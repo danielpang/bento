@@ -21,13 +21,14 @@ import {
   pipelines,
   projects,
   repositories,
+  runArtifacts,
   runEvents,
   runMigrations,
   sandboxes,
   stages,
 } from "@bento/db";
 import { SseParser } from "@bento/core";
-import { LocalProcessDriver, WorktreeManager, type SandboxHandle } from "@bento/sandbox";
+import { LocalProcessDriver, WorktreeManager, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
 import PgBoss from "pg-boss";
 import pg from "pg";
 import { createApp } from "./app.js";
@@ -36,6 +37,7 @@ import { publishFeatureBranches, resolvePublishBaseSha } from "./orchestrator/pu
 import { linkGitHubRemotes } from "./orchestrator/repo-remote.js";
 import { SecretBox } from "./secrets.js";
 import { ensureLocalUser, type AppContext } from "./context.js";
+import { singleDriver } from "./orchestrator/sandbox-driver.js";
 import { EventBus } from "./events.js";
 import { loadEnv } from "./env.js";
 import { createFeatureFlags } from "./feature-flags.js";
@@ -123,7 +125,7 @@ before(async () => {
     pool,
     boss,
     bus: new EventBus(),
-    driver: new LocalProcessDriver(),
+    drivers: singleDriver(new LocalProcessDriver()),
     worktrees: new WorktreeManager(dataDir),
     secretBox: new SecretBox("test-encryption-key-at-least-32-chars"),
     artifacts: new DiskArtifactStore(dataDir),
@@ -455,6 +457,16 @@ test("a run's artifacts are captured, listed, and served safely", { timeout: 90_
   assert.ok(shot, "the image artifact is listed");
   assert.equal(plan.kind, "markdown");
   assert.equal(shot.kind, "image");
+
+  // Every row says which board it is on. The capture path writes for
+  // both, and a card's artifact that did not say so would be a swarm's
+  // by the only rule the reader had left.
+  const boards = await ctx.db
+    .select({ type: runArtifacts.type })
+    .from(runArtifacts)
+    .where(eq(runArtifacts.featureId, feature.id));
+  assert.ok(boards.length >= 2);
+  assert.ok(boards.every((row) => row.type === "pipeline"), "a card's artifacts are the pipeline's, said outright");
 
   // The write-up came back inline, sandboxed and unsniffable: agent
   // bytes served by the console must never be able to act as it.
@@ -953,6 +965,7 @@ test("concurrent transcript appends all land, with contiguous seqs", async () =>
   const [run] = await ctx.db
     .insert(agentRuns)
     .values({
+      type: "pipeline",
       featureId: feature.id,
       stageId: projectStages[0]!.id,
       agentProfileId: profile.id,
@@ -1000,6 +1013,7 @@ test("resuming a session recovers the messages the agent sent while detached", a
     const [run] = await ctx.db
       .insert(agentRuns)
       .values({
+        type: "pipeline",
         featureId: feature.id,
         stageId: projectStages[0]!.id,
         agentProfileId: profile.id,
@@ -1058,6 +1072,7 @@ test("resuming a session recovers the messages the agent sent while detached", a
   const handle: SandboxHandle = { externalId: "local-recovery", provider: "local-process", workdir };
 
   const recoverArgs = {
+    driver: ctx.drivers.default,
     handle,
     adapter,
     featureId: feature.id,
@@ -1113,6 +1128,7 @@ test("a run already ended cannot be cancelled over its terminal state", async ()
   const [run] = await ctx.db
     .insert(agentRuns)
     .values({
+      type: "pipeline",
       featureId: feature.id,
       stageId: projectStages[0]!.id,
       agentProfileId: profile.id,
@@ -1146,6 +1162,7 @@ test("the run stream resumes from Last-Event-ID instead of replaying everything"
   const [run] = await ctx.db
     .insert(agentRuns)
     .values({
+      type: "pipeline",
       featureId: feature.id,
       stageId: projectStages[0]!.id,
       agentProfileId: profile.id,
@@ -1198,6 +1215,7 @@ test(
       const [run] = await ctx.db
         .insert(agentRuns)
         .values({
+          type: "pipeline",
           featureId: feature.id,
           stageId: stage.id,
           agentProfileId: profile.id,
@@ -1217,6 +1235,7 @@ test(
     const [onARunner] = await ctx.db
       .insert(agentRuns)
       .values({
+        type: "pipeline",
         featureId: runnerCard.id,
         stageId: stage.id,
         agentProfileId: profile.id,
@@ -1300,6 +1319,7 @@ test("a restart reattaches to a run still working in its sandbox", { timeout: 60
   const [running] = await ctx.db
     .insert(agentRuns)
     .values({
+      type: "pipeline",
       featureId: feature.id,
       stageId: stage.id,
       agentProfileId: profile.id,
@@ -1343,8 +1363,8 @@ test("a restart reattaches to a run still working in its sandbox", { timeout: 60
     },
     async destroy() {},
   };
-  const previousDriver = ctx.driver;
-  ctx.driver = fakeDriver as unknown as AppContext["driver"];
+  const previousDrivers = ctx.drivers;
+  ctx.drivers = singleDriver(fakeDriver as unknown as SandboxDriver);
   try {
     await recoverInterruptedRuns(ctx);
     assert.equal(await waitForRun(running!.id), "succeeded", "the reattached run finishes as itself");
@@ -1355,7 +1375,7 @@ test("a restart reattaches to a run still working in its sandbox", { timeout: 60
     assert.equal(attached.length, 1, "recovery attached exactly once");
     assert.equal(attached[0]?.externalId, `bento-${feature.id}`, "the attach went to the run's own sandbox");
   } finally {
-    ctx.driver = previousDriver;
+    ctx.drivers = previousDrivers;
   }
 });
 
@@ -1395,6 +1415,7 @@ test("a restart recovers what the agent said while no server was attached", { ti
   const [running] = await ctx.db
     .insert(agentRuns)
     .values({
+      type: "pipeline",
       featureId: feature.id,
       stageId: stage.id,
       agentProfileId: profile.id,
@@ -1477,13 +1498,13 @@ test("a restart recovers what the agent said while no server was attached", { ti
     },
     async destroy() {},
   };
-  const previousDriver = ctx.driver;
-  ctx.driver = fakeDriver as unknown as AppContext["driver"];
+  const previousDrivers = ctx.drivers;
+  ctx.drivers = singleDriver(fakeDriver as unknown as SandboxDriver);
   try {
     await recoverInterruptedRuns(ctx);
     assert.equal(await waitForRun(running!.id), "succeeded", "the reattached run finishes as itself");
   } finally {
-    ctx.driver = previousDriver;
+    ctx.drivers = previousDrivers;
   }
 
   // Other execs follow the finish (artifact capture, the export); the
@@ -1550,6 +1571,7 @@ test("a restart closes runs the sandbox cannot give back", { timeout: 60_000 }, 
     const [run] = await ctx.db
       .insert(agentRuns)
       .values({
+        type: "pipeline",
         featureId: feature.id,
         stageId: stage.id,
         agentProfileId: profile.id,
@@ -1580,8 +1602,8 @@ test("a restart closes runs the sandbox cannot give back", { timeout: 60_000 }, 
     },
     async destroy() {},
   };
-  const previousDriver = ctx.driver;
-  ctx.driver = fakeDriver as unknown as AppContext["driver"];
+  const previousDrivers = ctx.drivers;
+  ctx.drivers = singleDriver(fakeDriver as unknown as SandboxDriver);
   try {
     await recoverInterruptedRuns(ctx);
     for (const run of [gone, starting]) {
@@ -1593,7 +1615,7 @@ test("a restart closes runs the sandbox cannot give back", { timeout: 60_000 }, 
     }
     assert.equal(asked, 1, "a run that had not reached running is never attached");
   } finally {
-    ctx.driver = previousDriver;
+    ctx.drivers = previousDrivers;
   }
 });
 
@@ -1623,6 +1645,7 @@ test("a resumed live conversation hears new messages and never repeats the promp
   const [running] = await ctx.db
     .insert(agentRuns)
     .values({
+      type: "pipeline",
       featureId: feature.id,
       stageId: stage.id,
       agentProfileId: profile.id,
@@ -1665,8 +1688,8 @@ test("a resumed live conversation hears new messages and never repeats the promp
     },
     async destroy() {},
   };
-  const previousDriver = ctx.driver;
-  ctx.driver = fakeDriver as unknown as AppContext["driver"];
+  const previousDrivers = ctx.drivers;
+  ctx.drivers = singleDriver(fakeDriver as unknown as SandboxDriver);
   try {
     await recoverInterruptedRuns(ctx);
     // The live session registers as part of the resume; a message sent
@@ -1691,7 +1714,7 @@ test("a resumed live conversation hears new messages and never repeats the promp
     const transcript = await (await app.request(`/api/runs/${running!.id}/transcript`)).text();
     assert.match(transcript, /you> a follow-up mid resume/, "the follow-up is the user's own transcript line");
   } finally {
-    ctx.driver = previousDriver;
+    ctx.drivers = previousDrivers;
   }
 });
 
@@ -1710,6 +1733,7 @@ test("a run records its session id at init, not only at the end", { timeout: 60_
   const [running] = await ctx.db
     .insert(agentRuns)
     .values({
+      type: "pipeline",
       featureId: feature.id,
       stageId: stage.id,
       agentProfileId: profile.id,
@@ -1755,6 +1779,7 @@ test("two messages racing into the parking slot both survive", { timeout: 60_000
   const [running] = await ctx.db
     .insert(agentRuns)
     .values({
+      type: "pipeline",
       featureId: feature.id,
       stageId: stage.id,
       agentProfileId: profile.id,
@@ -1805,18 +1830,19 @@ test("a follow-up resumes the work agent's session, not the judge's", { timeout:
   const plant = async (values: {
     profileId: string;
     prompt: string;
-    kind?: "task" | "judge";
+    role?: "stage" | "judge";
     cliSessionId: string;
     queuedAt: Date;
   }) => {
     const [run] = await ctx.db
       .insert(agentRuns)
       .values({
+        type: "pipeline",
         featureId: feature.id,
         stageId: stage.id,
         agentProfileId: values.profileId,
         prompt: values.prompt,
-        kind: values.kind ?? "task",
+        role: values.role ?? "stage",
         status: "succeeded",
         executor: "server",
         cliSessionId: values.cliSessionId,
@@ -1834,7 +1860,7 @@ test("a follow-up resumes the work agent's session, not the judge's", { timeout:
   await plant({
     profileId: judge.id,
     prompt: `${JUDGE_PROMPT_PREFIX} for the stage "Build". Decide whether it is complete.`,
-    kind: "judge",
+    role: "judge",
     cliSessionId: "judge-sess",
     queuedAt: new Date(),
   });
@@ -1872,6 +1898,7 @@ test("a follow-up after a send-back talks to the current stage's agent", { timeo
     .set({ currentStageId: impl.id, status: "active", updatedAt: new Date() })
     .where(eq(features.id, feature.id));
   await ctx.db.insert(agentRuns).values({
+    type: "pipeline",
     featureId: feature.id,
     stageId: quality.id,
     agentProfileId: qa.id,
@@ -1912,6 +1939,7 @@ test("a message the agent never confirmed is redelivered to the next run", { tim
   const [running] = await ctx.db
     .insert(agentRuns)
     .values({
+      type: "pipeline",
       featureId: feature.id,
       stageId: stage.id,
       agentProfileId: profile.id,
@@ -1969,6 +1997,7 @@ test("a run's own prompt is never handed to another run", { timeout: 60_000 }, a
   const [previous] = await ctx.db
     .insert(agentRuns)
     .values({
+      type: "pipeline",
       featureId: feature.id,
       stageId: stage.id,
       agentProfileId: profile.id,
@@ -2020,6 +2049,7 @@ test("boot recovery delivers a message stranded with no active run", { timeout: 
   const stage = projectStages[0]!;
 
   await ctx.db.insert(agentRuns).values({
+    type: "pipeline",
     featureId: feature.id,
     stageId: stage.id,
     agentProfileId: profile.id,
@@ -2485,6 +2515,7 @@ test("sending a card back stops the current agent and starts nothing", { timeout
     const [live] = await ctx.db
       .insert(agentRuns)
       .values({
+        type: "pipeline",
         featureId: feature.id,
         stageId: quality.id,
         agentProfileId: qa.id,
@@ -2531,6 +2562,7 @@ test("sending a card back onto an automatic stage does not bounce it forward", {
     .where(eq(features.id, feature.id));
   await ctx.db.insert(agentRuns).values([
     {
+      type: "pipeline",
       featureId: feature.id,
       stageId: review.id,
       agentProfileId: reviewer.id,
@@ -2539,6 +2571,7 @@ test("sending a card back onto an automatic stage does not bounce it forward", {
       executor: "runner",
     },
     {
+      type: "pipeline",
       featureId: feature.id,
       stageId: quality.id,
       agentProfileId: qa.id,
@@ -2589,6 +2622,7 @@ test("parked messages survive send-back and reach the new agent", { timeout: 60_
   const [live] = await ctx.db
     .insert(agentRuns)
     .values({
+      type: "pipeline",
       featureId: feature.id,
       stageId: quality.id,
       agentProfileId: qa.id,
@@ -3524,31 +3558,34 @@ test("usage ignores judge runs and in-flight runs", async () => {
 
   await ctx.db.insert(agentRuns).values([
     {
+      type: "pipeline",
       featureId: feature.id,
       stageId: stage.id,
       agentProfileId: worker.id,
       prompt: "build it",
-      kind: "task",
+      role: "stage",
       status: "succeeded",
       executor: "server",
       costUsd: "4.20",
     },
     {
+      type: "pipeline",
       featureId: feature.id,
       stageId: stage.id,
       agentProfileId: judge.id,
       prompt: `${JUDGE_PROMPT_PREFIX} for the stage "Build".`,
-      kind: "judge",
+      role: "judge",
       status: "succeeded",
       executor: "server",
       costUsd: "9.99",
     },
     {
+      type: "pipeline",
       featureId: feature.id,
       stageId: stage.id,
       agentProfileId: worker.id,
       prompt: "still going",
-      kind: "task",
+      role: "stage",
       status: "running",
       executor: "server",
       costUsd: null,
@@ -4044,6 +4081,7 @@ test("resolve-conflicts starts the work agent on a conflicted pull request", { t
     const [planted] = await ctx.db
       .insert(agentRuns)
       .values({
+        type: "pipeline",
         featureId: feature.id,
         stageId: pipeline.stages[0]!.id,
         agentProfileId: worker.id,
@@ -4058,10 +4096,10 @@ test("resolve-conflicts starts the work agent on a conflicted pull request", { t
     assert.match(((await onRunner.json()) as { error: string }).error, /runner/);
 
     await ctx.db.update(agentRuns).set({ executor: "server" }).where(eq(agentRuns.id, planted!.id));
-    const started = await json<{ id: string; kind: string; agentProfileId: string; cliSessionId: string | null; prompt: string }>(
+    const started = await json<{ id: string; role: string; agentProfileId: string; cliSessionId: string | null; prompt: string }>(
       await app.request(`/api/features/${feature.id}/resolve-conflicts`, { method: "POST" }),
     );
-    assert.equal(started.kind, "rebase");
+    assert.equal(started.role, "rebase");
     assert.equal(started.agentProfileId, worker.id, "the card's own agent resolves");
     assert.equal(started.cliSessionId, "conflict-sess", "inside the work conversation, where the intent lives");
     assert.match(started.prompt, /rebase/i);
@@ -4313,9 +4351,9 @@ test("publishing on demand exports the card's sandbox when the driver keeps no h
       return null;
     },
   };
-  const previousDriver = ctx.driver;
+  const previousDrivers = ctx.drivers;
   const previousGitHubApp = ctx.githubApp;
-  ctx.driver = fakeDriver as unknown as AppContext["driver"];
+  ctx.drivers = singleDriver(fakeDriver as unknown as SandboxDriver);
   ctx.githubApp = {
     forInstallation(installationId: string) {
       assert.equal(installationId, "sandbox-publish-installation");
@@ -4358,7 +4396,7 @@ test("publishing on demand exports the card's sandbox when the driver keeps no h
     assert.equal(body.failures[0]?.name, repo!.name);
     assert.match(body.failures[0]?.reason ?? "", /the sandbox is gone/);
   } finally {
-    ctx.driver = previousDriver;
+    ctx.drivers = previousDrivers;
     ctx.githubApp = previousGitHubApp;
   }
 });
@@ -4433,6 +4471,157 @@ test("a card created by mistake can be deleted, and a repeat answers 404", async
 });
 
 /**
+ * A sprite row on a server with no sprite driver cannot be deleted.
+ * The card stays, and the answer does not ask for a retry that will
+ * throw the same way.
+ */
+test("deleting a card whose driver is not configured does not ask for a retry", async () => {
+  const { project } = await setupProject("Delete missing driver");
+  const feature = await createFeature(project.id, "Sprite leftover");
+  await ctx.db.insert(sandboxes).values({
+    projectId: project.id,
+    featureId: feature.id,
+    provider: "sprite",
+    externalId: `delete-sprite-${feature.id}`,
+    status: "ready",
+    workdir: "/workspace",
+  });
+
+  const deleted = await app.request(`/api/features/${feature.id}`, { method: "DELETE" });
+  assert.equal(deleted.status, 409);
+  const body = (await deleted.json()) as { error: string };
+  assert.match(body.error, /No sprite driver is configured on this server/);
+  assert.doesNotMatch(body.error, /try again/i);
+  assert.equal((await app.request(`/api/features/${feature.id}`)).status, 200, "the card stays");
+});
+
+/**
+ * File transfer failures are 503 because the next attempt can work.
+ * A missing driver will not, so the client gets the refusal it used
+ * to stop on.
+ */
+test("attaching a file is refused when this server has no driver for the sandbox", async () => {
+  const { project, stages } = await setupProject("Attach missing driver");
+  const feature = await createFeature(project.id, "Attach");
+  const profile = await fakeProfile("attach-missing-driver");
+  await ctx.db.insert(agentRuns).values({
+    type: "pipeline",
+    featureId: feature.id,
+    stageId: stages[0]!.id,
+    agentProfileId: profile.id,
+    prompt: "work",
+    status: "succeeded",
+  });
+  await ctx.db.insert(sandboxes).values({
+    projectId: project.id,
+    featureId: feature.id,
+    provider: "sprite",
+    externalId: `attach-sprite-${feature.id}`,
+    status: "ready",
+    workdir: "/workspace",
+  });
+
+  const res = await app.request(`/api/features/${feature.id}/message`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      text: "see attached",
+      attachments: [{ name: "note.txt", mime: "text/plain", data: Buffer.from("hi").toString("base64") }],
+    }),
+  });
+  assert.equal(res.status, 409);
+  assert.deepEqual(await res.json(), {
+    error: "This workspace cannot receive attachments from this server.",
+  });
+});
+
+/**
+ * Rows stored as docker are driven by local-process on this server, so
+ * the 501 names that driver. A sprite row with no sprite driver is a
+ * missing driver, not a driver that cannot restore.
+ */
+test("rollback names the driver that was asked, and a missing driver is not unsupported rollback", async () => {
+  const { project, stages } = await setupProject("Rollback driver");
+  const feature = await createFeature(project.id, "Roll local");
+  const profile = await fakeProfile("rollback-driver");
+  const [dockerBox] = await ctx.db
+    .insert(sandboxes)
+    .values({
+      projectId: project.id,
+      featureId: feature.id,
+      provider: "docker",
+      externalId: `rollback-docker-${feature.id}`,
+      status: "ready",
+      workdir: "/workspace",
+    })
+    .returning();
+  const [localRun] = await ctx.db
+    .insert(agentRuns)
+    .values({
+      type: "pipeline",
+      featureId: feature.id,
+      stageId: stages[0]!.id,
+      agentProfileId: profile.id,
+      prompt: "work",
+      status: "succeeded",
+      sandboxId: dockerBox!.id,
+      checkpointId: "snap-local",
+    })
+    .returning();
+
+  const local = await app.request(`/api/runs/${localRun!.id}/rollback`, { method: "POST" });
+  assert.equal(local.status, 501);
+  const localBody = (await local.json()) as { error: string };
+  assert.match(localBody.error, /local-process sandboxes do not support rollback/);
+
+  const spriteFeature = await createFeature(project.id, "Roll sprite");
+  const [spriteBox] = await ctx.db
+    .insert(sandboxes)
+    .values({
+      projectId: project.id,
+      featureId: spriteFeature.id,
+      provider: "sprite",
+      externalId: `rollback-sprite-${spriteFeature.id}`,
+      status: "ready",
+      workdir: "/workspace",
+    })
+    .returning();
+  const [spriteRun] = await ctx.db
+    .insert(agentRuns)
+    .values({
+      type: "pipeline",
+      featureId: spriteFeature.id,
+      stageId: stages[0]!.id,
+      agentProfileId: profile.id,
+      prompt: "work",
+      status: "succeeded",
+      sandboxId: spriteBox!.id,
+      checkpointId: "snap-sprite",
+    })
+    .returning();
+
+  const sprite = await app.request(`/api/runs/${spriteRun!.id}/rollback`, { method: "POST" });
+  assert.equal(sprite.status, 501);
+  const spriteBody = (await sprite.json()) as { error: string };
+  assert.match(spriteBody.error, /no sprite driver configured on this server/);
+  assert.doesNotMatch(spriteBody.error, /do not support rollback/);
+});
+
+test("tools treats a non-uuid projectId as no project and does not error", async () => {
+  const plain = await app.request("/api/profiles/tools");
+  assert.equal(plain.status, 200);
+  const plainBody = await plain.json();
+
+  const bad = await app.request("/api/profiles/tools?projectId=nope");
+  assert.equal(bad.status, 200, "a non-uuid must not become an internal error");
+  assert.deepEqual(await bad.json(), plainBody);
+
+  const unknown = await app.request("/api/profiles/tools?projectId=22222222-2222-4222-8222-222222222222");
+  assert.equal(unknown.status, 200);
+  assert.deepEqual(await unknown.json(), plainBody, "an unknown project uses the default driver");
+});
+
+/**
  * The delete this feature exists for: a card that has actually run.
  *
  * Its sandbox is a machine somebody is billed for, so the row cannot go
@@ -4463,8 +4652,8 @@ test("deleting a worked card takes its runs, transcript and sandbox, and leaves 
   // This route is the first caller of driver.destroy in the product, so
   // the test watches the call rather than trusting the status code.
   const destroyed: SandboxHandle[] = [];
-  const realDestroy = ctx.driver.destroy.bind(ctx.driver);
-  ctx.driver.destroy = async (handle: SandboxHandle) => {
+  const realDestroy = ctx.drivers.default.destroy.bind(ctx.drivers.default);
+  ctx.drivers.default.destroy = async (handle: SandboxHandle) => {
     destroyed.push(handle);
     await realDestroy(handle);
   };
@@ -4472,7 +4661,7 @@ test("deleting a worked card takes its runs, transcript and sandbox, and leaves 
     const res = await app.request(`/api/features/${feature.id}`, { method: "DELETE" });
     assert.equal(res.status, 200);
   } finally {
-    ctx.driver.destroy = realDestroy;
+    ctx.drivers.default.destroy = realDestroy;
   }
 
   assert.deepEqual(
@@ -4518,6 +4707,7 @@ test("a card an agent is working cannot be deleted", async () => {
   const [working] = await ctx.db
     .insert(agentRuns)
     .values({
+      type: "pipeline",
       featureId: feature.id,
       stageId: pipelineStages[0]!.id,
       agentProfileId: profile.id,
@@ -4562,8 +4752,8 @@ test("a sandbox that will not die keeps its card", async () => {
     workdir: "/workspace",
   });
 
-  const realDestroy = ctx.driver.destroy.bind(ctx.driver);
-  ctx.driver.destroy = async () => {
+  const realDestroy = ctx.drivers.default.destroy.bind(ctx.drivers.default);
+  ctx.drivers.default.destroy = async () => {
     throw new Error("the machine did not answer");
   };
   let body: { error: string };
@@ -4572,7 +4762,7 @@ test("a sandbox that will not die keeps its card", async () => {
     assert.equal(res.status, 502);
     body = (await res.json()) as { error: string };
   } finally {
-    ctx.driver.destroy = realDestroy;
+    ctx.drivers.default.destroy = realDestroy;
   }
   assert.match(body.error, /the machine did not answer/, "the reason reaches the person, not just the log");
   assert.match(body.error, /The card was not deleted/);
@@ -5926,6 +6116,65 @@ test("a claimed OpenCode run receives its custom provider configuration and key"
 });
 
 /**
+ * A judge's prompt is a complete instruction, and the stage's must
+ * never be put in front of it: an agent told to judge and to do the
+ * stage's work does the work.
+ *
+ * Which runs take a stage prompt is the run row's business, not the
+ * claiming machine's. It used to be neither: the payload said `role`
+ * and the runner decided again from it, so a machine built before that
+ * field was renamed read nothing, defaulted to ordinary work, and put
+ * the stage's instructions in front of every judge it claimed. The
+ * server resolves the role and sends only what the role takes, so a
+ * runner that says nothing about roles still gets the right prompt.
+ */
+test("a judge run claimed by a runner is handed no stage prompt", { timeout: 90_000 }, async () => {
+  const { project } = await setupProject("Judge on a runner");
+  await ctx.db.execute(sql`update projects set executor = 'runner' where id = ${project.id}`);
+
+  const feature = await createFeature(project.id, "Judged feature");
+  const profile = await fakeProfile("judge-runner-fake");
+  await app.request(`/api/features/${feature.id}/advance`, { method: "POST" });
+  const created = await json<{ id: string }>(
+    await app.request("/api/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ featureId: feature.id, agentProfileId: profile.id }),
+    }),
+  );
+
+  // What the gate evaluator writes when it puts a judge on a card,
+  // without waiting for a gate to ask for one.
+  await ctx.db.execute(
+    sql`update agent_runs set role = 'judge', prompt = 'Decide whether this stage passed.' where id = ${created.id}`,
+  );
+
+  const claim = (await (
+    await app.request("/api/runner/claim", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ runnerId: "judge-laptop" }),
+    })
+  ).json()) as {
+    run: { id: string; role: string; prompt: string } | null;
+    stagePrompt?: string;
+    compactedConversation?: string;
+  };
+  assert.equal(claim.run?.id, created.id);
+  assert.equal(claim.run?.role, "judge", "the role still travels for a runner that reads it");
+  assert.equal(claim.run?.prompt, "Decide whether this stage passed.");
+  assert.equal(claim.stagePrompt, "", "and the stage's instructions do not travel at all");
+  assert.equal(claim.compactedConversation, "", "nor does a history a judge would never read");
+
+  // Nothing left queued: the tests after this one claim from the same pool.
+  await app.request(`/api/runner/runs/${created.id}/complete`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ runnerId: "judge-laptop", ok: true, exitCode: 0 }),
+  });
+});
+
+/**
  * One card, one agent. A second Start while a run is queued or working
  * would put two agents on the same branch, so every door refuses it,
  * and cancelling the run opens the door again.
@@ -6245,16 +6494,16 @@ test("a finished card's sandbox is destroyed, and only once it is really gone", 
 
   const destroyed: string[] = [];
   let stillThere = true;
-  const previousDriver = ctx.driver;
-  ctx.driver = {
-    ...previousDriver,
+  const previousDrivers = ctx.drivers;
+  ctx.drivers = singleDriver({
+    ...previousDrivers.default,
     async destroy(handle: { externalId: string }) {
       destroyed.push(handle.externalId);
     },
     async exists() {
       return stillThere;
     },
-  } as unknown as AppContext["driver"];
+  } as SandboxDriver);
 
   try {
     // A driver that says the machine is still there must not have its
@@ -6280,7 +6529,7 @@ test("a finished card's sandbox is destroyed, and only once it is really gone", 
     // lets the sweep run over an already tidy deployment.
     await reapSandbox(ctx, feature.id);
   } finally {
-    ctx.driver = previousDriver;
+    ctx.drivers = previousDrivers;
   }
 });
 
@@ -6311,19 +6560,19 @@ test("a sandbox with a run still working it is not reaped, and is not forgotten 
   });
 
   let destroyCalls = 0;
-  const previousDriver = ctx.driver;
-  ctx.driver = {
-    ...previousDriver,
+  const previousDrivers = ctx.drivers;
+  ctx.drivers = singleDriver({
+    ...previousDrivers.default,
     async destroy() {
       destroyCalls += 1;
     },
-  } as unknown as AppContext["driver"];
+  } as SandboxDriver);
   try {
     await ctx.db.update(agentRuns).set({ status: "running" }).where(eq(agentRuns.id, run.id));
     await assert.rejects(() => reapSandbox(ctx, feature.id), /still working/);
     assert.equal(destroyCalls, 0, "the machine is not touched while an agent is on it");
   } finally {
-    ctx.driver = previousDriver;
+    ctx.drivers = previousDrivers;
     await ctx.db.update(agentRuns).set({ status: "cancelled" }).where(eq(agentRuns.id, run.id));
   }
 });
@@ -6426,6 +6675,7 @@ test("the evaluator stops handing a card to a stage it has already retried", asy
   // Three runs on this stage already, which is the ceiling.
   for (let i = 0; i < 3; i++) {
     await ctx.db.insert(agentRuns).values({
+      type: "pipeline",
       featureId: feature.id,
       stageId: stage.id,
       agentProfileId: profile.id,
@@ -6454,6 +6704,7 @@ test("the evaluator stops handing a card to a stage it has already retried", asy
   const human = await createFeature(project.id, "Card someone talks to");
   for (let i = 0; i < 3; i++) {
     await ctx.db.insert(agentRuns).values({
+      type: "pipeline",
       featureId: human.id,
       stageId: stage.id,
       agentProfileId: profile.id,
@@ -6521,6 +6772,7 @@ test("a failed gate holds the card, writes the reason, and records history", asy
   await patchStage(stage.id, { gateType: "auto", gateCriteria: [{ type: "run_succeeded" }] });
   await placeOnStage(feature.id, stage.id);
   await ctx.db.insert(agentRuns).values({
+    type: "pipeline",
     featureId: feature.id,
     stageId: stage.id,
     agentProfileId: profile.id,
@@ -6553,6 +6805,47 @@ test("a failed gate holds the card, writes the reason, and records history", asy
   assert.deepEqual((held.detail as { failedCriteria?: string[] } | null)?.failedCriteria, ["run_succeeded"]);
 });
 
+/**
+ * The command runs on the row's driver. When that driver is not
+ * configured, the card is held with a failed check. Leaving it active
+ * with no check means nothing will ask again.
+ */
+test("a command gate records a failure when the sandbox driver is not configured", async () => {
+  const { project, stages } = await setupProject("Unconfigured command gate");
+  const feature = await createFeature(project.id, "Sprite gate");
+  const stage = stages[0]!;
+  await patchStage(stage.id, {
+    gateType: "auto",
+    gateCriteria: [{ type: "command", cmd: "true", timeoutSec: 30 }],
+  });
+  await placeOnStage(feature.id, stage.id);
+  await ctx.db.insert(sandboxes).values({
+    projectId: project.id,
+    featureId: feature.id,
+    provider: "sprite",
+    externalId: `gate-sprite-${feature.id}`,
+    status: "ready",
+    workdir: "/workspace",
+  });
+
+  await evaluateFeatureGate(ctx, feature.id);
+
+  const [row] = await ctx.db.select().from(features).where(eq(features.id, feature.id));
+  assert.equal(row?.status, "gated", "the card is held instead of staying active");
+  assert.equal(row?.currentStageId, stage.id, "the command was not run on another machine");
+  const checks = await ctx.db
+    .select({ status: gateChecks.status, criterion: gateChecks.criterion, detail: gateChecks.detail })
+    .from(gateChecks)
+    .where(and(eq(gateChecks.featureId, feature.id), eq(gateChecks.stageId, stage.id)));
+  assert.equal(checks.length, 1);
+  assert.equal(checks[0]?.status, "failed");
+  assert.equal((checks[0]?.criterion as { type?: string } | null)?.type, "command");
+  assert.match(
+    (checks[0]?.detail as { message?: string } | null)?.message ?? "",
+    /no sprite driver configured on this server/,
+  );
+});
+
 test("a late failed gate does not drag a finished card back to gated", async () => {
   const { project, stages } = await setupProject("Late gate vs done");
   const feature = await createFeature(project.id, "Already finished");
@@ -6578,6 +6871,7 @@ test("a late failed gate does not drag a finished card back to gated", async () 
     workdir: path.dirname(repoDir),
   });
   await ctx.db.insert(agentRuns).values({
+    type: "pipeline",
     featureId: feature.id,
     stageId: stage.id,
     agentProfileId: profile.id,
@@ -6620,6 +6914,7 @@ test("a late failed gate does not hold a card that has already left the stage", 
     workdir: path.dirname(repoDir),
   });
   await ctx.db.insert(agentRuns).values({
+    type: "pipeline",
     featureId: feature.id,
     stageId: stage.id,
     agentProfileId: profile.id,
@@ -6659,6 +6954,7 @@ test("a hold that cannot be recorded does not happen", async () => {
   await patchStage(stage.id, { gateType: "auto", gateCriteria: [{ type: "run_succeeded" }] });
   await placeOnStage(feature.id, stage.id);
   await ctx.db.insert(agentRuns).values({
+    type: "pipeline",
     featureId: feature.id,
     stageId: stage.id,
     agentProfileId: profile.id,
@@ -6985,15 +7281,15 @@ test("Ollama Cloud without a key is missing it, and a server of your own is not"
 });
 
 test("a Docker sandbox reaches an Ollama server on this machine's loopback", async () => {
-  const driver = ctx.driver;
-  ctx.driver = { provider: "docker" } as unknown as AppContext["driver"];
+  const previousDrivers = ctx.drivers;
+  ctx.drivers = singleDriver({ provider: "docker", workspace: "host" } as SandboxDriver);
   try {
     await withEnv({ OLLAMA_API_KEY: null, OLLAMA_BASE_URL: "http://localhost:11434" }, async () => {
       const { env } = await resolveAgentEnv(ctx, null, claudeCodeAdapter, "ollama/glm-5.1");
       assert.equal(env.OLLAMA_BASE_URL, "http://host.docker.internal:11434");
     });
   } finally {
-    ctx.driver = driver;
+    ctx.drivers = previousDrivers;
   }
 });
 

@@ -77,7 +77,7 @@ async function provisionWithFilesystemRetries(
   driver: SpriteDriver,
   spec: Parameters<SpriteDriver["provision"]>[0] = {
     projectId: "project",
-    featureId: "feature",
+    workspaceKey: "feature",
     hostWorkspacePath: "/unused",
   },
 ): Promise<unknown> {
@@ -191,7 +191,7 @@ test("Sprite provisioning transfers a credential-free repository bundle", async 
 
   await driver.provision({
     projectId: "project",
-    featureId: "feature",
+    workspaceKey: "feature",
     hostWorkspacePath: "/unused",
     repositories: [{
       name: "api",
@@ -217,6 +217,233 @@ test("Sprite provisioning transfers a credential-free repository bundle", async 
   assert.ok(messages.some((m) => m.includes("cloud sandbox")));
   assert.ok(messages.some((m) => m.includes("Installing the agent tools")));
   assert.ok(messages.includes("Repository api is ready on branch feature/work."));
+});
+
+/**
+ * A swarm's worker, on the driver that clones inside the machine.
+ *
+ * The swarm's branch is not on any remote: the merge queue lands onto
+ * it inside the planner's machine and nothing pushes until the swarm
+ * is finished. A worker seeded from the remote alone would therefore
+ * be cut from the repository's default branch and would hold none of
+ * what the leaves before it landed, which is a branch that conflicts
+ * with every one of them at the queue.
+ *
+ * Verified here as a script rather than against a machine, because
+ * there is no Fly in this environment. What a real sprite does with
+ * the script is what the nightly sandbox workflow is for, and this
+ * change touches sprite.ts, which that workflow watches.
+ */
+test("a worker sprite is cut from the swarm branch it was handed, not from the default branch", async () => {
+  const writes: { path: string; data: Buffer }[] = [];
+  const scripts: string[] = [];
+  const removed: string[] = [];
+  const sprite = {
+    spawn(file: string, args: string[]) {
+      assert.equal(file, "sh");
+      scripts.push(args[1] ?? "");
+      const child = fakeChild();
+      queueMicrotask(() => {
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    filesystem() {
+      return {
+        async writeFile(path: string, data: Buffer) {
+          writes.push({ path, data });
+        },
+        async rm(path: string) {
+          removed.push(path);
+        },
+        async readdir() {
+          return [{ name: "api", isDirectory: () => true }];
+        },
+        async exists() {
+          return true;
+        },
+      };
+    },
+  };
+  const driver = new SpriteDriver({ token: "sprite-control-token" });
+  stubClient(driver, sprite);
+
+  await driver.provision({
+    projectId: "project",
+    workspaceKey: "swarm-1-aaaaaaaa",
+    hostWorkspacePath: "/unused",
+    repositories: [{
+      name: "api",
+      cloneUrl: "https://github.com/acme/api.git",
+      branch: "swarm/checkout-aaaaaaaa",
+      baseBranch: "main",
+      seedBundle: Buffer.from("base history"),
+      startBundle: { branch: "swarm/checkout", data: Buffer.from("what the swarm landed") },
+    }],
+  });
+
+  // Both bundles travel, and both are taken off the machine again.
+  assert.deepEqual(
+    writes.map((write) => write.path),
+    ["/tmp/bento-seed-api.bundle", "/tmp/bento-start-api.bundle"],
+  );
+  assert.deepEqual(writes[1]?.data, Buffer.from("what the swarm landed"));
+  assert.ok(removed.includes("/tmp/bento-start-api.bundle"), "the swarm's commits do not stay in /tmp");
+
+  const commands = scripts.join("\n");
+  /*
+   * The swarm's branch becomes a real ref, forced, because a machine
+   * provisioned twice finds the old head on it.
+   *
+   * By name, never HEAD. The bundle is built from a range, and a
+   * range bundle carries the branch ref alone: asking it for HEAD
+   * fails with "couldn't find remote ref HEAD", which under set -eu
+   * took the checkout down with it. This assertion said HEAD once,
+   * which is how a command git would refuse passed its own test.
+   */
+  assert.match(
+    commands,
+    /git fetch '\/tmp\/bento-start-api\.bundle' \+refs\/heads\/swarm\/checkout:refs\/heads\/swarm\/checkout/,
+  );
+  assert.doesNotMatch(commands, /\+HEAD:/, "a bundle built from a range has no HEAD to fetch");
+  // And the worker's branch is cut from it.
+  assert.match(commands, /git checkout -b 'swarm\/checkout-aaaaaaaa' 'swarm\/checkout'/);
+  assert.doesNotMatch(
+    commands,
+    /git checkout -b 'swarm\/checkout-aaaaaaaa' 'origin\/main'/,
+    "starting at the repository default is the bug this closes",
+  );
+  // The order matters: the incremental bundle's prerequisite is a
+  // commit the seed brings in.
+  assert.ok(
+    commands.indexOf("bento-seed-api.bundle") < commands.indexOf("bento-start-api.bundle"),
+    "the seed is fetched before the branch built on it",
+  );
+});
+
+/**
+ * A repository row's repo_url is nullable, so a project can hold a
+ * checkout that has no remote at all. Such a repository still has a
+ * seed bundle when a swarm worker is provisioned from one, and the
+ * bundle is the whole point: the code comes from it, not from a
+ * remote.
+ *
+ * Provisioning used to skip any repository without a clone url before
+ * looking at its seed. The machine then came up with an empty
+ * workspace, no checkout, and nothing said about it, which reads to
+ * everything downstream as a worker that simply did no work.
+ */
+test("a repository seeded from a bundle is provisioned even with no remote to clone from", async () => {
+  const writes: { path: string; data: Buffer }[] = [];
+  const scripts: string[] = [];
+  const sprite = {
+    spawn(file: string, args: string[]) {
+      assert.equal(file, "sh");
+      scripts.push(args[1] ?? "");
+      const child = fakeChild();
+      queueMicrotask(() => {
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    filesystem() {
+      return {
+        async writeFile(path: string, data: Buffer) {
+          writes.push({ path, data });
+        },
+        async rm() {},
+        async readdir() {
+          return [{ name: "api", isDirectory: () => true }];
+        },
+        async exists() {
+          return true;
+        },
+      };
+    },
+  };
+  const driver = new SpriteDriver({ token: "sprite-control-token" });
+  stubClient(driver, sprite);
+
+  await driver.provision({
+    projectId: "project",
+    workspaceKey: "swarm-1-aaaaaaaa",
+    hostWorkspacePath: "/unused",
+    repositories: [{
+      name: "api",
+      branch: "swarm/checkout-aaaaaaaa",
+      baseBranch: "main",
+      seedBundle: Buffer.from("base history"),
+    }],
+  });
+
+  assert.deepEqual(
+    writes.map((write) => write.path),
+    ["/tmp/bento-seed-api.bundle"],
+    "the seed never reached the machine, so the repository was skipped",
+  );
+  const commands = scripts.join("\n");
+  assert.match(commands, /git clone '\/tmp\/bento-seed-api\.bundle' '\/workspace\/api'/);
+  assert.match(commands, /git checkout -b 'swarm\/checkout-aaaaaaaa'/);
+  /*
+   * And nothing points origin at nowhere, or measures the checkout
+   * against a remote it does not have: an empty comparison matches no
+   * existing origin, so every re-provision would delete the workspace
+   * it was about to use.
+   */
+  assert.doesNotMatch(commands, /git remote set-url origin ''/);
+  assert.doesNotMatch(commands, /current_origin/);
+});
+
+test("a worker with no branch handed to it is still cut from the base branch", async () => {
+  const scripts: string[] = [];
+  const sprite = {
+    spawn(file: string, args: string[]) {
+      void file;
+      scripts.push(args[1] ?? "");
+      const child = fakeChild();
+      queueMicrotask(() => {
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    filesystem() {
+      return {
+        async writeFile() {},
+        async rm() {},
+        async readdir() {
+          return [{ name: "api", isDirectory: () => true }];
+        },
+        async exists() {
+          return true;
+        },
+      };
+    },
+  };
+  const driver = new SpriteDriver({ token: "sprite-control-token" });
+  stubClient(driver, sprite);
+
+  await driver.provision({
+    projectId: "project",
+    workspaceKey: "feature",
+    hostWorkspacePath: "/unused",
+    repositories: [{
+      name: "api",
+      cloneUrl: "https://github.com/acme/api.git",
+      branch: "bento/card",
+      baseBranch: "main",
+      seedBundle: Buffer.from("base history"),
+    }],
+  });
+
+  const commands = scripts.join("\n");
+  assert.match(commands, /git checkout -b 'bento\/card' 'origin\/main'/);
+  assert.doesNotMatch(commands, /bento-start-api\.bundle/, "no second bundle, no second fetch");
 });
 
 /**
@@ -276,7 +503,7 @@ test("Sprite provisioning leaves the artifacts directory and unreadable director
 
   await driver.provision({
     projectId: "project",
-    featureId: "feature",
+    workspaceKey: "feature",
     hostWorkspacePath: "/unused",
     repositories: [{ name: "api", cloneUrl: "https://github.com/acme/api.git", branch: "main" }],
   });
@@ -357,7 +584,7 @@ test("Sprite provisioning still fails when the checkout probe fails for other re
     const result = retriable
       ? await provisionWithFilesystemRetries(t, driver)
       : await driver
-          .provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" })
+          .provision({ projectId: "project", workspaceKey: "feature", hostWorkspacePath: "/unused" })
           .then(
             () => "resolved",
             (err: unknown) => err,
@@ -399,7 +626,7 @@ test("Sprite provisioning still fails when listing the workspace hits a transpor
   stubClient(driver, sprite);
 
   await assert.rejects(
-    driver.provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" }),
+    driver.provision({ projectId: "project", workspaceKey: "feature", hostWorkspacePath: "/unused" }),
     /fetch failed/,
   );
 });
@@ -443,7 +670,7 @@ test("Sprite provisioning survives an empty workspace", async () => {
 
   const handle = await driver.provision({
     projectId: "project",
-    featureId: "feature",
+    workspaceKey: "feature",
     hostWorkspacePath: "/unused",
     repositories: [],
     onProgress: (message) => {
@@ -487,7 +714,7 @@ test("Sprite provisioning still fails when the filesystem API does", async () =>
   stubClient(driver, sprite);
 
   await assert.rejects(
-    driver.provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" }),
+    driver.provision({ projectId: "project", workspaceKey: "feature", hostWorkspacePath: "/unused" }),
     /503/,
   );
   assert.equal(listings, 1);
@@ -544,7 +771,7 @@ test("Sprite provisioning retries a temporarily unavailable filesystem and still
 
   const result = await provisionWithFilesystemRetries(t, driver, {
     projectId: "project",
-    featureId: "feature",
+    workspaceKey: "feature",
     hostWorkspacePath: "/unused",
     onProgress: (message) => {
       messages.push(message);
@@ -637,7 +864,7 @@ test("Sprite provisioning says which agent CLI could not be installed", async ()
 
   const handle = await driver.provision({
     projectId: "project",
-    featureId: "feature",
+    workspaceKey: "feature",
     hostWorkspacePath: "/unused",
     onProgress: (message) => {
       messages.push(message);
@@ -672,7 +899,7 @@ test("Sprite provisioning failures carry the script's stderr on the error", asyn
   stubClient(driver, sprite);
 
   await assert.rejects(
-    driver.provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" }),
+    driver.provision({ projectId: "project", workspaceKey: "feature", hostWorkspacePath: "/unused" }),
     (err: Error & { stderr?: string }) => {
       assert.match(err.message, /exit code 1/);
       assert.match(err.stderr ?? "", /claude code install failed/);
@@ -1309,7 +1536,7 @@ test("Sprite provisioning holds the sandbox awake while its scripts run", async 
   const driver = new SpriteDriver({ token: "token" });
   stubClient(driver, sprite);
 
-  await driver.provision({ projectId: "p", featureId: "f", hostWorkspacePath: "/unused" });
+  await driver.provision({ projectId: "p", workspaceKey: "f", hostWorkspacePath: "/unused" });
 
   const registered = calls.filter((call) => /-X POST/.test(call));
   const released = calls.filter((call) => /-X DELETE/.test(call));
@@ -1797,7 +2024,7 @@ test("Sprite provisioning gives up on a script whose connection went silent", as
 
   const provisioning = driver.provision({
     projectId: "project",
-    featureId: "feature",
+    workspaceKey: "feature",
     hostWorkspacePath: "/unused",
   });
   const outcome = provisioning.then(
@@ -1861,7 +2088,7 @@ test("Sprite provisioning retries a refused exec upgrade and then installs", asy
 
   const pending = driver.provision({
     projectId: "project",
-    featureId: "feature",
+    workspaceKey: "feature",
     hostWorkspacePath: "/unused",
   });
   await settle();
@@ -1910,7 +2137,7 @@ test("Sprite provisioning reports a refused exec upgrade without the exec URL", 
   stubClient(driver, sprite);
 
   const pending = driver
-    .provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" })
+    .provision({ projectId: "project", workspaceKey: "feature", hostWorkspacePath: "/unused" })
     .then(
       () => "resolved",
       (err: Error) => err,
@@ -1988,7 +2215,7 @@ test("Sprite provisioning attaches to a script the refused upgrade already start
 
   const pending = driver.provision({
     projectId: "project",
-    featureId: "feature",
+    workspaceKey: "feature",
     hostWorkspacePath: "/unused",
   });
   await settle();
@@ -2038,7 +2265,7 @@ test("Sprite provisioning does not retry a script that exited", async () => {
   stubClient(driver, sprite);
 
   await assert.rejects(
-    driver.provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" }),
+    driver.provision({ projectId: "project", workspaceKey: "feature", hostWorkspacePath: "/unused" }),
     (err: unknown) => {
       assert.ok(err instanceof Error);
       assert.match(err.message, /exit code 1/);
@@ -2204,7 +2431,7 @@ test("Sprite provisioning fails rather than hangs when a filesystem call stalls"
   stubClient(driver, sprite);
 
   const outcome = driver
-    .provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" })
+    .provision({ projectId: "project", workspaceKey: "feature", hostWorkspacePath: "/unused" })
     .then(
       () => "resolved",
       (err: Error) => err,
@@ -2219,8 +2446,10 @@ test("Sprite provisioning fails rather than hangs when a filesystem call stalls"
 
 test("Sprite repository export returns committed objects without credentials", async () => {
   const bundle = Buffer.from("bundle bytes");
+  let script = "";
   const sprite = {
-    spawn() {
+    spawn(_file: string, args: string[]) {
+      script = args[1] ?? "";
       const child = fakeChild();
       queueMicrotask(() => {
         child.stdout.write(`base-sha\nhead-sha\n${bundle.toString("base64")}\n`);
@@ -2241,6 +2470,96 @@ test("Sprite repository export returns committed objects without credentials", a
   assert.equal(exported?.baseSha, "base-sha");
   assert.equal(exported?.headSha, "head-sha");
   assert.deepEqual(exported?.data, bundle);
+
+  await driver.exportRepository(
+    { externalId: "sprite", provider: "sprite", workdir: "/workspace" },
+    "api",
+    "main",
+    { selfContained: true },
+  );
+  assert.match(script, /git bundle create "\$tmp" HEAD/);
+  assert.doesNotMatch(script, /git bundle create "\$tmp" HEAD "\^\$base_sha"/);
+  assert.doesNotMatch(script, /base_sha.*head_sha.*exit 3/);
+});
+
+test("Sprite repository import uploads a bundle and fast-forwards with a compare-and-swap", async () => {
+  const writes: { path: string; data: Buffer }[] = [];
+  const removed: string[] = [];
+  const scripts: string[] = [];
+  const oldHead = "1".repeat(40);
+  const newHead = "2".repeat(40);
+  const data = Buffer.from("trusted landing bundle");
+  const sprite = {
+    spawn(file: string, args: string[]) {
+      assert.equal(file, "sh");
+      assert.equal(args[0], "-lc");
+      scripts.push(args[1] ?? "");
+      const child = fakeChild();
+      queueMicrotask(() => {
+        child.stdout.write(`${newHead}\n`);
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    filesystem() {
+      return {
+        async writeFile(path: string, contents: Buffer) {
+          writes.push({ path, data: contents });
+        },
+        async rm(path: string) {
+          removed.push(path);
+        },
+      };
+    },
+  };
+  const driver = new SpriteDriver({ token: "sprite-control-token" });
+  stubClient(driver, sprite);
+
+  const outcome = await driver.importRepository(
+    { externalId: "sprite", provider: "sprite", workdir: "/workspace" },
+    "api",
+    { baseSha: oldHead, headSha: newHead, data },
+    { branch: "swarm/demo", expectedHeadSha: oldHead },
+  );
+
+  assert.deepEqual(outcome, { ok: true, headSha: newHead });
+  assert.equal(writes.length, 1);
+  assert.deepEqual(writes[0]!.data, data);
+  assert.deepEqual(removed, [writes[0]!.path]);
+  assert.match(scripts[0]!, /symbolic-ref --quiet --short HEAD/);
+  assert.match(scripts[0]!, /git diff --quiet/);
+  assert.match(scripts[0]!, /git merge --ff-only/);
+  assert.doesNotMatch(scripts[0]!, /reset|force/);
+});
+
+test("Sprite repository import classifies a moved head as retryable", async () => {
+  const sprite = {
+    spawn() {
+      const child = fakeChild();
+      queueMicrotask(() => {
+        child.stderr.write("the swarm branch moved from old to new\n");
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 12);
+      });
+      return child;
+    },
+    filesystem() {
+      return { async writeFile() {}, async rm() {} };
+    },
+  };
+  const driver = new SpriteDriver({ token: "sprite-control-token" });
+  stubClient(driver, sprite);
+  const outcome = await driver.importRepository(
+    { externalId: "sprite", provider: "sprite", workdir: "/workspace" },
+    "api",
+    { baseSha: "1".repeat(40), headSha: "2".repeat(40), data: Buffer.from("bundle") },
+    { branch: "swarm/demo", expectedHeadSha: "1".repeat(40) },
+  );
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.ok === false && outcome.reason, "moved");
 });
 
 /**
@@ -2560,7 +2879,7 @@ test("Sprite provisioning retries a control-plane 500 and reuses the sprite a fa
     };
     const pending = driver.provision({
       projectId: "project",
-      featureId: "feature",
+      workspaceKey: "feature",
       hostWorkspacePath: "/unused",
       repositories: [],
       onProgress: (message) => {
@@ -2596,7 +2915,7 @@ test("Sprite provisioning retries a control-plane 500 and reuses the sprite a fa
     };
     let settled = false;
     const pending = driver
-      .provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" })
+      .provision({ projectId: "project", workspaceKey: "feature", hostWorkspacePath: "/unused" })
       .then(
         () => {
           settled = true;
@@ -2643,7 +2962,7 @@ test("Sprite provisioning retries a control-plane 500 and reuses the sprite a fa
       },
     };
     const pending = driver
-      .provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" })
+      .provision({ projectId: "project", workspaceKey: "feature", hostWorkspacePath: "/unused" })
       .then(
         () => "ok" as const,
         (err: Error) => err,
@@ -2674,7 +2993,7 @@ test("Sprite provisioning retries a control-plane 500 and reuses the sprite a fa
     };
     let settled = false;
     const pending = driver
-      .provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" })
+      .provision({ projectId: "project", workspaceKey: "feature", hostWorkspacePath: "/unused" })
       .then(
         () => {
           settled = true;
@@ -2718,7 +3037,7 @@ test("Sprite provisioning retries a control-plane 500 and reuses the sprite a fa
     };
     const pending = driver.provision({
       projectId: "project",
-      featureId: "feature",
+      workspaceKey: "feature",
       hostWorkspacePath: "/unused",
       repositories: [],
       onProgress: (message) => {
@@ -2780,7 +3099,7 @@ test("Sprite provisioning waits out a rate limit even after the short retries ar
     };
     const pending = driver.provision({
       projectId: "project",
-      featureId: "feature",
+      workspaceKey: "feature",
       hostWorkspacePath: "/unused",
       repositories: [],
       onProgress: (message) => {
@@ -2830,7 +3149,7 @@ test("Sprite provisioning waits out a rate limit even after the short retries ar
       },
     };
     const pending = driver
-      .provision({ projectId: "project", featureId: "feature", hostWorkspacePath: "/unused" })
+      .provision({ projectId: "project", workspaceKey: "feature", hostWorkspacePath: "/unused" })
       .then(
         () => "ok" as const,
         (err: Error) => err,

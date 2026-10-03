@@ -8,6 +8,7 @@ import { codexAdapter } from "./codex.js";
 import { cursorAdapter } from "./cursor.js";
 import { dshAdapter } from "./dsh.js";
 import { fxAdapter } from "./fx.js";
+import { fakeAdapter } from "./fake.js";
 import { museAdapter } from "./muse.js";
 import { opencodeAdapter } from "./opencode.js";
 import { piAdapter } from "./pi.js";
@@ -1404,4 +1405,21 @@ test("fx writes its MCP servers where the CLI reads them", () => {
   ]), { BENTO_MCP_GRANT: "t" });
   assert.deepEqual(JSON.parse(fxAdapter.mcp!.renderConfig([])[0]!.content), { mcp: {} });
   assert.deepEqual(fxAdapter.mcp!.env?.([]), {});
+});
+
+test("a reattached stream keeps its output cursor and prior result", async () => {
+  const committed: { type: string; cursor: number | undefined }[] = [];
+  const result = await runAgent({
+    adapter: fakeAdapter,
+    argv: ["sh"],
+    initialEvents: [{ type: "result", ok: true, sessionId: "already-reported" }],
+    exec: async function* () {
+      yield { kind: "stdout", data: '{"type":"assistant","message":{"content":[{"type":"text","text":"After restart"}]}}\n', cursor: 8 };
+      yield { kind: "exit", exitCode: 0, cursor: 9 };
+    },
+    onEvent: (event, cursor) => { committed.push({ type: event.type, cursor }); },
+  });
+  assert.deepEqual(committed, [{ type: "message", cursor: 8 }]);
+  assert.equal(result.outcome.ok, true);
+  assert.equal(result.outcome.sessionId, "already-reported");
 });

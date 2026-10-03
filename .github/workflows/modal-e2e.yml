@@ -1,0 +1,81 @@
+name: Modal sandbox e2e
+
+# Provisions a real Modal sandbox and installs one agent CLI into it.
+#
+# Not part of CI. It costs a machine and several minutes. It runs when
+# it earns its cost:
+#
+#   nightly       a Modal API change, or an installer that moved, is
+#                 found here rather than on somebody's card
+#   driver PR     a change to the Modal driver or the toolchain script
+#   by hand       after an outage, to confirm it is over
+#
+# Needs MODAL_TOKEN_ID and MODAL_TOKEN_SECRET. Without them the job
+# says so and stops, rather than passing on a test that never ran.
+
+on:
+  schedule:
+    - cron: "0 8 * * *"
+  pull_request:
+    paths:
+      - packages/sandbox/src/modal.ts
+      - packages/sandbox/src/modal-client.ts
+      - packages/sandbox/src/modal-exec.ts
+      - packages/sandbox/src/agent-toolchain.ts
+      - packages/sandbox/src/modal.e2e.test.ts
+      - .github/workflows/modal-e2e.yml
+  workflow_dispatch:
+
+# Its own group, so a Modal run does not queue behind the sprite e2e.
+concurrency:
+  group: modal-e2e
+  cancel-in-progress: false
+
+jobs:
+  modal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      BENTO_MODAL_E2E: "1"
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      MODAL_ENVIRONMENT: ${{ secrets.MODAL_ENVIRONMENT }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      # tsx runs the sandbox sources directly, but a workspace
+      # dependency resolves through its package exports, which point at
+      # dist. Without this build the test dies at import, and so does
+      # the cleanup step below it.
+      - run: pnpm turbo run build --filter=@bento/sandbox^...
+
+      - name: Note that a fork cannot provision a Modal sandbox
+        if: ${{ env.MODAL_TOKEN_ID == '' && github.event.pull_request.head.repo.fork }}
+        run: |
+          echo "::notice::A fork has no Modal tokens, so no sandbox was provisioned. A maintainer can run this workflow by hand against the branch."
+
+      - name: Refuse to pass without tokens
+        if: ${{ (env.MODAL_TOKEN_ID == '' || env.MODAL_TOKEN_SECRET == '') && !github.event.pull_request.head.repo.fork }}
+        run: |
+          echo "MODAL_TOKEN_ID and MODAL_TOKEN_SECRET are not set, so no sandbox can be provisioned." >&2
+          echo "Add them under Settings, Secrets and variables, Actions." >&2
+          exit 1
+
+      - name: Provision a Modal sandbox
+        if: ${{ env.MODAL_TOKEN_ID != '' && env.MODAL_TOKEN_SECRET != '' }}
+        working-directory: packages/sandbox
+        run: node --test --import tsx src/modal.e2e.test.ts
+
+      # The test terminates its own machine. This covers a cancelled
+      # job, the timeout above, or a runner that died. The name is
+      # derived from the run the same way the test derives it.
+      - name: Terminate the sandbox even if the run was killed
+        if: ${{ always() && env.MODAL_TOKEN_ID != '' && env.MODAL_TOKEN_SECRET != '' }}
+        working-directory: packages/sandbox
+        run: node --import tsx scripts/delete-modal-sandbox.ts "bento-e2e-${{ github.run_id }}-${{ github.run_attempt }}"

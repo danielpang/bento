@@ -1,0 +1,477 @@
+/**
+ * What the swarm endpoints answer with.
+ *
+ * This is the shape the console draws from. The names are mostly the
+ * table's, because the swarm routes answer with their rows: `nodeType`
+ * here is `swarm_tasks.node_type` there, and one vocabulary end to end
+ * is what keeps the console reading what the server sends. Where the
+ * two differ (a swarm's name, its status words, a leaf's attention)
+ * `client.ts` is the one place that translates, and the fixtures speak
+ * this shape so the tests can drive the console without a server.
+ *
+ * Two endpoints fill it:
+ *
+ *   GET /api/swarms?projectId=  ->  SwarmSummary[]   (the strip)
+ *   GET /api/swarms/:id         ->  SwarmDetail      (the page)
+ *
+ * Everything an agent wrote (a title, a description, a report, a
+ * flag's value) is untrusted text. It renders as text, and a report
+ * renders through the markdown path with raw HTML off.
+ */
+
+/** Where a swarm is, as the strip's status dot reads it. */
+export type SwarmStatus =
+  | "planning"
+  | "running"
+  | "paused"
+  | "waiting"
+  | "done"
+  | "stopped"
+  | "budget_exhausted"
+  | "timed_out"
+  | "failed";
+
+/** A plan node is decomposed further. A leaf is what a worker is given. */
+export type NodeType = "plan" | "leaf";
+
+export type TaskStatus =
+  | "open"
+  | "assigned"
+  | "working"
+  | "landed"
+  | "done"
+  | "blocked"
+  | "failed"
+  | "cancelled";
+
+/**
+ * Whether this node wants a person, and what about.
+ *
+ * A second axis and not a status: a worker that has been going for an
+ * hour is still `working`, and a leaf holding a question is still
+ * whatever it was doing.
+ *
+ * The reasons are the server's own words, carried through rather than
+ * flattened. They were flattened once, to "escalated", and the board
+ * then told everybody that four different things all needed them
+ * equally: a planner's question, a merge conflict, a failed worker and
+ * a swarm that had run out of money read identically, and none of them
+ * said what to do. The colour is still one colour. The sentence is not.
+ */
+export type TaskAttention =
+  | "none"
+  | "long_running"
+  | "escalated"
+  | "question"
+  | "failed"
+  | "conflict"
+  | "budget"
+  | "plan_limit";
+
+/**
+ * Measured is what a tool reported. Estimated is priced from reported
+ * tokens. The assumed field is retained for older wire data, and the
+ * console never treats it as spend.
+ */
+export interface SwarmSpend {
+  measuredUsd: number;
+  estimatedUsd: number;
+  assumedUsd: number;
+  /**
+   * A printed price that a subscription had already paid for.
+   *
+   * The fourth figure, and the one the budget does not count. A local
+   * install can lend a run the operator's own logged in agent session;
+   * the tool still prints its list price, but the work was already
+   * paid for and the marginal cost of the run is zero. Counting it
+   * would stop a swarm that is costing nothing.
+   */
+  notionalUsd: number;
+}
+
+/**
+ * A commit made for one node, found by its `Bento-Task` trailer.
+ *
+ * Read out of git rather than stored: landing rebases a worker's
+ * commits onto the swarm's branch and every sha changes, so a list
+ * recorded when the work was done would name commits no branch has.
+ * `repository` is which of the project's repositories it is in, which
+ * matters as soon as a project spans more than one.
+ */
+export interface TaskCommit {
+  sha: string;
+  message: string;
+  at: string;
+  repository?: string;
+}
+
+/**
+ * Something that happened to one node.
+ *
+ * `kind` is the server's own word (created, assigned, status_changed,
+ * attention_raised, landed, note), and `runId` is what makes a
+ * resolver visible: it is the only record on the node itself that an
+ * agent other than its worker was ever put on it.
+ *
+ * `detail` is loosely typed on purpose. It is coordinator bookkeeping
+ * and agent written, so it is rendered as text the way a flag's value
+ * is, never interpreted.
+ */
+export interface SwarmTaskEvent {
+  id: string;
+  kind: string;
+  at: string;
+  fromStatus: string | null;
+  toStatus: string | null;
+  runId: string | null;
+  detail: Record<string, unknown> | null;
+}
+
+/**
+ * What the drawer asks for when a node is opened.
+ *
+ * Its own request rather than fields on the plan: the commits are read
+ * by grepping a branch per repository, which is a git process per node
+ * per repository, and nobody is looking at them until a node is open.
+ *
+ *   GET /api/swarms/:id/tasks/:taskId  ->  SwarmNodeDetail
+ */
+export interface SwarmNodeDetail {
+  taskId: string;
+  commits: TaskCommit[];
+  events: SwarmTaskEvent[];
+  runs?: SwarmTaskRun[];
+}
+
+export interface SwarmTaskRun {
+  id: string;
+  status: string;
+  queuedAt: string;
+  startedAt: string | null;
+  endedAt: string | null;
+  error: string | null;
+}
+
+export interface SwarmTask {
+  id: string;
+  /** Null at the top. The swarm itself is the root nobody stores. */
+  parentId: string | null;
+  /** Whether this parent groups the task or must finish before it starts. */
+  parentRelation?: "contains" | "depends_on";
+  /** Orders siblings, so the console never invents an order of its own. */
+  position: number;
+  title: string;
+  description: string;
+  nodeType: NodeType;
+  status: TaskStatus;
+  attention: TaskAttention;
+  /** The planner's rough size, 1 to 5. Weights the rollup, never billed. */
+  weight: number;
+  assignedRunId: string | null;
+  branchName: string | null;
+  /**
+   * The agent a person chose for this leaf, or null for the swarm's
+   * own worker. What the drawer's Reassign writes, and what the next
+   * spawn on this leaf reads.
+   */
+  agentProfileId: string | null;
+  cost: SwarmSpend;
+  /** Coordinator bookkeeping: retry counts, who blocked this, planner notes. */
+  flags: Record<string, unknown>;
+  /** What the worker said it did. Markdown, agent written. */
+  report: string | null;
+  /** What "done" means for this leaf, as the planner wrote it. */
+  acceptanceCriteria: string[];
+  /**
+   * What a reopen asked for, on the node that holds its work.
+   *
+   * Null on every node the first pass created. Both views read it to
+   * label a follow up: the node carries the instruction, and the label
+   * reaches its subtree because the model walks it down. A person's own
+   * words, so it renders as text.
+   */
+  followUpInstruction: string | null;
+  startedAt: string | null;
+  endedAt: string | null;
+  commits: TaskCommit[];
+}
+
+/** A question the planner stopped to ask. One at a time. */
+export interface PlannerQuestion {
+  id: string;
+  text: string;
+  askedAt: string;
+  /** The task it came from, when it came from one. */
+  taskId: string | null;
+}
+
+export interface Swarm {
+  id: string;
+  projectId: string;
+  name: string;
+  slug: string;
+  goal: string;
+  status: SwarmStatus;
+  /** Why a paused swarm is paused, so the header prints the right sentence. */
+  pausedReason: "manual" | "budget" | "time_limit" | "attention" | "plan_limit" | "error" | null;
+  /** The single branch every leaf lands onto. */
+  branchName: string | null;
+  deliverable: "code" | "document";
+  settings: SwarmSettings;
+  /** The cap. Null means this swarm has none. */
+  budgetUsd: number | null;
+  maxWorkers: number;
+  /** Workers the swarm is allowed to run at once, as the stepper reads it. */
+  workers: number;
+  /** Workers actually holding a leaf right now. */
+  workersActive: number;
+  timeLimitMin: number | null;
+  spend: SwarmSpend;
+  startedAt: string | null;
+  endedAt: string | null;
+  createdAt: string;
+  archivedAt: string | null;
+  lastOpenedAt: string | null;
+  question: PlannerQuestion | null;
+  /**
+   * How many times this swarm has been reopened. Zero is the first
+   * pass, which is most of them.
+   */
+  reopenCount: number;
+  /** The branch this swarm was started from, when a person named one. */
+  startBranch: string | null;
+  /**
+   * Where the plan came from: the planner wrote it from the goal, or
+   * the person handed one over and the planner built the tree from it.
+   */
+  planMode: "goal" | "existing";
+}
+
+/**
+ * One source of the plan a person handed a swarm: a file they
+ * uploaded, or a page the server fetched for them. Metadata only; the
+ * text is the planner's to read, through its tools.
+ */
+export interface SwarmPlanSource {
+  id: string;
+  position: number;
+  kind: "file" | "website";
+  /** The file's name, or the page's title (its address when it had none). */
+  name: string;
+  /** The page's address, checked through `externalHttpUrl`; null on a file. */
+  url: string | null;
+  mime: string;
+  /** What it is read as: text, a PDF, or an image. */
+  media: "text" | "pdf" | "image";
+  /** Characters of text. Zero for an image or a scanned PDF. */
+  size: number;
+  /** Whether there is text in it: false for an image or a scanned PDF. */
+  hasText: boolean;
+  /** Bytes in the store, for a PDF or an image. Null for text. */
+  byteSize: number | null;
+  /**
+   * Where the console fetches the source itself: an image to draw
+   * under the goal, a PDF to download. Same origin as every other API
+   * path, and served by a route that resolves the swarm first.
+   */
+  contentPath: string;
+}
+
+/**
+ * Something a swarm produced for people to read: its assembled
+ * document, and anything else its agents captured.
+ *
+ * Metadata only. The bytes come from the artifact routes, which is
+ * where every rule about serving agent output lives, and the console
+ * opens them in the same viewer a card's artifacts open in: markdown
+ * through react-markdown with raw HTML off, HTML only inside a
+ * sandboxed iframe, everything else offered as a download.
+ */
+export interface SwarmArtifact {
+  id: string;
+  runId: string;
+  /** The node that produced it, or null for the swarm's own. */
+  swarmTaskId: string | null;
+  stageSlug: string;
+  stageName: string;
+  path: string;
+  kind: "markdown" | "mermaid" | "image" | "html" | "file";
+  mime: string;
+  size: number;
+  createdAt: string;
+}
+
+/** A row of the strip. The list endpoint sends no tree. */
+export interface SwarmSummary {
+  id: string;
+  projectId: string;
+  name: string;
+  status: SwarmStatus;
+  createdAt: string;
+  archivedAt: string | null;
+  lastOpenedAt: string | null;
+  /**
+   * The root ring, 0 to 1, rolled up by the server for swarms whose
+   * tree this browser has not loaded. The open swarm's tab uses the
+   * number the page computed instead, so the tab and the header can
+   * never disagree.
+   */
+  completion: number;
+}
+
+/** One leaf's branch waiting its turn on the merge queue. */
+export interface SwarmLanding {
+  id: string;
+  taskId: string;
+  branchName: string | null;
+  position: number;
+  /**
+   * The server's own words, not a translation of them. The panel picks
+   * the label; a second vocabulary here was how "conflict" and
+   * "conflicted" came to mean the same thing in two files, and a row
+   * whose status matched neither drew as nothing at all.
+   */
+  status: "queued" | "landing" | "landed" | "conflicted" | "failed" | "cancelled";
+  attempt: number;
+  error: string | null;
+  /** The agent reconciling this branch, when one was started. */
+  resolverRunId: string | null;
+  startedAt: string | null;
+  endedAt: string | null;
+}
+
+/**
+ * One charge, with the confidence it was recorded at. The header's
+ * three figures are this list grouped by tier.
+ */
+export interface SwarmLedgerEntry {
+  id: string;
+  at: string;
+  taskId: string | null;
+  /** The tool or model the charge is for. */
+  source: string;
+  tier: SpendTier;
+  usd: number;
+}
+
+export type SpendTier = "measured" | "estimated" | "assumed" | "notional";
+
+export interface SwarmPullRequest {
+  id: string;
+  repoUrl: string;
+  number: number;
+  /**
+   * Where to send somebody who clicks it, or null.
+   *
+   * Null is not "no pull request": it is a url the console refused to
+   * link to. The row is written on a path agents are on, and an
+   * `href` is not inert, so `client.ts` runs what the server sent
+   * through `externalHttpUrl` and anything that is not an http address
+   * arrives here as null. The chip then draws as text.
+   */
+  url: string | null;
+  headSha: string | null;
+}
+
+export interface SwarmDetail {
+  swarm: Swarm;
+  tasks: SwarmTask[];
+  /** Sum of recorded agent run durations. Waiting between runs is excluded. */
+  agentTimeMs?: number;
+  /** The planner's latest attempt, shown above the plan in both views. */
+  plannerRun?: SwarmPlannerRun | null;
+  landings: SwarmLanding[];
+  /** Counts include rows omitted from the short merge queue history. */
+  landingSummary?: { total: number; committed: number };
+  branchCheckout?: { mode: "worktree" | "remote"; released: boolean };
+  ledger: SwarmLedgerEntry[];
+  pullRequests: SwarmPullRequest[];
+  /** What the person handed the planner, when they handed over anything. */
+  planSources?: SwarmPlanSource[];
+}
+
+export interface SwarmPlannerRun {
+  id: string;
+  status: "queued" | "starting" | "running" | "succeeded" | "failed" | "cancelled";
+  error: string | null;
+  agent: { name: string; cli: string; model: string } | null;
+  queuedAt: string;
+  startedAt: string | null;
+  endedAt: string | null;
+}
+
+/**
+ * How a swarm is run, beyond its goal and its ceilings.
+ *
+ * Every one of these has a default a person never has to touch: the
+ * install's own Swarm Planner and Swarm Worker, no judge, no command,
+ * one planner writing the whole plan, and no extra instructions. They
+ * live on the swarm, set when it is created and changed in its
+ * settings.
+ */
+export interface SwarmSettings {
+  plannerProfileId: string | null;
+  workerProfileId: string | null;
+  /** The agent that reads the finished branch before the swarm is done. */
+  judgeProfileId: string | null;
+  /** A command that has to pass on the finished branch, such as the test suite. */
+  completionCommand: string | null;
+  /** 1: the planner writes the whole plan. More lets it hand parts to sub planners. */
+  maxPlanDepth: number;
+  plannerInstructions: string | null;
+  workerInstructions: string | null;
+}
+
+/** The settings a person can change after the swarm exists. */
+export type SwarmSettingsChange = Partial<{
+  plannerProfileId: string;
+  workerProfileId: string;
+  judgeProfileId: string | null;
+  completionCommand: string | null;
+  maxPlanDepth: number;
+  plannerInstructions: string | null;
+  workerInstructions: string | null;
+  budgetUsd: number | null;
+  timeLimitMin: number | null;
+}>;
+
+/** What the New swarm dialog sends. */
+/**
+ * One thing a person hands the planner at creation: a text file read
+ * in the browser, a PDF or an image as its bytes, or an address the
+ * server fetches itself.
+ */
+export type NewPlanSource =
+  | { kind: "file"; name: string; content: string }
+  | { kind: "file"; name: string; data: string; mime: string }
+  | { kind: "website"; url: string };
+
+export interface NewSwarmInput {
+  projectId: string;
+  /** Absent means the install's own Swarm Planner and Swarm Worker. */
+  plannerProfileId?: string;
+  workerProfileId?: string;
+  /** The rest of how it is run. Absent fields take the defaults. */
+  settings?: Partial<Omit<SwarmSettings, "plannerProfileId" | "workerProfileId">>;
+  name: string;
+  goal: string;
+  /**
+   * The plan the person already has, as the route takes it: files read
+   * as text in the browser, and addresses the server fetches itself.
+   */
+  planSources: NewPlanSource[];
+  /**
+   * "existing" says the sources (or the goal) are the plan to
+   * implement, so the planner builds the tree from them rather than
+   * planning from the goal and the code. "goal" is every other swarm.
+   */
+  planMode: "goal" | "existing";
+  start: { kind: "new-branch"; name: string } | { kind: "existing-branch"; name: string };
+  deliverable: "code" | "document";
+  budgetUsd: number | null;
+  /** Minutes the swarm may run for. Null means no limit. */
+  timeLimitMin?: number | null;
+  workers: number;
+  /** Plan only stops after the planner, before any worker starts. */
+  planOnly: boolean;
+}

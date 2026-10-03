@@ -1,0 +1,21 @@
+-- Where a swarm's agents work, written on the swarm instead of read off
+-- the deployment.
+--
+-- A local install works a swarm in worktrees of the project's checkout,
+-- because a container per worker is a container on the machine somebody
+-- is also using. A hosted one gives each worker its own machine. Read
+-- off the driver at run time, that shape would change under a running
+-- swarm the moment the install joined a team, and nothing would say so.
+--
+-- Two values. 'worktree' is an assertion: this swarm's agents work in
+-- checkouts on the server. A deployment whose driver keeps the
+-- repository inside the machine cannot keep that promise and refuses
+-- the run with a sentence naming the setting, rather than silently
+-- provisioning the other shape. 'sandbox' asserts nothing and lets the
+-- driver decide.
+--
+-- The default is added for the backfill and dropped straight after,
+-- the way agent_runs.type and run_artifacts.type both are, so that
+-- every insert from here on says which it is.
+ALTER TABLE "swarms" ADD COLUMN "worker_isolation" text DEFAULT 'sandbox' NOT NULL;--> statement-breakpoint
+ALTER TABLE "swarms" ALTER COLUMN "worker_isolation" DROP DEFAULT;

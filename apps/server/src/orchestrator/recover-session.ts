@@ -2,7 +2,7 @@ import { eq, inArray } from "drizzle-orm";
 import type { AgentAdapter, SessionRecovery } from "@bento/agents";
 import type { AgentEvent } from "@bento/core";
 import { agentRuns, runEvents } from "@bento/db";
-import { collectExec, type SandboxHandle } from "@bento/sandbox";
+import { collectExec, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
 import { appendRunEvent } from "./transcript.js";
 
@@ -15,7 +15,7 @@ import { appendRunEvent } from "./transcript.js";
  * attached reaches no transcript. The CLI's session storage in the
  * sandbox is the surviving copy of those messages. This reads that
  * record, diffs it against every message already persisted for the
- * card by CLI-native message id, and appends what is missing to the
+ * card or swarm run by CLI-native message id, and appends what is missing to the
  * given run's transcript, so the user sees what the agent said while
  * Bento was away instead of a conversation that skips from mid-task
  * to "the work is done".
@@ -39,9 +39,11 @@ export const MAX_RECOVERED_MESSAGES = 50;
 const READ_TIMEOUT_MS = 30_000;
 
 export interface RecoverArgs {
+  driver: SandboxDriver;
   handle: SandboxHandle;
   adapter: AgentAdapter;
-  featureId: string;
+  /** Card session scope. Swarm runs use their run id instead. */
+  featureId?: string;
   /** The starting run whose transcript receives what was missed. */
   runId: string;
   sessionId: string;
@@ -80,7 +82,7 @@ async function recover(ctx: AppContext, args: RecoverArgs): Promise<void> {
   if (!/^[A-Za-z0-9_.-]+$/.test(args.sessionId)) return;
 
   const read = await collectExec(
-    ctx.driver.exec(args.handle, recovery.readLogCommand(args.sessionId, args.cwd), {
+    args.driver.exec(args.handle, recovery.readLogCommand(args.sessionId, args.cwd), {
       cwd: args.cwd,
       timeoutMs: READ_TIMEOUT_MS,
     }),
@@ -92,7 +94,9 @@ async function recover(ctx: AppContext, args: RecoverArgs): Promise<void> {
   const held = recovery.parseLog(read.stdout);
   if (held.length === 0) return;
 
-  const seen = args.seen ?? (await loadPersistedIds(ctx, recovery, args.featureId));
+  const seen = args.seen ?? (await loadPersistedIds(
+    ctx, recovery, args.featureId ?? args.runId, args.featureId ? "feature" : "run",
+  ));
 
   const missed = held.filter((message) => {
     const event: AgentEvent = { type: "message", role: "assistant", text: message.text, raw: message.raw };
@@ -135,10 +139,9 @@ async function recover(ctx: AppContext, args: RecoverArgs): Promise<void> {
 }
 
 /**
- * Every native id the card's transcript holds, whichever run delivered
- * it. The session spans runs (each resume is a new run in the same CLI
- * session), so the set must too, or a resume would "recover" the whole
- * conversation into one transcript again.
+ * Every native id the owner's transcript holds. A card session can
+ * span runs, so its set includes them all; a swarm run has its own
+ * transcript and uses only that run's ids.
  *
  * A snapshot, on purpose. A reattaching server filters the live stream
  * against the ids it loaded at attach time plus the ones recovery
@@ -153,12 +156,15 @@ async function recover(ctx: AppContext, args: RecoverArgs): Promise<void> {
 export async function loadPersistedIds(
   ctx: AppContext,
   recovery: Pick<SessionRecovery, "persistedIds">,
-  featureId: string,
+  ownerId: string,
+  scope: "feature" | "run" = "feature",
 ): Promise<Set<string>> {
-  const cardRuns = await ctx.db
-    .select({ id: agentRuns.id })
-    .from(agentRuns)
-    .where(eq(agentRuns.featureId, featureId));
+  const cardRuns = scope === "run"
+    ? [{ id: ownerId }]
+    : await ctx.db
+        .select({ id: agentRuns.id })
+        .from(agentRuns)
+        .where(eq(agentRuns.featureId, ownerId));
   const persisted = cardRuns.length
     ? await ctx.db
         .select({ payload: runEvents.payload })

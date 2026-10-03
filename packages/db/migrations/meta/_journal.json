@@ -208,8 +208,120 @@
     {
       "idx": 29,
       "version": "7",
-      "when": 1789960000000,
-      "tag": "0029_stages_create_pr_default_on",
+      "when": 1789860060000,
+      "tag": "0029_swarms",
+      "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1789860120000,
+      "tag": "0030_agent_run_type",
+      "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1789860180000,
+      "tag": "0031_swarm_task_vocabulary",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1789860240000,
+      "tag": "0032_agent_run_role",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1789860300000,
+      "tag": "0033_swarm_task_node_type",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1789860360000,
+      "tag": "0034_run_artifact_type",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1789860420000,
+      "tag": "0035_swarm_worker_isolation",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1789860480000,
+      "tag": "0036_run_cost_tiers",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1790167330625,
+      "tag": "0037_unbilled_runs",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1790167906553,
+      "tag": "0038_swarm_follow_ups",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1790168711560,
+      "tag": "0039_swarm_slack_threads",
+      "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1790452177954,
+      "tag": "0040_swarm_parent_relation",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1790540000000,
+      "tag": "0041_swarm_branch_release",
+      "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1790620000000,
+      "tag": "0042_swarm_plan_sources",
+      "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1790630000000,
+      "tag": "0043_swarm_plan_source_bytes",
+      "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1790800000000,
+      "tag": "0044_project_sandbox_provider",
+      "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1790800060000,
+      "tag": "0045_stages_create_pr_default_on",
       "breakpoints": true
     }
   ]

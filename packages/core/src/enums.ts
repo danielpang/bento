@@ -34,11 +34,11 @@ export type TerminalRunStatus = (typeof TERMINAL_RUN_STATUSES)[number];
  * judge, and the topbar chip grows a plus while an agent is still
  * running.
  */
-export function isSpendRun(run: { status: string; kind?: string | null }): boolean {
-  return (TERMINAL_RUN_STATUSES as readonly string[]).includes(run.status) && run.kind !== "judge";
+export function isSpendRun(run: { status: string; role?: string | null }): boolean {
+  return (TERMINAL_RUN_STATUSES as readonly string[]).includes(run.status) && run.role !== "judge";
 }
 
-export const sandboxProvider = z.enum(["docker", "sprite"]);
+export const sandboxProvider = z.enum(["docker", "sprite", "modal"]);
 export type SandboxProvider = z.infer<typeof sandboxProvider>;
 
 export const sandboxStatus = z.enum(["provisioning", "ready", "busy", "hibernated", "destroyed"]);

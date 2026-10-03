@@ -75,6 +75,7 @@
 
   --mono: "Geist Mono", ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
   --sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --display: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
 
   --radius: 7px;
   --radius-lg: 12px;
@@ -372,17 +373,6 @@ button {
   flex: 1;
 }
 
-/* The project picker and the search field, as one block. They answer
-   the same question (which cards am I looking at), and on a phone they
-   move to a row of their own together rather than being separated by
-   wherever the row happened to wrap. */
-.topbar-lead {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
 /*
  * The board's tools, and the chrome that follows them. Replaced by the
  * hamburger below 720px; see the narrow-screen block.
@@ -489,9 +479,10 @@ button {
 }
 
 .workspace-nav .picker-current {
+  font-family: var(--display);
   font-size: 20px;
   font-weight: 650;
-  letter-spacing: -0.045em;
+  letter-spacing: -0.04em;
   line-height: 1.2;
 }
 
@@ -1216,10 +1207,10 @@ select.input,
 }
 
 /*
- * The running card glows like a monitor backlight: a soft arc of the
- * running hue circling the card while its agent works. Two copies of
+ * A running pipeline card or swarm agent glows like a monitor backlight:
+ * a soft arc of the running hue circling it. Two copies of
  * one conic gradient: a tight ring, and a blurred halo behind it.
- * They sit at negative z-index, so the card's own surface masks the
+ * They sit at negative z-index, so the surface masks the
  * centre and only the rim shows. Status colour on a status, not chrome.
  */
 @property --glow-angle {
@@ -1228,13 +1219,13 @@ select.input,
   initial-value: 0deg;
 }
 
-.card {
+:is(.card, :where(.swarm-node[data-agent-active] .swarm-node-face, .swarm-row[data-agent-active], .swarm-planner-step[data-state="running"])) {
   position: relative;
   z-index: 0;
 }
 
-.card[data-state="running"]::before,
-.card[data-state="running"]::after {
+:is(.card[data-state="running"], :where(.swarm-node[data-agent-active] .swarm-node-face, .swarm-row[data-agent-active], .swarm-planner-step[data-state="running"]))::before,
+:is(.card[data-state="running"], :where(.swarm-node[data-agent-active] .swarm-node-face, .swarm-row[data-agent-active], .swarm-planner-step[data-state="running"]))::after {
   content: "";
   position: absolute;
   z-index: -1;
@@ -1259,12 +1250,12 @@ select.input,
   pointer-events: none;
 }
 
-.card[data-state="running"]::before {
+:is(.card[data-state="running"], :where(.swarm-node[data-agent-active] .swarm-node-face, .swarm-row[data-agent-active], .swarm-planner-step[data-state="running"]))::before {
   inset: -2px;
   padding: 2px;
 }
 
-.card[data-state="running"]::after {
+:is(.card[data-state="running"], :where(.swarm-node[data-agent-active] .swarm-node-face, .swarm-row[data-agent-active], .swarm-planner-step[data-state="running"]))::after {
   inset: -6px;
   padding: 7px;
   filter: blur(6px);
@@ -1353,12 +1344,12 @@ select.input,
     opacity: 0;
   }
 
-  .card[data-state="running"]::before,
-  .card[data-state="running"]::after {
+  :is(.card[data-state="running"], :where(.swarm-node[data-agent-active] .swarm-node-face, .swarm-row[data-agent-active], .swarm-planner-step[data-state="running"]))::before,
+  :is(.card[data-state="running"], :where(.swarm-node[data-agent-active] .swarm-node-face, .swarm-row[data-agent-active], .swarm-planner-step[data-state="running"]))::after {
     background: none;
   }
 
-  .card[data-state="running"] {
+  :is(.card[data-state="running"], :where(.swarm-node[data-agent-active] .swarm-node-face, .swarm-row[data-agent-active], .swarm-planner-step[data-state="running"])) {
     box-shadow: 0 0 12px color-mix(in srgb, var(--running) 45%, transparent);
   }
 }
@@ -3427,6 +3418,16 @@ a.pr-row:hover .pr-external {
     display: none;
   }
 
+  .topbar-nav-swarms {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .topbar-nav-swarms > :not(.workspace-swarm-switcher) {
+    display: none;
+  }
+
   .nav-menu-trigger {
     display: inline-flex;
   }
@@ -3505,20 +3506,6 @@ a.pr-row:hover .pr-external {
   .topbar .select {
     flex: 1 1 140px;
     min-width: 0;
-  }
-
-  /*
-   * The row becomes two.
-   *
-   * Everything keeps its natural order except the picker and the search
-   * field, which are ordered last and told to take the full width, so
-   * they wrap together onto a line of their own. The line above is then
-   * the brand, the spend, the primary action and the menu, which is
-   * what a phone has room for.
-   */
-  .topbar-lead {
-    order: 1;
-    flex: 1 1 100%;
   }
 
   .search,
@@ -4147,6 +4134,18 @@ a.pr-row:hover .pr-external {
 }
 .spend-intro {
   margin: 0 0 24px;
+}
+.spend-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 16px;
+  color: var(--text-dim);
+  font-size: 13px;
+  text-decoration: none;
+}
+.spend-back:hover {
+  color: var(--text);
 }
 .spend-title {
   margin: 0;
@@ -7304,6 +7303,1513 @@ a.hours-person-name:hover {
 }
 
 /*
+ * Swarms.
+ *
+ * A second board of the same project, in the same vocabulary as the
+ * first. Nothing here introduces a colour, a radius, or a type size
+ * that the console did not already have: the five status hues carry
+ * every state, the brand carries completion, 6px is a control and 8px
+ * is a card, and the mono label over a sans body is the same pairing
+ * the drawer and the settings cards use.
+ *
+ * The one new shape is the ring, and it is new only in that it is
+ * drawn: it is the brand hue on the --line track every meter in this
+ * console already sits on.
+ */
+
+/* A two segment control: one question, both answers visible. Sized
+   to the 52px topbar, so it sits on the picker's line. */
+.seg {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  padding: 2px;
+  gap: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+
+.seg-item {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: none;
+  background: none;
+  border-radius: 4px;
+  padding: 4px 10px;
+  color: var(--text-faint);
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 500;
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+@media (hover: hover) {
+  .seg-item:hover {
+    color: var(--text-dim);
+  }
+}
+
+.seg-item[data-on] {
+  background: var(--panel-raised);
+  color: var(--text);
+}
+
+.seg-item:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+.seg-lock {
+  display: inline-flex;
+  color: var(--text-faint);
+}
+
+/*
+ * The completion ring, at every size it appears.
+ *
+ * Track and arc are the same two values the hours meter uses, so a
+ * ring and a bar in this console read as the same instrument at two
+ * shapes. Full turns green, because a finished thing is the one state
+ * that has its own reserved colour.
+ */
+.ring {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+
+.ring-track {
+  stroke: var(--line);
+}
+
+.ring-arc {
+  stroke: var(--brand);
+  transition: stroke-dasharray 240ms ease;
+}
+
+.ring[data-tone="muted"] .ring-arc {
+  stroke: var(--text-faint);
+}
+
+.ring[data-tone="running"] .ring-arc { stroke: var(--running); }
+.ring[data-tone="failed"] .ring-arc { stroke: var(--failed); }
+.ring[data-tone="gated"] .ring-arc { stroke: var(--gated); }
+.ring[data-tone="idle"] .ring-arc { stroke: var(--idle); }
+
+.ring[data-tone="succeeded"] .ring-arc {
+  stroke: var(--succeeded);
+}
+
+.ring-label {
+  position: absolute;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+
+/* The outline's reading of the same fraction. */
+.swarm-bar {
+  display: block;
+  width: 100%;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.swarm-bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--brand);
+  transition: width 240ms ease;
+}
+
+.swarm-bar[data-full] .swarm-bar-fill {
+  background: var(--succeeded);
+}
+
+/* Swarm navigation stays compact while the diagram gets the page. */
+.swarm-board {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+}
+
+.workspace-swarm-switcher,
+.swarm-switcher {
+  min-width: 0;
+}
+
+.swarm-switcher-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  max-width: min(320px, 100%);
+  min-height: 36px;
+  padding: 5px 9px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 150ms ease, border-color 150ms ease;
+}
+
+.swarm-switcher-trigger:hover,
+.swarm-switcher-trigger[data-state="open"] {
+  background: var(--panel-raised);
+  border-color: var(--line-bright);
+}
+
+.swarm-switcher-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.swarm-switcher-empty {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  border: 1.5px solid var(--line-bright);
+  border-radius: 50%;
+}
+
+.swarm-switcher-caret {
+  width: 6px;
+  height: 6px;
+  margin: -3px 1px 0 3px;
+  flex: none;
+  border-right: 1.5px solid var(--text-faint);
+  border-bottom: 1.5px solid var(--text-faint);
+  transform: rotate(45deg);
+}
+
+.swarm-switcher-menu {
+  width: min(320px, calc(100vw - 24px));
+  max-width: none;
+  max-height: min(460px, var(--radix-dropdown-menu-content-available-height));
+  overflow-y: auto;
+}
+
+.swarm-switcher-menu .picker-group {
+  max-height: none;
+  overflow: visible;
+}
+
+.swarm-switcher-create {
+  min-height: 34px;
+  font-weight: 600;
+}
+
+.swarm-switcher-plus {
+  display: grid;
+  place-items: center;
+  width: 19px;
+  height: 19px;
+  flex: none;
+  border: 1px solid var(--line-bright);
+  border-radius: 5px;
+  color: var(--brand);
+  font-family: var(--mono);
+  font-size: 16px;
+  font-weight: 400;
+  line-height: 1;
+}
+
+.swarm-switcher-label {
+  padding: 8px 9px 4px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.swarm-switcher-item {
+  min-height: 34px;
+}
+
+.swarm-switcher-item[data-archived] .picker-item-name {
+  color: var(--text-dim);
+}
+
+.swarm-switcher-check {
+  visibility: hidden;
+  margin-left: auto;
+  color: var(--brand);
+  font-size: 12px;
+}
+
+.swarm-switcher-item[aria-checked="true"] .swarm-switcher-check {
+  visibility: visible;
+}
+
+/* The page: header, then the plan. */
+.swarm-page {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+}
+
+.swarm-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 18px 24px;
+  padding: 22px 26px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.swarm-head-lead {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+}
+
+.swarm-head-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.swarm-name {
+  margin: 0;
+  font-family: var(--display);
+  font-size: clamp(20px, 2vw, 28px);
+  font-weight: 680;
+  letter-spacing: -0.035em;
+  color: var(--text);
+}
+
+.swarm-head-chips {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.swarm-head-spend {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  min-width: 0;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.swarm-head-spend .swarm-cap {
+  flex: 1 1 180px;
+  max-width: 360px;
+  margin-left: auto;
+}
+
+/*
+ * Three figures, never one.
+ *
+ * Laid out as a row of three rather than a sentence, so the
+ * separation is structural: there is no arrangement of this list that
+ * reads as a total.
+ */
+.swarm-tiers {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.swarm-tiers li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.swarm-tiers-inline {
+  flex-direction: row;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.swarm-tiers-inline li {
+  flex-direction: column;
+  gap: 0;
+  align-items: flex-start;
+}
+
+.swarm-tier-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.swarm-tier-value {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--text);
+}
+
+.swarm-cap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+}
+
+/* One track, three fills. The segments sit side by side rather than
+   stacking into a single length nobody could name. */
+.swarm-cap-track {
+  display: flex;
+  width: 100%;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.swarm-cap-fill[data-tier="measured"] {
+  background: var(--brand);
+}
+
+.swarm-cap-fill[data-tier="estimated"] {
+  background: color-mix(in srgb, var(--brand) 55%, var(--bg));
+}
+
+.swarm-cap-fill[data-tier="assumed"] {
+  background: var(--line-bright);
+}
+
+.swarm-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.swarm-workers {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1px;
+}
+
+.swarm-workers-count {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 0 4px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+}
+
+.swarm-workers-of {
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+/* The planner's question, with the answer in the same block. */
+.swarm-question {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin: 12px 16px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--gated);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--gated) 8%, transparent);
+}
+
+.swarm-question-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1 1 320px;
+  min-width: 0;
+}
+
+.swarm-question-reply {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 280px;
+  min-width: 0;
+}
+
+.swarm-prs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 16px 0;
+}
+
+/*
+ * The merge queue, under the plan.
+ *
+ * A list rather than a table: every row is one branch and the columns
+ * would be three, two of which are usually empty. The rows keep the
+ * board's own status dot, so "landing" here and "working" on the tree
+ * read as the same kind of fact.
+ */
+.swarm-queue {
+  margin: 20px 16px 24px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.swarm-queue-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.swarm-queue-head > h2 {
+  margin: 0;
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.swarm-queue-branches-heading {
+  margin-right: 32px;
+  text-align: right;
+}
+
+.swarm-queue-destination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
+
+.swarm-queue-destination p { margin: 0; }
+.swarm-queue-destination strong { font-weight: 600; }
+.swarm-queue-destination code,
+.swarm-queue-checkout code { color: var(--text); font-size: 11px; }
+.swarm-queue-destination .btn { white-space: nowrap; }
+.swarm-queue-checkout { display: flex; align-items: center; gap: 8px; }
+.swarm-queue-command-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.swarm-queue-command-copy:hover,
+.swarm-queue-command-copy:focus-visible {
+  border-color: var(--line-bright);
+  background: var(--panel-raised);
+  color: var(--text);
+}
+
+.swarm-queue-command-copy[data-copy-state="copied"] { color: var(--succeeded); }
+
+.swarm-queue-empty {
+  padding: 12px 14px;
+  margin: 0;
+}
+
+.swarm-queue-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.swarm-queue-row {
+  border-bottom: 1px solid var(--line);
+}
+
+.swarm-queue-row:last-child {
+  border-bottom: 0;
+}
+
+.swarm-queue-row[data-on] {
+  background: color-mix(in srgb, var(--brand) 10%, transparent);
+}
+
+.swarm-queue-row-top {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.swarm-queue-row-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 9px 8px 9px 14px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.swarm-queue-row-main:disabled {
+  cursor: default;
+}
+
+.swarm-queue-row-main .status {
+  flex: 0 0 auto;
+  min-width: 78px;
+}
+
+.swarm-queue-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.swarm-queue-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex: 0 1 auto;
+  max-width: 42%;
+  min-width: 0;
+  margin-left: auto;
+  margin-right: 14px;
+  padding: 4px 6px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.swarm-queue-copy:focus-visible {
+  border-color: var(--line-bright);
+  background: var(--panel-raised);
+  color: var(--text);
+}
+
+.swarm-queue-copy .chip {
+  min-width: 0;
+  text-align: right;
+}
+
+.swarm-queue-copy-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+}
+
+.swarm-queue-copy[data-copy-state="copied"] .swarm-queue-copy-icon {
+  color: var(--succeeded);
+}
+
+/*
+ * What git said. Wrapped rather than scrolled sideways, because the
+ * part that answers the question is the file name at the end of the
+ * line, and pre-wrap is what keeps its own line breaks.
+ */
+.swarm-queue-error {
+  margin: 0;
+  padding: 0 14px 10px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.swarm-queue-note {
+  margin: 0;
+  padding: 0 14px 10px;
+}
+.swarm-queue-technical { padding: 0 14px 10px; color: var(--text-dim); font-size: 11px; }
+.swarm-queue-technical summary { cursor: pointer; }
+.swarm-queue-technical .swarm-queue-error { padding: 9px 0 0; }
+
+.swarm-viewbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 26px;
+  min-width: 0;
+}
+
+.swarm-goal {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  line-height: 1.45;
+  max-width: 66ch;
+  min-width: 0;
+}
+
+/* The tree. The stage scrolls; the canvas is the laid out size. */
+.swarm-stage {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px 26px 26px;
+}
+
+.swarm-tree-content {
+  min-width: 100%;
+}
+
+.swarm-planner-tree-position {
+  display: flex;
+  justify-content: center;
+  padding: 12px 24px 0;
+}
+
+.swarm-planner-edges {
+  display: block;
+  margin-bottom: -24px;
+  overflow: visible;
+}
+
+.swarm-plan-pending {
+  margin: 0;
+  padding: 28px 24px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.swarm-planner-step {
+  width: min(100%, 420px);
+  padding: 17px 19px 18px;
+  border: 1px solid var(--line-bright);
+  border-left: 3px solid var(--running);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--panel-raised) 92%, var(--running));
+  box-shadow: 0 12px 32px color-mix(in srgb, var(--bg) 80%, transparent);
+}
+
+.swarm-planner-step[data-state="succeeded"] {
+  border-left-color: var(--succeeded);
+  background: var(--panel-raised);
+}
+
+.swarm-planner-step[data-state="failed"] {
+  width: min(100%, 520px);
+  border-color: color-mix(in srgb, var(--failed) 60%, var(--line));
+  border-left-color: var(--failed);
+  background: color-mix(in srgb, var(--failed) 7%, var(--panel-raised));
+}
+
+.swarm-planner-step-head,
+.swarm-planner-step-main {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 14px;
+}
+
+.swarm-planner-step-kicker {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.swarm-planner-step-head .status {
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.swarm-planner-step-main {
+  align-items: flex-end;
+  margin-top: 14px;
+}
+
+.swarm-planner-step-main h3 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 650;
+  letter-spacing: -0.025em;
+}
+
+.swarm-planner-step-main p {
+  margin: 5px 0 0;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.swarm-planner-step-time {
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.swarm-planner-step-failure {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid color-mix(in srgb, var(--failed) 35%, var(--line));
+}
+
+.swarm-planner-step-failure p {
+  margin: 0 0 13px;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.swarm-planner-step-failure .btn {
+  min-height: 32px;
+}
+
+.swarm-planner-outline-row {
+  padding: 6px 0 16px;
+}
+
+.swarm-planner-step[data-variant="outline"] {
+  width: 100%;
+  max-width: none;
+  box-shadow: none;
+}
+
+.swarm-stage-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 16px;
+}
+
+.swarm-canvas {
+  position: relative;
+}
+
+.swarm-edges {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.swarm-edge {
+  stroke: var(--line-bright);
+  stroke-width: 1.5;
+}
+
+/* An edge into work that is happening reads brighter, so the frontier
+   is findable in a tree too large to read node by node. */
+.swarm-edge[data-live] {
+  stroke: color-mix(in srgb, var(--running) 60%, var(--line-bright));
+}
+
+.swarm-edge[data-relation="depends_on"] {
+  stroke: var(--brand);
+  stroke-dasharray: 4 5;
+}
+
+.swarm-node {
+  position: absolute;
+}
+
+.swarm-node-face {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  height: 100%;
+  text-align: left;
+  padding: 12px 13px;
+  background: var(--panel-raised);
+  border: 1px solid var(--line);
+  /* One step softer than the controls inside it, the same as a card
+     on the pipeline board. */
+  border-radius: 8px;
+  border-left: 3px solid var(--idle);
+  color: var(--text);
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.swarm-node[data-state="running"] .swarm-node-face {
+  border-left-color: var(--running);
+}
+.swarm-node[data-state="succeeded"] .swarm-node-face {
+  border-left-color: var(--succeeded);
+}
+.swarm-node[data-state="failed"] .swarm-node-face {
+  border-left-color: var(--failed);
+}
+.swarm-node[data-state="gated"] .swarm-node-face {
+  border-left-color: var(--gated);
+}
+
+/*
+ * Attention, painted over the status rather than instead of it.
+ *
+ * The left rule still says what the node is doing; the outline says
+ * somebody should look. That is why a long running worker can be blue
+ * and yellow at once, and why switching to the outline keeps both.
+ */
+.swarm-node[data-attention] .swarm-node-face {
+  border-color: var(--gated);
+  background: color-mix(in srgb, var(--gated) 7%, var(--panel-raised));
+}
+
+/* A running agent keeps the pipeline card's blue edge and halo. The
+   warning remains on its yellow label instead of masking that motion. */
+.swarm-node[data-agent-active] {
+  z-index: 2;
+}
+
+.swarm-node[data-agent-active] .swarm-node-face {
+  border-color: var(--line);
+  border-left: 2px solid var(--running);
+  background: var(--panel-raised);
+}
+
+.swarm-node[data-collapsed] .swarm-node-face {
+  background: color-mix(in srgb, var(--succeeded) 12%, var(--panel-raised));
+  border-color: color-mix(in srgb, var(--succeeded) 35%, var(--line));
+}
+
+.swarm-node[data-selected] .swarm-node-face,
+.swarm-node-face:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 1px;
+}
+
+.swarm-node-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+}
+
+.swarm-node-title {
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--text);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.swarm-node-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+}
+
+.swarm-node-foot .status {
+  font-size: 11px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.swarm-node-cost {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.swarm-node-flag {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: -9px;
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  color: var(--gated);
+  background: var(--bg);
+  padding: 0 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/*
+ * A follow up, in both views.
+ *
+ * The tint says "this subtree is work a reopen asked for", and it
+ * reaches every node under the follow up because the model carries the
+ * follow up down the tree. The instruction itself is printed once, on
+ * the node the reopen made: twenty copies of one sentence is not a
+ * label, it is noise.
+ */
+.swarm-node[data-follow-up] {
+  border-style: dashed;
+}
+
+.swarm-node-followup,
+.swarm-row-followup {
+  font-family: var(--sans);
+  font-size: 10px;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.swarm-node-followup {
+  display: block;
+  margin-top: 2px;
+}
+
+.swarm-row-followup {
+  display: inline;
+  margin-left: 8px;
+}
+
+.swarm-node-fold {
+  position: absolute;
+  right: -8px;
+  top: -8px;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1px solid var(--line-bright);
+  background: var(--panel);
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 9px;
+  cursor: pointer;
+}
+
+/* The outline: the same nodes, as rows. */
+.swarm-outline {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 26px 26px;
+}
+
+.swarm-outline-empty {
+  padding: 48px 16px;
+}
+
+.swarm-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.swarm-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(60px, 160px) 42px 110px 130px 80px;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 11px 12px;
+  text-align: left;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.swarm-row:hover {
+  border-color: var(--line);
+}
+
+.swarm-row[data-selected] {
+  border-color: var(--brand);
+}
+
+.swarm-row[data-attention] {
+  background: color-mix(in srgb, var(--gated) 6%, transparent);
+}
+
+.swarm-row[data-agent-active] {
+  z-index: 2;
+  border-left: 2px solid var(--running);
+  background: var(--panel);
+}
+
+.swarm-row-title {
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 550;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.swarm-row-dependency {
+  margin-left: 8px;
+  color: var(--text-faint);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 400;
+}
+
+.swarm-row-pct,
+.swarm-row-cost {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.swarm-row-status {
+  font-size: 11px;
+}
+
+.swarm-attention-chip {
+  border-color: var(--gated);
+  color: var(--gated);
+}
+
+/* What a swarm produced, on its page. */
+.swarm-artifacts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.swarm-artifact {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: flex-start;
+  width: 100%;
+  padding: 10px 12px;
+  text-align: left;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: inherit;
+  cursor: pointer;
+}
+
+.swarm-artifact:disabled {
+  cursor: default;
+}
+
+.swarm-artifact-lead {
+  border-color: var(--line-bright);
+}
+
+.swarm-artifact-name {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.swarm-artifact-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* Reopening a finished swarm. */
+.swarm-reopen {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.swarm-reopen-ledger,
+.swarm-reopen-effect {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.swarm-reopen-ceilings {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.swarm-reopen-list {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-family: var(--sans);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+.swarm-reopen-refusal {
+  margin: 0;
+  font-family: var(--sans);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--gated);
+}
+
+/* The node drawer. */
+.swarm-drawer-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* Agent written, so it wraps as prose and never as markup. */
+.swarm-text {
+  margin: 0;
+  font-family: var(--sans);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.swarm-criteria,
+.swarm-flags,
+.swarm-commits,
+.swarm-attachments,
+.swarm-tools {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.swarm-criteria li {
+  padding-left: 14px;
+  position: relative;
+}
+
+.swarm-criteria li::before {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 7px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+
+.swarm-flags li,
+.swarm-commits li,
+.swarm-tools li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.swarm-flag-key,
+.swarm-tool-name {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.swarm-flag-value,
+.swarm-commit-message {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.swarm-sha {
+  font-family: var(--mono);
+}
+
+/* One node's history, with run attempts and notes on a single timeline. */
+.swarm-events {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.swarm-event-day {
+  padding: 8px 0 12px 22px;
+  color: var(--text-faint);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.swarm-event-day:first-child { padding-top: 0; }
+
+.swarm-events .swarm-event {
+  position: relative;
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr);
+  gap: 10px;
+  min-width: 0;
+}
+
+.swarm-event:not(:last-child)::before {
+  content: "";
+  position: absolute;
+  top: 12px;
+  bottom: 0;
+  left: 5px;
+  width: 1px;
+  background: var(--line-bright);
+}
+
+.swarm-event-marker {
+  z-index: 1;
+  width: 9px;
+  height: 9px;
+  margin: 5px 0 0 1px;
+  border: 2px solid var(--text-faint);
+  border-radius: 50%;
+  background: var(--panel);
+}
+
+.swarm-event[data-kind="assigned"] .swarm-event-marker { border-color: var(--running); }
+.swarm-event[data-state="failed"] .swarm-event-marker { border-color: var(--failed); }
+.swarm-event[data-kind="attention_raised"] .swarm-event-marker { border-color: var(--gated); }
+.swarm-event[data-kind="landed"] .swarm-event-marker { border-color: var(--succeeded); }
+
+.swarm-event-content {
+  min-width: 0;
+  padding: 0 0 16px;
+}
+
+.swarm-event-main {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.swarm-event-main strong {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.swarm-event-main time {
+  flex: none;
+  color: var(--text-faint);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.swarm-event-detail {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin-top: 3px;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.swarm-event-note { overflow-wrap: anywhere; }
+
+.swarm-event-detail code {
+  color: var(--text-faint);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+/* The node drawer's own composer, under the transcript it belongs to. */
+.swarm-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.swarm-confirm {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* The creation dialog. */
+.swarm-new {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.swarm-new-shape {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-raised);
+}
+
+.swarm-shape {
+  display: flex;
+  gap: 20px;
+  flex-wrap: wrap;
+  margin: 0;
+}
+
+.swarm-shape dt {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.swarm-shape dd {
+  margin: 2px 0 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+}
+
+.swarm-checkline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.swarm-estimate {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+}
+
+/*
+ * Narrow screens. The header stacks, the actions keep their row, and
+ * the outline drops the columns that are the first to stop fitting.
+ * The tree itself is left scrollable rather than reflowed: a plan is
+ * a shape, and a shape that rearranges at 700px is a different plan.
+ */
+@media (max-width: 720px) {
+  .swarm-head {
+    grid-template-columns: 1fr;
+    gap: 14px;
+    padding: 18px 16px;
+  }
+
+  .swarm-head-actions {
+    justify-content: flex-start;
+  }
+
+  .swarm-head-spend {
+    grid-column: 1;
+    flex-wrap: wrap;
+  }
+
+  .swarm-head-spend .swarm-cap {
+    margin-left: 0;
+  }
+
+  .swarm-viewbar {
+    padding: 14px 16px;
+  }
+
+  .swarm-stage,
+  .swarm-outline {
+    padding-inline: 12px;
+  }
+
+  /* The bar goes, the percentage stays, and attention stays: a
+     yellow leaf has to survive a narrow screen as surely as it
+     survives the switch from Tree to Outline. */
+  .swarm-row {
+    grid-template-columns: minmax(90px, 1fr) 42px 90px 110px 66px;
+  }
+
+  .swarm-row-bar {
+    display: none;
+  }
+}
+
+/*
  * Cards that were split into parts.
  *
  * A card that spawned others wears one chip in its existing meta row,
@@ -7646,3 +9152,1076 @@ a.hours-person-name:hover {
 .review-chat .chat { flex: 1 1 200px; min-height: 160px; max-height: none; border: 0; padding: 0 4px 0 0; border-radius: 0; }
 .review-chat .composer-dock { margin-top: auto; }
 .review-chat .composer-hint { margin-bottom: 0; }
+
+/*
+ * The fourth tier, which is the one the budget does not count.
+ *
+ * Drawn hollow rather than in another hue: the console has five
+ * reserved colours and a swarm introduces no sixth, and an outline
+ * against the same brand family says "counted differently" without
+ * saying "worse".
+ */
+.swarm-cap-fill[data-tier="notional"] {
+  background: repeating-linear-gradient(
+    135deg,
+    var(--line-bright) 0 3px,
+    transparent 3px 6px
+  );
+}
+
+/*
+ * Where the money went, by role.
+ *
+ * One row per role, four bars in each, drawn to one scale so the
+ * planner and the workers can be compared by eye. No stacking: a
+ * stacked bar is a total, and the whole point is that these four
+ * figures are not one.
+ */
+.swarm-costs {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+.swarm-costs-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.swarm-cost-roles,
+.swarm-cost-bars {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.swarm-cost-roles {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.swarm-cost-role {
+  font-size: 12px;
+  color: var(--text);
+}
+
+.swarm-cost-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 4px;
+}
+
+.swarm-cost-bars li {
+  display: grid;
+  grid-template-columns: minmax(80px, 1fr) 72px 68px;
+  align-items: center;
+  gap: 8px;
+}
+
+.swarm-cost-bar {
+  display: block;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.swarm-cost-fill {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--brand);
+  transition: width 240ms ease;
+}
+
+.swarm-cost-fill[data-tier="estimated"] {
+  background: color-mix(in srgb, var(--brand) 55%, var(--bg));
+}
+
+.swarm-cost-fill[data-tier="assumed"] {
+  background: var(--line-bright);
+}
+
+.swarm-cost-fill[data-tier="notional"] {
+  background: repeating-linear-gradient(
+    135deg,
+    var(--line-bright) 0 3px,
+    transparent 3px 6px
+  );
+}
+
+.swarm-cost-bars .swarm-tier-value {
+  text-align: right;
+}
+
+.swarm-sparkline {
+  color: var(--brand);
+  width: 100%;
+  height: 28px;
+}
+
+.swarm-cost-note,
+.swarm-paused,
+.swarm-attention-note {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+/* Why a swarm is not moving, said where the buttons are. */
+.swarm-paused {
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--gated);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+.swarm-attention-note {
+  padding: 8px 10px;
+  border-left: 3px solid var(--gated);
+  background: color-mix(in srgb, var(--gated) 8%, transparent);
+  border-radius: 0 var(--radius) var(--radius) 0;
+}
+
+.swarm-reassign {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.swarm-reassign select {
+  flex: 1;
+}
+
+.swarm-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+/* The swarm section of the Spend page: one row per swarm, tiers apart. */
+.spend-swarms {
+  margin-top: 28px;
+}
+
+.spend-tier-cell {
+  font-family: var(--mono);
+  font-size: 12px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* Swarm workspace: one brief, one action area, then the plan. */
+.swarm-page {
+  background: var(--bg);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+}
+
+.swarm-head {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 20px;
+  padding: 16px 36px 12px;
+  border-bottom: 0;
+}
+
+.swarm-head-lead {
+  align-items: center;
+  gap: 14px;
+}
+
+.swarm-head-lead > .ring {
+  margin-top: 0;
+}
+
+.swarm-head-eyebrow {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--brand);
+}
+
+.swarm-head-copy {
+  gap: 5px;
+}
+
+.swarm-name {
+  font-size: clamp(24px, 2.4vw, 30px);
+  line-height: 1.1;
+  font-weight: 680;
+  letter-spacing: -0.045em;
+}
+
+.swarm-head-chips {
+  gap: 7px 15px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.swarm-head-chips .chip {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.swarm-head-chips .status {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.swarm-head-actions {
+  padding-top: 0;
+  flex-wrap: nowrap;
+  gap: 9px;
+}
+
+.swarm-main-action {
+  min-width: 118px;
+}
+
+.swarm-awaiting-plan {
+  display: inline-flex;
+  align-items: center;
+  color: var(--running);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.swarm-awaiting-plan::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  margin-right: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--running) 14%, transparent);
+}
+
+.swarm-more-actions {
+  position: relative;
+  z-index: 3;
+}
+
+.swarm-more-actions > summary {
+  list-style: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.swarm-more-actions > summary::-webkit-details-marker { display: none; }
+
+.swarm-actions-chevron {
+  flex: none;
+  transition: transform 160ms ease;
+}
+
+.swarm-more-actions[open] .swarm-actions-chevron { transform: rotate(180deg); }
+
+.swarm-more-menu {
+  position: absolute;
+  top: calc(100% + 7px);
+  right: 0;
+  width: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px;
+  border: 1px solid var(--line-bright);
+  border-radius: 10px;
+  background: var(--panel-raised);
+  box-shadow: 0 18px 45px var(--shadow-2);
+}
+
+.swarm-more-menu .btn {
+  width: 100%;
+  justify-content: flex-start;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  font-size: 12px;
+}
+
+.swarm-more-menu .btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+}
+
+.swarm-more-menu .btn-danger-quiet {
+  color: var(--failed);
+  border-top: 1px solid var(--line);
+  border-radius: 0;
+  margin-top: 4px;
+  padding-top: 11px;
+}
+
+.swarm-brief {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(250px, 330px);
+  gap: 20px;
+  margin: 0 36px;
+  padding: 12px 20px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--panel) 87%, var(--bg));
+}
+
+.swarm-brief-copy .label {
+  color: var(--brand);
+}
+
+.swarm-brief-copy p {
+  max-width: 74ch;
+  margin: 5px 0 0;
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.swarm-brief-side {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 8px;
+  border-left: 1px solid var(--line);
+  padding-left: 20px;
+}
+
+.swarm-next-step {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.swarm-brief-metrics {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 18px 24px;
+}
+
+.swarm-spend-summary,
+.swarm-worker-control {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+}
+
+.swarm-spend-summary > span,
+.swarm-control-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.swarm-spend-summary strong {
+  color: var(--text);
+  font-size: 19px;
+  line-height: 1;
+  font-weight: 600;
+}
+
+.swarm-spend-summary small {
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+.swarm-workers {
+  background: var(--bg);
+}
+
+.swarm-worker-step {
+  display: inline-flex;
+}
+
+.swarm-worker-step > button:disabled {
+  pointer-events: none;
+}
+
+.swarm-viewbar {
+  justify-content: space-between;
+  margin: 18px 36px 0;
+  padding: 0 0 13px;
+  border-bottom: 1px solid var(--line);
+}
+
+.swarm-section-title {
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+
+.swarm-stage,
+.swarm-outline {
+  margin: 0 36px 24px;
+  padding: 20px 20px 32px;
+  min-height: 300px;
+  border: 1px solid var(--line);
+  border-top: 0;
+  border-radius: 0 0 12px 12px;
+  background-color: color-mix(in srgb, var(--panel) 40%, var(--bg));
+  background-image: radial-gradient(color-mix(in srgb, var(--text) 8%, transparent) 0.7px, transparent 0.7px);
+  background-size: 22px 22px;
+}
+
+.swarm-stage {
+  position: relative;
+  flex: 0 0 auto;
+  height: min(74vh, 860px);
+  min-height: 360px;
+  overflow: hidden;
+  padding: 0;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.swarm-outline {
+  min-height: min(74vh, 860px);
+}
+
+.swarm-row-arrow {
+  display: inline-block;
+  margin-right: 9px;
+  color: var(--text-faint);
+  font-family: var(--mono);
+  font-size: 16px;
+  font-weight: 400;
+  line-height: 0;
+}
+
+.swarm-row[data-relation="depends_on"] .swarm-row-arrow {
+  color: var(--brand);
+}
+
+.swarm-stage[data-dragging] {
+  cursor: grabbing;
+}
+
+.swarm-tree-content {
+  position: absolute;
+  top: 0;
+  left: 0;
+  min-width: 0;
+  transform-origin: top left;
+  will-change: transform;
+}
+
+.swarm-edge-legend {
+  position: absolute;
+  z-index: 5;
+  top: 14px;
+  left: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-bright);
+  border-radius: 8px;
+  background: var(--panel-raised);
+  box-shadow: 0 8px 24px var(--shadow-1);
+  pointer-events: none;
+}
+
+.swarm-edge-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.swarm-edge-legend-line {
+  width: 22px;
+  flex: 0 0 22px;
+  border-top: 2px solid var(--line-bright);
+}
+
+.swarm-edge-legend-line[data-live] {
+  border-color: color-mix(in srgb, var(--running) 60%, var(--line-bright));
+}
+
+.swarm-edge-legend-line[data-relation="depends_on"] {
+  border-color: var(--brand);
+  border-top-style: dashed;
+}
+
+.swarm-viewport-controls {
+  position: absolute;
+  z-index: 5;
+  top: 14px;
+  right: 14px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--line-bright);
+  border-radius: 8px;
+  background: var(--panel-raised);
+  box-shadow: 0 8px 24px var(--shadow-1);
+}
+
+.swarm-viewport-controls button {
+  min-width: 30px;
+  height: 30px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.swarm-viewport-controls button:hover {
+  background: color-mix(in srgb, var(--text) 9%, transparent);
+}
+
+.swarm-viewport-controls button:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 1px;
+}
+
+.swarm-viewport-controls span {
+  min-width: 44px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+  text-align: center;
+}
+
+.swarm-viewport-controls .swarm-viewport-reset {
+  width: auto;
+  padding: 0 9px;
+  border-left: 1px solid var(--line);
+  border-radius: 0 5px 5px 0;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.swarm-artifacts {
+  margin: 16px 36px 0;
+}
+
+.swarm-artifact-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr));
+}
+
+.swarm-stage[data-empty],
+.swarm-outline[data-empty] {
+  flex: 0 0 auto;
+  min-height: 185px;
+}
+
+.swarm-stage[data-empty] {
+  height: 185px;
+}
+
+.swarm-planner-tree-position {
+  padding-top: 4px;
+}
+
+.swarm-planner-step {
+  width: min(100%, 300px);
+  padding: 11px 13px 12px;
+  border-radius: 9px;
+  background: var(--panel-raised);
+  box-shadow: 0 8px 24px var(--shadow-1);
+}
+
+.swarm-planner-step[data-state="failed"] {
+  width: min(100%, 300px);
+}
+
+.swarm-planner-step-summary { margin: 9px 0 0; color: var(--text-dim); font-size: 11px; line-height: 1.45; }
+.swarm-failure-detail { flex: none; padding: 14px; border: 1px solid color-mix(in srgb, var(--failed) 40%, var(--line)); border-radius: 8px; background: var(--panel-raised); font-size: 12px; }
+.swarm-failure-detail p { margin: 7px 0 12px; color: var(--text-dim); line-height: 1.5; }
+.swarm-failure-detail details { margin-top: 12px; color: var(--text-dim); }
+.swarm-failure-detail summary { cursor: pointer; }
+.swarm-failure-detail pre { max-height: 180px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; }
+
+.swarm-planner-step-main {
+  margin-top: 8px;
+  align-items: flex-start;
+}
+
+.swarm-planner-step-main h3 {
+  font-size: 14px;
+}
+
+.swarm-planner-step-main p {
+  margin-top: 3px;
+  font-size: 11px;
+}
+
+.swarm-planner-step-time {
+  font-size: 10px;
+}
+
+.swarm-output-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 10px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--brand);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.swarm-output-link:hover { text-decoration: underline; }
+
+.swarm-plan-pending {
+  padding: 22px 12px;
+  font-size: 12px;
+}
+
+.swarm-node-face {
+  border-radius: 10px;
+  padding: 14px;
+  box-shadow: 0 6px 22px var(--shadow-1);
+}
+
+.swarm-row {
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: var(--panel);
+}
+
+.swarm-row:first-child { border-radius: 8px 8px 0 0; }
+.swarm-row:last-child { border-radius: 0 0 8px 8px; }
+
+.swarm-run-output { min-width: 0; }
+.swarm-output-chat { max-height: 55vh; }
+.swarm-node-drawer .swarm-output-chat { max-height: 320px; }
+.swarm-node-tabs { gap: 16px; overflow-x: auto; white-space: nowrap; }
+.swarm-node-tabs > button { font-size: 12px; }
+.swarm-node-pane > .section { display: flex; flex-direction: column; }
+.swarm-output-pane { display: flex; flex-direction: column; }
+.swarm-output-pane[hidden] { display: none; }
+.swarm-output-pane > .section { flex: 1; min-height: 0; }
+.swarm-output-pane .swarm-run-output { display: flex; flex: 1; min-height: 0; flex-direction: column; }
+.swarm-node-drawer .swarm-output-pane .swarm-output-chat { flex: 1; min-height: 0; max-height: none; }
+.swarm-output-drawer .drawer-body { min-height: 0; overflow: hidden; }
+.swarm-output-drawer .swarm-run-output { display: flex; flex: 1; flex-direction: column; min-height: 0; }
+.swarm-output-drawer .swarm-output-chat { flex: 1; min-height: 0; max-height: none; }
+.swarm-output-close { margin-left: auto; width: 30px; height: 30px; padding: 0; flex: none; font-size: 24px; line-height: 1; }
+.swarm-output-task-title { color: var(--text-dim); font-size: 12px; margin: 2px 0 0; }
+.swarm-worker-output-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.swarm-worker-output-head .swarm-output-link { flex: none; }
+.swarm-planner-history { border-bottom: 1px solid var(--line); padding-bottom: 12px; }
+.swarm-planner-history summary { cursor: pointer; color: var(--text-dim); font-size: 11px; margin-bottom: 8px; }
+.swarm-planner-compose { display: flex; flex-direction: column; gap: 9px; padding: 16px 24px; border-top: 1px solid var(--line); background: var(--panel); }
+.swarm-planner-compose textarea { resize: vertical; min-height: 74px; max-height: 40vh; }
+.swarm-planner-compose-bottom { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
+.swarm-planner-compose-bottom .muted { flex: 1 1 100%; margin: 0; font-size: 11px; }
+.swarm-planner-compose-bottom .btn { flex: none; }
+
+@media (max-width: 720px) { .swarm-planner-compose { padding: 12px 16px max(12px, env(safe-area-inset-bottom)); } }
+.swarm-node-header-status { margin-right: 4px; }
+.swarm-node-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; color: var(--text-dim); font-size: 11px; font-variant-numeric: tabular-nums; }
+.swarm-node-summary-divider { width: 1px; height: 14px; background: var(--line-bright); }
+.swarm-node-attention { color: var(--gated); }
+.swarm-node-body { gap: 0; }
+.swarm-node-pane > .section { padding: 20px 0; border-bottom: 1px solid var(--line); gap: 12px; }
+.swarm-node-pane > .section:last-child { border-bottom: 0; }
+.swarm-node-pane > .section > .label,
+.swarm-node-body .swarm-worker-output-head > .label { font-family: var(--sans); font-size: 13px; font-weight: 600; color: var(--text); letter-spacing: 0; text-transform: none; }
+.swarm-node-pane > .section > .label::after { display: none; }
+.swarm-node-pane > .swarm-node-actions { padding: 16px; border: 1px solid var(--line-bright); border-radius: var(--radius-lg); background: var(--panel-raised); margin-bottom: 2px; }
+.swarm-node-actions .feature-section-heading { align-items: flex-start; flex-direction: column; gap: 3px; }
+.swarm-node-actions .feature-section-heading > span { font-size: 12px; color: var(--text-dim); }
+.swarm-node-actions .action-grid { grid-template-columns: minmax(0, 1fr); }
+.swarm-node-actions .feature-more-actions .action-grid { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
+.swarm-node-cost-line { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; margin: 2px 0 0; padding-top: 10px; border-top: 1px solid var(--line); color: var(--text-dim); font-size: 11px; }
+.swarm-node-cost-line strong { color: var(--text); font-family: var(--mono); font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.swarm-node-cost-line .muted { margin-left: auto; font-size: 11px; }
+.swarm-node-actions .feature-more-actions { margin-top: 2px; }
+.swarm-node-body .swarm-text { font-size: 13px; line-height: 1.65; }
+.swarm-attempts { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.swarm-attempt { padding: 12px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--panel-raised); }
+.swarm-attempt-main { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; font-size: 12px; }
+.swarm-attempt-main time { margin-left: auto; color: var(--text-faint); font-size: 11px; }
+.swarm-attempt-error { margin: 8px 0 0; color: var(--failed); font-size: 12px; overflow-wrap: anywhere; }
+.swarm-attempt > .swarm-output-link { margin-top: 8px; }
+
+.swarm-new { gap: 19px; }
+
+.swarm-agent-row {
+  flex-direction: column;
+  gap: 12px;
+}
+
+.swarm-agent-row > .field { width: 100%; flex: none; }
+
+/*
+ * More settings, in the New swarm dialog. Closed, it is one row that
+ * says what the swarm will do; open, the groups under it read top to
+ * bottom with a sentence under each heading.
+ */
+.swarm-more-settings {
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--panel);
+}
+
+.swarm-more-settings > summary {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px 14px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.swarm-more-settings > summary::-webkit-details-marker { display: none; }
+
+/* The open and closed marker, drawn rather than written so it is not read aloud. */
+.swarm-more-marker {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-left: 4px;
+  border-right: 1.5px solid var(--text-faint);
+  border-bottom: 1.5px solid var(--text-faint);
+  transform: translateY(-2px) rotate(45deg);
+  transition: transform 120ms ease;
+}
+
+.swarm-more-settings[open] .swarm-more-marker { transform: translateY(1px) rotate(-135deg); }
+
+.swarm-more-settings > summary:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+.swarm-more-settings > .swarm-settings-fields {
+  padding: 4px 14px 14px;
+  border-top: 1px solid var(--line);
+}
+
+.swarm-settings-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.swarm-settings-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 12px 0 0;
+  border: 0;
+}
+
+.swarm-settings-group > legend {
+  float: left;
+  width: 100%;
+  padding: 0;
+}
+
+.swarm-settings-group .field-row {
+  flex-wrap: wrap;
+}
+
+.swarm-settings-group .field-row > .field {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.swarm-output-link:focus-visible,
+.swarm-more-actions > summary:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 3px;
+}
+
+@media (max-width: 820px) {
+  .swarm-head { grid-template-columns: 1fr; padding: 24px 18px 18px; }
+  .swarm-head-actions { padding-top: 0; justify-content: flex-start; }
+  .swarm-brief { grid-template-columns: 1fr; margin: 0 18px; padding: 12px 16px; }
+  .swarm-brief-side { padding: 12px 0 0; border-left: 0; border-top: 1px solid var(--line); }
+  .swarm-artifacts { margin: 14px 18px 0; }
+  .swarm-viewbar { margin: 22px 18px 0; }
+  .swarm-stage, .swarm-outline { margin: 0 18px 20px; }
+  .swarm-stage { padding: 0; }
+  .swarm-outline { padding-inline: 12px; }
+}
+
+
+/*
+ * The plan a person hands a swarm, in the New swarm dialog and under
+ * the goal on the swarm's page: a list of sources, and the switch that
+ * says whether they are the plan or material to plan from.
+ */
+.swarm-plan-field {
+  gap: 8px;
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+.swarm-plan-field > legend {
+  padding: 0;
+}
+
+.swarm-plan-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.swarm-plan-actions .input {
+  flex: 1;
+  min-width: 200px;
+}
+
+.swarm-plan-sources {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.swarm-plan-sources li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  font-size: 12px;
+}
+
+.swarm-plan-source-kind {
+  flex: none;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.swarm-plan-source-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+a.swarm-plan-source-name:hover {
+  text-decoration: underline;
+}
+
+.swarm-plan-source-remove {
+  flex: none;
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+.swarm-brief-plan {
+  margin-top: 10px;
+}
+
+.swarm-brief-plan .label {
+  color: var(--brand);
+}
+
+.swarm-brief-plan p {
+  margin: 3px 0 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* A switch: a checkbox drawn as a toggle, keyboard and reader intact. */
+.switch-row {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  cursor: pointer;
+}
+
+.switch-row > input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.switch {
+  position: relative;
+  flex: none;
+  width: 30px;
+  height: 18px;
+  margin-top: 1px;
+  border-radius: 9px;
+  background: var(--line-bright);
+  transition: background 120ms ease;
+}
+
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--bg);
+  transition: transform 120ms ease;
+}
+
+.switch-row > input:checked + .switch {
+  background: var(--brand);
+}
+
+.switch-row > input:checked + .switch::after {
+  transform: translateX(12px);
+}
+
+.switch-row > input:focus-visible + .switch {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+.switch-row > span:last-child {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.swarm-plan-source-thumb {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  object-fit: cover;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  background: var(--panel-raised);
+}
+
+.swarm-plan-source-open {
+  flex: none;
+  font-size: 12px;
+  color: var(--brand);
+}
+
+.swarm-plan-source-open:hover {
+  text-decoration: underline;
+}
+
+/*
+ * The brief folds to one line, so the diagram gets the screen. Folded,
+ * the row is the label, the goal's first line, and the button that
+ * opens it again; the metrics and the plan come back with the goal.
+ */
+.swarm-brief[data-open="false"] {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+  padding: 8px 20px;
+}
+
+.swarm-brief-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.swarm-brief-head .label {
+  flex: none;
+}
+
+.swarm-brief-excerpt {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.swarm-brief-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  padding: 3px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.swarm-brief-toggle:hover {
+  background: var(--panel-raised);
+  color: var(--text);
+}
+
+.swarm-brief-toggle:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+.swarm-brief-chevron {
+  transition: transform 120ms ease;
+}
+
+.swarm-brief-toggle[aria-expanded="true"] .swarm-brief-chevron {
+  transform: rotate(180deg);
+}
+
+/* The next step, on the folded brief: under the one line, never hidden with the goal. */
+.swarm-brief[data-open="false"] .swarm-next-step-folded {
+  margin: 4px 0 0;
+}

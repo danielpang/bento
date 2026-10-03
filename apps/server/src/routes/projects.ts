@@ -5,18 +5,21 @@ import { zValidator } from "@hono/zod-validator";
 import { and, asc, count, desc, eq, inArray, isNull, ne, sql, sum } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
-import { gateCriteria, TERMINAL_RUN_STATUSES, WORKSPACE_ARTIFACT_DIR } from "@bento/core";
+import { gateCriteria, sandboxProvider, TERMINAL_RUN_STATUSES, WORKSPACE_ARTIFACT_DIR } from "@bento/core";
 import {
   agentProfiles,
   agentRuns,
   featureEvents,
   features,
+  member,
   pipelines,
   projects,
   repositories,
   runEvents,
   seedDefaultPipeline,
+  organizationPolicies,
   stages,
+  swarms,
 } from "@bento/db";
 import { parsePipelineFile, pipelineFile, writePipelineFile } from "../pipeline-file.js";
 import { upsertAgentsFromFile } from "../upsert-agents.js";
@@ -29,6 +32,8 @@ import {
   getActiveOrganizationMembership,
   visibleProjectFilter,
 } from "../access.js";
+import { getBetaTester } from "../feature-flags.js";
+import { driverForProject } from "../orchestrator/sandbox-driver.js";
 import { githubForOrganization } from "../github.js";
 import { branchExists, detectDefaultBranch, githubRemoteOf, linkGitHubRemotes } from "../orchestrator/repo-remote.js";
 import { ACTIVE_RUN_STATUSES } from "../orchestrator/start-run.js";
@@ -263,9 +268,13 @@ async function resolveRepositoryInput(
   c: Context,
   input: RepositoryInput,
   organizationId: string | null,
+  driver: { workspace: "host" | "clone" },
 ): Promise<RepositoryResolution> {
   if (!input.githubRepoId) {
-    if (ctx.driver.provider === "sprite") return { ok: false, error: UNAVAILABLE };
+    // A clone driver has no host filesystem to mount a path onto.
+    // The caller passes the project's driver when the project names
+    // one, and the deployment default otherwise.
+    if (driver.workspace === "clone") return { ok: false, error: UNAVAILABLE };
     // A hosted installation token must never be selected from a URL the
     // caller supplied. Runner/local paths carry no server credential.
     if (ctx.env.BENTO_MODE === "multi" && input.repoUrl) return { ok: false, error: UNAVAILABLE };
@@ -367,6 +376,43 @@ async function editedBaseBranch(
  */
 const byName = [sql`lower(${projects.name})`, asc(projects.id)];
 
+/**
+ * Whether this caller may change the project's sandbox provider.
+ *
+ * Local mode has one trusted user and no roles. In multi mode the
+ * decision belongs to an owner or admin of the project's organization,
+ * the same bar as credentials. A project with no organization is
+ * visible only to its creator, who is the one who can change it.
+ */
+async function canManageSandboxProvider(
+  ctx: AppContext,
+  c: Context,
+  project: { ownerId: string; organizationId: string | null },
+): Promise<boolean> {
+  if (ctx.env.BENTO_MODE !== "multi") return true;
+  if (!project.organizationId) return project.ownerId === actor(c);
+  const [membership] = await db(c, ctx)
+    .select({ role: member.role })
+    .from(member)
+    .where(and(eq(member.userId, actor(c)), eq(member.organizationId, project.organizationId)));
+  return membership?.role === "owner" || membership?.role === "admin";
+}
+
+/** Whether the organization has asked for sandboxes with no egress. */
+async function organizationRestrictsNetwork(
+  ctx: AppContext,
+  c: Context,
+  organizationId: string | null,
+): Promise<boolean> {
+  if (!organizationId) return false;
+  const [row] = await db(c, ctx)
+    .select({ restrictNetwork: organizationPolicies.restrictNetwork })
+    .from(organizationPolicies)
+    .where(eq(organizationPolicies.organizationId, organizationId))
+    .limit(1);
+  return row?.restrictNetwork === true;
+}
+
 export function projectRoutes(ctx: AppContext) {
   return new Hono()
     .get("/", async (c) => {
@@ -407,7 +453,13 @@ export function projectRoutes(ctx: AppContext) {
             : [];
       const repoInputs = [];
       for (const requested of requestedInputs) {
-        const resolved = await resolveRepositoryInput(ctx, c, requested, membership?.organizationId ?? null);
+        const resolved = await resolveRepositoryInput(
+          ctx,
+          c,
+          requested,
+          membership?.organizationId ?? null,
+          ctx.drivers.default,
+        );
         if (!resolved.ok) return c.json({ error: resolved.error }, 400);
         repoInputs.push(resolved.repo);
       }
@@ -510,7 +562,21 @@ export function projectRoutes(ctx: AppContext) {
         return c.json({ error: "not found" }, 404);
       }
       const requested = c.req.valid("json");
-      const resolved = await resolveRepositoryInput(ctx, c, requested, membership?.organizationId ?? null);
+      const [project] = await db(c, ctx)
+        .select({ sandboxProvider: projects.sandboxProvider, ownerId: projects.ownerId })
+        .from(projects)
+        .where(eq(projects.id, projectId))
+        .limit(1);
+      const driver = project
+        ? await driverForProject(ctx, project, actor(c))
+        : ctx.drivers.default;
+      const resolved = await resolveRepositoryInput(
+        ctx,
+        c,
+        requested,
+        membership?.organizationId ?? null,
+        driver,
+      );
       if (!resolved.ok) return c.json({ error: resolved.error }, 400);
       const body = resolved.repo;
 
@@ -652,7 +718,7 @@ export function projectRoutes(ctx: AppContext) {
       const projectId = c.req.param("id");
       if (!(await canAccessProject(ctx, c, projectId))) return c.json({ error: "not found" }, 404);
 
-      const conversationRuns = and(eq(features.projectId, projectId), ne(agentRuns.kind, "judge"));
+      const conversationRuns = and(eq(features.projectId, projectId), ne(agentRuns.role, "judge"));
       const [totals, latest] = await Promise.all([
         db(c, ctx)
           .select({
@@ -706,7 +772,7 @@ export function projectRoutes(ctx: AppContext) {
       const projectId = c.req.param("id");
       if (!(await canAccessProject(ctx, c, projectId))) return c.text("error|not found", 404);
 
-      const conversationRuns = and(eq(features.projectId, projectId), ne(agentRuns.kind, "judge"));
+      const conversationRuns = and(eq(features.projectId, projectId), ne(agentRuns.role, "judge"));
       const [totals, latest] = await Promise.all([
         db(c, ctx)
           .select({
@@ -764,6 +830,24 @@ export function projectRoutes(ctx: AppContext) {
      * Every field is optional and only what was sent is written, so one
      * toggle can be flipped without restating the name.
      */
+    /**
+     * The provider a new card on this project would use, and whether
+     * this caller may change it. Hidden from anyone who is not a beta
+     * tester: the same 404 as a project they cannot see.
+     */
+    .get("/:id/sandbox-provider", async (c) => {
+      const projectId = c.req.param("id");
+      if (!(await canAccessProject(ctx, c, projectId))) return c.json({ error: "not found" }, 404);
+      if (!(await getBetaTester(ctx, c))) return c.json({ error: "not found" }, 404);
+      const [project] = await db(c, ctx).select().from(projects).where(eq(projects.id, projectId));
+      if (!project) return c.json({ error: "not found" }, 404);
+      return c.json({
+        current: project.sandboxProvider,
+        default: ctx.drivers.default.provider,
+        available: ctx.drivers.selectable(),
+        canManage: await canManageSandboxProvider(ctx, c, project),
+      });
+    })
     .patch(
       "/:id",
       zValidator(
@@ -771,15 +855,47 @@ export function projectRoutes(ctx: AppContext) {
         z.object({
           name: projectName.optional(),
           autoStartPipeline: z.boolean().optional(),
+          // Null clears the column, which means the deployment default.
+          sandboxProvider: sandboxProvider.nullable().optional(),
         }),
       ),
       async (c) => {
         const projectId = c.req.param("id");
         if (!(await canAccessProject(ctx, c, projectId))) return c.json({ error: "not found" }, 404);
         const body = c.req.valid("json");
+        const [project] = await db(c, ctx).select().from(projects).where(eq(projects.id, projectId));
+        if (!project) return c.json({ error: "not found" }, 404);
+
+        // A name-only edit stays available to every member. The
+        // provider is unfinished product, so a body that names it is
+        // a beta endpoint, then an owner or admin decision.
+        if (body.sandboxProvider !== undefined) {
+          if (!(await getBetaTester(ctx, c))) return c.json({ error: "not found" }, 404);
+          if (ctx.env.BENTO_MODE === "multi" && !(await canManageSandboxProvider(ctx, c, project))) {
+            return c.json({ error: "only organization owners and admins can change the sandbox provider" }, 403);
+          }
+          if (body.sandboxProvider !== null && !ctx.drivers.selectable().includes(body.sandboxProvider)) {
+            return c.json({ error: "that sandbox provider is not available on this server" }, 400);
+          }
+          const chosen = body.sandboxProvider === null
+            ? ctx.drivers.default
+            : ctx.drivers.get(body.sandboxProvider);
+          if (!chosen) return c.json({ error: "that sandbox provider is not available on this server" }, 400);
+          if (
+            (await organizationRestrictsNetwork(ctx, c, project.organizationId))
+            && chosen.supportsRestrictedNetwork !== true
+          ) {
+            return c.json(
+              { error: "This team restricts outbound traffic, and this provider cannot honor that." },
+              409,
+            );
+          }
+        }
+
         const patch: Partial<typeof projects.$inferInsert> = { updatedAt: new Date() };
         if (body.name !== undefined) patch.name = body.name;
         if (body.autoStartPipeline !== undefined) patch.autoStartPipeline = body.autoStartPipeline;
+        if (body.sandboxProvider !== undefined) patch.sandboxProvider = body.sandboxProvider;
         const [updated] = await db(c, ctx)
           .update(projects)
           .set(patch)
@@ -964,7 +1080,7 @@ export function projectRoutes(ctx: AppContext) {
     .get("/:id/usage", async (c) => {
       const projectId = c.req.param("id");
       if (!(await canAccessProject(ctx, c, projectId))) return c.json({ error: "not found" }, 404);
-      const spendRun = and(ne(agentRuns.kind, "judge"), inArray(agentRuns.status, [...TERMINAL_RUN_STATUSES]));
+      const spendRun = and(ne(agentRuns.role, "judge"), inArray(agentRuns.status, [...TERMINAL_RUN_STATUSES]));
       const rows = await db(c, ctx)
         .select({
           stageId: agentRuns.stageId,
@@ -1008,6 +1124,54 @@ export function projectRoutes(ctx: AppContext) {
         .where(eq(features.projectId, projectId))
         .groupBy(features.id, features.title);
 
+      /**
+       * The swarms, as swarms rather than as forty unrelated runs.
+       *
+       * A swarm's runs have no feature, so they are absent from the
+       * card rollup above and would be absent from this page
+       * altogether: the first thing a person would notice is that a
+       * swarm which cost forty dollars is nowhere on the spend page.
+       *
+       * Grouped by swarm and split by tier, because that is the only
+       * shape in which the figure means anything: a swarm's total is a
+       * measurement, an estimate, a stand in and a list price added
+       * together unless something keeps them apart, and this is the
+       * page where somebody is deciding whether the number is real.
+       */
+      /*
+       * And only for somebody who is allowed to know swarms exist.
+       *
+       * This route is not a swarm route, and the cards on it are not
+       * behind the flag, so it answers either way. The section does
+       * not: every swarm route refuses a non-tester with 404 rather
+       * than 402 precisely so the feature's existence stays unstated,
+       * and a table of swarm titles and dollar figures on the Spend
+       * page would state it, along with what the rest of the team had
+       * been spending.
+       */
+      const swarmRows = !(await getBetaTester(ctx, c))
+        ? []
+        : await db(c, ctx)
+            .select({
+              swarmId: swarms.id,
+              title: swarms.title,
+              status: swarms.status,
+              measuredUsd: swarms.spentMeasuredUsd,
+              estimatedUsd: swarms.spentEstimatedUsd,
+              assumedUsd: swarms.spentAssumedUsd,
+              notionalUsd: swarms.spentNotionalUsd,
+              runs: sql<number>`count(${agentRuns.id})`,
+              runsWithoutCost: sql<number>`count(${agentRuns.id}) filter (where ${agentRuns.costUsd} is null)`,
+            })
+            .from(swarms)
+            .leftJoin(
+              agentRuns,
+              and(eq(agentRuns.swarmId, swarms.id), inArray(agentRuns.status, [...TERMINAL_RUN_STATUSES])),
+            )
+            .where(eq(swarms.projectId, projectId))
+            .groupBy(swarms.id, swarms.title, swarms.status)
+            .orderBy(desc(swarms.createdAt));
+
       const totalUsd = rows.reduce((sum, row) => sum + Number(row.costUsd ?? 0), 0);
       return c.json({
         totalUsd,
@@ -1028,6 +1192,17 @@ export function projectRoutes(ctx: AppContext) {
           costUsd: row.costUsd === null ? null : Number(row.costUsd),
           runsWithoutCost: Number(row.runsWithoutCost),
         })),
+        bySwarm: swarmRows.map((row) => ({
+          swarmId: row.swarmId,
+          title: row.title,
+          status: row.status,
+          runs: Number(row.runs),
+          runsWithoutCost: Number(row.runsWithoutCost),
+          measuredUsd: Number(row.measuredUsd),
+          estimatedUsd: Number(row.estimatedUsd),
+          assumedUsd: Number(row.assumedUsd),
+          notionalUsd: Number(row.notionalUsd),
+        })),
       });
     })
     /**
@@ -1040,7 +1215,7 @@ export function projectRoutes(ctx: AppContext) {
     .get("/:id/usage/plain", async (c) => {
       const projectId = c.req.param("id");
       if (!(await canAccessProject(ctx, c, projectId))) return c.text("error|not found", 404);
-      const spendRun = and(ne(agentRuns.kind, "judge"), inArray(agentRuns.status, [...TERMINAL_RUN_STATUSES]));
+      const spendRun = and(ne(agentRuns.role, "judge"), inArray(agentRuns.status, [...TERMINAL_RUN_STATUSES]));
       const rows = await db(c, ctx)
         .select({
           stageId: agentRuns.stageId,
@@ -1319,6 +1494,7 @@ export function projectRoutes(ctx: AppContext) {
           .set({ setupCommand: entry.setup ?? null, testCommand: entry.test ?? null })
           .where(eq(repositories.id, target.id));
       }
+
 
       return c.json({
         stages: file.pipeline.stages.length,

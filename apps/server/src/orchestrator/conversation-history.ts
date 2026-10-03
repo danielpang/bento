@@ -16,7 +16,7 @@ export async function loadConversationTurns(
   const runs = await db
     .select({ id: agentRuns.id })
     .from(agentRuns)
-    .where(and(eq(agentRuns.featureId, featureId), ne(agentRuns.kind, "judge")))
+    .where(and(eq(agentRuns.featureId, featureId), ne(agentRuns.role, "judge")))
     .orderBy(asc(agentRuns.queuedAt));
   const ids = runs.map((row) => row.id).filter((id) => id !== excludeRunId);
   if (ids.length === 0) return [];

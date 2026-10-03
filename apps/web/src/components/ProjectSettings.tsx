@@ -5,7 +5,11 @@ import type {
   LinearProjectOption,
   LinearTeamOption,
   Project,
+  SandboxProviderSetting,
 } from "@bento/api-client";
+import { ApiError } from "@bento/api-client";
+import type { SandboxProvider } from "@bento/core";
+import { BetaOnly } from "../beta.js";
 import { useToast } from "./Toasts.js";
 import { SettingsCardSkeleton } from "./Skeleton.js";
 
@@ -71,7 +75,108 @@ export function ProjectSettings({
         loadFailed={loadFailed}
         onChanged={onChanged}
       />
+      <BetaOnly>
+        <SandboxProviderCard client={client} projectId={project.id} onChanged={onChanged} />
+      </BetaOnly>
     </>
+  );
+}
+
+const SANDBOX_PROVIDER_HELP =
+  "Applies to new cards. Cards that already have a sandbox keep it until they finish.";
+
+function sandboxProviderLabel(provider: string): string {
+  if (provider === "sprite") return "Fly Sprites (default)";
+  if (provider === "modal") return "Modal";
+  return provider;
+}
+
+function isSandboxProvider(value: string): value is SandboxProvider {
+  return value === "docker" || value === "sprite" || value === "modal";
+}
+
+/**
+ * Which sandbox new cards on this project are created on. Hidden when
+ * the server says this person is not a beta tester. Disabled when they
+ * can see the project but are not an owner or admin.
+ */
+function SandboxProviderCard({
+  client,
+  projectId,
+  onChanged,
+}: {
+  client: BentoClient;
+  projectId: string;
+  onChanged: () => void;
+}) {
+  const toast = useToast();
+  const [choice, setChoice] = useState<SandboxProviderSetting | null>(null);
+  const [hidden, setHidden] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void client
+      .getSandboxProvider(projectId)
+      .then((value) => {
+        if (!cancelled) setChoice(value);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        if (err instanceof ApiError && err.status === 404) setHidden(true);
+        else toast.fail(err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [client, projectId]);
+
+  async function choose(next: string) {
+    if (!choice) return;
+    const sandboxProvider = next === "" || next === choice.default ? null : next;
+    if (sandboxProvider !== null && !isSandboxProvider(sandboxProvider)) return;
+    setBusy(true);
+    try {
+      await client.updateProject(projectId, { sandboxProvider });
+      setChoice({ ...choice, current: sandboxProvider });
+      onChanged();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 404) setHidden(true);
+      else toast.fail(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (hidden) return null;
+  if (!choice) return <SettingsCardSkeleton rows={2} />;
+
+  const defaultIsListed = choice.available.includes(choice.default);
+  const selected = choice.current ?? (defaultIsListed ? choice.default : "");
+
+  return (
+    <section className="section settings-card">
+      <h3 className="settings-title">Sandbox provider</h3>
+      <p className="muted">{SANDBOX_PROVIDER_HELP}</p>
+      <label className="field">
+        <span className="label">Provider</span>
+        <select
+          className="select"
+          aria-label="Sandbox provider"
+          value={selected}
+          disabled={busy || !choice.canManage}
+          onChange={(e) => void choose(e.target.value)}
+        >
+          {!defaultIsListed && <option value="">Deployment default</option>}
+          {choice.available.map((provider) => (
+            <option key={provider} value={provider}>
+              {sandboxProviderLabel(provider)}
+            </option>
+          ))}
+        </select>
+      </label>
+      {!choice.canManage && <p className="muted">Only an owner or admin can change this.</p>}
+    </section>
   );
 }
 

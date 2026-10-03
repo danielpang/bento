@@ -51,6 +51,12 @@ export const projects = pgTable("projects", {
    */
   executor: text("executor", { enum: ["server", "runner"] }).notNull().default("server"),
   /**
+   * Remote sandbox provider this project asked for. Null means the
+   * deployment default. Stored and returned with the project. A beta
+   * tester who is an owner or admin sets it; null clears it.
+   */
+  sandboxProvider: text("sandbox_provider", { enum: ["sprite", "modal", "docker"] }),
+  /**
    * Whether an issue arriving from Linear enters this project's first
    * stage instead of waiting in the backlog. Per project, because one
    * team's intake is triaged by a person and another's is meant to be
@@ -418,7 +424,18 @@ export const sandboxes = pgTable("sandboxes", {
    */
   organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
   featureId: uuid("feature_id").references(() => features.id, { onDelete: "set null" }),
-  provider: text("provider", { enum: ["docker", "sprite"] }).notNull(),
+  /**
+   * The swarm this machine belongs to, and the task it was made for.
+   *
+   * Both are kept because the two are asked for separately: the reaper
+   * finds a worker's machine by its leaf task, and stopping a swarm has
+   * to find every machine under it without walking the tree. Nulled
+   * rather than cascaded, like featureId: a row that outlives its work
+   * still names a machine somebody has to clean up.
+   */
+  swarmId: uuid("swarm_id").references((): AnyPgColumn => swarms.id, { onDelete: "set null" }),
+  swarmTaskId: uuid("swarm_task_id").references((): AnyPgColumn => swarmTasks.id, { onDelete: "set null" }),
+  provider: text("provider", { enum: ["docker", "sprite", "modal"] }).notNull(),
   externalId: text("external_id").notNull(),
   status: text("status", {
     enum: ["provisioning", "ready", "busy", "hibernated", "destroyed"],
@@ -447,6 +464,21 @@ export const sandboxes = pgTable("sandboxes", {
    * is billed for a container on their own machine.
    */
   size: text("size"),
+  /**
+   * The snapshot this machine was put away at, when its driver can
+   * take one.
+   *
+   * A paused swarm is one nobody is working in and everybody is still
+   * paying for, and the point of a checkpoint is that resuming it
+   * starts from where it stopped rather than from a fresh clone: a
+   * sandbox that spent ten minutes installing a toolchain should not
+   * spend them again.
+   *
+   * On the sandbox rather than on a run, because there is no run at
+   * the moment a person pauses. agent_runs.checkpoint_id is a
+   * different fact: what one run may be rolled back to.
+   */
+  checkpointId: text("checkpoint_id"),
   lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
   ...timestamps,
 },
@@ -470,18 +502,33 @@ export const agentRuns = pgTable(
   "agent_runs",
   {
   id: uuid("id").primaryKey().defaultRandom(),
-  featureId: uuid("feature_id")
-    .notNull()
-    .references(() => features.id, { onDelete: "cascade" }),
+  /**
+   * The card this run works on, for a pipeline run. Null on a swarm
+   * run, which is keyed by its swarm and task instead. Exactly one of
+   * featureId and swarmId is set, and a check constraint holds every
+   * insert to that.
+   */
+  featureId: uuid("feature_id").references(() => features.id, { onDelete: "cascade" }),
   /**
    * Denormalized from the owning project so row-level security can be a
    * column comparison rather than a join. Null means "belongs to no
    * organization", which is local mode. Set on insert; never changed.
    */
   organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
-  stageId: uuid("stage_id")
-    .notNull()
-    .references(() => stages.id),
+  /**
+   * The pipeline stage this run belongs to. Null on a swarm run: a
+   * swarm carries a task tree rather than a pipeline, so there is no
+   * stage to name. Every card run still has one, which the run tenant
+   * trigger enforces.
+   */
+  stageId: uuid("stage_id").references(() => stages.id),
+  /** The swarm this run works for. Null on a pipeline run. */
+  swarmId: uuid("swarm_id").references((): AnyPgColumn => swarms.id, { onDelete: "cascade" }),
+  /**
+   * The task inside that swarm. Null for a run that acts on the swarm
+   * as a whole: the planner, and the merge queue's resolver.
+   */
+  swarmTaskId: uuid("swarm_task_id").references((): AnyPgColumn => swarmTasks.id, { onDelete: "cascade" }),
   /**
    * Deleting an agent takes its runs with it, transcripts included.
    *
@@ -523,16 +570,42 @@ export const agentRuns = pgTable(
     .default("queued"),
   prompt: text("prompt").notNull(),
   /**
-   * What this run is, structurally. "judge" is the gate evaluator's
-   * completion check; "rebase" is the resolve-conflicts button, a work
-   * run whose finish must republish the branch whatever the stage's
-   * publish setting says; everything else is work someone can talk to.
+   * Which board this run belongs to.
+   *
+   * Not the same question as `role`, and not derivable from it: a judge
+   * run exists on both boards. A card names a judge agent for its gate,
+   * and a swarm names one too, so `role = 'judge'` cannot say
+   * which board asked. The two are axes: this is which board, and
+   * `role` is the capacity within it.
+   *
+   * No default, deliberately. Every insert states its board, because a
+   * default is exactly how a swarm run would quietly record itself as a
+   * card's and then be picked up by a pipeline query.
+   */
+  type: text("type", { enum: ["pipeline", "swarm"] }).notNull(),
+  /**
+   * What this run is: which job it holds within its board.
+   *
+   * "stage" is a card being walked through a stage, "judge" is the gate
+   * evaluator's completion check, "rebase" is the resolve-conflicts
+   * button (a work run whose finish republishes the branch whatever the
+   * stage's publish setting says), and the rest are a swarm's.
+   *
    * A column rather than a prompt-prefix test, because the prompt is
    * user-reachable text: a chat message that happened to open with the
-   * judge sentence used to make its run drop out of every "not a
-   * judge" query in the server.
+   * judge sentence used to make its run drop out of every "not a judge"
+   * query in the server.
+   *
+   * This absorbed the older `kind` column, which said the same thing
+   * for the pipeline in different words and had to be kept in step with
+   * this one by hand. Which values are legal depends on `type`, and a
+   * check constraint holds that.
    */
-  kind: text("kind", { enum: ["task", "judge", "rebase"] }).notNull().default("task"),
+  role: text("role", {
+    enum: ["stage", "judge", "rebase", "planner", "subplanner", "worker", "resolver"],
+  })
+    .notNull()
+    .default("stage"),
   /** Copied from the project when the run is created. */
   executor: text("executor", { enum: ["server", "runner"] }).notNull().default("server"),
   /** Sandbox snapshot taken before this run, for rolling it back. */
@@ -543,15 +616,96 @@ export const agentRuns = pgTable(
   cliSessionId: text("cli_session_id"),
   exitCode: integer("exit_code"),
   costUsd: numeric("cost_usd"),
+  /**
+   * How well this run's cost is known, which is a different question
+   * from what it was.
+   *
+   * measured is the figure the tool printed. estimated is token counts
+   * priced from the model catalog. assumed is a stand in for a tool
+   * that prints nothing at all. notional is a printed figure a
+   * subscription has already paid for, which is the least true number
+   * in the most trusted tier if it is filed as measured: see
+   * shouldShareAgentAuth.
+   *
+   * Null on every run that ended before the ledger existed, and on a
+   * run that has not ended. Null is "nobody has said", not "free".
+   */
+  costTier: text("cost_tier", { enum: ["measured", "estimated", "assumed", "notional"] }),
+  /** What the tool printed, when it prints tokens rather than dollars. */
+  inputTokens: integer("input_tokens"),
+  outputTokens: integer("output_tokens"),
+  /**
+   * The rate an estimate used, in dollars per million tokens, as
+   * `{ "input": 3, "output": 15 }`.
+   *
+   * Stored on the run rather than looked up when somebody reads it,
+   * because the catalog's prices change and a figure that moves after
+   * the fact is a figure nobody can reconcile against a bill. Two
+   * numbers in one column because they are one fact: the rate card in
+   * force when this run ended.
+   */
+  pricePerMtok: jsonb("price_per_mtok").$type<{ input: number; output: number }>(),
+  /**
+   * Whether this run borrowed the operator's own agent login instead of
+   * an API key.
+   *
+   * Recorded when the agent is started rather than asked at the end,
+   * because the setting can be changed while a run is in flight and the
+   * question the ledger asks is what this run actually used. Local mode
+   * only; multi mode never shares a login.
+   */
+  sharedAgentAuth: boolean("shared_agent_auth").notNull().default(false),
   numTurns: integer("num_turns"),
   error: text("error"),
   queuedAt: timestamp("queued_at", { withTimezone: true }).notNull().defaultNow(),
   startedAt: timestamp("started_at", { withTimezone: true }),
   endedAt: timestamp("ended_at", { withTimezone: true }),
+  /**
+   * Whether this run counts toward usage and billing.
+   *
+   * False only when infrastructure failed before the agent started,
+   * such as a Sprite provider outage while provisioning its machine.
+   * The start time remains an operational fact either way. Normal
+   * agent, configuration, repository, timeout, and restart failures
+   * stay billable.
+   */
+  billable: boolean("billable").notNull().default(true),
   },
-  // "This card's runs, newest first" is the shape of every conversation,
-  // resume, and session query; without this it is a table scan per ask.
-  (t) => [index("agent_runs_feature_queued_idx").on(t.featureId, t.queuedAt)],
+  (t) => [
+    // "This card's runs, newest first" is the shape of every
+    // conversation, resume, and session query; without this it is a
+    // table scan per ask.
+    index("agent_runs_feature_queued_idx").on(t.featureId, t.queuedAt),
+    // The same question asked of a swarm, which reads its runs by
+    // swarm rather than by card.
+    index("agent_runs_swarm_queued_idx").on(t.swarmId, t.queuedAt),
+    /**
+     * The discriminator and the columns have to agree, or the type is
+     * decoration. A pipeline run is a card at a stage and nothing else;
+     * a swarm run is a swarm, optionally one of its tasks, and never a
+     * card. swarm_task_id stays optional there: the planner and the
+     * merge queue's resolver act on the swarm as a whole.
+     */
+    check(
+      "agent_runs_pipeline_shape",
+      sql`${t.type} <> 'pipeline' or (${t.featureId} is not null and ${t.stageId} is not null
+        and ${t.swarmId} is null and ${t.swarmTaskId} is null)`,
+    ),
+    check(
+      "agent_runs_swarm_shape",
+      sql`${t.type} <> 'swarm' or (${t.swarmId} is not null and ${t.featureId} is null and ${t.stageId} is null)`,
+    ),
+    /**
+     * A role belongs to one board or the other, except judging, which
+     * both boards do. Stated here so a swarm run cannot claim to be a
+     * stage, which is the value every pipeline query filters on.
+     */
+    check(
+      "agent_runs_role_for_type",
+      sql`(${t.type} = 'pipeline' and ${t.role} in ('stage', 'judge', 'rebase'))
+        or (${t.type} = 'swarm' and ${t.role} in ('planner', 'subplanner', 'worker', 'resolver', 'judge'))`,
+    ),
+  ],
 );
 
 export const runEvents = pgTable(
@@ -640,15 +794,32 @@ export const runArtifacts = pgTable(
     runId: uuid("run_id")
       .notNull()
       .references(() => agentRuns.id, { onDelete: "cascade" }),
-    featureId: uuid("feature_id")
-      .notNull()
-      .references(() => features.id, { onDelete: "cascade" }),
+    /**
+     * Which board this artifact belongs to, said outright.
+     *
+     * The same statement agent_runs.type makes, for the same reason:
+     * "whichever id is set" is a fact about the columns rather than the
+     * row's own account of itself, and a reader had to know the rule to
+     * know which board a row is on. The shape checks below tie the two
+     * together, so a row whose columns disagree with its type cannot be
+     * written at all.
+     */
+    type: text("type", { enum: ["pipeline", "swarm"] }).notNull(),
+    /**
+     * The card this artifact was produced for. Set on a pipeline
+     * artifact and null on a swarm's, which is keyed by swarm and task
+     * instead.
+     */
+    featureId: uuid("feature_id").references(() => features.id, { onDelete: "cascade" }),
     /**
      * Denormalized from the owning project so row-level security can be a
      * column comparison rather than a join. Null means "belongs to no
      * organization", which is local mode. Set on insert; never changed.
      */
     organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
+    /** The swarm this artifact belongs to, and the task that made it. */
+    swarmId: uuid("swarm_id").references((): AnyPgColumn => swarms.id, { onDelete: "cascade" }),
+    swarmTaskId: uuid("swarm_task_id").references((): AnyPgColumn => swarmTasks.id, { onDelete: "cascade" }),
     /**
      * The stage as it was when the run happened, held by value rather
      * than by reference: an artifact is a record, and renaming or
@@ -656,6 +827,10 @@ export const runArtifacts = pgTable(
      */
     stageSlug: text("stage_slug").notNull(),
     stageName: text("stage_name").notNull(),
+    // A swarm has no stages, so a swarm artifact records the task that
+    // produced it here: its slug and its title. The columns keep their
+    // pipeline names because every existing reader is a pipeline one;
+    // do not invent a placeholder stage to fill them.
     /** Where the agent wrote it, relative to the workspace. Display only. */
     path: text("path").notNull(),
     kind: text("kind", { enum: ["markdown", "mermaid", "image", "html", "file"] }).notNull(),
@@ -670,7 +845,22 @@ export const runArtifacts = pgTable(
   (t) => [
     index("run_artifacts_feature_idx").on(t.featureId, t.createdAt),
     index("run_artifacts_run_idx").on(t.runId),
+    index("run_artifacts_swarm_idx").on(t.swarmId, t.createdAt),
     check("run_artifacts_content_or_key", sql`(${t.content} is null) <> (${t.storageKey} is null)`),
+    /**
+     * An artifact belongs to a card or to a swarm, the same way its run
+     * does, and its type is what says which. Two checks rather than one
+     * XOR, the shape agent_runs uses: an XOR says a row has exactly one
+     * owner without saying that the owner is the one the row claims.
+     */
+    check(
+      "run_artifacts_pipeline_shape",
+      sql`${t.type} <> 'pipeline' or (${t.featureId} is not null and ${t.swarmId} is null and ${t.swarmTaskId} is null)`,
+    ),
+    check(
+      "run_artifacts_swarm_shape",
+      sql`${t.type} <> 'swarm' or (${t.swarmId} is not null and ${t.featureId} is null)`,
+    ),
   ],
 );
 
@@ -973,10 +1163,9 @@ export const slackThreadLinks = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
-    featureId: uuid("feature_id")
-      .notNull()
-      .unique()
-      .references(() => features.id, { onDelete: "cascade" }),
+    /** Exactly one board owns the thread. */
+    featureId: uuid("feature_id").references(() => features.id, { onDelete: "cascade" }),
+    swarmId: uuid("swarm_id").references((): AnyPgColumn => swarms.id, { onDelete: "cascade" }),
     slackTeamId: text("slack_team_id").notNull(),
     slackChannelId: text("slack_channel_id").notNull(),
     slackThreadTs: text("slack_thread_ts").notNull(),
@@ -986,9 +1175,20 @@ export const slackThreadLinks = pgTable(
     ...timestamps,
   },
   (t) => [
-    uniqueIndex("slack_thread_links_org_feature_idx").on(t.organizationId, t.featureId),
-    uniqueIndex("slack_thread_links_local_feature_idx").on(t.featureId).where(sql`${t.organizationId} is null`),
+    uniqueIndex("slack_thread_links_org_feature_idx")
+      .on(t.organizationId, t.featureId)
+      .where(sql`${t.featureId} is not null`),
+    uniqueIndex("slack_thread_links_local_feature_idx")
+      .on(t.featureId)
+      .where(sql`${t.organizationId} is null AND ${t.featureId} is not null`),
+    uniqueIndex("slack_thread_links_org_swarm_idx")
+      .on(t.organizationId, t.swarmId)
+      .where(sql`${t.swarmId} is not null`),
+    uniqueIndex("slack_thread_links_local_swarm_idx")
+      .on(t.swarmId)
+      .where(sql`${t.organizationId} is null AND ${t.swarmId} is not null`),
     uniqueIndex("slack_thread_links_thread_idx").on(t.slackTeamId, t.slackChannelId, t.slackThreadTs),
+    check("slack_thread_links_owner_shape", sql`(${t.featureId} is null) <> (${t.swarmId} is null)`),
   ],
 );
 
@@ -1155,6 +1355,12 @@ export const mcpRunGrants = pgTable(
       .references(() => agentRuns.id, { onDelete: "cascade" }),
     /** Filled by the inherit trigger from the parent run row. */
     organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
+    /**
+     * The swarm whose run holds this grant, copied at mint. Null for a
+     * pipeline run. Carried here so stopping a swarm can revoke every
+     * grant it minted without joining back through its runs.
+     */
+    swarmId: uuid("swarm_id").references((): AnyPgColumn => swarms.id, { onDelete: "cascade" }),
     /**
      * The member whose per-user connections this run may use, from
      * agent_runs.started_by at mint. Null means auto-started: per-user
@@ -1323,3 +1529,609 @@ export const githubInstallations = pgTable("github_installations", {
     .references(() => user.id),
   ...timestamps,
 });
+
+/**
+ * A swarm is the board's second mode: one goal, decomposed by a planner
+ * into a tree of tasks, worked by several agents at once, landed onto
+ * one branch by a server-owned merge queue.
+ *
+ * Nothing below replaces the pipeline. A card is a lane a person walks
+ * a change down; a swarm is a fan-out somebody starts and watches. They
+ * share a project, a repository set, and the agent profiles, and they
+ * share agent_runs: a run belongs to a card or to a swarm, and the
+ * check constraint on that table is what keeps it from belonging to
+ * neither.
+ */
+
+/**
+ * One goal being worked by a swarm of agents.
+ *
+ * The ceilings are on the swarm rather than on the plan, because they
+ * are what a person actually sets before letting several agents loose:
+ * how much money, how many at once, how long. The three spend columns
+ * are the same total counted three ways, from most trustworthy to
+ * least: what a provider reported, what the harness estimated from
+ * tokens, and what had to be assumed for a run that reported nothing.
+ * Keeping them apart is what lets a later phase show a number and say
+ * how much of it is known. Nothing here tiers them; they are columns.
+ */
+export const swarms = pgTable(
+  "swarms",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    /**
+     * Denormalized from the owning project so row-level security can be a
+     * column comparison rather than a join. Null means "belongs to no
+     * organization", which is local mode. Set on insert; never changed.
+     */
+    organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
+    /** Stable handle inside the project, used in branch names and URLs. */
+    slug: text("slug").notNull(),
+    title: text("title").notNull(),
+    /** What the swarm was asked to do, as the person wrote it. */
+    goal: text("goal").notNull().default(""),
+    /** Who decomposes the goal, and who works the leaves. Chosen at creation. */
+    plannerProfileId: uuid("planner_profile_id").references(() => agentProfiles.id, { onDelete: "set null" }),
+    workerProfileId: uuid("worker_profile_id").references(() => agentProfiles.id, { onDelete: "set null" }),
+    /**
+     * Where this swarm's agents work: each on a machine that holds its
+     * own clone, or all of them in worktrees of the project's checkout
+     * on the server.
+     *
+     * Recorded when the swarm is created rather than read off the
+     * deployment on every run. A local install works in worktrees
+     * because a container per worker is a container on the machine
+     * somebody is also using; a hosted one gives each worker a machine.
+     * Read off the driver, that shape would change under a running swarm
+     * the moment the install joined a team, and nobody would be told.
+     *
+     * "worktree" is an assertion the deployment has to be able to keep.
+     * A driver whose sandboxes hold their own clones cannot, and says so
+     * rather than quietly provisioning the other shape. "sandbox" makes
+     * no assertion: the driver decides.
+     *
+     * No default, deliberately: every insert says which it is, the way
+     * agent_runs.type and run_artifacts.type do.
+     */
+    workerIsolation: text("worker_isolation", { enum: ["sandbox", "worktree"] }).notNull(),
+    /**
+     * Operating instructions handed to the planner and the workers on
+     * top of their own profile skill: how to split this goal, and what
+     * a finished leaf has to have done. Read fresh on every run, so an
+     * edit reaches the next turn.
+     */
+    plannerInstructions: text("planner_instructions"),
+    workerInstructions: text("worker_instructions"),
+    /**
+     * The agent that reads a finished swarm before it is called done.
+     *
+     * Null is the ordinary case, and a swarm is done when its tree is.
+     * An agent here says the swarm's own account of itself is not
+     * enough: the judge reads the branch and either passes it or sends
+     * it back with a reason, which becomes a leaf like any other.
+     */
+    judgeProfileId: uuid("judge_profile_id").references(() => agentProfiles.id, { onDelete: "set null" }),
+    /**
+     * A command that has to pass before that same moment, run once in
+     * the swarm's own checkout.
+     *
+     * Separate from a repository's test command, which every leaf runs
+     * against its own branch. This one is about the whole change, at
+     * the end: what a person would run themselves before calling the
+     * swarm finished.
+     */
+    completionCommand: text("completion_command"),
+    /**
+     * How deep a plan may be decomposed by an agent other than the one
+     * planner.
+     *
+     * One: the planner writes the whole tree. Two lets a plan node be
+     * handed to a sub planner, which is given that node's subtree and
+     * nothing else. A ceiling rather than a switch, because the cost of
+     * getting it wrong is a planner that plans planners.
+     */
+    maxPlanDepth: integer("max_plan_depth").notNull().default(1),
+    status: text("status", {
+      enum: [
+        "draft",
+        "planning",
+        "running",
+        "paused",
+        "blocked",
+        "done",
+        "failed",
+        "cancelled",
+        /**
+         * The two ceilings a swarm can end on, which are endings and
+         * not pauses: the money ran out, or the clock did. Both keep
+         * everything that landed, and both are the states a reopen
+         * with a raised ceiling starts from.
+         */
+        "budget_exhausted",
+        "timed_out",
+      ],
+    })
+      .notNull()
+      .default("draft"),
+    /**
+     * Why a paused swarm is paused. A person pausing it and a ceiling
+     * stopping it both leave the same status, and only this tells the
+     * board which sentence to print and whether resuming is a button
+     * or a plan change.
+     */
+    pausedReason: text("paused_reason", {
+      enum: ["manual", "budget", "time_limit", "attention", "plan_limit", "error"],
+    }),
+    /** The single branch every task lands onto. */
+    branchName: text("branch_name"),
+    /** When its local checkout was removed so the branch can be opened elsewhere. */
+    branchReleasedAt: timestamp("branch_released_at", { withTimezone: true }),
+    /**
+     * The swarm's own machine: where the planner runs and where the
+     * merge queue does its landings. Workers get their own, recorded on
+     * sandboxes with the leaf they belong to.
+     */
+    sandboxId: uuid("sandbox_id").references(() => sandboxes.id, { onDelete: "set null" }),
+    /** Ceilings, set at creation and changeable after. Null means none. */
+    budgetUsd: numeric("budget_usd"),
+    maxWorkers: integer("max_workers").notNull().default(4),
+    timeLimitMin: integer("time_limit_min"),
+    /**
+     * What this swarm produces: a change to the code, or a document.
+     *
+     * The same tree of leaves worked by the same agents either way. A
+     * document swarm's leaves write sections rather than changes, the
+     * planner assembles them into one file (docs/<slug>.md) at the end,
+     * and a repository's setup and test commands are skipped, because
+     * there is nothing to build and nothing to test.
+     */
+    deliverable: text("deliverable", { enum: ["code", "document"] })
+      .notNull()
+      .default("code"),
+    /**
+     * The branch this swarm was started from, when a person named one.
+     *
+     * Null is the ordinary case: the swarm's branch is cut from each
+     * repository's default branch. A name here says the work continues
+     * on a branch that already exists, so the swarm's branch is cut
+     * from that instead, and the planner's first prompt carries what is
+     * on it and what its pull request is still being asked about.
+     */
+    startBranch: text("start_branch"),
+    /**
+     * Where the plan comes from.
+     *
+     * "goal" is the ordinary case: the planner reads the goal and the
+     * code and writes the plan itself. "existing" says the person
+     * already has one, in the plan sources attached to this swarm or
+     * in the goal text, and the planner's job is to turn it into the
+     * task tree rather than to plan from scratch: check whether it
+     * holds an implementation plan, write one from it when it does
+     * not, and build the tree that implements it. A column rather than
+     * a flag on the prompt, because every later planner turn has to be
+     * told the same thing.
+     */
+    planMode: text("plan_mode", { enum: ["goal", "existing"] }).notNull().default("goal"),
+    /**
+     * How many times this swarm has been reopened with a follow up.
+     *
+     * Counted rather than worked out from the tree: it is what names
+     * the follow up nodes, and what tells a person reading the header
+     * that this is not the first pass.
+     */
+    reopenCount: integer("reopen_count").notNull().default(0),
+    /** Spend so far, by how well it is known. See the table comment. */
+    spentMeasuredUsd: numeric("spent_measured_usd").notNull().default("0"),
+    spentEstimatedUsd: numeric("spent_estimated_usd").notNull().default("0"),
+    spentAssumedUsd: numeric("spent_assumed_usd").notNull().default("0"),
+    /**
+     * Spend on runs that borrowed a subscription rather than a key.
+     *
+     * Its own column because it is the one tier the cap does not
+     * count. The tool printed a list price, the subscription had
+     * already paid for the work, and the marginal cost of the run was
+     * zero: charging it against the budget would stop a swarm that is
+     * costing nothing. Recorded and shown, never enforced.
+     */
+    spentNotionalUsd: numeric("spent_notional_usd").notNull().default("0"),
+    /**
+     * When the planner was last told the budget was running low, so it
+     * is told once rather than on every tick. Cleared when the budget
+     * is raised, because that is a different budget.
+     */
+    budgetWarnedAt: timestamp("budget_warned_at", { withTimezone: true }),
+    /**
+     * Who started it. Nulled rather than cascaded when the account goes,
+     * for the reason agent_runs.started_by is: the swarm and its hours
+     * outlive the person who asked for them.
+     */
+    startedBy: text("started_by").references(() => user.id, { onDelete: "set null" }),
+    /** Set when a finished swarm is put away. The rows stay. */
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    /** Drives "pick up where you left off" without touching updatedAt. */
+    lastOpenedAt: timestamp("last_opened_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex("swarms_project_slug_idx").on(t.projectId, t.slug),
+    index("swarms_project_idx").on(t.projectId),
+  ],
+);
+
+/**
+ * One node of a swarm's plan.
+ *
+ * The tree is the plan: a group is a decomposition the planner made, a
+ * task is a leaf an agent works. parentId is null at the top, and the
+ * swarm itself is the root nobody stores. position orders siblings, so
+ * the board can draw the plan without inventing an order of its own.
+ */
+export const swarmTasks = pgTable(
+  "swarm_tasks",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    swarmId: uuid("swarm_id")
+      .notNull()
+      .references(() => swarms.id, { onDelete: "cascade" }),
+    /**
+     * Denormalized from the owning project so row-level security can be a
+     * column comparison rather than a join. Null means "belongs to no
+     * organization", which is local mode. Set on insert; never changed.
+     */
+    organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
+    /** Null at the top of the tree. Deleting a node takes its subtree. */
+    parentId: uuid("parent_id").references((): AnyPgColumn => swarmTasks.id, { onDelete: "cascade" }),
+    /**
+     * Containment rolls a child's status into its parent. A dependency
+     * still draws the child below its parent, but waits for that
+     * parent's own work to finish without changing its status.
+     */
+    parentRelation: text("parent_relation", { enum: ["contains", "depends_on"] }).notNull().default("contains"),
+    position: integer("position").notNull().default(0),
+    /**
+     * What type of node this is in the tree. A plan node is decomposed
+     * further and never worked directly; a leaf is work an agent is
+     * given. A subplanner turns a plan node into more of both, which is
+     * why the two share a table.
+     */
+    nodeType: text("node_type", { enum: ["plan", "leaf"] }).notNull().default("leaf"),
+    title: text("title").notNull(),
+    description: text("description").notNull().default(""),
+    /**
+     * Where this node is in its life: open (in the plan, not handed
+     * out), assigned (ready for an agent), working (one is on it),
+     * landed (its branch is on the swarm's branch), done, blocked,
+     * failed, cancelled.
+     */
+    status: text("status", {
+      enum: ["open", "assigned", "working", "landed", "done", "blocked", "failed", "cancelled"],
+    })
+      .notNull()
+      .default("open"),
+    /**
+     * Why this task wants a person, or null when it does not.
+     *
+     * Separate from status because a swarm that stops for a question is
+     * still running everything else, and a board that has to be read
+     * for a stalled leaf is a board nobody reads. Orthogonal to status
+     * for the same reason: a working node can want attention without
+     * ceasing to be worked.
+     *
+     * Two kinds of value in one column, deliberately. long_running and
+     * escalated are severity, set by the clock: a worker past the
+     * warning threshold, and one past the escalation threshold whose
+     * planner is woken about it. The rest are reasons, set by an event:
+     * a planner's question, a landing conflict, a failure, a budget
+     * stop. Both answer the same question a board asks, which is which
+     * node a person should look at, so they share the column.
+     *
+     * "blocked" is not among them, though status has it. A stuck node
+     * is what status says, and repeating it here would mean the same
+     * word answering two different questions one column apart: is this
+     * node moving, and does a person need to come. Every value left
+     * adds something status cannot say.
+     */
+    attention: text("attention", {
+      enum: ["long_running", "escalated", "question", "failed", "conflict", "budget", "plan_limit"],
+    }),
+    /**
+     * Rough size, set by the planner. Used to order work and to spread
+     * the budget, never to bill: nothing here is a measurement.
+     */
+    weight: integer("weight").notNull().default(1),
+    /** The branch this leaf's work is on, before it lands. */
+    branchName: text("branch_name"),
+    /**
+     * The run currently working this task. Nulled rather than cascaded
+     * when the run is deleted: the task outlives the attempt, and a
+     * cascade would take the plan with the transcript.
+     */
+    assignedRunId: uuid("assigned_run_id").references(() => agentRuns.id, { onDelete: "set null" }),
+    /**
+     * Coordinator bookkeeping the tree needs but nobody queries across:
+     * retry counts, which sibling blocked this one, the planner's own
+     * notes about a split. A column rather than a table, because it is
+     * read only with the row it hangs off.
+     */
+    flags: jsonb("flags").$type<Record<string, unknown>>().notNull().default({}),
+    /** What the worker said it did, once it was done. */
+    report: text("report"),
+    /**
+     * The instruction a reopen was given, written on the node that
+     * holds the work it asked for.
+     *
+     * On the node rather than on the swarm, because a swarm can be
+     * reopened more than once and each follow up is its own subtree.
+     * Null on everything the first pass created, which is how the tree
+     * and the outline know which subtree to label, and with what.
+     */
+    followUpInstruction: text("follow_up_instruction"),
+    /** Spend attributed to this task, counted the ways a swarm's is. */
+    costMeasuredUsd: numeric("cost_measured_usd").notNull().default("0"),
+    costEstimatedUsd: numeric("cost_estimated_usd").notNull().default("0"),
+    costAssumedUsd: numeric("cost_assumed_usd").notNull().default("0"),
+    /** The tier the cap does not count. See swarms.spent_notional_usd. */
+    costNotionalUsd: numeric("cost_notional_usd").notNull().default("0"),
+    /**
+     * The agent to put on this leaf, when a person chose one for it.
+     *
+     * Null is the ordinary case: the swarm names the worker and every
+     * leaf uses it. Reassigning a leaf that a cheap worker could not
+     * finish to a stronger one writes the choice here, on the node it
+     * was made about, rather than changing the swarm's worker and with
+     * it every leaf that has not started yet.
+     */
+    agentProfileId: uuid("agent_profile_id").references(() => agentProfiles.id, { onDelete: "set null" }),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  // Drawing the plan is "the children of this node, in order", once per
+  // node, so the tree is one index rather than a scan per level.
+  (t) => [index("swarm_tasks_tree_idx").on(t.swarmId, t.parentId, t.position)],
+);
+
+/**
+ * Everything that has happened to one task, in order. Append only: a
+ * status is a current value and this is how it got there, which is the
+ * only account a person has of a swarm that ran while they were away.
+ */
+export const swarmTaskEvents = pgTable(
+  "swarm_task_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    taskId: uuid("task_id")
+      .notNull()
+      .references(() => swarmTasks.id, { onDelete: "cascade" }),
+    organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
+    kind: text("kind", {
+      enum: [
+        "created",
+        "status_changed",
+        "assigned",
+        "attention_raised",
+        "attention_cleared",
+        "reported",
+        "landed",
+        "note",
+      ],
+    }).notNull(),
+    fromStatus: text("from_status"),
+    toStatus: text("to_status"),
+    /** The run that caused this, when one did. */
+    runId: uuid("run_id").references(() => agentRuns.id, { onDelete: "set null" }),
+    actorUserId: text("actor_user_id").references(() => user.id),
+    /** Why, when there is a why: the conflict, the failure, the question. */
+    detail: jsonb("detail"),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("swarm_task_events_task_at_idx").on(t.taskId, t.at)],
+);
+
+/**
+ * The merge queue: finished work waiting to go onto the swarm's branch.
+ *
+ * One landing at a time is the whole point of the queue, and it is a
+ * database fact here rather than a property of whichever job happens to
+ * be running: the partial unique index refuses a second row in the
+ * landing state for the same swarm, so two coordinators, a retry, and a
+ * restarted server cannot land two branches onto one at once.
+ */
+export const swarmLandings = pgTable(
+  "swarm_landings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    swarmId: uuid("swarm_id")
+      .notNull()
+      .references(() => swarms.id, { onDelete: "cascade" }),
+    organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
+    /** The leaf whose branch this lands. */
+    taskId: uuid("task_id")
+      .notNull()
+      .references(() => swarmTasks.id, { onDelete: "cascade" }),
+    /** Denormalized so a landing still names its branch after a replan. */
+    branchName: text("branch_name"),
+    /** Queue order, lowest first. */
+    position: integer("position").notNull().default(0),
+    status: text("status", {
+      enum: ["queued", "landing", "landed", "conflicted", "failed", "cancelled"],
+    })
+      .notNull()
+      .default("queued"),
+    /**
+     * The agent asked to resolve a conflict this landing hit. Nulled
+     * rather than cascaded, like every other run reference on a row
+     * that outlives the attempt.
+     */
+    resolverRunId: uuid("resolver_run_id").references(() => agentRuns.id, { onDelete: "set null" }),
+    /** How many times this branch has been tried. */
+    attempt: integer("attempt").notNull().default(0),
+    error: text("error"),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (t) => [
+    index("swarm_landings_queue_idx").on(t.swarmId, t.position),
+    uniqueIndex("swarm_landings_one_in_flight_idx")
+      .on(t.swarmId)
+      .where(sql`${t.status} = 'landing'`),
+  ],
+);
+
+/**
+ * One pull request per repository a swarm changed, the way a card's
+ * feature_pull_requests works. A swarm lands everything onto one
+ * branch, so this is that branch's pull request in each repository.
+ */
+export const swarmPullRequests = pgTable(
+  "swarm_pull_requests",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    swarmId: uuid("swarm_id")
+      .notNull()
+      .references(() => swarms.id, { onDelete: "cascade" }),
+    /**
+     * Kept when the repository leaves the project, so a pull request
+     * already open does not lose the record of where it was opened.
+     */
+    repositoryId: uuid("repository_id").references(() => repositories.id, { onDelete: "set null" }),
+    organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
+    /** Denormalized so a row still names its repository after a removal. */
+    repoUrl: text("repo_url").notNull(),
+    number: integer("number").notNull(),
+    url: text("url").notNull(),
+    /**
+     * The commit Bento last pushed to the branch, which is the lease the
+     * next force push holds. See feature_pull_requests.head_sha.
+     */
+    headSha: text("head_sha"),
+    ...timestamps,
+  },
+  (t) => [uniqueIndex("swarm_pull_requests_swarm_repo_idx").on(t.swarmId, t.repoUrl)],
+);
+
+/**
+ * A message sent into a swarm, with the same lifecycle a card message
+ * has: queued until an agent hears it, sent when one is handed it,
+ * delivered once its answer is on the transcript.
+ *
+ * A null taskId is a message to the planner, which is how a person
+ * changes the plan rather than one leaf's work.
+ */
+export const swarmMessages = pgTable(
+  "swarm_messages",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    swarmId: uuid("swarm_id")
+      .notNull()
+      .references(() => swarms.id, { onDelete: "cascade" }),
+    /**
+     * Denormalized from the owning project so row-level security can be a
+     * column comparison rather than a join. Null means "belongs to no
+     * organization", which is local mode. Set on insert; never changed.
+     */
+    organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
+    /** Null means the planner: a message about the plan, not a leaf. */
+    taskId: uuid("task_id").references(() => swarmTasks.id, { onDelete: "cascade" }),
+    text: text("text").notNull(),
+    /**
+     * Who is speaking: a person, or Bento itself.
+     *
+     * The wake message labels the two differently and it matters that
+     * it can. A long run escalation and a budget warning are the
+     * server's own words about facts it holds, and printing them
+     * under "messages from people" would tell the planner that
+     * somebody asked for something nobody asked for. The agent written
+     * text a notice carries (a worker's transcript tail) is quoted as
+     * untrusted inside it, exactly as a report is.
+     */
+    source: text("source", { enum: ["person", "system"] }).notNull().default("person"),
+    /**
+     * Who wrote it. A continuation run started by this message acts with
+     * the author's per-user MCP connections, so attribution here is what
+     * keeps member B's follow-up from using member A's tokens.
+     */
+    userId: text("user_id").references(() => user.id, { onDelete: "set null" }),
+    status: text("status", { enum: ["queued", "sent", "delivered"] })
+      .notNull()
+      .default("queued"),
+    /** The run that consumed this message; null while it waits. */
+    runId: uuid("run_id").references(() => agentRuns.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    sentAt: timestamp("sent_at", { withTimezone: true }),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+  },
+  (t) => [index("swarm_messages_claim_idx").on(t.swarmId, t.taskId, t.status, t.createdAt)],
+);
+
+/**
+ * A plan somebody handed a swarm when they started it.
+ *
+ * One row per source: a file the person uploaded, or a web page the
+ * server fetched for them at creation. Stored as text, never as bytes:
+ * a plan is something a planner reads, and the route refuses anything
+ * that does not decode as text rather than storing a blob nothing can
+ * read. The content is a person's input and is quoted as untrusted
+ * where a prompt carries it, the same as the goal: a plan pasted from
+ * a web page is exactly where an instruction addressed to an agent
+ * would be waiting.
+ *
+ * Immutable once written. The plan is what the swarm was asked to
+ * implement, and changing it under a tree that was built from it would
+ * rewrite the meaning of every task; further work goes through reopen.
+ */
+export const swarmPlanSources = pgTable(
+  "swarm_plan_sources",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    swarmId: uuid("swarm_id")
+      .notNull()
+      .references(() => swarms.id, { onDelete: "cascade" }),
+    /**
+     * Denormalized from the owning project so row-level security can be a
+     * column comparison rather than a join. Null means "belongs to no
+     * organization", which is local mode. Set on insert; never changed.
+     */
+    organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
+    /** Where in the person's list this source was. The planner is told them in this order. */
+    position: integer("position").notNull().default(0),
+    /** An uploaded file, or a page fetched from an address. */
+    kind: text("kind", { enum: ["file", "website"] }).notNull(),
+    /** The file's name as uploaded (a relative path, for a folder), or the page's title or address. */
+    name: text("name").notNull(),
+    /** The address a website source was fetched from. Null on a file. */
+    url: text("url"),
+    /** The media type the source was read as: what a page answered with, or what the file's name says. */
+    mime: text("mime").notNull(),
+    /** Characters of text, so a list can say how big each source is without reading it. Zero when there is none. */
+    size: integer("size").notNull(),
+    /**
+     * The source as text: a text file as uploaded, a page stripped to
+     * its text, a PDF's extracted text. Null for an image, and for a
+     * PDF whose pages held no text at all (a scan), whose bytes are
+     * then the only copy and the agent's own eyes the only reader.
+     */
+    content: text("content"),
+    /**
+     * Where the bytes are, for a PDF or an image: a key in the
+     * artifact store, minted by the server and org-prefixed for
+     * lifecycle bookkeeping, never a URL. Who may read it is decided
+     * by this row, behind the same access helpers and row-level
+     * security as every other tenant row; the store is a shelf.
+     * Null for a source that is text and nothing else.
+     */
+    storageKey: text("storage_key"),
+    /** Bytes in the store. Null when nothing is stored. */
+    byteSize: integer("byte_size"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("swarm_plan_sources_swarm_idx").on(t.swarmId, t.position),
+    // A source with neither text nor bytes is nothing a planner could read.
+    check("swarm_plan_sources_content_or_key", sql`${t.content} is not null or ${t.storageKey} is not null`),
+  ],
+);

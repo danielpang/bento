@@ -33,6 +33,16 @@ import { useGitHubOutcome } from "./components/GitHubIdentity.js";
 import { SignOutButton } from "./components/IconButtons.js";
 import { CHANGELOG_URL } from "./changelog.js";
 import { BetaTestersProvider, useBetaTesters } from "./beta.js";
+import { BoardModeToggle } from "./components/BoardModeToggle.js";
+import { useSwarmPlan } from "./swarm/plan.js";
+import { isSwarmEvent } from "./swarm/events.js";
+import {
+  boardHref,
+  browserStorage,
+  readBoardMode,
+  rememberBoardMode,
+  type BoardMode,
+} from "./swarm/view-state.js";
 import { NavMenu, ConfigureMenu, type NavAction } from "./components/NavMenu.js";
 import { CommandMenu } from "./components/CommandMenu.js";
 import { OutOfCompute } from "./components/OutOfCompute.js";
@@ -41,6 +51,8 @@ import { NewFeatureDialog, NewProjectDialog, PromptDialog } from "./components/P
 import { ProjectPicker } from "./components/ProjectPicker.js";
 import { useToast } from "./components/Toasts.js";
 import { identifyUser, resetUser, sessionIdentityChange } from "./posthog.js";
+import { desktop } from "./desktop.js";
+import { readProjectSelection, rememberProjectSelection } from "./project-selection.js";
 
 /*
  * Everything below here is fetched when it is first needed.
@@ -71,6 +83,10 @@ const SessionsPage = lazy(() => import("./components/SessionsPage.js").then((m) 
 const SettingsPage = lazy(() => import("./components/SettingsPage.js").then((m) => ({ default: m.SettingsPage })));
 const SpendPage = lazy(() => import("./components/SpendPage.js").then((m) => ({ default: m.SpendPage })));
 const StageConfig = lazy(() => import("./components/StageConfig.js").then((m) => ({ default: m.StageConfig })));
+/* The swarm board is a second board, and most people open the first
+ * one: its tree, its outline and its dialog stay out of the bundle
+ * until somebody picks Swarms. */
+const SwarmBoard = lazy(() => import("./components/SwarmBoard.js").then((m) => ({ default: m.SwarmBoard })));
 
 /**
  * What a route shows while its code arrives.
@@ -136,8 +152,6 @@ const client = new BentoClient({
   baseUrl: window.location.origin,
   onBuild: buildWatch.note,
 });
-
-const PROJECT_KEY = "bento:projectId";
 
 export function App() {
   const { data: session, isPending } = useSession();
@@ -242,7 +256,7 @@ function Console() {
   if (mode === "multi" && session) {
     return <FirstTeamGate userName={session.user.name ?? ""} />;
   }
-  return <BoardScreen showSignOut={false} />;
+  return <BoardScreen showSignOut={false} mode="local" />;
 }
 
 /**
@@ -278,7 +292,7 @@ function FirstTeamGate({ userName }: { userName: string }) {
   if (!created && Array.isArray(organizations) && organizations.length === 0) {
     return <FirstTeam userName={userName} onCreated={() => setCreated(true)} />;
   }
-  return <BoardScreen showSignOut />;
+  return <BoardScreen showSignOut mode="multi" />;
 }
 
 /** What /api/team/invitations answers with: only offers accept would honour. */
@@ -398,7 +412,7 @@ function FirstTeam({ userName, onCreated }: { userName: string; onCreated: () =>
   );
 }
 
-function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
+function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local" | "multi" }) {
   const beta = useBetaTesters();
   const [commandsOpen, setCommandsOpen] = useState(false);
   const [focusedReview, setFocusedReview] = useState(false);
@@ -429,18 +443,34 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
    * every reload, then swapped in the board.
    */
   const [projects, setProjects] = useState<{ id: string; name: string }[] | null>(null);
-  // Remembered across reloads: which board a user was last looking at.
+  // Desktop windows remember their own board across reloads and native menu
+  // navigation. New windows start with the last used project.
   // The list effect below still re-checks the stored id against the
   // rows the current tenant can see, so a stale value from before an
   // organization switch falls back to the first visible project
   // rather than landing on one this session cannot open.
-  const [projectId, setProjectId] = useState<string | null>(() => {
-    try {
-      return localStorage.getItem(PROJECT_KEY) ?? null;
-    } catch {
-      return null;
-    }
-  });
+  const [projectId, setProjectId] = useState<string | null>(() => readProjectSelection(Boolean(desktop)));
+  /**
+   * Pipeline or Swarms: which board of this project you are looking
+   * at. Beside the picker rather than in the address bar's path,
+   * because the project is chosen once and the mode decides which
+   * board of it you see.
+   *
+   * Remembered per browser and written into the address, so a reload
+   * lands where you were and a link opens the board it was copied
+   * from. Pipeline is the default, and stays it for anybody who never
+   * touches the toggle.
+   */
+  const swarmStorage = useMemo(() => browserStorage(), []);
+  const [boardMode, setBoardMode] = useState<BoardMode>(() =>
+    readBoardMode(window.location.search, swarmStorage),
+  );
+  const { access: swarmAccess, surfaces: swarmSurfaces } = useSwarmPlan(mode);
+  const betaTester = useBetaTesters();
+  /** Swarms only render for a tester on a plan that includes them. */
+  const swarmsOpen = betaTester && swarmAccess.included;
+  const swarming = boardMode === "swarms" && swarmsOpen && screen === "board";
+
   const [stages, setStages] = useState<Stage[]>([]);
   const [pipelineId, setPipelineId] = useState<string | null>(null);
   const [features, setFeatures] = useState<Feature[]>([]);
@@ -633,18 +663,19 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
     if (panel !== "agents") setAgentsIntent(null);
   }, [panel]);
 
-  // Persist the selection so a refresh lands on the same board. The
-  // list effect above has already rejected ids this tenant cannot see,
-  // so anything reaching here is one the session can open. Private
-  // browsing can refuse storage; the write is best effort.
+  // Wait until the list confirms this tenant can see the selected project.
   useEffect(() => {
-    try {
-      if (projectId) localStorage.setItem(PROJECT_KEY, projectId);
-      else localStorage.removeItem(PROJECT_KEY);
-    } catch {
-      // ignore: storage unavailable
-    }
-  }, [projectId]);
+    if (projects === null || (projectId && !projects.some(project => project.id === projectId))) return;
+    rememberProjectSelection(projectId, Boolean(desktop));
+  }, [projectId, projects]);
+
+  useEffect(() => {
+    if (!desktop) return;
+    const name = projects?.find(project => project.id === projectId)?.name;
+    const section = screen === "sessions" ? "Sessions" : screen === "spend" ? "Spend" : null;
+    document.title = [name, section, "Bento"].filter(Boolean).join(" | ");
+    return () => { document.title = "Bento"; };
+  }, [projectId, projects, screen]);
 
   useEffect(() => {
     // Drop the previous project's cards immediately: leaving them up
@@ -703,6 +734,14 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
       projectId,
       (event) => {
         const e = event as { featureId?: string; status?: string; type?: string; text?: string };
+        /*
+         * The other board's, on the same channel. Ignored here rather
+         * than handled: nothing on this screen renders a swarm, and
+         * falling through to the refresh below re-fetched stages,
+         * features and usage several times a second for every viewer
+         * of the Pipeline while a swarm ran.
+         */
+        if (isSwarmEvent(event)) return;
         if (e.type === "run_updated" && e.featureId && e.status) {
           setRunStatus((prev) => ({ ...prev, [e.featureId!]: e.status }));
           // The drawer refetches its runs list on this tick, so a run
@@ -938,6 +977,29 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
     </a>
   ) : null;
 
+  /*
+   * Rendered on the board screen only. Sessions and spend are not
+   * boards, and a toggle that changes something two screens away is
+   * a control that lies about what it does.
+   */
+  const boardToggle =
+    screen === "board" ? (
+      <BoardModeToggle
+        mode={boardMode}
+        access={swarmAccess}
+        hrefFor={(next) => boardHref(window.location.pathname, window.location.search, { mode: next })}
+        onSelect={(next) => {
+          setBoardMode(next);
+          rememberBoardMode(swarmStorage, next);
+          window.history.replaceState(
+            null,
+            "",
+            boardHref(window.location.pathname, window.location.search, { mode: next }),
+          );
+        }}
+      />
+    ) : undefined;
+
   const hasProjects = (projects?.length ?? 0) > 0;
   /**
    * The list has not answered, or this project's stages have not. Either
@@ -953,17 +1015,42 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
    * The order is the row's order, which is the order they were in
    * before the menu existed.
    */
-  const actions: NavAction[] = [
-    { id: "board", label: "Board", href: "/", current: screen === "board" },
-    { id: "sessions", label: "Sessions", href: "/sessions", current: screen === "sessions" },
-    { id: "agents", label: "Agents", onSelect: () => { setAgentsIntent(null); setPanel("agents"); } },
-    ...(hasProjects
-      ? [
-          { id: "pipeline", label: "Pipeline", onSelect: () => setPanel("pipeline") },
-          { id: "repos", label: "Repositories", onSelect: () => setPanel("repos") },
-        ]
-      : []),
-  ];
+  /*
+   * The swarm board's tools are not the card board's.
+   *
+   * Board, Sessions and Pipeline are all about cards: a swarm has no
+   * stage to configure, no session list of its own, and the board
+   * button would point at the board already open. So on the swarm
+   * board they are left out. A swarm's agents and how it is run are
+   * chosen in the New swarm dialog and changed in its own settings.
+   */
+  /*
+   * And only where the swarm board is the thing actually on screen.
+   *
+   * `swarming` is true from the moment the mode is remembered, but the
+   * swarm board renders under `swarming && projectId` and the two
+   * early returns below (no project list yet, no projects at all) draw
+   * the card board's skeleton without the board toggle. Keyed on
+   * `swarming` alone, somebody whose remembered mode is swarms and
+   * whose project list fails to load got a topbar with no Board, no
+   * Sessions and no toggle: nothing but the URL bar to get out with.
+   */
+  const onSwarmBoard = swarming && projectId !== null && hasProjects;
+  const actions: NavAction[] = onSwarmBoard
+    ? [
+        ...(hasProjects ? [{ id: "repos", label: "Repositories", onSelect: () => setPanel("repos") }] : []),
+      ]
+    : [
+        { id: "board", label: "Board", href: "/", current: screen === "board" },
+        { id: "sessions", label: "Sessions", href: "/sessions", current: screen === "sessions" },
+        { id: "agents", label: "Agents", onSelect: () => { setAgentsIntent(null); setPanel("agents"); } },
+        ...(hasProjects
+          ? [
+              { id: "pipeline", label: "Pipeline", onSelect: () => setPanel("pipeline") },
+              { id: "repos", label: "Repositories", onSelect: () => setPanel("repos") },
+            ]
+          : []),
+      ];
 
   const bottom = (
     <>
@@ -1050,6 +1137,7 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
       <TopBar
         showSignOut={showSignOut}
         actions={actions}
+        showSwarmSwitcher={onSwarmBoard}
         meta={spend}
         onContact={() => setContactOpen(true)}
         picker={
@@ -1058,11 +1146,13 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
             projectId={projectId}
             onSelect={setProjectId}
             onNewProject={() => setDialog("project")}
+            onOpenProject={desktop ? (id) => { window.open(`/?project=${encodeURIComponent(id)}`, "_blank", "noopener,noreferrer"); } : undefined}
           />
         }
+        boardToggle={boardToggle}
         search={
-          workScreen ? (
-          <BoardSearch
+          workScreen && !swarming ? (
+            <BoardSearch
               value={query}
               onChange={setQuery}
               matches={features.filter((f) => matchesQuery(f, query)).length}
@@ -1071,7 +1161,7 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
           ) : undefined
         }
         primary={
-          workScreen ? (
+          workScreen && !swarming ? (
             <button className="btn btn-primary" title={beta ? "New card (n)" : undefined} onClick={() => setDialog("feature")}>
               New card
             </button>
@@ -1083,7 +1173,9 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
           act on any advice below it either. The banner links to
           Settings, Billing, so a phone does not land on Appearance
           with that tab off the right edge of the strip. */}
-      <OutOfCompute />
+      {/* The swarm page carries its own, above its own header, so a
+          swarm does not stack two identical banners. */}
+      {!swarming && <OutOfCompute />}
 
       {!boardPending && setupNeeded && (
         <div className="setup-prompt">
@@ -1119,6 +1211,12 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
       ) : screen === "spend" ? (
         <Suspense fallback={<SpendPageSkeleton />}>
           <SpendPage client={client} projectId={projectId} />
+        </Suspense>
+      ) : swarming && projectId ? (
+        /* A second board of the same project. Its own boundary, like
+           the panels: the chunk arrives without blanking the chrome. */
+        <Suspense fallback={<BoardSkeleton />}>
+          <SwarmBoard projectId={projectId} client={client} surfaces={swarmSurfaces} />
         </Suspense>
       ) : boardPending ? (
         <BoardSkeleton />
@@ -1213,7 +1311,7 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
         </section>
       )}
       <Suspense fallback={null}>
-        {workScreen && selected && (
+        {workScreen && !swarming && selected && (
           <FeatureDrawer
             client={client}
             feature={selected}
@@ -1279,6 +1377,8 @@ function TopBar({
   actions = [],
   primary,
   picker,
+  boardToggle,
+  showSwarmSwitcher = false,
   search,
   meta,
   onContact,
@@ -1289,6 +1389,10 @@ function TopBar({
   /** The one button that stays out of the menu at every width. */
   primary?: React.ReactNode;
   picker?: React.ReactNode;
+  /** Pipeline or Swarms. Beside the picker, never in the menu. */
+  boardToggle?: React.ReactNode;
+  /** The swarm board mounts its live switcher here, before Configure. */
+  showSwarmSwitcher?: boolean;
   search?: React.ReactNode;
   /** The spend chip. It stays out of the menu at every width. */
   meta?: React.ReactNode;
@@ -1321,6 +1425,9 @@ function TopBar({
     <header className="topbar workspace-nav">
       <BrandLockup />
       {picker && <div className="workspace-project">{picker}</div>}
+      {/* Beside the picker it qualifies: which project, then which of
+          its boards. The row's own gap separates them. */}
+      {boardToggle}
       <span className="topbar-spacer" />
       {meta}
       <a className="btn btn-ghost settings-gear" aria-label="Settings" title="Settings" href="/settings">
@@ -1329,7 +1436,7 @@ function TopBar({
       {showSignOut && <SignOutButton onClick={() => signOut()} />}
     </header>
     <div className="workspace-toolbar">
-      <nav className="topbar-nav" aria-label="Board">
+      <nav className={showSwarmSwitcher ? "topbar-nav topbar-nav-swarms" : "topbar-nav"} aria-label="Board">
         {actions.filter((action) => !beta || action.href !== undefined).map((action) =>
           action.href === undefined ? (
             <button key={action.id} className="btn btn-ghost" onClick={action.onSelect}>
@@ -1348,6 +1455,7 @@ function TopBar({
             </a>
           ),
         )}
+        {showSwarmSwitcher && <div id="swarm-switcher-slot" className="workspace-swarm-switcher" />}
         {beta && actions.some((action) => action.href === undefined) && <ConfigureMenu actions={actions.filter((action) => action.href === undefined)} />}
       </nav>
       <NavMenu actions={entries} />

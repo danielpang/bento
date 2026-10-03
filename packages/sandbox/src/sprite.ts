@@ -1,5 +1,6 @@
 import { WORKSPACE_ARTIFACT_DIR } from "@bento/core";
 import { APIError, FilesystemError, SpritesClient, type Sprite, type SpriteCommand } from "@fly/sprites";
+import { randomUUID } from "node:crypto";
 import {
   AGENT_BINARIES,
   agentToolchainScript,
@@ -13,21 +14,24 @@ import {
   type ExecOptions,
   type ProvisionSpec,
   type RepositoryBundle,
+  type RepositoryExportOptions,
+  type RepositoryImportOptions,
+  type RepositoryImportOutcome,
   type SandboxDriver,
   type SandboxHandle,
 } from "./driver.js";
 import { holdSpriteAwake } from "./keep-awake.js";
 
 /**
- * The machine a feature's work happens on. Exported because a test that
- * provisions a real sprite has to be able to delete it by name even
- * when provisioning threw halfway, and guessing the convention in two
- * places is how a leaked machine goes on being billed.
+ * The machine one workspace's work happens on. Exported because a test
+ * that provisions a real sprite has to be able to delete it by name
+ * even when provisioning threw halfway, and guessing the convention in
+ * two places is how a leaked machine goes on being billed.
  *
  * Sprite names are DNS-ish; a uuid with dashes is fine.
  */
-export function spriteName(featureId: string): string {
-  return `bento-${featureId}`;
+export function spriteName(workspaceKey: string): string {
+  return `bento-${workspaceKey}`;
 }
 
 /**
@@ -276,6 +280,7 @@ export interface SpriteDriverOptions {
  */
 export class SpriteDriver implements SandboxDriver {
   provider = "sprite" as const;
+  readonly workspace = "clone" as const;
   /**
    * Which row of the price list an hour here belongs to.
    *
@@ -300,12 +305,12 @@ export class SpriteDriver implements SandboxDriver {
     this.workdir = options.workdir ?? "/workspace";
   }
 
-  private spriteName(featureId: string): string {
-    return spriteName(featureId);
+  private spriteName(workspaceKey: string): string {
+    return spriteName(workspaceKey);
   }
 
   async provision(spec: ProvisionSpec): Promise<SandboxHandle> {
-    const name = this.spriteName(spec.featureId);
+    const name = this.spriteName(spec.workspaceKey);
     const say = async (message: string) => {
       await spec.onProgress?.(message);
     };
@@ -381,27 +386,69 @@ export class SpriteDriver implements SandboxDriver {
       await say("The sandbox filesystem is temporarily unavailable. Retrying.");
     };
     for (const repo of spec.repositories ?? []) {
-      if (!repo.cloneUrl) continue;
+      /*
+       * A repository with neither a remote nor a seed has nothing to
+       * make a checkout from. A worker seeded from bundles has no
+       * remote at all, and skipping it here left its machine with an
+       * empty workspace and no sign of why.
+       */
+      if (!repo.cloneUrl && !repo.seedBundle) continue;
       const dir = `${this.workdir}/${repo.name}`;
       const branch = repo.branch ?? "main";
       const baseBranch = repo.baseBranch ?? "main";
       await say(`Preparing repository ${repo.name}...`);
-      const verifyIdentity = [
-        `if [ -d ${shellQuote(dir)}/.git ]; then`,
-        `  current_origin=$(git -C ${shellQuote(dir)} remote get-url origin 2>/dev/null || true)`,
-        `  if [ "$current_origin" != ${shellQuote(repo.cloneUrl)} ]; then rm -rf ${shellQuote(dir)}; fi`,
-        "fi",
-      ];
+      /*
+       * Only where there is a remote to compare against. A seeded
+       * checkout has no origin, and comparing that against an empty
+       * string matches nothing, so the check would delete the
+       * workspace on every re-provision of the same machine.
+       */
+      const verifyIdentity = repo.cloneUrl
+        ? [
+            `if [ -d ${shellQuote(dir)}/.git ]; then`,
+            `  current_origin=$(git -C ${shellQuote(dir)} remote get-url origin 2>/dev/null || true)`,
+            `  if [ "$current_origin" != ${shellQuote(repo.cloneUrl)} ]; then rm -rf ${shellQuote(dir)}; fi`,
+            "fi",
+          ]
+        : [];
       if (repo.seedBundle) {
         const bundlePath = `/tmp/bento-seed-${repo.name}.bundle`;
         const seedBundle = repo.seedBundle;
+        const startPath = `/tmp/bento-start-${repo.name}.bundle`;
         // Filesystem calls carry no SDK timeout at all; see callFilesystem.
         await callFilesystem(
           () => sprite.filesystem("/").writeFile(bundlePath, seedBundle),
           `writing the ${repo.name} seed bundle`,
           sayFilesystemRetry,
         );
+        if (repo.startBundle) {
+          const startData = repo.startBundle.data;
+          await callFilesystem(
+            () => sprite.filesystem("/").writeFile(startPath, startData),
+            `writing the ${repo.name} starting branch`,
+            sayFilesystemRetry,
+          );
+        }
         try {
+          /**
+           * Where this repository's branch is cut from.
+           *
+           * The seed carries the remote's base branch and nothing
+           * else, so ordinarily that is the only starting point there
+           * is. A swarm's worker is the exception: the branch it must
+           * start from is the swarm's, which lives only inside the
+           * machine that has been landing onto it and has never been
+           * pushed anywhere. That branch arrives as a second bundle,
+           * is fetched into a real ref here, and becomes the start
+           * point, so a worker on this driver begins where the leaves
+           * before it finished rather than at the repository's
+           * default branch.
+           *
+           * Incremental, so it is fetched after the seed: its
+           * prerequisite is a commit on the base branch, which the
+           * seed is what brings in.
+           */
+          const startRef = repo.startBundle ? repo.startBundle.branch : `origin/${baseBranch}`;
           const script = [
             "set -eu",
             ...verifyIdentity,
@@ -409,9 +456,20 @@ export class SpriteDriver implements SandboxDriver {
             `  cd ${shellQuote(dir)} && git fetch ${shellQuote(bundlePath)} refs/heads/${shellQuotePart(baseBranch)}:refs/remotes/origin/${shellQuotePart(baseBranch)}`,
             "else",
             `  git clone ${shellQuote(bundlePath)} ${shellQuote(dir)}`,
-            `  cd ${shellQuote(dir)} && git remote set-url origin ${shellQuote(repo.cloneUrl)}`,
+            ...(repo.cloneUrl
+              ? [`  cd ${shellQuote(dir)} && git remote set-url origin ${shellQuote(repo.cloneUrl)}`]
+              : []),
             "fi",
-            `cd ${shellQuote(dir)} && (git checkout ${shellQuote(branch)} || git checkout -b ${shellQuote(branch)} ${shellQuote(`origin/${baseBranch}`)})`,
+            ...(repo.startBundle
+              ? [
+                  // Forced, because a re-provision of the same machine
+                  // finds the ref already there at an older head: the
+                  // swarm's branch has moved since, and the stale one
+                  // is not a start point anybody wants.
+                  `cd ${shellQuote(dir)} && git fetch ${shellQuote(startPath)} +refs/heads/${shellQuotePart(repo.startBundle.branch)}:refs/heads/${shellQuotePart(repo.startBundle.branch)}`,
+                ]
+              : []),
+            `cd ${shellQuote(dir)} && (git checkout ${shellQuote(branch)} || git checkout -b ${shellQuote(branch)} ${shellQuote(startRef)})`,
           ].join("\n");
           await runScript(sprite, script);
         } finally {
@@ -420,15 +478,25 @@ export class SpriteDriver implements SandboxDriver {
             "removing the seed bundle",
             sayFilesystemRetry,
           ).catch(() => {});
+          if (repo.startBundle) {
+            await callFilesystem(
+              () => sprite.filesystem("/").rm(startPath),
+              "removing the starting branch bundle",
+              sayFilesystemRetry,
+            ).catch(() => {});
+          }
         }
-      } else {
+        // No seed, so the remote is the only source there is. The
+        // guard above is what makes this exhaustive.
+      } else if (repo.cloneUrl) {
+        const cloneUrl = repo.cloneUrl;
         const script = [
           "set -eu",
           ...verifyIdentity,
           `if [ -d ${shellQuote(dir)}/.git ]; then`,
           `  cd ${shellQuote(dir)} && git fetch --all --prune`,
           `else`,
-          `  git clone ${shellQuote(repo.cloneUrl)} ${shellQuote(dir)}`,
+          `  git clone ${shellQuote(cloneUrl)} ${shellQuote(dir)}`,
           `fi`,
           `cd ${shellQuote(dir)} && (git checkout ${shellQuote(branch)} || git checkout -b ${shellQuote(branch)})`,
         ].join("\n");
@@ -1301,6 +1369,7 @@ export class SpriteDriver implements SandboxDriver {
     handle: SandboxHandle,
     repositoryName: string,
     baseBranch: string,
+    options: RepositoryExportOptions = {},
   ): Promise<RepositoryBundle | null> {
     const dir = `${handle.workdir}/${repositoryName}`;
     const script = [
@@ -1310,10 +1379,12 @@ export class SpriteDriver implements SandboxDriver {
       'if ! git rev-parse --verify "$base^{commit}" >/dev/null 2>&1; then base="origin/$base"; fi',
       'base_sha=$(git merge-base "$base" HEAD 2>/dev/null || git rev-parse "$base^{commit}")',
       'head_sha=$(git rev-parse "HEAD^{commit}")',
-      'if [ "$base_sha" = "$head_sha" ]; then exit 3; fi',
+      ...(options.selfContained ? [] : ['if [ "$base_sha" = "$head_sha" ]; then exit 3; fi']),
       'tmp=$(mktemp /tmp/bento-bundle.XXXXXX)',
       'trap \'rm -f "$tmp"\' EXIT',
-      'git bundle create "$tmp" HEAD "^$base_sha" >/dev/null',
+      options.selfContained
+        ? 'git bundle create "$tmp" HEAD >/dev/null'
+        : 'git bundle create "$tmp" HEAD "^$base_sha" >/dev/null',
       'printf "%s\\n%s\\n" "$base_sha" "$head_sha"',
       'base64 "$tmp"',
     ].join("\n");
@@ -1327,6 +1398,72 @@ export class SpriteDriver implements SandboxDriver {
       throw new Error(`could not export ${repositoryName}: malformed bundle response`);
     }
     return { baseSha, headSha, data: Buffer.from(encoded.join(""), "base64") };
+  }
+
+  /**
+   * Moves a branch held only inside a Sprite after the server has
+   * reconciled a worker bundle in a disposable trusted checkout.
+   *
+   * The bundle is uploaded through the filesystem API, never through
+   * argv. The shell then verifies the branch, its clean working tree,
+   * and the exact old head before doing a fast-forward merge. Those
+   * checks are the same compare-and-swap the host landing path gets
+   * from `git merge --ff-only` in the swarm worktree.
+   */
+  async importRepository(
+    handle: SandboxHandle,
+    repositoryName: string,
+    bundle: RepositoryBundle,
+    options: RepositoryImportOptions,
+  ): Promise<RepositoryImportOutcome> {
+    if (!/^[0-9a-f]{40,64}$/i.test(options.expectedHeadSha) || !/^[0-9a-f]{40,64}$/i.test(bundle.headSha)) {
+      return { ok: false, reason: "error", detail: "the landing bundle contains an invalid commit id." };
+    }
+
+    const sprite = await this.openSprite(handle.externalId);
+    const token = randomUUID();
+    const bundlePath = `/tmp/bento-landing-${token}.bundle`;
+    const ref = `refs/bento/landing/${token}`;
+    const dir = `${handle.workdir}/${repositoryName}`;
+    await callFilesystem(
+      () => sprite.filesystem("/").writeFile(bundlePath, bundle.data),
+      `uploading the landing bundle for ${repositoryName}`,
+    );
+
+    try {
+      const script = [
+        "set -eu",
+        `cd ${shellQuote(dir)}`,
+        `wanted_branch=${shellQuote(options.branch)}`,
+        `expected=${shellQuote(options.expectedHeadSha)}`,
+        `wanted_head=${shellQuote(bundle.headSha)}`,
+        `bundle=${shellQuote(bundlePath)}`,
+        `landing_ref=${shellQuote(ref)}`,
+        'trap \'git update-ref -d "$landing_ref" >/dev/null 2>&1 || true\' EXIT',
+        'actual_branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)',
+        'if [ "$actual_branch" != "$wanted_branch" ]; then printf "wrong branch: %s\\n" "${actual_branch:-detached HEAD}" >&2; exit 10; fi',
+        'if ! git diff --quiet || ! git diff --cached --quiet; then printf "the swarm checkout has uncommitted tracked changes\\n" >&2; exit 11; fi',
+        'actual=$(git rev-parse "HEAD^{commit}")',
+        'if [ "$actual" != "$expected" ]; then printf "the swarm branch moved from %s to %s\\n" "$expected" "$actual" >&2; exit 12; fi',
+        'git fetch --no-tags --quiet "$bundle" "+HEAD:$landing_ref"',
+        'fetched=$(git rev-parse "$landing_ref^{commit}")',
+        'if [ "$fetched" != "$wanted_head" ]; then printf "the bundle head is %s rather than %s\\n" "$fetched" "$wanted_head" >&2; exit 13; fi',
+        'if ! git merge-base --is-ancestor "$expected" "$fetched"; then printf "the imported head is not a descendant of the swarm branch\\n" >&2; exit 13; fi',
+        'git merge --ff-only "$fetched" >/dev/null',
+        'git rev-parse "HEAD^{commit}"',
+      ].join("\n");
+      const result = await collectExec(this.exec(handle, ["sh", "-lc", script], { timeoutMs: 60_000 }));
+      if (result.exitCode === 0) return { ok: true, headSha: result.stdout.trim() };
+      const detail = result.stderr.trim() || `git exited ${result.exitCode}`;
+      return result.exitCode === 12
+        ? { ok: false, reason: "moved", detail }
+        : { ok: false, reason: "error", detail };
+    } finally {
+      await callFilesystem(
+        () => sprite.filesystem("/").rm(bundlePath),
+        `removing the landing bundle for ${repositoryName}`,
+      ).catch(() => {});
+    }
   }
 
   /** Sprites hibernate on their own; this is here for symmetry. */

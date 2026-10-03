@@ -20,7 +20,14 @@
     },
     "dev": {
       "cache": false,
-      "persistent": true
+      "persistent": true,
+      "env": [
+        "MODAL_TOKEN_ID",
+        "MODAL_TOKEN_SECRET",
+        "MODAL_ENVIRONMENT",
+        "MODAL_SANDBOX_CPU",
+        "MODAL_SANDBOX_MEMORY_MIB"
+      ]
     }
   }
 }

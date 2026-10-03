@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -90,6 +90,22 @@ test("a worktree whose directory was swept away is recreated", async () => {
   assert.equal(stdout.trim(), branch, "the card is back on its own branch");
 });
 
+test("a worktree whose Git registration vanished is rebuilt without deleting its files", async () => {
+  const repo = await fixtureRepo();
+  const manager = new WorktreeManager(await scratchDir("bento-orphan-data-"));
+  const [first] = await manager.ensureAll([{ name: "app", localPath: repo }], "swarm-orphan", "swarm/demo");
+  await writeFile(path.join(first!.worktreePath, "unfinished.txt"), "agent work\n");
+  const metadata = (await run("git", ["-C", first!.worktreePath, "rev-parse", "--git-dir"])).stdout.trim();
+  await rm(metadata, { recursive: true, force: true });
+
+  const [again] = await manager.ensureAll([{ name: "app", localPath: repo }], "swarm-orphan", "swarm/demo");
+  assert.equal((await run("git", ["-C", again!.worktreePath, "branch", "--show-current"])).stdout.trim(), "swarm/demo");
+  const entries = await readdir(manager.workspacePath("swarm-orphan"));
+  const backup = entries.find((name) => name.startsWith("app.orphan-"));
+  assert.ok(backup, "the old checkout was preserved beside its replacement");
+  assert.equal(await readFile(path.join(manager.workspacePath("swarm-orphan"), backup, "unfinished.txt"), "utf8"), "agent work\n");
+});
+
 /**
  * A merged pull request takes the branch with it, and someone tidying
  * up locally takes the local one. The card is still on the board, so
@@ -103,6 +119,7 @@ test("a card whose branch is gone starts a new one", async () => {
   const manager = new WorktreeManager(dataDir);
   const [first] = await manager.ensureAll([{ name: "app", localPath: repo }], "feat-4", branch);
   await rm(first!.worktreePath, { recursive: true, force: true });
+  await run("git", ["-C", repo, "worktree", "unlock", first!.worktreePath]);
   await run("git", ["-C", repo, "worktree", "prune", "--expire=now"]);
   await run("git", ["-C", repo, "branch", "-D", branch]);
 
@@ -341,6 +358,8 @@ test("removeWorkspace deregisters the worktrees and deletes the workspace", asyn
     featureId,
     "feature/cleanup",
   );
+  const listing = (await run("git", ["-C", repo, "worktree", "list", "--porcelain"])).stdout;
+  assert.match(listing, /locked Bento workspace/, "an active worktree must survive pruning from another filesystem view");
   await writeFile(path.join(prepared!.worktreePath, "WIP.md"), "uncommitted\n");
   await mkdir(path.join(manager.workspacePath(featureId), "node_modules"), { recursive: true });
 
@@ -382,4 +401,47 @@ test("a worktree reaped and then ensured again comes back with its commits", asy
 
   const { stdout: head } = await run("git", ["-C", again!.worktreePath, "rev-parse", "HEAD"]);
   assert.equal(head.trim(), sha.trim(), "the branch's commits are still there after the workspace was removed");
+});
+
+test("a branch that lives only here is not asked of the remote", async () => {
+  /**
+   * The swarm's branch is the case this closes. The merge queue owns
+   * it, it exists only in this repository, and nothing pushes it until
+   * the swarm finishes, so asking origin for it fails with "couldn't
+   * find remote ref". That was turned into a sentence about remote
+   * access, and it killed every worker of every swarm on a project
+   * whose checkout has an origin, before its agent had started.
+   *
+   * The refresh below it is still worth having: a base branch the
+   * remote owns should be fetched, so a new branch starts from what
+   * main is now. Only a branch already here skips it.
+   */
+  const repo = await fixtureRepo();
+  const remote = await scratchDir("bento-worktree-remote-");
+  await run("git", ["-C", remote, "init", "-q", "--bare", "-b", "main"]);
+  await run("git", ["-C", repo, "remote", "add", "origin", remote]);
+  await run("git", ["-C", repo, "push", "-q", "origin", "main"]);
+
+  const data = await scratchDir("bento-worktree-data-");
+  const manager = new WorktreeManager(data);
+
+  // A branch the remote has never heard of, made here.
+  await manager.ensureAll([{ name: "app", localPath: repo, defaultBranch: "main" }], "swarm-1", "swarm/demo");
+  await writeFile(path.join(manager.worktreePath("swarm-1", "app"), "landed.txt"), "landed\n");
+  await run("git", ["-C", manager.worktreePath("swarm-1", "app"), "add", "-A"]);
+  await run(
+    "git",
+    ["-C", manager.worktreePath("swarm-1", "app"), "-c", "user.email=t@t.test", "-c", "user.name=t", "commit", "-qm", "landed"],
+  );
+
+  // And a second workspace branched off it, which is a swarm's worker.
+  const [prepared] = await manager.ensureAll(
+    [{ name: "app", localPath: repo, defaultBranch: "main", startFromBranch: "swarm/demo" }],
+    "swarm-1-aaaaaaaa",
+    "swarm/demo-aaaaaaaa",
+  );
+  const { stdout: head } = await run("git", ["-C", prepared!.worktreePath, "rev-parse", "--abbrev-ref", "HEAD"]);
+  assert.equal(head.trim(), "swarm/demo-aaaaaaaa");
+  const { stdout: landed } = await run("git", ["-C", prepared!.worktreePath, "show", "HEAD:landed.txt"]);
+  assert.equal(landed.trim(), "landed", "it started from the branch, with what had landed on it");
 });
