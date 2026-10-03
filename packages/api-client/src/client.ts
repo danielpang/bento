@@ -666,8 +666,9 @@ export class BentoClient {
   /**
    * The project's own settings: its name, whether an arriving Linear
    * issue starts its pipeline, and which sandbox provider new cards
-   * use. Only what is passed is written. Null sandboxProvider resets
-   * the project to the deployment default.
+   * use. Only what is passed is written. "auto" sandboxProvider is a
+   * Fly sprite with Modal behind it; null resets the project to the
+   * deployment default.
    */
   updateProject(
     projectId: string,

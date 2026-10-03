@@ -55,7 +55,7 @@ import { runRepositorySetup } from "./repo-setup.js";
 import { captureRunArtifacts } from "./capture-artifacts.js";
 import { provisionWorkspace } from "./sandbox-provision.js";
 export { sandboxProvisionConflict } from "./sandbox-provision.js";
-import { driverForRun, driverForSandbox, SandboxDriverUnavailable } from "./sandbox-driver.js";
+import { driversForRun, driverForSandbox, SandboxDriverUnavailable, type ProvisionDrivers } from "./sandbox-driver.js";
 import { evaluateFeatureGate } from "./gate-evaluator.js";
 import { buildResolverPrompt, buildStagePrompt, repositoryInstructions } from "./prompt.js";
 import {
@@ -159,11 +159,14 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   emitBoard("starting");
 
   // A live sandbox keeps the driver that created it. A card or swarm
-  // with none follows the project's provider, which is the deployment
-  // default until a beta tester sets one.
+  // with none follows the project's provider: "auto" for a new
+  // project, which is a sprite with Modal behind it, a provider a
+  // beta tester named, or the deployment default.
   let driver: SandboxDriver;
+  let chosenDrivers: ProvisionDrivers;
   try {
-    driver = await driverForRun(ctx.db, ctx, subject, run.startedBy);
+    chosenDrivers = await driversForRun(ctx.db, ctx, subject, run.startedBy);
+    driver = chosenDrivers.driver;
   } catch (err) {
     console.error(`sandbox provisioning failed for run ${runId}:`, err);
     await finishRun(ctx, runId, { ok: false, error: `sandbox provisioning failed: ${describeSandboxError(err)}` }, null);
@@ -307,8 +310,11 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   // MCP attach after it read this.
   const restrictNetwork = await organizationRestrictsNetwork(ctx, subject.organizationId);
   try {
+    // The allowlist is built when Modal may make this machine, which
+    // on "auto" includes a Modal fallback behind a sprite that cannot
+    // honor the restriction and so is never asked.
     const modalNetwork =
-      restrictNetwork && driver.provider === "modal"
+      restrictNetwork && [driver, ...chosenDrivers.fallbacks].some((d) => d.provider === "modal")
         ? await modalNetworkForProject(ctx, project.id, subject.organizationId, profile.cli, profile.model)
         : {};
     // The workspace, from the function both boards provision through.
@@ -316,6 +322,9 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     // live in that function, so a swarm and a card take the same path.
     const workspace = await provisionWorkspace(ctx, {
       driver,
+      fallbackDrivers: chosenDrivers.fallbacks,
+      selection: chosenDrivers.selection,
+      startedBy: run.startedBy,
       projectId: project.id,
       organizationId: subject.organizationId,
       workspaceKey: subject.workspaceKey,
@@ -386,6 +395,10 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     });
     handle = workspace.handle;
     prepared = workspace.prepared;
+    // The driver that made the machine, which on "auto" is the fallback
+    // when the first choice could not. Everything from here (exec,
+    // attach, destroy) goes through the owner of the handle.
+    driver = workspace.driver;
     // A swarm records the branch and the machine it just got, so
     // stopping it can find both without rebuilding their names.
     if (subject.kind === "swarm" && workspace.sandboxRow) {

@@ -9,8 +9,10 @@ export interface Project {
   /** Whether an issue arriving from Linear starts this project's pipeline. */
   autoStartPipeline: boolean;
   /**
-   * Remote sandbox provider for new cards. Null means the deployment
-   * default. Cards that already have a sandbox keep it.
+   * Sandbox provider for new cards. "auto" tries a Fly sprite and
+   * falls back to Modal, and is what a new project starts on. Null
+   * means the deployment default. Cards that already have a sandbox
+   * keep it.
    */
   sandboxProvider: SandboxProvider | null;
   /** Whether a card created in this project files an issue in Linear. */
@@ -31,8 +33,9 @@ export interface Project {
  * The sandbox provider a project would use for a new card.
  *
  * `current` is the stored column. Null means the deployment default.
- * `available` is the providers this server can run. `canManage` is
- * false for a member who can see the project but cannot change it.
+ * `available` is "auto" and then the providers this server can run,
+ * in the order "auto" tries them. `canManage` is false for a member
+ * who can see the project but cannot change it.
  */
 export interface SandboxProviderSetting {
   current: SandboxProvider | null;

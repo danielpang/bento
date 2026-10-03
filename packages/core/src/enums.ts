@@ -38,7 +38,14 @@ export function isSpendRun(run: { status: string; role?: string | null }): boole
   return (TERMINAL_RUN_STATUSES as readonly string[]).includes(run.status) && run.role !== "judge";
 }
 
-export const sandboxProvider = z.enum(["docker", "sprite", "modal"]);
+/**
+ * What a project asks for its sandboxes. "auto" is the server's own
+ * order: a Fly sprite, then a Modal sandbox when the sprite cannot be
+ * provisioned. The named providers pin a project to one of them. A
+ * sandbox row never carries "auto": by the time a machine exists, one
+ * provider made it.
+ */
+export const sandboxProvider = z.enum(["auto", "docker", "sprite", "modal"]);
 export type SandboxProvider = z.infer<typeof sandboxProvider>;
 
 export const sandboxStatus = z.enum(["provisioning", "ready", "busy", "hibernated", "destroyed"]);

@@ -316,6 +316,13 @@
       "when": 1790800000000,
       "tag": "0044_project_sandbox_provider",
       "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1790900000000,
+      "tag": "0045_project_sandbox_provider_auto",
+      "breakpoints": true
     }
   ]
 }
