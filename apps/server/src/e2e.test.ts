@@ -4505,6 +4505,7 @@ test("attaching a file is refused when this server has no driver for the sandbox
   const feature = await createFeature(project.id, "Attach");
   const profile = await fakeProfile("attach-missing-driver");
   await ctx.db.insert(agentRuns).values({
+    type: "pipeline",
     featureId: feature.id,
     stageId: stages[0]!.id,
     agentProfileId: profile.id,
@@ -4557,6 +4558,7 @@ test("rollback names the driver that was asked, and a missing driver is not unsu
   const [localRun] = await ctx.db
     .insert(agentRuns)
     .values({
+      type: "pipeline",
       featureId: feature.id,
       stageId: stages[0]!.id,
       agentProfileId: profile.id,
@@ -4587,6 +4589,7 @@ test("rollback names the driver that was asked, and a missing driver is not unsu
   const [spriteRun] = await ctx.db
     .insert(agentRuns)
     .values({
+      type: "pipeline",
       featureId: spriteFeature.id,
       stageId: stages[0]!.id,
       agentProfileId: profile.id,
