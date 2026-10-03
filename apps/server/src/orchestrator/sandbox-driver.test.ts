@@ -82,13 +82,13 @@ test("modal is selectable only when both token vars are set", () => {
   assert.equal(driverForProject(both).provider, "docker");
 });
 
-test("migration 0029 adds a nullable project sandbox provider", () => {
-  const sql = readFileSync(new URL("../../../../packages/db/migrations/0029_project_sandbox_provider.sql", import.meta.url), "utf8");
+test("migration 0044 adds a nullable project sandbox provider", () => {
+  const sql = readFileSync(new URL("../../../../packages/db/migrations/0044_project_sandbox_provider.sql", import.meta.url), "utf8");
   assert.match(sql, /ADD COLUMN sandbox_provider text/);
   assert.match(sql, /CHECK \(sandbox_provider IN \('sprite', 'modal', 'docker'\)\)/);
   assert.doesNotMatch(sql, /NOT NULL/);
   const journal = readFileSync(new URL("../../../../packages/db/migrations/meta/_journal.json", import.meta.url), "utf8");
-  assert.match(journal, /"tag": "0029_project_sandbox_provider"/);
+  assert.match(journal, /"tag": "0044_project_sandbox_provider"/);
 });
 
 test("driverForProject returns the default even when sprite is also registered", () => {
