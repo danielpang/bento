@@ -40,7 +40,7 @@ import {
   swarmTasks,
   swarms,
 } from "@bento/db";
-import { collectExec, isExecTimeout, LineChannel, repositoryPathIn, type PreparedRepository, type SandboxHandle } from "@bento/sandbox";
+import { collectExec, isExecTimeout, LineChannel, repositoryPathIn, sandboxErrorKind, type PreparedRepository, type SandboxHandle } from "@bento/sandbox";
 import { captureJobErrors } from "../analytics.js";
 import type { AppContext } from "../context.js";
 import { unbilledReason } from "../unbilled-reasons.js";
@@ -376,6 +376,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       run_id: runId,
       ...(subject.kind === "pipeline" ? { feature_id: subject.feature.id } : { swarm_id: subject.swarm.id }),
       source: "sandbox_provision",
+      error_kind: sandboxErrorKind(err),
     });
     await finishRun(ctx, runId, { ok: false, error: `sandbox provisioning failed: ${describeSandboxError(err)}` }, null);
     emitBoard("failed");

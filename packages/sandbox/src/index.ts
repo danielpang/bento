@@ -1,7 +1,13 @@
 export * from "./driver.js";
 export { DockerDriver } from "./docker.js";
 export { LocalProcessDriver } from "./local-process.js";
-export { SpriteDriver, type SpriteDriverOptions, type SpriteLookupRetry } from "./sprite.js";
+export {
+  SpriteDriver,
+  sandboxErrorKind,
+  type SandboxErrorKind,
+  type SpriteDriverOptions,
+  type SpriteLookupRetry,
+} from "./sprite.js";
 export {
   WorktreeManager,
   repositoryPathIn,
