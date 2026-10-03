@@ -1,5 +1,6 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { authClient, signIn, signUp } from "../auth-client.js";
+import { oauthFailureMessage, withoutOAuthError } from "../oauth-return.js";
 import { BrandLockup } from "./BrandLockup.js";
 import { desktop } from "../desktop.js";
 import { GitHubIcon, GoogleIcon } from "./ProviderIcons.js";
@@ -57,11 +58,19 @@ export function SignIn({
   note?: string;
 }) {
   const social = useSocialProviders(supplied);
+  useEffect(() => {
+    const next = withoutOAuthError(window.location.search);
+    if (next === null) return;
+    const url = `${window.location.pathname}${next ? `?${next}` : ""}${window.location.hash}`;
+    window.history.replaceState(null, "", url);
+  }, []);
   const [mode, setMode] = useState<"in" | "up">(initialMode);
   const [email, setEmail] = useState(initialEmail);
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
-  const [error, setError] = useState("");
+  const [error, setError] = useState(() => (typeof window === "undefined" ? "" : oauthFailureMessage(window.location.search)));
+  /** Blocks a second click before React re-renders the disabled button. Two starts overwrite the one OAuth state cookie. */
+  const socialStart = useRef(false);
   const [busy, setBusy] = useState(false);
   /** Set once an address needs confirming, which is not an error to fix but a step to finish. */
   const [pendingEmail, setPendingEmail] = useState("");
@@ -109,6 +118,28 @@ export function SignIn({
       setNotice("Could not send it just now. Try again in a moment.");
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function startSocial(provider: "github" | "google") {
+    // The state cookie holds one attempt. A second click before the
+    // redirect replaces it, and the first GitHub tab comes back as a
+    // mismatch. The ref closes that gap: setState has not re-rendered yet.
+    if (socialStart.current) return;
+    socialStart.current = true;
+    setBusy(true);
+    setError("");
+    const result = await signIn.social({
+      provider,
+      callbackURL,
+      // A parsed failure (the cookie did not match) returns here instead
+      // of the generic error page, so an invitation stays in the address.
+      errorCallbackURL: callbackURL,
+    });
+    if (result.error) {
+      socialStart.current = false;
+      setBusy(false);
+      setError(result.error.message || "Could not start sign in. Try again.");
     }
   }
 
@@ -232,13 +263,13 @@ export function SignIn({
           <>
             <div className="auth-social">
               {social.github && (
-                <button className="btn btn-block" onClick={() => signIn.social({ provider: "github", callbackURL })}>
+                <button className="btn btn-block" disabled={busy} onClick={() => void startSocial("github")}>
                   <GitHubIcon />
                   Continue with GitHub
                 </button>
               )}
               {social.google && (
-                <button className="btn btn-block" onClick={() => signIn.social({ provider: "google", callbackURL })}>
+                <button className="btn btn-block" disabled={busy} onClick={() => void startSocial("google")}>
                   <GoogleIcon />
                   Continue with Google
                 </button>

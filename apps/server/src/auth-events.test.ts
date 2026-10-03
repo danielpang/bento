@@ -143,15 +143,33 @@ test("an OAuth callback that redirected with an error is a sign in failure, unde
     outcome: "failed",
     properties: { method: "github", route: "/callback/:id", status: 302, code: "state_mismatch" },
   });
-  const { analytics, exceptions } = recordingAnalytics();
+  const { analytics, events, exceptions } = recordingAnalytics();
   reportAuthEvent(analytics, event!);
-  assert.equal(exceptions.length, 1, "a state that would not verify is a fault worth an issue");
-  assert.equal(exceptions[0].properties?.$exception_fingerprint, "sign in failed:github:state_mismatch");
+  assert.equal(events[0]?.event, "sign in failed");
+  assert.equal(exceptions.length, 0, "a state the browser did not bring back is one person, not an outage");
+
+  // The callback remaps a cookie mismatch onto the same code. A future
+  // library that stops remapping it should stay off the issue list too.
+  const security = describeAuthEvent(hook({ path: "/callback/:id", params: { id: "github" }, returned: redirected("/api/auth/error?error=state_security_mismatch") }));
+  const securityReport = recordingAnalytics();
+  reportAuthEvent(securityReport.analytics, security!);
+  assert.equal(securityReport.exceptions.length, 0);
+
+  // A state cookie that will not decrypt means the secret changed under
+  // an in-flight sign in. That is an operator fault.
+  const invalid = describeAuthEvent(hook({ path: "/callback/:id", params: { id: "github" }, returned: redirected("/api/auth/error?error=state_invalid") }));
+  const invalidReport = recordingAnalytics();
+  reportAuthEvent(invalidReport.analytics, invalid!);
+  assert.equal(invalidReport.exceptions.length, 1);
+  assert.equal(invalidReport.exceptions[0].properties?.$exception_fingerprint, "sign in failed:github:state_invalid");
 
   // A relative error page, and one that already carried an error of its own: the last one is better-auth's.
   const relative = describeAuthEvent(hook({ path: "/callback/:id", params: { id: "google" }, returned: redirected("/sign-in?error=stale&error=invalid_code") }));
   assert.equal(relative?.properties.code, "invalid_code");
   assert.equal(relative?.properties.method, "google");
+  const codeReport = recordingAnalytics();
+  reportAuthEvent(codeReport.analytics, relative!);
+  assert.equal(codeReport.exceptions.length, 1, "a rejected authorization code is the provider or the app credentials");
 
   // Cancelling at the provider is the person's choice, not a fault.
   const declined = describeAuthEvent(hook({ path: "/callback/:id", params: { id: "github" }, returned: redirected("/?error=access_denied") }));
