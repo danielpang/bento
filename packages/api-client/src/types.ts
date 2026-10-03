@@ -1,4 +1,4 @@
-import type { AgentCli, FeatureStatus, GateCriteria, RunStatus } from "@bento/core";
+import type { AgentCli, FeatureStatus, GateCriteria, RunStatus, SandboxProvider } from "@bento/core";
 
 export interface Project {
   id: string;
@@ -8,6 +8,11 @@ export interface Project {
   defaultBranch: string;
   /** Whether an issue arriving from Linear starts this project's pipeline. */
   autoStartPipeline: boolean;
+  /**
+   * Remote sandbox provider for new cards. Null means the deployment
+   * default. Cards that already have a sandbox keep it.
+   */
+  sandboxProvider: SandboxProvider | null;
   /** Whether a card created in this project files an issue in Linear. */
   linearCreateIssues: boolean;
   /**
@@ -20,6 +25,20 @@ export interface Project {
   linearTeamName: string | null;
   linearProjectId: string | null;
   linearProjectName: string | null;
+}
+
+/**
+ * The sandbox provider a project would use for a new card.
+ *
+ * `current` is the stored column. Null means the deployment default.
+ * `available` is the providers this server can run. `canManage` is
+ * false for a member who can see the project but cannot change it.
+ */
+export interface SandboxProviderSetting {
+  current: SandboxProvider | null;
+  default: string;
+  available: string[];
+  canManage: boolean;
 }
 
 export interface Repository {

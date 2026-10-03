@@ -52,8 +52,8 @@ export const projects = pgTable("projects", {
   executor: text("executor", { enum: ["server", "runner"] }).notNull().default("server"),
   /**
    * Remote sandbox provider this project asked for. Null means the
-   * deployment default. Stored and returned with the project. No route
-   * accepts a value for it yet.
+   * deployment default. Stored and returned with the project. A beta
+   * tester who is an owner or admin sets it; null clears it.
    */
   sandboxProvider: text("sandbox_provider", { enum: ["sprite", "modal", "docker"] }),
   /**

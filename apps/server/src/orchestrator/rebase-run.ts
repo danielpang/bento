@@ -78,7 +78,7 @@ export async function startFeatureFollowUpRun(
   // Clone drivers clone the base branch themselves.
   let driver: SandboxDriver;
   try {
-    driver = await driverForProvision(db, ctx.drivers, feature.id);
+    driver = await driverForProvision(db, ctx, feature.id, startedBy);
   } catch (err) {
     return {
       ok: false,

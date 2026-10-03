@@ -425,7 +425,7 @@ export function defaultWorkerIsolation(mode: "local" | "multi", workspace: "host
 async function swarmCloneWorkspace(
   ctx: AppContext,
   c: Context,
-  swarm: { sandboxId: string | null },
+  swarm: { sandboxId: string | null; projectId: string },
 ): Promise<boolean> {
   if (swarm.sandboxId) {
     const [row] = await db(c, ctx)
@@ -435,7 +435,17 @@ async function swarmCloneWorkspace(
       .limit(1);
     if (row && row.status !== "destroyed") return driverForSandbox(ctx.drivers, row).workspace === "clone";
   }
-  return driverForProject(ctx.drivers).workspace === "clone";
+  // No machine yet. A project set to a clone driver (Sprite or Modal)
+  // still lands inside the sandbox. A project left on the default
+  // keeps that driver's workspace, which is the host on Docker and
+  // local-process.
+  const [project] = await db(c, ctx)
+    .select({ sandboxProvider: projects.sandboxProvider, ownerId: projects.ownerId })
+    .from(projects)
+    .where(eq(projects.id, swarm.projectId))
+    .limit(1);
+  if (!project) return ctx.drivers.default.workspace === "clone";
+  return (await driverForProject(ctx, project, actor(c))).workspace === "clone";
 }
 
 /**
@@ -606,7 +616,7 @@ export function swarmRoutes(ctx: AppContext) {
            */
           workerIsolation: defaultWorkerIsolation(
             ctx.env.BENTO_MODE === "multi" ? "multi" : "local",
-            driverForProject(ctx.drivers).workspace,
+            (await driverForProject(ctx, project, actor(c))).workspace,
           ),
           judgeProfileId: body.judgeProfileId ?? null,
           completionCommand: body.completionCommand ?? null,
