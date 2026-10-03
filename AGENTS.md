@@ -126,6 +126,28 @@ So when touching this: an adapter with `sessionRecovery` must give
 before it reads the stream, not after. The test is "a restart recovers
 what the agent said while no server was attached" in `e2e.test.ts`.
 
+## A new project is on "auto", and only "auto" ever falls back
+
+`projects.sandbox_provider` defaults to `auto`: a Fly sprite first,
+then a Modal sandbox when the sprite cannot be provisioned, among
+whichever of those two the process has credentials for, and the
+deployment default when it has neither. Null is the deployment default
+with no fallback, which is what projects from before `auto` hold, and
+a named provider pins the project to it. The order lives in one place,
+`driversForProject` in `apps/server/src/orchestrator/sandbox-driver.ts`,
+which answers `{ driver, fallbacks, selection }`; `provisionWorkspace`
+asks the drivers in that order and returns the one that made the
+machine, and the executor uses that driver from then on. An existing
+sandbox row keeps its driver with no fallback, so a hibernated Modal
+machine resumes on Modal and a swarm never splits across providers.
+
+Every provision emits `sandbox provisioned` to PostHog with the
+`provider` that answered, the `selection` that chose it, and
+`fell_back_from` when Fly did not; a sprite failure that Modal covered
+also goes to error tracking as `sandbox_provision_fallback`. A new
+place that provisions must go through `provisionWorkspace` so it is
+counted.
+
 ## Starting a run goes through startRunIfIdle, never a bare insert
 
 One card, one agent. Every door that starts a run (the runs route,

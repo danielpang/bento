@@ -33,7 +33,7 @@ import {
   visibleProjectFilter,
 } from "../access.js";
 import { getBetaTester } from "../feature-flags.js";
-import { driverForProject } from "../orchestrator/sandbox-driver.js";
+import { autoDrivers, driverForProject } from "../orchestrator/sandbox-driver.js";
 import { githubForOrganization } from "../github.js";
 import { branchExists, detectDefaultBranch, githubRemoteOf, linkGitHubRemotes } from "../orchestrator/repo-remote.js";
 import { ACTIVE_RUN_STATUSES } from "../orchestrator/start-run.js";
@@ -844,7 +844,10 @@ export function projectRoutes(ctx: AppContext) {
       return c.json({
         current: project.sandboxProvider,
         default: ctx.drivers.default.provider,
-        available: ctx.drivers.selectable(),
+        // "auto" is always on offer: it is the sprite-then-Modal order
+        // among whatever this server runs, and the default when it
+        // runs neither, so there is no server it cannot name.
+        available: ["auto", ...ctx.drivers.selectable()],
         canManage: await canManageSandboxProvider(ctx, c, project),
       });
     })
@@ -874,16 +877,28 @@ export function projectRoutes(ctx: AppContext) {
           if (ctx.env.BENTO_MODE === "multi" && !(await canManageSandboxProvider(ctx, c, project))) {
             return c.json({ error: "only organization owners and admins can change the sandbox provider" }, 403);
           }
-          if (body.sandboxProvider !== null && !ctx.drivers.selectable().includes(body.sandboxProvider)) {
+          if (
+            body.sandboxProvider !== null
+            && body.sandboxProvider !== "auto"
+            && !ctx.drivers.selectable().includes(body.sandboxProvider)
+          ) {
             return c.json({ error: "that sandbox provider is not available on this server" }, 400);
           }
+          // Every driver the choice could land on. "auto" is its order,
+          // or the default when this server runs none of it, and it
+          // honors a locked network as long as one of them can: the
+          // ones that cannot are never asked.
           const chosen = body.sandboxProvider === null
-            ? ctx.drivers.default
-            : ctx.drivers.get(body.sandboxProvider);
-          if (!chosen) return c.json({ error: "that sandbox provider is not available on this server" }, 400);
+            ? [ctx.drivers.default]
+            : body.sandboxProvider === "auto"
+              ? (autoDrivers(ctx.drivers).length > 0 ? autoDrivers(ctx.drivers) : [ctx.drivers.default])
+              : [ctx.drivers.get(body.sandboxProvider)].filter((d) => d !== undefined);
+          if (chosen.length === 0) {
+            return c.json({ error: "that sandbox provider is not available on this server" }, 400);
+          }
           if (
             (await organizationRestrictsNetwork(ctx, c, project.organizationId))
-            && chosen.supportsRestrictedNetwork !== true
+            && !chosen.some((d) => d.supportsRestrictedNetwork === true)
           ) {
             return c.json(
               { error: "This team restricts outbound traffic, and this provider cannot honor that." },

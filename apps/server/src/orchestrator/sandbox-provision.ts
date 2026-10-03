@@ -6,6 +6,7 @@ import type { AgentBinary } from "@bento/sandbox";
 import { githubConnectionFor } from "../github.js";
 import { duplicateRepositoryLocation } from "../repository-identity.js";
 import { createRepositorySeed } from "./publish.js";
+import { reportSandboxProvisioned, type SandboxSelection } from "./sandbox-metrics.js";
 import { isolationRefusal, type WorkerIsolation } from "./swarm/sandbox.js";
 
 /**
@@ -115,12 +116,39 @@ export interface ProvisionWorkspaceInput {
    * live sandbox row, or from the project when there is no machine yet.
    */
   driver: SandboxDriver;
+  /**
+   * Drivers to try in turn when `driver` cannot provision, in order.
+   * A project on "auto" passes Modal behind the sprite; everything
+   * else passes none, so a named provider fails plainly rather than
+   * landing somewhere the project did not ask for. Only drivers whose
+   * workspace shape matches `driver` are tried: the worktrees and seed
+   * bundles above are prepared once, for that shape.
+   */
+  fallbackDrivers?: SandboxDriver[];
+  /** Why `driver` was chosen, for the metric. Default when absent. */
+  selection?: SandboxSelection;
+  /** The person who started the run, for the metric. */
+  startedBy?: string | null;
 }
 
 export interface ProvisionedWorkspace {
   handle: SandboxHandle;
   prepared: PreparedRepository[];
   sandboxRow: typeof sandboxes.$inferSelect | undefined;
+  /**
+   * The driver that made the machine. The caller's `driver` when that
+   * one answered, else the fallback that did, and the caller must use
+   * this one from here on: exec, attach and destroy all go through
+   * the driver that owns the handle.
+   */
+  driver: SandboxDriver;
+}
+
+/** A provider's name as a transcript line says it. */
+function providerLabel(provider: string): string {
+  if (provider === "sprite") return "Fly Sprites";
+  if (provider === "modal") return "Modal";
+  return provider;
 }
 
 export async function provisionWorkspace(
@@ -129,6 +157,16 @@ export async function provisionWorkspace(
 ): Promise<ProvisionedWorkspace> {
   const { repoRows, branch, workspaceKey, driver } = input;
   const publisher = await githubConnectionFor(ctx, input.organizationId);
+  /**
+   * Every driver that may make this machine, first choice first. A
+   * fallback of another workspace shape is left out rather than tried:
+   * the checkout below is prepared for one shape, and a host driver
+   * handed clone-shaped input would mount nothing.
+   */
+  const candidates = [
+    driver,
+    ...(input.fallbackDrivers ?? []).filter((d) => d.workspace === driver.workspace && d !== driver),
+  ];
 
   /**
    * Two repositories pointing at one checkout would have their
@@ -183,8 +221,8 @@ export async function provisionWorkspace(
    * could ever commit. Mounted at the same absolute path the .git file
    * names, writable because committing writes.
    */
-  const repoGitMounts =
-    driver.provider === "docker"
+  const repoGitMounts = (candidate: SandboxDriver) =>
+    candidate.provider === "docker"
       ? repoRows.map((r) => ({
           hostPath: `${r.localPath.replace(/\/$/, "")}/.git`,
           containerPath: `${r.localPath.replace(/\/$/, "")}/.git`,
@@ -215,19 +253,21 @@ export async function provisionWorkspace(
   /**
    * An organization that locked its agents down gets a sandbox with no
    * route out, or no sandbox at all. Falling back to open egress would
-   * turn a security setting into a decoration, so this fails with the
-   * reason instead.
+   * turn a security setting into a decoration, so a driver that cannot
+   * honor it is not asked, and when none of them can this fails with
+   * the reason instead. On "auto" that is what puts a locked team's
+   * runs straight on Modal: a sprite has no restricted network.
    */
-  if (input.restrictNetwork && !driver.supportsRestrictedNetwork) {
+  const usable = input.restrictNetwork ? candidates.filter((d) => d.supportsRestrictedNetwork) : candidates;
+  if (usable.length === 0) {
     throw new Error(
       "This organization requires agents to run without network access, and this deployment has no restricted network configured. Set BENTO_SANDBOX_RESTRICTED_NETWORK, or turn the setting off under Team.",
     );
   }
 
-  const restore = driver.provider === "modal" ? await hibernatedRestore(ctx, input.owner) : undefined;
-  let handle: SandboxHandle | undefined;
-  try {
-    handle = await driver.provision({
+  const provisionWith = async (candidate: SandboxDriver): Promise<SandboxHandle> => {
+    const restore = candidate.provider === "modal" ? await hibernatedRestore(ctx, input.owner) : undefined;
+    return candidate.provision({
       projectId: input.projectId,
       workspaceKey,
       ...(input.organizationId ? { organizationId: input.organizationId } : {}),
@@ -247,11 +287,58 @@ export async function provisionWorkspace(
       })),
       // Local mode can share the user's own agent logins and git identity.
       ...(input.agentBinaries ? { agentBinaries: input.agentBinaries } : {}),
-      mounts: [...repoGitMounts, ...input.authMounts],
+      mounts: [...repoGitMounts(candidate), ...input.authMounts],
       image: ctx.env.BENTO_SANDBOX_IMAGE,
       onProgress: input.say,
     });
+  };
 
+  /**
+   * First driver that answers wins. A driver that throws is cleaned up
+   * after (a Modal machine it leaked is destroyed), and the next one
+   * is asked; the last one's error is the run's. The move is said in
+   * the transcript and counted in error tracking, because a sprite
+   * that keeps failing is something to look at even while every run
+   * still lands on Modal.
+   */
+  let chosen: SandboxDriver = usable[0]!;
+  let handle: SandboxHandle | undefined;
+  let fellBackFrom: string | null = null;
+  let attempts = 0;
+  for (const candidate of usable) {
+    attempts += 1;
+    try {
+      handle = await provisionWith(candidate);
+      chosen = candidate;
+      break;
+    } catch (err) {
+      await cleanupFailedAttempt(ctx, candidate, err, input.owner);
+      const next = usable[attempts];
+      if (!next) throw err;
+      fellBackFrom ??= candidate.provider;
+      const reason = err instanceof ModalProvisionLeak ? (err.cause ?? err) : err;
+      console.warn(
+        `${candidate.provider} could not provision a sandbox for ${workspaceKey}; trying ${next.provider}:`,
+        reason,
+      );
+      ctx.analytics?.captureException(reason, input.startedBy ?? null, input.organizationId, {
+        source: "sandbox_provision_fallback",
+        provider: candidate.provider,
+        next_provider: next.provider,
+        project_id: input.projectId,
+        ...("featureId" in input.owner
+          ? { feature_id: input.owner.featureId }
+          : { swarm_id: input.owner.swarmId, swarm_task_id: input.owner.swarmTaskId ?? null }),
+      });
+      await input.say(
+        `${providerLabel(candidate.provider)} could not provide a sandbox (${reasonSentence(reason)}). Trying ${providerLabel(next.provider)}.`,
+      );
+    }
+  }
+  if (!handle) throw new Error("no sandbox driver provisioned a machine");
+  const driverUsed = chosen;
+
+  try {
     /**
      * An upsert, not insert-or-ignore. The machine was just provisioned,
      * so whatever the row said before, it is real and awake now.
@@ -277,7 +364,7 @@ export async function provisionWorkspace(
         // from the driver at the moment it was created, so changing the
         // deployment's default size later cannot reprice hours already
         // spent. Absent on the local drivers, which bill nobody.
-        ...(driver.sandboxSize ? { size: driver.sandboxSize } : {}),
+        ...(driverUsed.sandboxSize ? { size: driverUsed.sandboxSize } : {}),
       })
       .onConflictDoUpdate({
         target: sandboxes.externalId,
@@ -285,52 +372,87 @@ export async function provisionWorkspace(
           ...input.owner,
           provider: persistedSandboxProvider(handle.provider),
           workdir: handle.workdir,
-          ...(driver.sandboxSize ? { size: driver.sandboxSize } : {}),
+          ...(driverUsed.sandboxSize ? { size: driverUsed.sandboxSize } : {}),
           ...(handle.recordedImageRef !== undefined ? { recordedImageRef: handle.recordedImageRef } : {}),
         }),
       })
       .returning();
 
-    return { handle, prepared, sandboxRow };
+    reportSandboxProvisioned(ctx.analytics, {
+      provider: handle.provider,
+      selection: input.selection ?? "default",
+      fellBackFrom,
+      attempts,
+      projectId: input.projectId,
+      organizationId: input.organizationId,
+      userId: input.startedBy ?? null,
+      ...("featureId" in input.owner
+        ? { featureId: input.owner.featureId }
+        : { swarmId: input.owner.swarmId, swarmTaskId: input.owner.swarmTaskId ?? null }),
+    });
+
+    return { handle, prepared, sandboxRow, driver: driverUsed };
   } catch (err) {
     // A machine this attempt created, and then failed to record, would
-    // bill with nobody looking. A hibernated row would also hide it
-    // from the sweep, so that row stops counting as live.
-    if (handle?.createdSandbox) {
-      await driver
+    // bill with nobody looking.
+    if (handle.createdSandbox) {
+      const created = handle;
+      await driverUsed
         .destroy({
-          externalId: handle.externalId,
-          provider: handle.provider,
-          workdir: handle.workdir,
+          externalId: created.externalId,
+          provider: created.provider,
+          workdir: created.workdir,
         })
         .catch((destroyErr) => {
-          console.warn(`could not destroy sandbox ${handle?.externalId} after a failed provision:`, destroyErr);
+          console.warn(`could not destroy sandbox ${created.externalId} after a failed provision:`, destroyErr);
         });
-    } else if (err instanceof ModalProvisionLeak) {
-      const ownerWhere =
-        "featureId" in input.owner
-          ? eq(sandboxes.featureId, input.owner.featureId)
-          : and(
-              eq(sandboxes.swarmId, input.owner.swarmId),
-              input.owner.swarmTaskId
-                ? eq(sandboxes.swarmTaskId, input.owner.swarmTaskId)
-                : isNull(sandboxes.swarmTaskId),
-            );
-      await ctx.db
-        .update(sandboxes)
-        .set({ status: "destroyed" })
-        .where(and(ownerWhere, eq(sandboxes.status, "hibernated")))
-        .catch(() => {});
-      await driver
-        .destroy({
-          externalId: err.externalId,
-          provider: "modal",
-          workdir: "/workspace",
-        })
-        .catch(() => {});
     }
     throw err;
   }
+}
+
+/** The error a transcript line can carry: its sentence, on one line. */
+function reasonSentence(err: unknown): string {
+  const text = err instanceof Error ? err.message : String(err);
+  const line = text.split("\n").find((l) => l.trim() !== "")?.trim() ?? "unknown error";
+  return line.length > 200 ? `${line.slice(0, 197)}...` : line;
+}
+
+/**
+ * What a driver that threw out of provision leaves behind.
+ *
+ * Only Modal says: a machine it made and then lost track of comes
+ * back as ModalProvisionLeak, and is destroyed here so it does not
+ * bill with nobody looking. A hibernated row for this owner would
+ * also hide it from the sweep, so that row stops counting as live.
+ * Every other driver either made nothing or cleaned up itself.
+ */
+async function cleanupFailedAttempt(
+  ctx: AppContext,
+  driver: SandboxDriver,
+  err: unknown,
+  owner: { featureId: string } | { swarmId: string; swarmTaskId?: string | null },
+): Promise<void> {
+  if (!(err instanceof ModalProvisionLeak)) return;
+  const ownerWhere =
+    "featureId" in owner
+      ? eq(sandboxes.featureId, owner.featureId)
+      : and(
+          eq(sandboxes.swarmId, owner.swarmId),
+          owner.swarmTaskId ? eq(sandboxes.swarmTaskId, owner.swarmTaskId) : isNull(sandboxes.swarmTaskId),
+        );
+  await ctx.db
+    .update(sandboxes)
+    .set({ status: "destroyed" })
+    .where(and(ownerWhere, eq(sandboxes.status, "hibernated")))
+    .catch(() => {});
+  await driver
+    .destroy({
+      externalId: err.externalId,
+      provider: "modal",
+      workdir: "/workspace",
+    })
+    .catch(() => {});
 }
 
 /**

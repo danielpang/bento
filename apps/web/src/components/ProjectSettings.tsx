@@ -83,22 +83,40 @@ export function ProjectSettings({
 }
 
 const SANDBOX_PROVIDER_HELP =
-  "Applies to new cards. Cards that already have a sandbox keep it until they finish.";
+  "Applies to new cards. Cards that already have a sandbox keep it until they finish. Auto starts on Fly Sprites and moves to Modal when Fly cannot provide a machine.";
 
-function sandboxProviderLabel(provider: string): string {
-  if (provider === "sprite") return "Fly Sprites (default)";
+/** The order Auto tries providers in, as the server resolves it. */
+const AUTO_ORDER = ["sprite", "modal"];
+
+function providerName(provider: string): string {
+  if (provider === "sprite") return "Fly Sprites";
   if (provider === "modal") return "Modal";
   return provider;
 }
 
+/**
+ * What a choice does on this server. Auto names the providers it
+ * would try here, in order, so a server with only one of them does
+ * not promise a fallback it cannot make.
+ */
+function sandboxProviderLabel(provider: string, setting: SandboxProviderSetting): string {
+  if (provider === "auto") {
+    const order = AUTO_ORDER.filter((p) => setting.available.includes(p)).map(providerName);
+    return order.length > 0 ? `Auto (${order.join(", then ")})` : "Auto (deployment default)";
+  }
+  const name = providerName(provider);
+  return provider === setting.default ? `${name} (deployment default)` : name;
+}
+
 function isSandboxProvider(value: string): value is SandboxProvider {
-  return value === "docker" || value === "sprite" || value === "modal";
+  return value === "auto" || value === "docker" || value === "sprite" || value === "modal";
 }
 
 /**
- * Which sandbox new cards on this project are created on. Hidden when
- * the server says this person is not a beta tester. Disabled when they
- * can see the project but are not an owner or admin.
+ * Which sandbox new cards on this project are created on. A new
+ * project is on Auto; a named provider pins it. Hidden when the server
+ * says this person is not a beta tester. Disabled when they can see
+ * the project but are not an owner or admin.
  */
 function SandboxProviderCard({
   client,
@@ -170,7 +188,7 @@ function SandboxProviderCard({
           {!defaultIsListed && <option value="">Deployment default</option>}
           {choice.available.map((provider) => (
             <option key={provider} value={provider}>
-              {sandboxProviderLabel(provider)}
+              {sandboxProviderLabel(provider, choice)}
             </option>
           ))}
         </select>

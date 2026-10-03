@@ -3140,9 +3140,10 @@ test("sandbox provider changes are limited to beta testers who own or administer
       available: string[];
       canManage: boolean;
     };
-    assert.equal(memberBody.current, null);
+    // A new project starts on auto, which is always on offer.
+    assert.equal(memberBody.current, "auto");
     assert.equal(memberBody.default, "docker");
-    assert.deepEqual(memberBody.available, ["sprite", "modal"]);
+    assert.deepEqual(memberBody.available, ["auto", "sprite", "modal"]);
     assert.equal(memberBody.canManage, false);
 
     const memberWrite = await asUser(teammateToken, `/api/projects/${projectId}`, {
@@ -3154,7 +3155,7 @@ test("sandbox provider changes are limited to beta testers who own or administer
       .select({ sandboxProvider: projects.sandboxProvider })
       .from(projects)
       .where(eq(projects.id, projectId));
-    assert.equal(afterMember?.sandboxProvider, null);
+    assert.equal(afterMember?.sandboxProvider, "auto");
 
     await ctx.db
       .update(member)
@@ -3205,6 +3206,15 @@ test("sandbox provider changes are limited to beta testers who own or administer
     });
     assert.equal(modalAllowed.status, 200);
     assert.equal(((await modalAllowed.json()) as { sandboxProvider: string | null }).sandboxProvider, "modal");
+
+    // Auto honors the lock through Modal, the one candidate that can,
+    // so a locked team may go back to it.
+    const autoAllowed = await asUser(ownerToken, `/api/projects/${projectId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ sandboxProvider: "auto" }),
+    });
+    assert.equal(autoAllowed.status, 200);
+    assert.equal(((await autoAllowed.json()) as { sandboxProvider: string | null }).sandboxProvider, "auto");
   } finally {
     ctx.featureFlags = previousFlags;
     ctx.drivers = previousDrivers;
@@ -3252,7 +3262,7 @@ test("a non-tester cannot read or set the sandbox provider, and can still rename
       .select({ sandboxProvider: projects.sandboxProvider, name: projects.name })
       .from(projects)
       .where(eq(projects.id, projectId));
-    assert.equal(unchanged?.sandboxProvider, null);
+    assert.equal(unchanged?.sandboxProvider, "auto");
     assert.equal(unchanged?.name, "Closed project");
 
     const renamed = await app.request(`/api/projects/${projectId}`, {
@@ -3266,7 +3276,7 @@ test("a non-tester cannot read or set the sandbox provider, and can still rename
       .select({ sandboxProvider: projects.sandboxProvider })
       .from(projects)
       .where(eq(projects.id, projectId));
-    assert.equal(after?.sandboxProvider, null);
+    assert.equal(after?.sandboxProvider, "auto");
   } finally {
     ctx.featureFlags = previousFlags;
     ctx.drivers = previousDrivers;
