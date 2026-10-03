@@ -81,7 +81,7 @@ repositories:
     test: npm test
 ```
 
-Import matches stages by slug and agents by name. Re-import updates in place and preserves card positions.
+Import matches stages by slug and agents by name. Re-import updates in place and preserves card positions. A stage with no `createPr` in the file keeps its current setting, and a new one gets the default (on).
 
 Stages omitted from the file are removed only when empty. Otherwise import fails and names the blocking stage. Repository commands apply to matching checkout names; unmatched names are reported.
 

@@ -29,8 +29,13 @@ const stageEntry = z.object({
   gate: gateType.default("manual"),
   /** What must pass before an automatic stage advances. */
   requirements: gateCriteria.default([]),
-  /** Omitted means on, the same as a stage added through the console. */
-  createPr: z.boolean().default(true),
+  /**
+   * Omitted leaves a stage the import matches as it is, and gives a new
+   * one the column's default (on). Not defaulted here: a file written
+   * when omitted meant off would otherwise switch every matched stage
+   * on the next time somebody imported it.
+   */
+  createPr: z.boolean().optional(),
   /** The agent that runs this stage, by name. */
   agent: z.string().max(200).nullish(),
 });

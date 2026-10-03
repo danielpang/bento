@@ -5008,7 +5008,8 @@ test("a pipeline exports to YAML and imports into another project", { timeout: 9
     defaultAgentProfileId: agent.id,
     gateType: "auto",
     gateCriteria: [{ type: "checks_pass" }],
-    createPr: true,
+    // Off, against the seeded default, so the round trip has to carry it.
+    createPr: false,
   });
   const [repo] = await json<{ id: string }[]>(
     await app.request(`/api/projects/${source.project.id}/repositories`),
@@ -5049,7 +5050,7 @@ test("a pipeline exports to YAML and imports into another project", { timeout: 9
   );
   const review = pipeline.stages.find((s) => s.slug === "code-review");
   assert.equal(review?.gateType, "auto");
-  assert.equal(review?.createPr, true);
+  assert.equal(review?.createPr, false, "a stage turned off stays off through export and import");
   assert.ok(review?.defaultAgentProfileId, "the agent named in the file is assigned here too");
 
   const targetRepos = await json<{ setupCommand: string | null; testCommand: string | null }[]>(
@@ -5057,6 +5058,41 @@ test("a pipeline exports to YAML and imports into another project", { timeout: 9
   );
   assert.equal(targetRepos[0]?.setupCommand, "npm ci");
   assert.equal(targetRepos[0]?.testCommand, "npm test");
+});
+
+/**
+ * A hand written pipeline file that never mentions createPr must not
+ * change a stage's choice when it is imported again. Omitted used to
+ * mean off and now the column default is on, so a file kept beside the
+ * code from before would otherwise switch every matched stage on.
+ */
+test("re-importing a file without createPr keeps each stage's choice", { timeout: 90_000 }, async () => {
+  const { project, stages: seeded } = await setupProject("Keeps PR choice");
+  const plan = seeded.find((s) => s.slug === "engineering-requirements")!;
+  await patchStage(plan.id, { createPr: false });
+
+  const file = [
+    "version: 1",
+    "pipeline:",
+    "  stages:",
+    ...seeded.map((s) => `    - name: ${s.name}\n      slug: ${s.slug}`),
+    "    - name: Release notes",
+    "      slug: release-notes",
+  ].join("\n");
+  const applied = await app.request(`/api/projects/${project.id}/pipeline/import`, {
+    method: "POST",
+    headers: { "content-type": "application/yaml" },
+    body: file,
+  });
+  assert.equal(applied.status, 200);
+
+  const after = await json<{ stages: { slug: string; createPr: boolean }[] }>(
+    await app.request(`/api/projects/${project.id}/pipeline`),
+  );
+  const flags = Object.fromEntries(after.stages.map((s) => [s.slug, s.createPr]));
+  assert.equal(flags["engineering-requirements"], false, "the stage turned off stays off");
+  assert.equal(flags["implementation"], true, "a matched stage that was on stays on");
+  assert.equal(flags["release-notes"], true, "a stage new to the project gets the default");
 });
 
 /**

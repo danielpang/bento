@@ -184,8 +184,8 @@ export function PullRequests({
   useEffect(() => {
     if (runActive) setRepairStarted(false);
   }, [runActive]);
-  const [automatic, setAutomatic] = useState(stage?.createPr ?? false);
-  useEffect(() => setAutomatic(stage?.createPr ?? false), [stage?.id, stage?.createPr]);
+  const [automatic, setAutomatic] = useState(stage?.createPr ?? true);
+  useEffect(() => setAutomatic(stage?.createPr ?? true), [stage?.id, stage?.createPr]);
   const pr = rows.find((row) => row.url === selected);
   const canRepair = Boolean(pr?.current && pr.state !== "merged" && pr.state !== "closed" && !finished);
   async function repair(kind: "ci" | "conflicts") {

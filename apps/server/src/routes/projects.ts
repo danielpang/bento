@@ -1382,7 +1382,8 @@ export function projectRoutes(ctx: AppContext) {
           description: entry.description,
           gateType: entry.gate,
           gateCriteria: entry.requirements as unknown[],
-          createPr: entry.createPr,
+          // Only when the file says: see pipelineFile's createPr.
+          ...(entry.createPr !== undefined ? { createPr: entry.createPr } : {}),
           position,
           defaultAgentProfileId: entry.agent ? (agentIdByName.get(entry.agent) ?? null) : null,
         };
