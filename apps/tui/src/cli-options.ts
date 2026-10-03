@@ -66,6 +66,12 @@ export interface CliOptions {
   branch?: string;
   /** A swarm's budget in dollars, on `swarm new` and `swarm reopen`. */
   budget?: number;
+  /** Files holding a plan the person already has, on `swarm new`. Read as text. */
+  plan?: string[];
+  /** Pages holding that plan, which the server fetches. */
+  planUrl?: string[];
+  /** Whether those files and pages (or the goal) are the plan to implement. */
+  existingPlan: boolean;
   /** Silence the local stack's startup progress, for scripts. */
   quiet: boolean;
   help: boolean;
@@ -133,10 +139,14 @@ Commands
   swarm [list]         Swarms in the project, one per line: name, state,
                        tasks done, what is waiting on you, and spend.
   swarm new <title> --goal <goal> [--branch <name>] [--budget <usd>]
+                       [--plan <file>]... [--plan-url <url>]... [--existing-plan]
                        Start a swarm. Its planner begins at once; nothing
                        else starts until you have read the plan and run
                        swarm start. Give a branch that already exists to
-                       carry on from it, review comments included.
+                       carry on from it, review comments included. Give
+                       --plan files or --plan-url pages the planner should
+                       read first, and --existing-plan to have it build the
+                       task tree from them rather than plan from scratch.
   swarm status <swarm> Print the plan as a tree, once.
   swarm watch <swarm>  The same tree, redrawn as the swarm works. Ends
                        when the swarm does, or on Ctrl+C.
@@ -303,6 +313,9 @@ export function parseCliOptions(argv: string[]): CliOptions {
       instruction: { type: "string" },
       branch: { type: "string" },
       budget: { type: "string" },
+      plan: { type: "string", multiple: true },
+      "plan-url": { type: "string", multiple: true },
+      "existing-plan": { type: "boolean" },
     },
     allowPositionals: false,
   });
@@ -368,6 +381,9 @@ export function parseCliOptions(argv: string[]): CliOptions {
     ...(values.instruction !== undefined ? { instruction: values.instruction } : {}),
     ...(values.branch !== undefined ? { branch: values.branch } : {}),
     ...(budget !== undefined ? { budget } : {}),
+    ...(values.plan?.length ? { plan: values.plan } : {}),
+    ...(values["plan-url"]?.length ? { planUrl: values["plan-url"] } : {}),
+    existingPlan: values["existing-plan"] ?? false,
     positionals,
     quiet: values.quiet ?? false,
     help: values.help ?? false,

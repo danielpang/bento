@@ -7,7 +7,7 @@ import { createDb, createPool, projects, runMigrations, type Db } from "@bento/d
 import type { AppContext } from "./context.js";
 import { loadEnv } from "./env.js";
 import { ACTOR_KEY, ORG_KEY } from "./middleware/actor.js";
-import { deferAfterCommit, tenantDb, tenantMiddleware } from "./middleware/tenant.js";
+import { deferAfterCommit, deferOnRollback, tenantDb, tenantMiddleware } from "./middleware/tenant.js";
 
 /**
  * Work deferred to after the tenant transaction, checked in multi mode
@@ -109,4 +109,38 @@ test("a deferred task that throws does not take the response with it", async (t)
   assert.equal(logged.length, 1, "the failed task is still logged once");
   assert.match(String(logged[0]?.[0]), /deferred task failed:/);
   assert.match(String(logged[0]?.[1]), /queue is down/);
+});
+
+test("work registered for a rollback runs only when the request fails to commit", async (t) => {
+  t.mock.method(console, "error", () => {});
+  const ran: string[] = [];
+  const app = new Hono();
+  app.use(async (c, next) => {
+    c.set(ACTOR_KEY, "u1");
+    c.set(ORG_KEY, "org-a");
+    await next();
+  });
+  app.use(tenantMiddleware(ctx));
+  app.post("/shelve", async (c) => {
+    await tenantDb(c, ctx).insert(projects).values({ ownerId: "u1", organizationId: "org-a", name: "Shelved" });
+    deferOnRollback(c, async () => {
+      ran.push("undo");
+    });
+    deferAfterCommit(c, async () => {
+      ran.push("after");
+    });
+    if (c.req.query("fail")) throw new Error("something after the shelf broke");
+    return c.json({ ok: true });
+  });
+  app.onError((_err, c) => c.json({ error: "failed" }, 500));
+
+  const ok = await app.request("/shelve", { method: "POST" });
+  assert.equal(ok.status, 200);
+  assert.deepEqual(ran, ["after"], "a request that commits runs its after-commit work and nothing else");
+
+  ran.length = 0;
+  const failed = await app.request("/shelve?fail=1", { method: "POST" });
+  assert.equal(failed.status, 500);
+  assert.deepEqual(ran, ["undo"], "a request that throws runs its rollback work and never its after-commit work");
+  assert.equal((await db.select().from(projects).where(eq(projects.name, "Shelved"))).length, 1, "and only the committed request's row is there");
 });

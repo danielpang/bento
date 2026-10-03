@@ -1,5 +1,7 @@
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { ApiError, unwrapError } from "@bento/api-client";
-import { checkAgentPairing } from "@bento/core";
+import { checkAgentPairing, planFileIsBinary, planFileMime } from "@bento/core";
 import { LocalRunner } from "./runner.js";
 import { startEmbedded } from "./embedded.js";
 import { FileTokenStore } from "./credentials.js";
@@ -453,18 +455,60 @@ export async function runSwarm(options: CliOptions): Promise<void> {
           io.fail();
           return;
         }
+        /*
+         * The plan the person already has: files read here as text,
+         * in the order given, and pages the server fetches itself. A
+         * file that cannot be read is a refusal before the request,
+         * so nothing is half created.
+         */
+        const sources: (
+          | { kind: "file"; name: string; content: string }
+          | { kind: "file"; name: string; data: string; mime: string }
+          | { kind: "website"; url: string }
+        )[] = [];
+        for (const file of options.plan ?? []) {
+          let bytes: Buffer;
+          try {
+            bytes = await readFile(file);
+          } catch (err) {
+            io.err(`could not read ${file}: ${err instanceof Error ? err.message : String(err)}`);
+            io.fail();
+            return;
+          }
+          const name = path.basename(file);
+          const mime = planFileMime(name);
+          if (planFileIsBinary(mime)) {
+            // A PDF or an image travels as its bytes; the server reads
+            // the PDF's text and shelves both. The same table the
+            // console and the server read, so the three agree.
+            sources.push({ kind: "file", name, data: bytes.toString("base64"), mime });
+            continue;
+          }
+          const content = bytes.toString("utf8");
+          if (content.includes("\u0000")) {
+            io.err(`${file} is not a text file. A plan source is markdown, plain text, a PDF, or an image.`);
+            io.fail();
+            return;
+          }
+          sources.push({ kind: "file", name, content });
+        }
+        for (const url of options.planUrl ?? []) sources.push({ kind: "website", url });
         const created = await client.createSwarm({
           projectId: project.id,
           title,
           goal: options.goal,
           ...(options.branch ? { startBranch: options.branch } : {}),
           ...(options.budget === undefined ? {} : { budgetUsd: options.budget }),
+          ...(options.existingPlan ? { planMode: "existing" as const } : {}),
+          ...(sources.length > 0 ? { planSources: sources } : {}),
         });
         io.out(`${created.slug}\tplanning\t${created.id}`);
         io.out(
-          options.branch
-            ? `Its planner is reading ${options.branch} and whatever its pull request is still being asked about. Watch it with: bento swarm watch ${created.slug}`
-            : `Its planner is at work. Watch it with: bento swarm watch ${created.slug}`,
+          options.existingPlan
+            ? `Its planner is building the task tree from your plan. Watch it with: bento swarm watch ${created.slug}`
+            : options.branch
+              ? `Its planner is reading ${options.branch} and whatever its pull request is still being asked about. Watch it with: bento swarm watch ${created.slug}`
+              : `Its planner is at work. Watch it with: bento swarm watch ${created.slug}`,
         );
         io.out(`Nothing else starts until you run: bento swarm start ${created.slug}`);
         return;

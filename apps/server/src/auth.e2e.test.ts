@@ -18,6 +18,7 @@ import {
   projects,
   runArtifacts,
   runMigrations,
+  swarmPlanSources,
   swarmTasks,
   swarms,
   user,
@@ -912,6 +913,13 @@ test("every entity route refuses a foreign tenant", async () => {
     })
     .returning({ id: runArtifacts.id });
   assert.ok(swarmArtifact?.id, "the owner's swarm artifact must exist for the artifact routes to be probed");
+  // And a plan source, so the route that serves one's bytes is probed
+  // with a real id rather than an invented one.
+  const [planSource] = await ctx.db
+    .insert(swarmPlanSources)
+    .values({ swarmId: swarm.id, kind: "file", name: "plan.md", mime: "text/markdown", size: 6, content: "# Plan" })
+    .returning({ id: swarmPlanSources.id });
+  assert.ok(planSource?.id, "the owner's plan source must exist for its content route to be probed");
 
   // Inserted directly for the same reason as the MCP server row above:
   // the connection routes refuse org-less callers in multi mode (and
@@ -1098,6 +1106,7 @@ test("every entity route refuses a foreign tenant", async () => {
     // a foreign tenant learning the ids would be a foreign tenant
     // holding the handles to another team's agent output.
     ["GET", `/api/swarms/${swarm.id}/artifacts`],
+    ["GET", `/api/swarms/${swarm.id}/plan-sources/${planSource!.id}/content`],
     ["GET", `/api/swarms/${swarm.id}/messages`],
     ["POST", `/api/swarms/${swarm.id}/messages`, { body: JSON.stringify({ text: "injected" }) }],
     // A real node of the owner's swarm, not an invented id: a route

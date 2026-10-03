@@ -322,6 +322,7 @@ function swarmShell(overrides: Partial<Swarm> & Pick<Swarm, "id" | "name" | "sta
     question: null,
     reopenCount: 0,
     startBranch: null,
+    planMode: "goal",
     ...overrides,
   };
 }
@@ -523,6 +524,7 @@ export function draftSwarm(input: NewSwarmInput, now: number): SwarmDetail {
         goal: input.goal,
         branchName: input.start.name,
         deliverable: input.deliverable,
+        planMode: input.planMode,
         settings: {
           ...DEFAULT_SETTINGS,
           ...(input.plannerProfileId ? { plannerProfileId: input.plannerProfileId } : {}),

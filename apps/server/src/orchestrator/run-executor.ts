@@ -74,6 +74,7 @@ import { agentAuthEnv, agentAuthMounts, gitIdentityEnv } from "./agent-auth.js";
 import { prepareRunMcp } from "./mcp-run.js";
 import { BENTO_SERVER_ID } from "../mcp/bento-tools.js";
 import { SWARM_DESIGN_PATH } from "./swarm/design-document.js";
+import { loadPlanSources, PLAN_SOURCE_DIR, writePlanSourceFiles, type PlanSource } from "./swarm/plan-sources.js";
 import { isBetaRun } from "../feature-flags.js";
 import { extendRunGrant, revokeRunGrant, runGrantServerIds, sweepExpiredGrants } from "../mcp/grants.js";
 import { sweepExpiredOAuth } from "../mcp/oauth-sweep.js";
@@ -1262,7 +1263,19 @@ async function buildRunCommand(
    * that the plan is made through tools. Both are built here, from the
    * subject, so the argv below is assembled once.
    */
-  const rolePrompt = await buildSubjectPrompt(ctx, subject, mounted, handle, input.cardTools ?? false);
+  /*
+   * A swarm's plan sources, copied into this run's workspace before
+   * its prompt is built, so the prompt can say where each one is. A
+   * PDF's layout and an image reach an agent no other way; the text
+   * ones are there too for an agent that would rather grep them.
+   * Every role whose prompt reads the plan: a worker's leaf may point
+   * at a mockup, and the judge may want the plan it is checking
+   * against. Not the resolver, whose job is one merge conflict and
+   * whose prompt never mentions the plan.
+   */
+  const planSources =
+    subject.kind === "swarm" && subject.run.role !== "resolver" ? await planSourcesInWorkspace(ctx, handle, subject.swarm.id) : [];
+  const rolePrompt = await buildSubjectPrompt(ctx, subject, mounted, handle, input.cardTools ?? false, planSources);
   const resume = Boolean(run.cliSessionId) && !forgetsBetweenRuns(profile.cli);
   // Only ordinary work compacts: judge and rebase prompts are complete
   // instructions on their own, and agentRunPrompt ignores a compacted
@@ -1326,6 +1339,8 @@ async function buildSubjectPrompt(
   handle: SandboxHandle,
   /** Whether the card tools reached the sandbox; only a stage prompt mentions them. */
   cardTools: boolean,
+  /** The swarm's plan sources, each with its path in this workspace once written. */
+  planSources: PlanSource[] = [],
 ): Promise<string> {
   if (subject.kind === "pipeline") {
     const allStages = await ctx.db
@@ -1396,6 +1411,8 @@ async function buildSubjectPrompt(
       repositories: mounted,
       swarmInstructions: subject.swarm.plannerInstructions,
       hasDesign: await swarmHasDesign(ctx, subject.swarm.id),
+      hasPlanSources: planSources.length > 0,
+      planSourceDir: planSourceDirOf(handle, planSources),
     });
   }
   /*
@@ -1431,6 +1448,8 @@ async function buildSubjectPrompt(
       branch: subject.branch,
       swarmInstructions: subject.swarm.workerInstructions,
       hasDesign: await swarmHasDesign(ctx, subject.swarm.id),
+      hasPlanSources: planSources.length > 0,
+      planSourceDir: planSourceDirOf(handle, planSources),
       messages: await takeNodeMessages(ctx.db, subject.task.id, subject.run.id),
     });
   }
@@ -1449,6 +1468,14 @@ async function buildSubjectPrompt(
     swarmInstructions: subject.swarm.plannerInstructions,
     deliverable: subject.swarm.deliverable,
     sectionDir: SECTION_DIR,
+    /*
+     * The plan the person handed over, on every planner turn rather
+     * than the first only: a fresh session on a later turn has to be
+     * told what the tree was built from, and the sources never change.
+     */
+    planMode: subject.swarm.planMode,
+    planSources,
+    planSourceDir: planSourceDirOf(handle, planSources),
     /*
      * And, on a swarm that started from an existing branch, what is on
      * that branch and what is still being asked about it.
@@ -1584,6 +1611,28 @@ async function swarmBranchBundles(
 }
 
 /** Whether the planner has written the design note a worker is told to read. */
+/**
+ * The swarm's plan sources, with a copy of each written into this
+ * run's workspace and its path recorded on it.
+ *
+ * A failure to write is a failure of the run: a planner told its plan
+ * is a PDF it cannot open would plan from nothing, and the person
+ * would be billed for a plan written blind. A driver that cannot take
+ * stdin is not a failure; the sources then have no path, and the
+ * prompt says they are only in the text.
+ */
+async function planSourcesInWorkspace(ctx: AppContext, handle: SandboxHandle, swarmId: string): Promise<PlanSource[]> {
+  const sources = await loadPlanSources(ctx.db, swarmId);
+  if (sources.length === 0) return sources;
+  const paths = await writePlanSourceFiles(ctx.driver, ctx.artifacts, handle, sources);
+  return sources.map((source) => ({ ...source, path: paths?.get(source.id) ?? null }));
+}
+
+/** Where the sources are in this workspace, when any were written there. */
+function planSourceDirOf(handle: SandboxHandle, sources: PlanSource[]): string | null {
+  return sources.some((source) => source.path) ? `${handle.workdir}/${PLAN_SOURCE_DIR}` : null;
+}
+
 async function swarmHasDesign(ctx: AppContext, swarmId: string): Promise<boolean> {
   const [row] = await ctx.db
     .select({ id: runArtifacts.id })

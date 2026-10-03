@@ -1695,6 +1695,20 @@ export const swarms = pgTable(
      */
     startBranch: text("start_branch"),
     /**
+     * Where the plan comes from.
+     *
+     * "goal" is the ordinary case: the planner reads the goal and the
+     * code and writes the plan itself. "existing" says the person
+     * already has one, in the plan sources attached to this swarm or
+     * in the goal text, and the planner's job is to turn it into the
+     * task tree rather than to plan from scratch: check whether it
+     * holds an implementation plan, write one from it when it does
+     * not, and build the tree that implements it. A column rather than
+     * a flag on the prompt, because every later planner turn has to be
+     * told the same thing.
+     */
+    planMode: text("plan_mode", { enum: ["goal", "existing"] }).notNull().default("goal"),
+    /**
      * How many times this swarm has been reopened with a follow up.
      *
      * Counted rather than worked out from the tree: it is what names
@@ -2045,4 +2059,72 @@ export const swarmMessages = pgTable(
     deliveredAt: timestamp("delivered_at", { withTimezone: true }),
   },
   (t) => [index("swarm_messages_claim_idx").on(t.swarmId, t.taskId, t.status, t.createdAt)],
+);
+
+/**
+ * A plan somebody handed a swarm when they started it.
+ *
+ * One row per source: a file the person uploaded, or a web page the
+ * server fetched for them at creation. Stored as text, never as bytes:
+ * a plan is something a planner reads, and the route refuses anything
+ * that does not decode as text rather than storing a blob nothing can
+ * read. The content is a person's input and is quoted as untrusted
+ * where a prompt carries it, the same as the goal: a plan pasted from
+ * a web page is exactly where an instruction addressed to an agent
+ * would be waiting.
+ *
+ * Immutable once written. The plan is what the swarm was asked to
+ * implement, and changing it under a tree that was built from it would
+ * rewrite the meaning of every task; further work goes through reopen.
+ */
+export const swarmPlanSources = pgTable(
+  "swarm_plan_sources",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    swarmId: uuid("swarm_id")
+      .notNull()
+      .references(() => swarms.id, { onDelete: "cascade" }),
+    /**
+     * Denormalized from the owning project so row-level security can be a
+     * column comparison rather than a join. Null means "belongs to no
+     * organization", which is local mode. Set on insert; never changed.
+     */
+    organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
+    /** Where in the person's list this source was. The planner is told them in this order. */
+    position: integer("position").notNull().default(0),
+    /** An uploaded file, or a page fetched from an address. */
+    kind: text("kind", { enum: ["file", "website"] }).notNull(),
+    /** The file's name as uploaded (a relative path, for a folder), or the page's title or address. */
+    name: text("name").notNull(),
+    /** The address a website source was fetched from. Null on a file. */
+    url: text("url"),
+    /** The media type the source was read as: what a page answered with, or what the file's name says. */
+    mime: text("mime").notNull(),
+    /** Characters of text, so a list can say how big each source is without reading it. Zero when there is none. */
+    size: integer("size").notNull(),
+    /**
+     * The source as text: a text file as uploaded, a page stripped to
+     * its text, a PDF's extracted text. Null for an image, and for a
+     * PDF whose pages held no text at all (a scan), whose bytes are
+     * then the only copy and the agent's own eyes the only reader.
+     */
+    content: text("content"),
+    /**
+     * Where the bytes are, for a PDF or an image: a key in the
+     * artifact store, minted by the server and org-prefixed for
+     * lifecycle bookkeeping, never a URL. Who may read it is decided
+     * by this row, behind the same access helpers and row-level
+     * security as every other tenant row; the store is a shelf.
+     * Null for a source that is text and nothing else.
+     */
+    storageKey: text("storage_key"),
+    /** Bytes in the store. Null when nothing is stored. */
+    byteSize: integer("byte_size"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("swarm_plan_sources_swarm_idx").on(t.swarmId, t.position),
+    // A source with neither text nor bytes is nothing a planner could read.
+    check("swarm_plan_sources_content_or_key", sql`${t.content} is not null or ${t.storageKey} is not null`),
+  ],
 );

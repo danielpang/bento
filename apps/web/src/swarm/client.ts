@@ -9,6 +9,7 @@ import type {
   SwarmDetail,
   SwarmLanding,
   SwarmPlannerRun,
+  SwarmPlanSource,
   SwarmNodeDetail,
   SwarmPullRequest,
   SwarmStatus,
@@ -597,6 +598,8 @@ export interface WireSwarm {
   deliverable?: "code" | "document";
   startBranch?: string | null;
   reopenCount?: number;
+  /** Optional for the same reason: a server older than the column sends nothing, and nothing reads as a planner that planned from the goal. */
+  planMode?: "goal" | "existing";
   archivedAt: string | null;
   lastOpenedAt: string | null;
   createdAt: string;
@@ -662,6 +665,23 @@ export interface WireDetail {
   branchCheckout?: { mode: "worktree" | "remote"; released: boolean };
   /** Optional for the same reason the landings are. */
   pullRequests?: WirePullRequest[];
+  /** Optional for the same reason: a server older than plan sources sends none. */
+  planSources?: WirePlanSource[];
+}
+
+/** One plan source, as the detail route lists it. */
+export interface WirePlanSource {
+  id: string;
+  position: number;
+  kind: "file" | "website";
+  name: string;
+  url: string | null;
+  /* Optional: a server from before PDFs and images sends text only. */
+  mime?: string;
+  media?: "text" | "pdf" | "image";
+  size: number;
+  hasText?: boolean;
+  byteSize?: number | null;
 }
 
 /** One node, as its own route sends it. */
@@ -864,6 +884,7 @@ export function toSwarm(row: WireSwarm, workersActive = 0): Swarm {
     question: null,
     reopenCount: row.reopenCount ?? 0,
     startBranch: row.startBranch ?? null,
+    planMode: row.planMode ?? "goal",
   };
 }
 
@@ -934,15 +955,18 @@ export function httpSwarmApi(
     async createSwarm(input) {
       /*
        * What the route takes, and nothing else. The dialog still
-       * collects two things the server has no home for (attachments,
-       * and plan only, which is how every swarm begins anyway); they
-       * are not sent, because a field the server drops is a promise
-       * the console did not keep.
+       * collects one thing the server has no home for (plan only,
+       * which is how every swarm begins anyway); it is not sent,
+       * because a field the server drops is a promise the console did
+       * not keep.
        *
        * The starting branch is sent now that there is a column for
        * it. Only when it is an existing one: a new branch is named by
        * the server after the swarm, and sending the console's preview
-       * of that name would let the two disagree.
+       * of that name would let the two disagree. The plan travels the
+       * same way: the mode only when it is not the default, and the
+       * sources only when there are any, so a swarm started from a
+       * goal sends the body it always sent.
        */
       const created = await post<WireSwarm>("/api/swarms", {
         projectId: input.projectId,
@@ -956,6 +980,8 @@ export function httpSwarmApi(
         ...(input.budgetUsd === null ? {} : { budgetUsd: input.budgetUsd }),
         ...(input.timeLimitMin ? { timeLimitMin: input.timeLimitMin } : {}),
         ...(input.start.kind === "existing-branch" ? { startBranch: input.start.name } : {}),
+        ...(input.planMode === "existing" ? { planMode: "existing" } : {}),
+        ...(input.planSources.length > 0 ? { planSources: input.planSources } : {}),
       });
       return { swarm: toSwarm(created), tasks: [], landings: [], ledger: [], pullRequests: [] };
     },
@@ -1088,6 +1114,27 @@ export function toDetail(detail: WireDetail): SwarmDetail {
     // holds something.
     ledger: [],
     pullRequests: (detail.pullRequests ?? []).map(toPullRequest),
+    planSources: (detail.planSources ?? []).map((row) => toPlanSource(row, detail.swarm.id)),
+  };
+}
+
+/**
+ * One plan source. The url is checked the way a pull request's is: it
+ * becomes an `href` on the page, and a person typed it.
+ */
+export function toPlanSource(row: WirePlanSource, swarmId: string): SwarmPlanSource {
+  return {
+    id: row.id,
+    position: row.position,
+    kind: row.kind,
+    name: row.name,
+    url: row.url === null ? null : externalHttpUrl(row.url),
+    mime: row.mime ?? "text/plain",
+    media: row.media ?? "text",
+    size: Number(row.size),
+    hasText: row.hasText ?? Number(row.size) > 0,
+    byteSize: row.byteSize ?? null,
+    contentPath: `/api/swarms/${encodeURIComponent(swarmId)}/plan-sources/${encodeURIComponent(row.id)}/content`,
   };
 }
 

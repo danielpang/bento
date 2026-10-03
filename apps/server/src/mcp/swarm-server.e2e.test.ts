@@ -250,6 +250,7 @@ test("the handshake and the catalogue answer a planner", async () => {
       "delegate",
       "get_tree",
       "read_design",
+      "read_plan",
       "read_report",
       "read_transcript_tail",
       "reject",
@@ -264,8 +265,8 @@ test("a role's tools are the only tools it has", async () => {
   const listed = (await rpc(token, "tools/list")).body?.result as { tools: { name: string }[] };
   assert.deepEqual(
     listed.tools.map((tool) => tool.name).sort(),
-    ["flag", "my_task", "read_design", "report"],
-    "a worker sees its own four and none of the planner's",
+    ["flag", "my_task", "read_design", "read_plan", "report"],
+    "a worker sees its own five and none of the planner's",
   );
 
   // And asking anyway is answered as a tool that is not there, which is

@@ -23,6 +23,8 @@ export const VIEW_PARAM = "view";
 
 export const BOARD_MODE_KEY = "bento:boardMode";
 export const SWARM_VIEW_KEY = "bento:swarmView";
+/** Whether the goal and plan sit open above the diagram, or folded to one line. */
+export const SWARM_BRIEF_KEY = "bento:swarmBrief";
 /** Per project: the swarm you were last in is a fact about that board. */
 export function swarmKey(projectId: string): string {
   return `bento:swarm:${projectId}`;
@@ -118,6 +120,24 @@ export function readSwarmView(search: string, storage: StorageLike | null): Swar
 
 export function rememberSwarmView(storage: StorageLike | null, view: SwarmView): void {
   write(storage, SWARM_VIEW_KEY, view);
+}
+
+/**
+ * Whether the brief (the goal, the plan it came from, the spend and
+ * the worker stepper) is open above the diagram.
+ *
+ * Open by default: a person opening a swarm for the first time should
+ * see what it is for before they see its tree. Folded is a choice
+ * about screen, not about this swarm, so it is remembered once for
+ * every swarm rather than per swarm, and it is never in the address: a
+ * link somebody follows should show them the goal.
+ */
+export function readBriefOpen(storage: StorageLike | null): boolean {
+  return read(storage, SWARM_BRIEF_KEY) !== "closed";
+}
+
+export function rememberBriefOpen(storage: StorageLike | null, open: boolean): void {
+  write(storage, SWARM_BRIEF_KEY, open ? "open" : "closed");
 }
 
 /**

@@ -27,3 +27,40 @@ export const MAX_SWARM_GOAL_CHARS = 100_000;
  * coordination than one merge queue can use.
  */
 export const MAX_PLAN_DEPTH = 3;
+
+/**
+ * How much of a plan a person may hand a swarm at creation.
+ *
+ * A plan source is one file somebody uploaded or one web page the
+ * server fetched for them, stored as text and read by the planner
+ * before it builds the tree. The caps are what Postgres holds without
+ * complaint and what a planner can actually read: a plan of twenty
+ * documents is a plan somebody should have assembled first, and a
+ * single source past a few hundred thousand characters is a dump of
+ * something rather than a plan.
+ *
+ * In one place for the reason MAX_SWARM_WORKERS is: the New swarm
+ * dialog refuses the same set the route refuses, so a person is told
+ * before the request is sent rather than after.
+ */
+export const MAX_SWARM_PLAN_SOURCES = 20;
+
+/** Characters of text one plan source may hold. */
+export const MAX_SWARM_PLAN_SOURCE_CHARS = 300_000;
+
+/** Characters of text every plan source of one swarm may hold together. */
+export const MAX_SWARM_PLAN_CHARS = 1_000_000;
+
+/** How long the name of an uploaded plan file may be, path included. */
+export const MAX_SWARM_PLAN_SOURCE_NAME_CHARS = 240;
+
+/**
+ * Bytes one PDF or image plan source may hold, and bytes every binary
+ * source of one swarm may hold together. Separate from the character
+ * caps above because a PDF's size says nothing about how much text is
+ * in it, and a mockup is read by the agent's eyes rather than as
+ * text. Ten megabytes is a long design document or a large screenshot;
+ * past that a plan source is a dump of something.
+ */
+export const MAX_SWARM_PLAN_FILE_BYTES = 10 * 1024 * 1024;
+export const MAX_SWARM_PLAN_BYTES = 30 * 1024 * 1024;

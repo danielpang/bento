@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  readBriefOpen,
+  rememberBriefOpen,
   BOARD_MODE_KEY,
   SWARM_VIEW_KEY,
   boardHref,
@@ -69,6 +71,16 @@ test("the view round trips the same way, and defaults to the tree", () => {
   assert.equal(readSwarmView("", storage), "outline");
   // And the address still overrides it for whoever follows a link.
   assert.equal(readSwarmView("?view=tree", storage), "tree");
+});
+
+test("the brief is open until this browser folds it, and the fold is remembered for every swarm", () => {
+  const storage = memoryStorage();
+  assert.equal(readBriefOpen(storage), true, "open by default, so a first look at a swarm shows what it is for");
+  rememberBriefOpen(storage, false);
+  assert.equal(readBriefOpen(storage), false);
+  rememberBriefOpen(storage, true);
+  assert.equal(readBriefOpen(storage), true);
+  assert.equal(readBriefOpen(null), true, "a browser that refuses storage shows the goal");
 });
 
 test("a browser that refuses storage still resolves every choice", () => {

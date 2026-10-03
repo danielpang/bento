@@ -21,6 +21,7 @@ import {
   settingsFrom,
 } from "./components/SwarmSettingsFields.js";
 import { modeSurfaces } from "./swarm/plan.js";
+import { memoryStorage } from "./swarm/view-state.js";
 import { canReopen } from "./swarm/status.js";
 import { seedSwarms } from "./swarm/fixtures.js";
 import { buildSwarmModel } from "./swarm/layout.js";
@@ -1231,4 +1232,81 @@ test("a document swarm names its deliverable and offers to open it", () => {
     "",
   );
   assertNoDashes(`${asDocument}${asCode}`, "the artifacts panel");
+});
+
+/* ---------------------------------------------------------------- *
+ * The brief folds, so the diagram gets the screen.
+ * ---------------------------------------------------------------- */
+
+test("the brief opens with the goal and a button that folds it, and nothing of the goal is lost to the fold", () => {
+  const detail = seedSwarms("p1", NOW).find((entry) => entry.swarm.id === "sw-api")!;
+  const html = renderToStaticMarkup(
+    createElement(SwarmPage, {
+      detail,
+      model: buildSwarmModel(detail.tasks, { now: NOW }),
+      view: "tree",
+      onView: () => {},
+      selectedId: null,
+      onSelect: () => {},
+      onToggleNode: () => {},
+      surfaces: modeSurfaces("multi"),
+      actions: {
+        onPause: () => {},
+        onResume: () => {},
+        onStop: () => {},
+        onReopen: () => {},
+        onDelete: () => {},
+        onArchive: () => {},
+        onRestore: () => {},
+        onWorkers: () => {},
+        onSettings: () => {},
+        onAnswer: () => {},
+      },
+    }),
+  );
+  // Open by default, in a test as in a browser that has never folded it.
+  assert.match(html, /class="swarm-brief"[^>]*data-open="true"/);
+  assert.match(html, /class="swarm-brief-toggle" aria-expanded="true" aria-controls="swarm-brief-body"/);
+  assert.ok(html.includes(">Hide<"), "the button says what it does");
+  assert.ok(html.includes(detail.swarm.goal), "the goal is on the page in full");
+  assert.ok(html.includes('id="swarm-brief-body"'));
+  assert.ok(html.includes("swarm-spend-summary"), "the metrics are part of what folds, so they are here while it is open");
+  assert.ok(!html.includes("swarm-brief-excerpt"), "no excerpt while the whole goal is showing");
+
+  // Folded by this browser: the goal, the plan, spend and workers fold
+  // away, and the one sentence about what the swarm waits on stays.
+  const waiting = { ...detail, swarm: { ...detail.swarm, status: "planning" as const }, plannerRun: { ...detail.plannerRun!, status: "failed" as const, error: "spawn failed" } };
+  const folded = renderToStaticMarkup(
+    createElement(SwarmPage, {
+      detail: waiting,
+      model: buildSwarmModel(waiting.tasks, { now: NOW }),
+      view: "tree",
+      onView: () => {},
+      selectedId: null,
+      onSelect: () => {},
+      onToggleNode: () => {},
+      surfaces: modeSurfaces("multi"),
+      briefStorage: memoryStorage({ "bento:swarmBrief": "closed" }),
+      actions: {
+        onPause: () => {},
+        onResume: () => {},
+        onStop: () => {},
+        onReopen: () => {},
+        onDelete: () => {},
+        onArchive: () => {},
+        onRestore: () => {},
+        onWorkers: () => {},
+        onSettings: () => {},
+        onAnswer: () => {},
+      },
+    }),
+  );
+  assert.match(folded, /class="swarm-brief"[^>]*data-open="false"/);
+  assert.ok(folded.includes(">Show<"));
+  assert.ok(folded.includes("swarm-brief-excerpt"), "the goal's first line stands in for it");
+  assert.ok(!folded.includes('id="swarm-brief-body"'));
+  assert.ok(!folded.includes("swarm-spend-summary") && !folded.includes("swarm-worker-control"), "spend and workers fold with the goal");
+  // This swarm has a plan and a planner that stopped, so what it waits
+  // on is approval of the saved plan; that sentence is on the page.
+  assert.ok(folded.includes("Review the diagram, then approve the plan to start ready workers."), "what the swarm waits on a person for is never folded away");
 });
