@@ -7,6 +7,7 @@ import {
   noticeMessage,
   passwordResetMessage,
   verificationMessage,
+  waitlistInvitationMessage,
   createMailer,
   LoggingMailer,
 } from "./mail.js";
@@ -92,6 +93,12 @@ test("every email carries the header, the footer links, and the reason it arrive
       appUrl: APP_URL,
     }),
     notice(),
+    waitlistInvitationMessage({
+      email: "ada@example.com",
+      signupUrl: `${APP_URL}/?signup=1&email=ada%40example.com`,
+      expiresInDays: 7,
+      appUrl: APP_URL,
+    }),
   ];
 
   for (const message of messages) {
@@ -224,6 +231,35 @@ test("a notice separates its paragraphs in both halves", () => {
   const message = notice(["First.", "Second."]);
   assert.match(message.text, /First\.\n\nSecond\./);
   assert.equal((message.html ?? "").match(/<p style="margin:0 0 14px/g)?.length, 2);
+});
+
+test("the waitlist invitation names the address, the expiry, and no action if unsolicited", () => {
+  const message = waitlistInvitationMessage({
+    email: "ada@example.com",
+    signupUrl: `${APP_URL}/?signup=1&email=ada%40example.com`,
+    expiresInDays: 7,
+    appUrl: APP_URL,
+  });
+  assert.equal(message.to, "ada@example.com");
+  assert.equal(message.subject, "You can create a Bento account");
+  assert.match(message.text, /ada@example.com/);
+  assert.match(message.text, /expires in 7 days/);
+  assert.match(message.text, /No action is needed if you did not request this/);
+  assert.match(message.text, /signup=1&email=ada%40example.com/);
+  assert.match(message.html ?? "", /ada@example.com/);
+  assert.doesNotMatch(message.subject, /[—–]/);
+  assert.doesNotMatch(message.text, /[—–]/);
+});
+
+test("waitlist invitation content is escaped so a name cannot inject markup", () => {
+  const message = waitlistInvitationMessage({
+    email: '<script>alert("x")</script>@example.com',
+    signupUrl: `${APP_URL}/?signup=1&email=x`,
+    expiresInDays: 7,
+    appUrl: APP_URL,
+  });
+  assert.doesNotMatch(message.html ?? "", /<script>/);
+  assert.match(message.html ?? "", /&lt;script&gt;/);
 });
 
 test("a notice carries copy, not markup", () => {
