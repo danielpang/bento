@@ -4,7 +4,7 @@ Agents commit in the sandbox. GitHub publication is a separate server-side step.
 
 ## Opening a pull request
 
-**Create a pull request** is on for every stage unless you turn it off, including the stages a new project starts with and any stage you add. After a successful run, the server pushes the feature branch and opens or updates one pull request per repository with commits. All stages on a card share one branch.
+**Create a pull request** is on for every stage unless you turn it off, including the stages a new project starts with and any stage you add. After a successful run, the server pushes the feature branch and opens or updates one pull request per repository with commits. All stages on a card share one branch. A stage that only wrote its own notes, such as engineering requirements, has nothing for a reviewer yet, so the pull request opens when a stage commits code.
 
 A new card starts from the repository's configured base branch, not whichever branch is checked out on the host. Worktree-based sandboxes fetch `origin/<base>` before creating the branch. Repositories without an origin use the local base branch. If the base cannot be fetched or found, setup stops with an error instead of inheriting unrelated commits. Existing card worktrees retain their commits and unfinished work.
 
