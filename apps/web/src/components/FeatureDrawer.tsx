@@ -53,7 +53,7 @@ import { useBetaTesters } from "../beta.js";
 import { ChatSkeleton, Skeleton } from "./Skeleton.js";
 import { ReviewHandoff } from "./ReviewHandoff.js";
 import { ConversationPlacement } from "./ConversationPlacement.js";
-import { REPOSITORY_SETUP_ACTION, REPOSITORY_SETUP_MESSAGE } from "../repository-setup.js";
+import { REPOSITORY_SETUP_ACTION, REPOSITORY_SETUP_MESSAGE, repositoriesMissing } from "../repository-setup.js";
 
 interface DrawerProps {
   client: BentoClient;
@@ -165,8 +165,12 @@ export function FeatureDrawer({
   const [pullRequestHistory, setPullRequestHistory] = useState<FeaturePullRequestRecord[]>([]);
   /** How each of those ended, fetched after the card's own detail. */
   const [pullRequestStates, setPullRequestStates] = useState<FeaturePullRequestStatus[]>([]);
-  /** Every linked repository in the project, for multi-repo publish state. */
-  const [projectRepos, setProjectRepos] = useState<Repository[]>([]);
+  /**
+   * Every linked repository in the project, for multi-repo publish
+   * state. Null until a list is read: an empty array is a project
+   * with no checkout, and a failed read must not look like one.
+   */
+  const [projectRepos, setProjectRepos] = useState<Repository[] | null>(null);
   /**
    * What GitHub says about each pull request's merge, fetched after the
    * card's own detail so the drawer never waits on GitHub to render.
@@ -245,7 +249,7 @@ export function FeatureDrawer({
     setChanges(null);
     setArtifacts([]);
     setPullRequests([]);
-    setProjectRepos([]);
+    setProjectRepos(null);
     setMergeStates([]);
     setCheckStates([]);
     setLoadedId(null);
@@ -290,7 +294,12 @@ export function FeatureDrawer({
           client.getChanges(feature.id).catch(() => null),
           client.githubStatus().catch(() => null),
           client.listArtifacts(feature.id).catch(() => []),
-          client.listRepositories(feature.projectId).catch(() => []),
+          // Null, not an empty list: a failed read must not disable
+          // starting work on a project that may already have a checkout.
+          client.listRepositories(feature.projectId).then(
+            (rows) => rows,
+            () => null,
+          ),
         ]);
         if (cancelled) return;
         setRuns(detail.runs);
@@ -538,10 +547,11 @@ export function FeatureDrawer({
    */
   const finished = feature.status === "done" || feature.status === "cancelled";
   /**
-   * Detail has arrived and the project really has no checkout. Until
-   * the list loads, projectRepos is empty and must not read as missing.
+   * The list was read and the project has no checkout. Unknown and
+   * failed both stay false: those are not a reason to block the card.
    */
-  const noRepositories = !detailsPending && projectRepos.length === 0;
+  const noRepositories = repositoriesMissing(projectRepos, loadFailed);
+  const knownRepos = projectRepos ?? [];
   // Approving mid-run would advance the card out from under the working
   // agent; the button says why it is waiting instead of failing later.
   const runActive = !!latestRun && !TERMINAL_RUN.has(latestRun.status);
@@ -596,7 +606,7 @@ export function FeatureDrawer({
     ? "An agent is working this card. Fix CI tests when it finishes."
     : undefined;
   const orphanPullRequests = pullRequests.filter(
-    (pr) => !projectRepos.some((repo) => repo.name === pr.name),
+    (pr) => !knownRepos.some((repo) => repo.name === pr.name),
   );
 
   /**
@@ -869,8 +879,14 @@ export function FeatureDrawer({
               <>
                 <button
                   className={beta && (needsRecovery || runActive) ? "btn" : "btn btn-primary"}
-                  disabled={busy || runActive || detailsPending || loadFailed}
-                  title={runActive ? "An agent is working this card. Stop it or wait for it to finish." : undefined}
+                  disabled={busy || runActive || detailsPending || loadFailed || noRepositories}
+                  title={
+                    noRepositories
+                      ? REPOSITORY_SETUP_MESSAGE
+                      : runActive
+                        ? "An agent is working this card. Stop it or wait for it to finish."
+                        : undefined
+                  }
                   onClick={() => act(async () => {
                     const result = await client.approveFeature(feature.id);
                     if (beta) {
@@ -1171,13 +1187,13 @@ export function FeatureDrawer({
                 <Skeleton height={36} />
                 <Skeleton height={36} />
               </div>
-            ) : showPullRequests && projectRepos.length === 0 ? (
+            ) : showPullRequests && noRepositories ? (
               <p className="muted">{REPOSITORY_SETUP_MESSAGE}</p>
             ) : (
               <div className="pr-list">
                 {showPullRequests && (
                   <>
-                    {projectRepos.map((repo) => renderPullRequestRow(repo, pullRequestByName.get(repo.name)))}
+                    {knownRepos.map((repo) => renderPullRequestRow(repo, pullRequestByName.get(repo.name)))}
                     {orphanPullRequests.map((pr) =>
                       renderPullRequestRow({ id: pr.url, name: pr.name, repoUrl: pr.url }, pr),
                     )}

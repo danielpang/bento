@@ -159,6 +159,12 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     // Not billed: the agent never started. Announced so a queued run
     // does not sit open in analytics after the row is closed.
     await announceRunFinished(ctx, runId, "cancelled", false);
+    // Settlement is what tells the card and the tree this run is over.
+    // A pipeline card otherwise waits on an evaluation that never
+    // comes, and a swarm leaf stays working with nobody on it. The
+    // tick that follows does not start another agent while the project
+    // still has no checkout.
+    await subject.settle(ctx);
     return;
   }
 

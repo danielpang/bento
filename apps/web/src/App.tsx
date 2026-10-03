@@ -551,6 +551,8 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
    * panel that adds one.
    */
   const [repoCount, setRepoCount] = useState<number | null>(null);
+  /** The project the current count belongs to. A panel change is not a new project. */
+  const repoCountFor = useRef<string | null>(null);
   const toast = useToast();
   /**
    * Where focus goes once a deleted card has left the board, and which
@@ -668,26 +670,34 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
 
   useEffect(() => {
     if (!projectId) {
+      repoCountFor.current = null;
       setRepoCount(null);
       return;
     }
     let cancelled = false;
-    setRepoCount(null);
+    // Only a different project forgets the count. Opening a panel used
+    // to clear it first, so the warning vanished and a board with no
+    // agents flashed "No coding agents yet" until the refetch returned.
+    if (repoCountFor.current !== projectId) {
+      repoCountFor.current = projectId;
+      setRepoCount(null);
+    }
     void client
       .listRepositories(projectId)
       .then((rows) => {
-        if (!cancelled) setRepoCount(rows.length);
+        if (!cancelled && repoCountFor.current === projectId) setRepoCount(rows.length);
       })
       .catch(() => {
-        // A failed read must not claim the project has no repositories.
-        // The start routes still refuse a run if it really has none.
-        if (!cancelled) setRepoCount(null);
+        // Keep the last count for this project. A failed read must not
+        // claim there are no repositories, and must not drop a warning
+        // that was already on screen. The start routes still refuse.
       });
     return () => {
       cancelled = true;
     };
     // Closing the Repositories panel is when a repository just added
-    // should clear the warning.
+    // should clear the warning. The count stays up while that refetch
+    // is in flight.
   }, [projectId, panel]);
 
   useEffect(() => {
@@ -1287,12 +1297,23 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
           // Optimistic: the card lands in the lane it was dropped on,
           // and the refetch settles the truth. Waiting for the server
           // makes a drop feel like it bounced.
+          const card = features.find((feature) => feature.id === featureId);
+          const fromIndex = card?.currentStageId
+            ? stages.findIndex((stage) => stage.id === card.currentStageId)
+            : -1;
+          const toIndex = stageId ? stages.findIndex((stage) => stage.id === stageId) : -1;
+          // Forward is the drop that would have started an agent. The
+          // move still happens; the note is why that agent did not.
+          const movingForward = toIndex > fromIndex;
           setFeatures((current) =>
             current.map((f) => (f.id === featureId ? { ...f, currentStageId: stageId, status: "active" } : f)),
           );
           void client
             .moveFeature(featureId, stageId)
-            .then(() => setLoadError(""))
+            .then(() => {
+              setLoadError("");
+              if (movingForward && repoCount === 0) toast.note(REPOSITORY_SETUP_MESSAGE);
+            })
             // The refetch will snap the card back; without a reason the
             // bounce reads as a glitch rather than a refusal.
             .catch((err: unknown) =>

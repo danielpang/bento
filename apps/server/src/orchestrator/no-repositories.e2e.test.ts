@@ -5,18 +5,27 @@ import {
   agentRuns,
   createDb,
   createPool,
+  features,
+  gateChecks,
   repositories,
   runEvents,
   runMigrations,
+  stages,
+  swarmMessages,
+  swarmTasks,
+  swarms,
   type Db,
 } from "@bento/db";
 import { eq } from "drizzle-orm";
 import { createApp } from "../app.js";
 import type { AppContext } from "../context.js";
 import { loadEnv } from "../env.js";
+import { evaluateFeatureGate } from "./gate-evaluator.js";
+import { startFeatureFollowUpRun } from "./rebase-run.js";
 import { executeRun } from "./run-executor.js";
 import { startAssignedStageAgent } from "./stage-agent.js";
 import { NO_REPOSITORIES } from "./start-run.js";
+import { tickSwarm } from "./swarm/coordinator.js";
 
 /**
  * A project with no checkout cannot run an agent. The start route says
@@ -153,14 +162,135 @@ test("a project with no repositories refuses a new run and cancels one already q
     board.filter((event) => event.type === "run_updated").map((event) => event.status),
     ["cancelled"],
   );
-  assert.deepEqual(jobs, []);
+  // Cancelling settles the card. The gate is what would have been
+  // skipped, and a second delivery of the same job must not settle again.
+  assert.deepEqual(jobs, [{ name: "gate.evaluate", data: { featureId: FEATURE } }]);
 
   // A duplicate job, the shape a retry or a boot requeue would deliver,
   // finds the run already closed and writes nothing further.
   await executeRun(ctx, run!.id);
   const again = await db.select().from(runEvents).where(eq(runEvents.runId, run!.id));
   assert.equal(again.length, 0);
-  assert.deepEqual(jobs, []);
+  assert.deepEqual(jobs, [{ name: "gate.evaluate", data: { featureId: FEATURE } }]);
+
+  const quick = await app.request(`/api/features/${FEATURE}/quick-run?cli=claude-code`, { method: "POST" });
+  assert.equal(quick.status, 409, await quick.clone().text());
+  assert.deepEqual(await quick.json(), { error: NO_REPOSITORIES });
+
+  const message = await app.request(`/api/features/${FEATURE}/message`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text: "please continue" }),
+  });
+  assert.equal(message.status, 409);
+  assert.deepEqual(await message.json(), { error: NO_REPOSITORIES });
+
+  await db.update(agentRuns).set({ cliSessionId: "session-1" }).where(eq(agentRuns.id, run!.id));
+  const resumed = await app.request(`/api/runs/${run!.id}/resume`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "also handle the empty case" }),
+  });
+  assert.equal(resumed.status, 409);
+  assert.deepEqual(await resumed.json(), { error: NO_REPOSITORIES });
+
+  await db.update(features).set({ branchName: "card" }).where(eq(features.id, FEATURE));
+  const followUp = await startFeatureFollowUpRun(
+    ctx,
+    db,
+    { id: FEATURE, projectId: PROJECT, branchName: "card", status: "active", currentStageId: STAGE },
+    "rebase onto main",
+    "u1",
+    "rebase",
+  );
+  assert.deepEqual(followUp, { ok: false, status: 409, error: NO_REPOSITORIES });
+
+  const swarmCreate = await app.request("/api/swarms", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ projectId: PROJECT, title: "No checkout" }),
+  });
+  assert.equal(swarmCreate.status, 409, await swarmCreate.clone().text());
+  assert.deepEqual(await swarmCreate.json(), { error: NO_REPOSITORIES });
+
+  const [swarm] = await db
+    .insert(swarms)
+    .values({
+      projectId: PROJECT,
+      slug: "no-checkout",
+      title: "No checkout",
+      plannerProfileId: PROFILE,
+      workerProfileId: PROFILE,
+      workerIsolation: "worktree",
+      status: "planning",
+      startedBy: "u1",
+    })
+    .returning();
+  await db.insert(agentRuns).values({
+    type: "swarm",
+    swarmId: swarm!.id,
+    role: "planner",
+    agentProfileId: PROFILE,
+    prompt: "",
+    status: "failed",
+    startedBy: "u1",
+  });
+  const retry = await app.request(`/api/swarms/${swarm!.id}/planner/retry`, { method: "POST" });
+  assert.equal(retry.status, 409, await retry.clone().text());
+  assert.deepEqual(await retry.json(), { error: NO_REPOSITORIES });
+
+  // A tick still records a worker that was cancelled, and does not
+  // start the planner a queued message would otherwise wake.
+  const [worker] = await db
+    .insert(agentRuns)
+    .values({
+      type: "swarm",
+      swarmId: swarm!.id,
+      role: "worker",
+      agentProfileId: PROFILE,
+      prompt: "",
+      status: "cancelled",
+      startedBy: "u1",
+    })
+    .returning();
+  await db.insert(swarmTasks).values({
+    swarmId: swarm!.id,
+    title: "Stopped leaf",
+    nodeType: "leaf",
+    status: "working",
+    assignedRunId: worker!.id,
+  });
+  const [pendingMessage] = await db
+    .insert(swarmMessages)
+    .values({ swarmId: swarm!.id, text: "change the plan", userId: "u1", status: "queued" })
+    .returning();
+  const ticked = await tickSwarm(ctx, swarm!.id);
+  assert.equal(ticked?.plannerRunId, null);
+  assert.deepEqual(ticked?.workerRunIds, []);
+  assert.deepEqual(ticked?.resolverRunIds, []);
+  const [leaf] = await db.select().from(swarmTasks).where(eq(swarmTasks.swarmId, swarm!.id));
+  assert.equal(leaf?.status, "failed");
+  const [stillQueued] = await db.select().from(swarmMessages).where(eq(swarmMessages.id, pendingMessage!.id));
+  assert.equal(stillQueued?.status, "queued");
+  const planners = await db
+    .select({ id: agentRuns.id })
+    .from(agentRuns)
+    .where(eq(agentRuns.role, "planner"));
+  assert.equal(planners.length, 1);
+
+  await db
+    .update(stages)
+    .set({ gateType: "auto", gateCriteria: [{ type: "agent_judge", agentProfileId: PROFILE }] })
+    .where(eq(stages.id, STAGE));
+  const runsBeforeJudge = await db.select({ id: agentRuns.id }).from(agentRuns);
+  await evaluateFeatureGate(ctx, FEATURE);
+  const runsAfterJudge = await db.select({ id: agentRuns.id }).from(agentRuns);
+  assert.equal(runsAfterJudge.length, runsBeforeJudge.length);
+  const [judgment] = await db.select().from(gateChecks).where(eq(gateChecks.featureId, FEATURE));
+  assert.equal(judgment?.status, "pending");
+  assert.equal((judgment?.detail as { message?: string } | null)?.message, NO_REPOSITORIES);
+
+  assert.deepEqual(jobs, [{ name: "gate.evaluate", data: { featureId: FEATURE } }]);
 
   await db.insert(repositories).values({
     projectId: PROJECT,
