@@ -5,7 +5,7 @@ import type { SandboxDriver } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
 import { asPipelineRun } from "./pipeline-run.js";
 import { driverForProvision } from "./sandbox-driver.js";
-import { CARD_BUSY, startRunIfIdle } from "./start-run.js";
+import { CARD_BUSY, NO_REPOSITORIES, projectHasRepositories, startRunIfIdle } from "./start-run.js";
 import { enqueueRun } from "./queue.js";
 import { latestConversationRun, resolveFollowUpRun } from "./stage-agent.js";
 import { refreshBaseBranches } from "./repo-remote.js";
@@ -49,6 +49,9 @@ export async function startFeatureFollowUpRun(
   }
   if (!feature.branchName) {
     return { ok: false, status: 409, error: "this card has no branch yet; run an agent on it first" };
+  }
+  if (!(await projectHasRepositories(db, feature.projectId))) {
+    return { ok: false, status: 409, error: NO_REPOSITORIES };
   }
 
   const conversation = await latestConversationRun(db, feature.id);

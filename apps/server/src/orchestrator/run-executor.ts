@@ -83,7 +83,7 @@ import { extendRunGrant, revokeRunGrant, runGrantServerIds, sweepExpiredGrants }
 import { sweepExpiredOAuth } from "../mcp/oauth-sweep.js";
 import { shouldIncludeStageNotes, shouldShareAgentAuth } from "../settings.js";
 import { captureRunQueueDepth } from "./queue-snapshot.js";
-import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
+import { ACTIVE_RUN_STATUSES, NO_REPOSITORIES, startRunIfIdle } from "./start-run.js";
 import { enqueueRun, INTERACTIVE_POLL_SECONDS, QUEUE_POLL_SECONDS, RUN_WORKER_POLL_SECONDS } from "./queue.js";
 import { HIBERNATE_SANDBOX_QUEUE, MODAL_SWEEP_QUEUE, scheduleModalHibernation, hibernateSandbox, sweepOrphanModalSandboxes } from "./hibernate-sandbox.js";
 import { modalRunHosts } from "./modal-hosts.js";
@@ -134,13 +134,24 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
    */
   const subject = await describeRunSubject(ctx, found);
   const { run, profile, project, repoRows } = subject;
-  // An agent needs somewhere to work. Thrown rather than failed as a
-  // run, the way it always was: the job retries, and a project with no
-  // repository is a setup problem the person fixes once.
-  if (repoRows.length === 0) {
-    throw new Error(`project ${project.id} has no repositories; add at least one before running agents`);
-  }
   const emitBoard = (status: string) => subject.emitBoard(status);
+  /**
+   * An agent needs a checkout. Failing the run, rather than throwing,
+   * is the whole of the answer.
+   *
+   * A throw used to leave the row queued: the compare-and-set below
+   * had not run, so the job retried, and a boot requeued every queued
+   * run on top of that. Each attempt was reported as an exception, the
+   * card stayed busy, and nobody was told why. Adding a repository
+   * later did not help until the next retry happened to land after it.
+   */
+  if (repoRows.length === 0) {
+    console.warn(`run ${runId} cannot start: project ${project.id} has no repositories`);
+    await finishRun(ctx, runId, { ok: false, error: NO_REPOSITORIES }, null);
+    emitBoard("failed");
+    await subject.settle(ctx);
+    return;
+  }
 
   /**
    * Claimed atomically rather than checked then set. Boot recovery

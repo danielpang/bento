@@ -49,7 +49,7 @@ import {
   reopenFeature,
   activationRefusal,
 } from "../orchestrator/gate-evaluator.js";
-import { ACTIVE_RUN_STATUSES, CARD_BUSY, CARD_BUSY_DELETE, startRunIfIdle } from "../orchestrator/start-run.js";
+import { ACTIVE_RUN_STATUSES, CARD_BUSY, CARD_BUSY_DELETE, NO_REPOSITORIES, projectHasRepositories, startRunIfIdle } from "../orchestrator/start-run.js";
 import { enqueueRun } from "../orchestrator/queue.js";
 import { queueLinearIssueCreate } from "../orchestrator/linear-sync.js";
 import {
@@ -707,6 +707,13 @@ export function featureRoutes(ctx: AppContext) {
         return c.json({ error: "no agent has run on this card yet; start one first" }, 400);
       }
       const latest = asPipelineRun(newest);
+      const working =
+        latest.status === "queued" || latest.status === "starting" || latest.status === "running";
+      // A live run already has a workspace. An idle card would start a
+      // new one, which cannot happen until the project has a checkout.
+      if (!working && !(await projectHasRepositories(db(c, ctx), feature.projectId))) {
+        return c.json({ error: NO_REPOSITORIES }, 409);
+      }
 
       if (body.attachments?.length) {
         const [sandbox] = await db(c, ctx).select().from(sandboxes)
@@ -1505,6 +1512,9 @@ export function featureRoutes(ctx: AppContext) {
       // alone would let an agent run on a card nobody is watching.
       if (feature.status === "done" || feature.status === "cancelled") {
         return c.json({ error: `feature is ${feature.status}; reopen it first` }, 409);
+      }
+      if (!(await projectHasRepositories(db(c, ctx), feature.projectId))) {
+        return c.json({ error: NO_REPOSITORIES }, 409);
       }
 
       /**
