@@ -13,6 +13,7 @@ import {
   type Db,
 } from "@bento/db";
 import type { AppContext } from "../../context.js";
+import { driverForSandbox } from "../sandbox-driver.js";
 import type { BoardEvent } from "../../events.js";
 import { captureJobErrors } from "../../analytics.js";
 import { enqueueRun, INTERACTIVE_POLL_SECONDS } from "../queue.js";
@@ -597,7 +598,7 @@ async function executeDocumentAssembly(ctx: AppContext, taskId: string): Promise
     if (!repository) throw new Error("the project has no repository for the document");
     const assembled = await assembleSwarmDocumentInSandbox(ctx.db, {
       swarm,
-      driver: ctx.driver,
+      driver: driverForSandbox(ctx.drivers, sandbox),
       handle: { externalId: sandbox.externalId, provider: sandbox.provider, workdir: sandbox.workdir },
       repositoryName: repository.name,
       branch: swarm.branchName,

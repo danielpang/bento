@@ -610,6 +610,8 @@ export class BentoClient {
       ok: boolean;
       mode: string;
       driver: string;
+      /** Remote providers this server can run, beside the default in `driver`. */
+      selectableSandboxProviders?: string[];
       /**
        * The console build the server serves, when it serves one. The
        * same value rides on every API response as `x-bento-build`.

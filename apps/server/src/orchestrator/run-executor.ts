@@ -40,7 +40,7 @@ import {
   swarmTasks,
   swarms,
 } from "@bento/db";
-import { collectExec, isExecTimeout, LineChannel, repositoryPathIn, type PreparedRepository, type SandboxHandle } from "@bento/sandbox";
+import { collectExec, isExecTimeout, LineChannel, repositoryPathIn, type PreparedRepository, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
 import { captureJobErrors } from "../analytics.js";
 import type { AppContext } from "../context.js";
 import { unbilledReason } from "../unbilled-reasons.js";
@@ -53,6 +53,7 @@ import { recoverAncestryPublishFailures } from "./rebase-run.js";
 import { runRepositorySetup } from "./repo-setup.js";
 import { captureRunArtifacts } from "./capture-artifacts.js";
 import { provisionWorkspace } from "./sandbox-provision.js";
+import { driverForRun, driverForSandbox, SandboxDriverUnavailable } from "./sandbox-driver.js";
 import { evaluateFeatureGate } from "./gate-evaluator.js";
 import { buildResolverPrompt, buildStagePrompt, repositoryInstructions } from "./prompt.js";
 import {
@@ -153,6 +154,19 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   if (!claimed) return; // a duplicate job claimed it first
   emitBoard("starting");
 
+  // A live sandbox keeps the driver that created it. A card or swarm
+  // with none uses the deployment default until a project can name one.
+  let driver: SandboxDriver;
+  try {
+    driver = await driverForRun(ctx.db, ctx.drivers, subject);
+  } catch (err) {
+    console.error(`sandbox provisioning failed for run ${runId}:`, err);
+    await finishRun(ctx, runId, { ok: false, error: `sandbox provisioning failed: ${describeSandboxError(err)}` }, null);
+    emitBoard("failed");
+    await subject.settle(ctx);
+    return;
+  }
+
   const adapter = getAdapter(profile.cli);
   // Resolved before provisioning because two places need it: the
   // sandbox mounts them, and the credential check below counts a
@@ -173,6 +187,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     project.organizationId,
     adapter,
     profile.model,
+    driver,
   );
   const customProvider = await customProviderRunEnv(ctx, project.organizationId, profile.cli, profile.model);
   // A custom provider key is sufficient. Forwarding every other
@@ -277,9 +292,9 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       `${landed}, so this card continues on a new branch, ${branch}, started from the base branch. The next publish opens a new pull request.`,
     );
     // The new branch starts at origin/<base>, so origin/<base> had
-    // better be the merge. Sprites clone it fresh; the drivers that
-    // share a host checkout see only what was last fetched there.
-    if (ctx.driver.provider !== "sprite") {
+    // better be the merge. Clone drivers fetch it themselves. Host
+    // drivers share a checkout and only see what was last fetched there.
+    if (driver.workspace === "host") {
       await refreshBaseBranches(repoRows.map((r) => ({ localPath: r.localPath, defaultBranch: r.defaultBranch })));
     }
   }
@@ -289,6 +304,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   try {
     // The workspace, from the function both boards provision through.
     const workspace = await provisionWorkspace(ctx, {
+      driver,
       projectId: project.id,
       organizationId: subject.organizationId,
       workspaceKey: subject.workspaceKey,
@@ -351,7 +367,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
        * would be writing against code every landed leaf has moved
        * past. Read out of the swarm's own machine.
        */
-      ...(subject.kind === "swarm" && subject.task && subject.swarm.branchName && ctx.driver.provider === "sprite"
+      ...(subject.kind === "swarm" && subject.task && subject.swarm.branchName && driver.workspace === "clone"
         ? { startFromBundles: await swarmBranchBundles(ctx, subject.swarm, repoRows) }
         : {}),
       say: saySystem,
@@ -390,6 +406,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     runId,
     organizationId: subject.organizationId,
     actingUserId: run.startedBy,
+    driver,
     adapter,
     handle,
     restrictNetwork,
@@ -453,9 +470,9 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
 
   // Snapshot before the agent touches anything, so this run can be
   // undone wholesale. Drivers without snapshots (Docker) rely on git.
-  if (ctx.driver.snapshot) {
+  if (driver.snapshot) {
     try {
-      const checkpointId = await ctx.driver.snapshot(handle, subject.snapshotLabel);
+      const checkpointId = await driver.snapshot(handle, subject.snapshotLabel);
       await ctx.db.update(agentRuns).set({ checkpointId }).where(eq(agentRuns.id, runId));
     } catch (err) {
       // A missing snapshot costs rollback, not the run.
@@ -494,6 +511,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   const setupFailure = skipSetup
     ? null
     : await runRepositorySetup(ctx, {
+        driver,
         handle,
         repositories: repoRows.map((row) => ({
           name: row.name,
@@ -507,6 +525,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   }
 
   const { argv, live, liveChannel, workdir, toolEnv, files } = await buildRunCommand(ctx, {
+    driver,
     subject,
     adapter,
     prepared,
@@ -530,13 +549,13 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   // ahead of whatever the tool then reports without it.
   for (const file of files) {
     // No sandbox: the agent's home is the operator's own.
-    if (ctx.driver.provider === "local-process" && isSandboxHomePath(file.path)) {
+    if (driver.provider === "local-process" && isSandboxHomePath(file.path)) {
       await saySystem(
         `Not writing ${file.path} on this machine, because it would replace your own file, so ${profile.cli} starts without it.`,
       );
       continue;
     }
-    const written = await collectExec(ctx.driver.exec(handle, writeFileCommand(file), { timeoutMs: 60_000 }));
+    const written = await collectExec(driver.exec(handle, writeFileCommand(file), { timeoutMs: 60_000 }));
     if (written.exitCode !== 0) {
       await saySystem(`Could not write ${file.path} into the sandbox, so ${profile.cli} starts without it.`);
     }
@@ -552,6 +571,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
    */
   if (run.cliSessionId && subject.kind === "pipeline") {
     await recoverMissedMessages(ctx, {
+      driver,
       handle,
       adapter,
       featureId: subject.feature.id,
@@ -621,7 +641,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       adapter,
       argv,
       exec: () =>
-        ctx.driver.exec(handle, argv, {
+        driver.exec(handle, argv, {
           cwd: workdir,
           env: execEnv,
           sessionKey: runId,
@@ -700,6 +720,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   }
 
   await settleAgentResult(ctx, {
+    driver,
     runId,
     subject,
     repoRows,
@@ -715,6 +736,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
 
 /** The rows a run settlement needs, shared by first runs and resumes. */
 interface RunSettlement {
+  driver: SandboxDriver;
   runId: string;
   /** Which board this run belongs to, and everything that follows. */
   subject: RunSubject;
@@ -1019,6 +1041,7 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
   // certainly still there. Before the gate evaluates, so an approver
   // reading the card sees the artifacts the decision is about.
   await captureRunArtifacts(ctx, {
+    driver: settlement.driver,
     runId,
     organizationId: subject.organizationId,
     // Where the files are filed. A card's artifacts hang off the card
@@ -1097,10 +1120,10 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
           githubRepoId: Number.isSafeInteger(githubRepoId) ? githubRepoId! : null,
           defaultBranch: row.defaultBranch,
           ...(preparedRepo ? { worktreePath: preparedRepo.worktreePath } : {}),
-          ...(ctx.driver.exportRepository
+          ...(settlement.driver.exportRepository
             ? {
                 exportBundle: () =>
-                  ctx.driver.exportRepository!(handle, row.name, row.defaultBranch),
+                  settlement.driver.exportRepository!(handle, row.name, row.defaultBranch),
               }
             : {}),
         };
@@ -1209,6 +1232,7 @@ function execFailureReason(ctx: AppContext, err: unknown): string {
 async function buildRunCommand(
   ctx: AppContext,
   input: {
+    driver: SandboxDriver;
     subject: RunSubject;
     adapter: AgentAdapter;
     prepared: PreparedRepository[];
@@ -1240,7 +1264,7 @@ async function buildRunCommand(
   /** Files the tool reads settings from, written before it starts. */
   files: McpFile[];
 }> {
-  const { subject, adapter, prepared, handle } = input;
+  const { driver, subject, adapter, prepared, handle } = input;
   const { run, profile, repoRows } = subject;
   // Paths inside the sandbox depend on the driver: a container mounts
   // the workspace at /workspace, the local driver uses the host path.
@@ -1274,7 +1298,7 @@ async function buildRunCommand(
    * whose prompt never mentions the plan.
    */
   const planSources =
-    subject.kind === "swarm" && subject.run.role !== "resolver" ? await planSourcesInWorkspace(ctx, handle, subject.swarm.id) : [];
+    subject.kind === "swarm" && subject.run.role !== "resolver" ? await planSourcesInWorkspace(ctx, driver, handle, subject.swarm.id) : [];
   const rolePrompt = await buildSubjectPrompt(ctx, subject, mounted, handle, input.cardTools ?? false, planSources);
   const resume = Boolean(run.cliSessionId) && !forgetsBetweenRuns(profile.cli);
   // Only ordinary work compacts: judge and rebase prompts are complete
@@ -1315,7 +1339,7 @@ async function buildRunCommand(
    * driver that can attach stdin.
    */
   const live =
-    adapter.live && ctx.driver.supportsStdin && (adapter.live.appliesTo?.(commandInput) ?? true)
+    adapter.live && driver.supportsStdin && (adapter.live.appliesTo?.(commandInput) ?? true)
       ? adapter.live
       : null;
   const liveChannel = live ? new LineChannel() : null;
@@ -1603,7 +1627,7 @@ async function swarmBranchBundles(
   const [row] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, swarm.sandboxId)).limit(1);
   if (!row || row.status === "destroyed") return new Map();
   return exportSwarmBranch(
-    ctx.driver,
+    driverForSandbox(ctx.drivers, row),
     { externalId: row.externalId, provider: row.provider, workdir: row.workdir },
     repoRows.map((repo) => ({ name: repo.name, defaultBranch: repo.defaultBranch })),
     swarm.branchName ?? swarmBranchName(swarm.slug),
@@ -1621,10 +1645,15 @@ async function swarmBranchBundles(
  * stdin is not a failure; the sources then have no path, and the
  * prompt says they are only in the text.
  */
-async function planSourcesInWorkspace(ctx: AppContext, handle: SandboxHandle, swarmId: string): Promise<PlanSource[]> {
+async function planSourcesInWorkspace(
+  ctx: AppContext,
+  driver: SandboxDriver,
+  handle: SandboxHandle,
+  swarmId: string,
+): Promise<PlanSource[]> {
   const sources = await loadPlanSources(ctx.db, swarmId);
   if (sources.length === 0) return sources;
-  const paths = await writePlanSourceFiles(ctx.driver, ctx.artifacts, handle, sources);
+  const paths = await writePlanSourceFiles(driver, ctx.artifacts, handle, sources);
   return sources.map((source) => ({ ...source, path: paths?.get(source.id) ?? null }));
 }
 
@@ -2234,10 +2263,19 @@ export async function recoverInterruptedRuns(ctx: AppContext): Promise<void> {
     // external id: sandboxes has no unique index on external_id, so a
     // name lookup could hand back another row for the same sprite.
     const sandbox =
-      orphan.status === "running" && orphan.sandboxId && ctx.driver.attach
+      orphan.status === "running" && orphan.sandboxId
         ? (await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, orphan.sandboxId)).limit(1))[0]
         : undefined;
-    if (!sandbox || sandbox.provider !== ctx.driver.provider) {
+    let resumeDriver: SandboxDriver | undefined;
+    if (sandbox) {
+      try {
+        resumeDriver = driverForSandbox(ctx.drivers, sandbox);
+      } catch (err) {
+        console.warn(`run ${orphan.id} cannot resume:`, err);
+        resumeDriver = undefined;
+      }
+    }
+    if (!sandbox || !resumeDriver?.attach) {
       await failRunAsInterrupted(ctx, orphan);
       closed += 1;
       continue;
@@ -2249,7 +2287,7 @@ export async function recoverInterruptedRuns(ctx: AppContext): Promise<void> {
      * the interrupted close, whose compare-and-set means a resume that
      * already finished cannot be clobbered.
      */
-    void resumeInterruptedRun(ctx, orphan, sandbox).catch(async (err) => {
+    void resumeInterruptedRun(ctx, orphan, sandbox, resumeDriver).catch(async (err) => {
       console.error(`could not resume run ${orphan.id} after the restart:`, err);
       ctx.analytics?.captureException(err, orphan.startedBy, orphan.organizationId, {
         run_id: orphan.id,
@@ -2364,6 +2402,7 @@ async function resumeInterruptedRun(
   ctx: AppContext,
   run: typeof agentRuns.$inferSelect,
   sandbox: typeof sandboxes.$inferSelect,
+  driver: SandboxDriver,
 ): Promise<void> {
   const subject = await describeRunSubject(ctx, run);
   const { profile, repoRows } = subject;
@@ -2375,7 +2414,7 @@ async function resumeInterruptedRun(
 
   const handle: SandboxHandle = {
     externalId: sandbox.externalId,
-    provider: sandbox.provider === "sprite" ? "sprite" : ctx.driver.provider,
+    provider: driver.provider,
     workdir: sandbox.workdir,
   };
   // Resume only exists for drivers with attach, whose publish path
@@ -2397,6 +2436,7 @@ async function resumeInterruptedRun(
   const mcpArgs = grantServers.length > 0 ? adapter.mcp?.extraArgs?.() ?? [] : [];
 
   const { argv, live, liveChannel, workdir } = await buildRunCommand(ctx, {
+    driver,
     subject,
     adapter,
     prepared,
@@ -2429,7 +2469,7 @@ async function resumeInterruptedRun(
   // neither loses lines nor duplicates Poolside output (which has no
   // native event ids). The prior events still inform the outcome when
   // the CLI's result was committed just before the restart.
-  const durableEvents = ctx.driver.provider === "docker"
+  const durableEvents = driver.provider === "docker"
     ? (await ctx.db.select({ payload: runEvents.payload }).from(runEvents)
         .where(eq(runEvents.runId, run.id)).orderBy(asc(runEvents.seq)))
         .map((row) => row.payload as AgentEvent & { sandboxCursor?: number })
@@ -2448,7 +2488,7 @@ async function resumeInterruptedRun(
   const attach = async () => {
     for (let attempt = 0; ; attempt++) {
       try {
-        return await ctx.driver.attach!(handle, argv, {
+        return await driver.attach!(handle, argv, {
           sessionKey: run.id,
           afterCursor,
           timeoutMs,
@@ -2552,7 +2592,7 @@ async function resumeInterruptedRun(
   // nothing but a second attempt at the same query.
   // Docker replays from its durable cursor. Sprite replays its live
   // session and uses the CLI's native ids to close transcript gaps.
-  const persisted = recovery && ctx.driver.provider !== "docker"
+  const persisted = recovery && driver.provider !== "docker"
     ? await loadPersistedIds(
         ctx, recovery,
         subject.kind === "pipeline" ? subject.feature.id : run.id,
@@ -2562,8 +2602,9 @@ async function resumeInterruptedRun(
         return null;
       })
     : null;
-  if (recovery && run.cliSessionId && ctx.driver.provider !== "docker") {
+  if (recovery && run.cliSessionId && driver.provider !== "docker") {
     await recoverMissedMessages(ctx, {
+      driver,
       handle,
       adapter,
       ...(subject.kind === "pipeline" ? { featureId: subject.feature.id } : {}),
@@ -2631,6 +2672,7 @@ async function resumeInterruptedRun(
   }
 
   await settleAgentResult(ctx, {
+    driver,
     runId: run.id,
     subject,
     repoRows,
@@ -2920,7 +2962,12 @@ function describeSandboxError(err: unknown): string {
   // A plain Error carrying a written sentence is that sentence. The
   // "Error:" String() puts in front of it says nothing a reader wants,
   // while a driver's own subclass names who failed and is kept.
-  const base = err instanceof Error && err.name === "Error" ? err.message : String(err);
+  // A missing driver is a plain sentence too. Its name says which
+  // check failed; the run record should still show the sentence.
+  const base =
+    err instanceof SandboxDriverUnavailable || (err instanceof Error && err.name === "Error")
+      ? err.message
+      : String(err);
   if (typeof err !== "object" || err === null) return base;
   const { stderr, stdout } = err as { stderr?: unknown; stdout?: unknown };
   const output = [stderr, stdout].find((value) => typeof value === "string" && value.trim() !== "");

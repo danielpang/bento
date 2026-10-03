@@ -1,8 +1,10 @@
 import { and, desc, eq } from "drizzle-orm";
 import { agentRuns, repositories, type Db } from "@bento/db";
 import type { GitHubPublisher } from "@bento/github";
+import type { SandboxDriver } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
 import { asPipelineRun } from "./pipeline-run.js";
+import { driverForProvision } from "./sandbox-driver.js";
 import { CARD_BUSY, startRunIfIdle } from "./start-run.js";
 import { enqueueRun } from "./queue.js";
 import { latestConversationRun, resolveFollowUpRun } from "./stage-agent.js";
@@ -72,7 +74,19 @@ export async function startFeatureFollowUpRun(
     };
   }
 
-  if (ctx.driver.provider !== "sprite") {
+  // Host drivers share a checkout and only see what was last fetched.
+  // Clone drivers clone the base branch themselves.
+  let driver: SandboxDriver;
+  try {
+    driver = await driverForProvision(db, ctx.drivers, feature.id);
+  } catch (err) {
+    return {
+      ok: false,
+      status: 409,
+      error: err instanceof Error ? err.message : "no driver configured on this server",
+    };
+  }
+  if (driver.workspace === "host") {
     const repos = await db
       .select({ localPath: repositories.localPath, defaultBranch: repositories.defaultBranch })
       .from(repositories)

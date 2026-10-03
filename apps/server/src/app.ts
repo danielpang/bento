@@ -117,7 +117,8 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
       return c.json({
         ok: true,
         mode: ctx.env.BENTO_MODE,
-        driver: ctx.driver.provider,
+        driver: ctx.drivers.default.provider,
+        selectableSandboxProviders: ctx.drivers.selectable(),
         build: shell?.build ?? undefined,
         // Which social logins are actually configured, so the sign-in
         // page offers real buttons rather than ones that can only 404.

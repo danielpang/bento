@@ -1,10 +1,12 @@
 import { zValidator } from "@hono/zod-validator";
 import { and, asc, count, eq, sql } from "drizzle-orm";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { z } from "zod";
 import { MODEL_GUIDANCE, agentCli, checkAgentPairing, providerForProfile } from "@bento/core";
 import { agentProfiles, agentRuns, stages } from "@bento/db";
-import { getActiveOrganizationMembership } from "../access.js";
+import type { SandboxDriver } from "@bento/sandbox";
+import { canAccessProject, getActiveOrganizationMembership } from "../access.js";
+import { driverForProject } from "../orchestrator/sandbox-driver.js";
 import { parseAgentFile, writeAgentFile } from "../agent-file.js";
 import type { AppContext } from "../context.js";
 import { actor, activeOrg } from "../middleware/actor.js";
@@ -17,19 +19,38 @@ import { upsertAgentsFromFile } from "../upsert-agents.js";
  * reopening the form tells the truth.
  */
 const TOOL_CACHE_MS = 60_000;
-let toolCache: { at: number; value: Record<string, boolean> | null } | null = null;
+const toolCache = new Map<string, { at: number; value: Record<string, boolean> | null }>();
+
+/** projects.id is a uuid. Anything else must not be sent to Postgres. */
+const PROJECT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Absent project, a project id that is not a uuid, or a project the
+ * caller cannot access, uses the default driver. An accessible project
+ * asks driverForProject, which is the default until a project can name
+ * a provider. Unknown and inaccessible ids answer the same body as no
+ * parameter, so the route does not say whether a project exists.
+ */
+async function toolsDriver(ctx: AppContext, c: Context): Promise<SandboxDriver> {
+  const projectId = c.req.query("projectId");
+  if (!projectId || !PROJECT_ID.test(projectId)) return ctx.drivers.default;
+  if (!(await canAccessProject(ctx, c, projectId))) return ctx.drivers.default;
+  return driverForProject(ctx.drivers);
+}
 
 async function toolAvailability(
   ctx: AppContext,
+  driver: SandboxDriver,
   binaries: string[],
 ): Promise<Record<string, boolean> | null> {
-  if (toolCache && Date.now() - toolCache.at < TOOL_CACHE_MS) return toolCache.value;
+  const cached = toolCache.get(driver.provider);
+  if (cached && Date.now() - cached.at < TOOL_CACHE_MS) return cached.value;
   // A driver with no opinion (a runner's machine is not this one) leaves
   // the question open rather than guessing.
-  const value = ctx.driver.checkTools
-    ? await ctx.driver.checkTools(binaries, ctx.env.BENTO_SANDBOX_IMAGE).catch(() => null)
+  const value = driver.checkTools
+    ? await driver.checkTools(binaries, ctx.env.BENTO_SANDBOX_IMAGE).catch(() => null)
     : null;
-  toolCache = { at: Date.now(), value };
+  toolCache.set(driver.provider, { at: Date.now(), value });
   return value;
 }
 
@@ -99,7 +120,8 @@ export function profileRoutes(ctx: AppContext) {
      */
     .get("/tools", async (c) => {
       const tools = MODEL_GUIDANCE.filter((tool) => tool.cli !== "fake");
-      const available = await toolAvailability(ctx, tools.map((tool) => tool.binary));
+      const driver = await toolsDriver(ctx, c);
+      const available = await toolAvailability(ctx, driver, tools.map((tool) => tool.binary));
       return c.json(
         tools.map((tool) => ({
           cli: tool.cli,

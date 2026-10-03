@@ -9,15 +9,19 @@ import {
   createDb,
   customModelProviders,
   createPool,
+  features,
   invitation,
   linearConnections,
   mcpConnections,
   mcpCredentials,
   mcpServers,
   member,
+  organizationPolicies,
+  pipelines,
   projects,
   runArtifacts,
   runMigrations,
+  sandboxes,
   swarmPlanSources,
   swarmTasks,
   swarms,
@@ -25,6 +29,7 @@ import {
   verification,
 } from "@bento/db";
 import { LocalProcessDriver, WorktreeManager, type SandboxDriver } from "@bento/sandbox";
+import { singleDriver } from "./orchestrator/sandbox-driver.js";
 import { mkdtemp } from "node:fs/promises";
 import { createHmac } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -37,7 +42,7 @@ import { SecretBox } from "./secrets.js";
 import { createAuth, type AuthHooks } from "./auth.js";
 import { reportAuthEvent } from "./auth-events.js";
 import { recordingAnalytics } from "./test-analytics.js";
-import type { AppContext } from "./context.js";
+import { createDrivers, type AppContext } from "./context.js";
 import { EventBus } from "./events.js";
 import { loadEnv } from "./env.js";
 import { createFeatureFlags, FeatureFlags } from "./feature-flags.js";
@@ -88,7 +93,7 @@ before(async () => {
     pool,
     boss,
     bus: new EventBus(),
-    driver: new LocalProcessDriver(),
+    drivers: singleDriver(new LocalProcessDriver()),
     worktrees: new WorktreeManager(dataDir),
     secretBox: new SecretBox("test-encryption-key-at-least-32-chars"),
     artifacts: new DiskArtifactStore(dataDir),
@@ -1424,13 +1429,14 @@ test("custom providers keep definitions and keys inside their organization", asy
     });
     assert.equal(started.status, 201, await started.clone().text());
     const runId = (await started.json() as { id: string }).id;
-    const previousDriver = ctx.driver;
+    const previousDrivers = ctx.drivers;
     let provisioned = false;
-    ctx.driver = {
+    ctx.drivers = singleDriver({
       provider: "local-process",
+      workspace: "host",
       provision: async () => { provisioned = true; throw new Error("a removed provider must fail before provisioning"); },
-    } as unknown as SandboxDriver;
-    try { await executeRun(ctx, runId); } finally { ctx.driver = previousDriver; }
+    } as unknown as SandboxDriver);
+    try { await executeRun(ctx, runId); } finally { ctx.drivers = previousDrivers; }
     const [finished] = await ctx.db.select({ status: agentRuns.status, error: agentRuns.error })
       .from(agentRuns).where(eq(agentRuns.id, runId));
     assert.equal(provisioned, false);
@@ -2970,6 +2976,89 @@ test("network lockdown is refused when the deployment cannot honour it", async (
   });
   assert.equal(refused.status, 409, "turning it on without a network to use is refused");
   assert.match(((await refused.json()) as { error: string }).error, /BENTO_SANDBOX_RESTRICTED_NETWORK/);
+});
+
+/**
+ * The default driver can lock its network, and so can a card with no
+ * machine yet. A live sprite row is provisioned on sprite, which
+ * cannot, so the lock must not say it can be honoured.
+ */
+test("network lockdown is refused when a live sandbox would use a driver that cannot lock the network", async () => {
+  const signup = await jsonPost("/api/auth/sign-up/email", {
+    email: "sprite-lock@bento.test",
+    password: "correct-horse-battery",
+    name: "Sprite Lock",
+  });
+  const token = signup.headers.get("set-auth-token")!;
+  const org = (await (
+    await jsonPost("/api/auth/organization/create", { name: "Sprite Lock Co", slug: "sprite-lock-co" }, token)
+  ).json()) as { id: string };
+  await jsonPost("/api/auth/organization/set-active", { organizationId: org.id }, token);
+
+  const previous = ctx.drivers;
+  ctx.drivers = createDrivers(
+    loadEnv({
+      BENTO_MODE: "multi",
+      DATABASE_URL: testUrl,
+      BENTO_SANDBOX_DRIVER: "docker",
+      BENTO_SANDBOX_RESTRICTED_NETWORK: "bento-locked",
+      SPRITES_TOKEN: "test-token",
+    } as NodeJS.ProcessEnv),
+  );
+  try {
+    const headers = { authorization: `Bearer ${token}` };
+    const open = (await (await app.request("/api/team/policy", { headers })).json()) as { supported: boolean };
+    assert.equal(open.supported, true, "the default driver can honour the lock when no live row needs another");
+
+    const [owner] = await ctx.db.select({ id: user.id }).from(user).where(eq(user.email, "sprite-lock@bento.test"));
+    const [project] = await ctx.db
+      .insert(projects)
+      .values({ ownerId: owner!.id, organizationId: org.id, name: "Live sprite" })
+      .returning();
+    const [pipeline] = await ctx.db
+      .insert(pipelines)
+      .values({ projectId: project!.id, name: "Default", isDefault: true })
+      .returning();
+    const [feature] = await ctx.db
+      .insert(features)
+      .values({ projectId: project!.id, pipelineId: pipeline!.id, title: "Sprite card", status: "active" })
+      .returning();
+    const [sandbox] = await ctx.db
+      .insert(sandboxes)
+      .values({
+        projectId: project!.id,
+        featureId: feature!.id,
+        provider: "sprite",
+        externalId: `policy-sprite-${feature!.id}`,
+        status: "ready",
+        workdir: "/workspace",
+      })
+      .returning();
+
+    const blocked = (await (await app.request("/api/team/policy", { headers })).json()) as { supported: boolean };
+    assert.equal(blocked.supported, false, "a live sprite row would provision a driver that cannot lock the network");
+
+    const refused = await app.request("/api/team/policy", {
+      method: "PATCH",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({ restrictNetwork: true }),
+    });
+    assert.equal(refused.status, 409);
+    const refusedBody = (await refused.json()) as { error: string };
+    assert.match(refusedBody.error, /cannot lock down/);
+    assert.doesNotMatch(refusedBody.error, /BENTO_SANDBOX_RESTRICTED_NETWORK/);
+    const [policy] = await ctx.db
+      .select({ restrictNetwork: organizationPolicies.restrictNetwork })
+      .from(organizationPolicies)
+      .where(eq(organizationPolicies.organizationId, org.id));
+    assert.notEqual(policy?.restrictNetwork, true, "the lock was not stored");
+
+    await ctx.db.update(sandboxes).set({ status: "destroyed" }).where(eq(sandboxes.id, sandbox!.id));
+    const after = (await (await app.request("/api/team/policy", { headers })).json()) as { supported: boolean };
+    assert.equal(after.supported, true, "a destroyed row is not provisioned again");
+  } finally {
+    ctx.drivers = previous;
+  }
 });
 
 /**

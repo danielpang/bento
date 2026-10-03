@@ -2,6 +2,7 @@ import { and, eq, inArray, isNull } from "drizzle-orm";
 import { credentialNamesFor, runsOnOllama } from "@bento/agents";
 import { missingOllamaCredentials, ollamaCredentialsOnly, ollamaUrlFromSandbox } from "@bento/core";
 import { secrets } from "@bento/db";
+import type { SandboxDriver } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
 
 /**
@@ -28,6 +29,12 @@ export async function resolveAgentEnv(
     requiredEnvFor?(model: string): string[];
   },
   model?: string,
+  /**
+   * The sandbox this run will execute in. The Ollama base URL is
+   * rewritten for docker only, so a clone driver must be passed here
+   * rather than assumed from the process default.
+   */
+  driver: SandboxDriver = ctx.drivers.default,
 ): Promise<{ env: Record<string, string>; missing: string[]; ollama: boolean }> {
   const env: Record<string, string> = {};
   // requiredEnvFor replaces requiredEnv, so a Codex OpenRouter run does
@@ -72,7 +79,7 @@ export async function resolveAgentEnv(
    */
   if (runsOnOllama(names, env)) {
     const ollama = ollamaCredentialsOnly(env);
-    if (ollama.OLLAMA_BASE_URL) ollama.OLLAMA_BASE_URL = ollamaUrlFromSandbox(ollama.OLLAMA_BASE_URL, ctx.driver.provider);
+    if (ollama.OLLAMA_BASE_URL) ollama.OLLAMA_BASE_URL = ollamaUrlFromSandbox(ollama.OLLAMA_BASE_URL, driver.provider);
     return { env: ollama, missing: missingOllamaCredentials(ollama), ollama: true };
   }
 

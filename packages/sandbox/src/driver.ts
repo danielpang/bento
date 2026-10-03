@@ -216,6 +216,11 @@ export type RepositoryImportOutcome =
 export interface SandboxDriver {
   provider: SandboxHandle["provider"];
   /**
+   * Host drivers mount a worktree the server prepared. Clone drivers
+   * have no host filesystem and clone from cloneUrl or seedBundle.
+   */
+  readonly workspace: "host" | "clone";
+  /**
    * What this driver's sandboxes cost, as a name rather than a number.
    *
    * A deployment that meters compute has to know which shape of machine

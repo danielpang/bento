@@ -104,7 +104,12 @@ export interface AppContext {
   pool: pg.Pool;
   boss: PgBoss;
   bus: EventBus;
-  driver: SandboxDriver;
+  /**
+   * Every sandbox driver this process built. `default` is what
+   * BENTO_SANDBOX_DRIVER selected, and it is what every project uses
+   * until a project can name its own.
+   */
+  drivers: SandboxDrivers;
   worktrees: WorktreeManager;
   /** Server-owned GitHub App; an installation is selected per organization. */
   githubApp?: GitHubApp;
@@ -192,26 +197,58 @@ export function reportSpriteLookupRetry(analytics: Analytics | null | undefined,
   }
 }
 
-export function createDriver(
+/**
+ * The drivers this process can run a sandbox with.
+ *
+ * `default` is today's switch on BENTO_SANDBOX_DRIVER. `get` returns a
+ * driver only when this server actually built one. `selectable` is the
+ * remote providers a project could choose: sprite when that driver was
+ * built. Docker and local-process are how a process runs, not choices.
+ */
+export interface SandboxDrivers {
+  readonly default: SandboxDriver;
+  get(provider: string): SandboxDriver | undefined;
+  selectable(): readonly string[];
+}
+
+export function createDrivers(
   env: Env,
   hooks?: { onSpriteLookupRetry?: (info: SpriteLookupRetry) => void },
-): SandboxDriver {
-  switch (env.BENTO_SANDBOX_DRIVER) {
-    case "sprite": {
-      if (!env.SPRITES_TOKEN) {
-        throw new Error("BENTO_SANDBOX_DRIVER=sprite needs SPRITES_TOKEN");
-      }
-      return new SpriteDriver({
+): SandboxDrivers {
+  // Built whenever the token is set, even when the default is something
+  // else, so a sprite row can still be reaped and reattached on a
+  // server that also runs another driver. No Modal driver here.
+  const sprite = env.SPRITES_TOKEN
+    ? new SpriteDriver({
         token: env.SPRITES_TOKEN,
         ...(env.SPRITES_REGION ? { region: env.SPRITES_REGION } : {}),
         ...(hooks?.onSpriteLookupRetry ? { onLookupRetry: hooks.onSpriteLookupRetry } : {}),
-      });
+      })
+    : undefined;
+
+  let fallback: SandboxDriver;
+  switch (env.BENTO_SANDBOX_DRIVER) {
+    case "sprite": {
+      if (!sprite) throw new Error("BENTO_SANDBOX_DRIVER=sprite needs SPRITES_TOKEN");
+      fallback = sprite;
+      break;
     }
     case "local-process":
-      return new LocalProcessDriver();
+      fallback = new LocalProcessDriver();
+      break;
     default:
-      return new DockerDriver(undefined, env.BENTO_SANDBOX_RESTRICTED_NETWORK);
+      fallback = new DockerDriver(undefined, env.BENTO_SANDBOX_RESTRICTED_NETWORK);
   }
+
+  const registered = new Map<string, SandboxDriver>();
+  registered.set(fallback.provider, fallback);
+  if (sprite) registered.set(sprite.provider, sprite);
+
+  return {
+    default: fallback,
+    get: (provider) => registered.get(provider),
+    selectable: () => (sprite ? ["sprite"] : []),
+  };
 }
 
 /**

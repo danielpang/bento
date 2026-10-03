@@ -95,9 +95,9 @@ export type WorkerIsolation = "sandbox" | "worktree";
  * open egress: a shape that changes under a swarm is a setting that
  * was a decoration.
  */
-export function isolationRefusal(isolation: WorkerIsolation, provider: string): string | null {
+export function isolationRefusal(isolation: WorkerIsolation, workspace: "host" | "clone"): string | null {
   if (isolation !== "worktree") return null;
-  if (provider !== "sprite") return null;
+  if (workspace !== "clone") return null;
   return (
     "This swarm was created to run its agents in worktrees of the repository on the server, and this deployment runs agents on machines that hold their own clones. " +
     "A new swarm started here gives each agent its own machine. To carry on with this one, run it on a deployment that keeps the checkouts."

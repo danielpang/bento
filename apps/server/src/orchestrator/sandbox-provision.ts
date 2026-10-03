@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 import { repositories, sandboxes } from "@bento/db";
-import type { PreparedRepository, SandboxHandle } from "@bento/sandbox";
+import type { PreparedRepository, SandboxDriver, SandboxHandle } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
 import type { AgentBinary } from "@bento/sandbox";
 import { githubConnectionFor } from "../github.js";
@@ -104,6 +104,11 @@ export interface ProvisionWorkspaceInput {
   startFromBundles?: Map<string, { branch: string; data: Buffer }>;
   /** Progress lines, which go into the transcript of whatever asked. */
   say: (text: string) => Promise<void>;
+  /**
+   * The driver this machine belongs to. Chosen by the caller from the
+   * live sandbox row, or from the project when there is no machine yet.
+   */
+  driver: SandboxDriver;
 }
 
 export interface ProvisionedWorkspace {
@@ -116,7 +121,7 @@ export async function provisionWorkspace(
   ctx: AppContext,
   input: ProvisionWorkspaceInput,
 ): Promise<ProvisionedWorkspace> {
-  const { repoRows, branch, workspaceKey } = input;
+  const { repoRows, branch, workspaceKey, driver } = input;
   const publisher = await githubConnectionFor(ctx, input.organizationId);
 
   /**
@@ -141,12 +146,12 @@ export async function provisionWorkspace(
    * a swarm that cannot land a single branch. Better to say that than
    * to provision the machine and find out at the merge queue.
    */
-  const shape = isolationRefusal(input.workerIsolation ?? "sandbox", ctx.driver.provider);
+  const shape = isolationRefusal(input.workerIsolation ?? "sandbox", driver.workspace);
   if (shape) throw new Error(shape);
 
   const restarted = new Set(input.restartedRepoUrls ?? []);
   const prepared: PreparedRepository[] =
-    ctx.driver.provider === "sprite"
+    driver.workspace === "clone"
       ? repoRows.map((r) => ({ name: r.name, localPath: r.localPath, worktreePath: "" }))
       : await ctx.worktrees.ensureAll(
           repoRows.map((r) => ({
@@ -173,7 +178,7 @@ export async function provisionWorkspace(
    * names, writable because committing writes.
    */
   const repoGitMounts =
-    ctx.driver.provider === "docker"
+    driver.provider === "docker"
       ? repoRows.map((r) => ({
           hostPath: `${r.localPath.replace(/\/$/, "")}/.git`,
           containerPath: `${r.localPath.replace(/\/$/, "")}/.git`,
@@ -186,7 +191,7 @@ export async function provisionWorkspace(
   // default branch when that name no longer exists on the remote. The
   // sandbox must branch off the name the bundle has, not the stale one.
   const seedBaseBranches = new Map<string, string>();
-  if (ctx.driver.provider === "sprite" && publisher) {
+  if (driver.workspace === "clone" && publisher) {
     for (const row of repoRows) {
       if (!row.repoUrl) continue;
       const repoId = row.githubRepoId ? Number(row.githubRepoId) : undefined;
@@ -207,13 +212,13 @@ export async function provisionWorkspace(
    * turn a security setting into a decoration, so this fails with the
    * reason instead.
    */
-  if (input.restrictNetwork && !ctx.driver.supportsRestrictedNetwork) {
+  if (input.restrictNetwork && !driver.supportsRestrictedNetwork) {
     throw new Error(
       "This organization requires agents to run without network access, and this deployment has no restricted network configured. Set BENTO_SANDBOX_RESTRICTED_NETWORK, or turn the setting off under Team.",
     );
   }
 
-  const handle = await ctx.driver.provision({
+  const handle = await driver.provision({
     projectId: input.projectId,
     workspaceKey,
     ...(input.restrictNetwork ? { network: "restricted" as const } : {}),
@@ -259,7 +264,7 @@ export async function provisionWorkspace(
       // from the driver at the moment it was created, so changing the
       // deployment's default size later cannot reprice hours already
       // spent. Absent on the local drivers, which bill nobody.
-      ...(ctx.driver.sandboxSize ? { size: ctx.driver.sandboxSize } : {}),
+      ...(driver.sandboxSize ? { size: driver.sandboxSize } : {}),
     })
     .onConflictDoUpdate({
       target: sandboxes.externalId,
@@ -267,7 +272,7 @@ export async function provisionWorkspace(
         ...input.owner,
         status: "busy",
         workdir: handle.workdir,
-        ...(ctx.driver.sandboxSize ? { size: ctx.driver.sandboxSize } : {}),
+        ...(driver.sandboxSize ? { size: driver.sandboxSize } : {}),
         lastUsedAt: new Date(),
       },
     })

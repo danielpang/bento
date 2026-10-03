@@ -10,6 +10,7 @@ import { createDb, createPool, runEvents, runMigrations } from "@bento/db";
 import type { AgentEvent } from "@bento/core";
 import { SseParser } from "@bento/core";
 import { LocalProcessDriver, WorktreeManager } from "@bento/sandbox";
+import { singleDriver } from "./orchestrator/sandbox-driver.js";
 import PgBoss from "pg-boss";
 import pg from "pg";
 import { createApp } from "./app.js";
@@ -65,7 +66,7 @@ async function makeContext(): Promise<AppContext> {
     pool,
     boss,
     bus: new EventBus(),
-    driver: new LocalProcessDriver(),
+    drivers: singleDriver(new LocalProcessDriver()),
     worktrees: new WorktreeManager(dataDir),
     secretBox: new SecretBox("test-encryption-key-at-least-32-chars"),
     artifacts: new DiskArtifactStore(dataDir),

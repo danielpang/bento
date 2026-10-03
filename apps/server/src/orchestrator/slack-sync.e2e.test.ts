@@ -28,6 +28,7 @@ import {
   swarms,
 } from "@bento/db";
 import { LocalProcessDriver, WorktreeManager } from "@bento/sandbox";
+import { singleDriver } from "./sandbox-driver.js";
 import { DiskArtifactStore } from "../artifact-store.js";
 import { SecretBox } from "../secrets.js";
 import { ensureLocalUser, LOCAL_USER_ID, type AppContext } from "../context.js";
@@ -101,7 +102,7 @@ before(async () => {
     pool,
     boss,
     bus: new EventBus(),
-    driver: new LocalProcessDriver(),
+    drivers: singleDriver(new LocalProcessDriver()),
     worktrees: new WorktreeManager(dataDir),
     secretBox: new SecretBox("test-encryption-key-at-least-32-chars"),
     artifacts: new DiskArtifactStore(dataDir),

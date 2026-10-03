@@ -21,6 +21,7 @@ import {
   type Db,
 } from "@bento/db";
 import { LocalProcessDriver, WorktreeManager } from "@bento/sandbox";
+import { singleDriver } from "./orchestrator/sandbox-driver.js";
 import { createApp } from "./app.js";
 import { DiskArtifactStore } from "./artifact-store.js";
 import { SecretBox } from "./secrets.js";
@@ -160,7 +161,7 @@ before(async () => {
       unschedule: async () => {},
     } as unknown as AppContext["boss"],
     bus: new EventBus(),
-    driver: new LocalProcessDriver(),
+    drivers: singleDriver(new LocalProcessDriver()),
     worktrees: new WorktreeManager(dataDir),
     secretBox: new SecretBox("test-encryption-key-at-least-32-chars"),
     artifacts: new DiskArtifactStore(dataDir),
@@ -406,18 +407,18 @@ test("every swarm run is announced to the deployment exactly once", async () => 
 test("a Sprite provider failure before the agent starts is neither charged nor announced", async () => {
   const created = await createSwarm();
   const swarm = (await created.json()) as { id: string; plannerRunId: string };
-  const workingDriver = ctx.driver;
+  const workingDrivers = ctx.drivers;
   const failingDriver = new LocalProcessDriver();
   failingDriver.provision = async () => {
     const outage = new Error("control plane unavailable");
     outage.name = "APIError";
     throw outage;
   };
-  ctx.driver = failingDriver;
+  ctx.drivers = singleDriver(failingDriver);
   try {
     await executeRun(ctx, swarm.plannerRunId);
   } finally {
-    ctx.driver = workingDriver;
+    ctx.drivers = workingDrivers;
   }
 
   const [run] = await db.select().from(agentRuns).where(eq(agentRuns.id, swarm.plannerRunId));

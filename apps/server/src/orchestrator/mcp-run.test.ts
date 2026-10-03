@@ -2,28 +2,37 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { AgentAdapter } from "@bento/agents";
 import { BENTO_SERVER_ID } from "../mcp/bento-tools.js";
+import type { SandboxDriver } from "@bento/sandbox";
 import { prepareRunMcp, resolveGatewayBase } from "./mcp-run.js";
 import type { AppContext } from "../context.js";
+import { singleDriver } from "./sandbox-driver.js";
 
 // resolveGatewayBase is the pure host-resolution rule; the full attach
 // flow (credential resolution, per-user omission, config writes) runs
 // against a real sandbox and database in the e2e suites.
 
-function fakeCtx(env: Partial<AppContext["env"]>, provider: string): AppContext {
+function fakeDriver(provider: "docker" | "sprite" | "local-process"): SandboxDriver {
+  return {
+    provider,
+    workspace: provider === "sprite" ? "clone" : "host",
+  } as SandboxDriver;
+}
+
+function fakeCtx(env: Partial<AppContext["env"]>, provider: "docker" | "sprite" | "local-process"): AppContext {
   return {
     env: { BETTER_AUTH_URL: "http://localhost:4400", ...env },
-    driver: { provider },
+    drivers: singleDriver(fakeDriver(provider)),
   } as unknown as AppContext;
 }
 
 test("a publicly routable base is used as given", () => {
   const ctx = fakeCtx({ BETTER_AUTH_URL: "https://bento.example.com" }, "sprite");
-  assert.equal(resolveGatewayBase(ctx), "https://bento.example.com");
+  assert.equal(resolveGatewayBase(ctx, ctx.drivers.default), "https://bento.example.com");
 });
 
 test("docker rewrites a localhost base to host.docker.internal", () => {
   const ctx = fakeCtx({ BETTER_AUTH_URL: "http://localhost:4400" }, "docker");
-  assert.equal(resolveGatewayBase(ctx), "http://host.docker.internal:4400");
+  assert.equal(resolveGatewayBase(ctx, ctx.drivers.default), "http://host.docker.internal:4400");
 });
 
 test("an explicit gateway URL is always honored, even on loopback", () => {
@@ -31,17 +40,22 @@ test("an explicit gateway URL is always honored, even on loopback", () => {
     { BETTER_AUTH_URL: "http://localhost:4400", BENTO_MCP_GATEWAY_URL: "http://127.0.0.1:9000" },
     "docker",
   );
-  assert.equal(resolveGatewayBase(ctx), "http://127.0.0.1:9000");
+  assert.equal(resolveGatewayBase(ctx, ctx.drivers.default), "http://127.0.0.1:9000");
 });
 
 test("a sprite on a loopback base has no reachable gateway", () => {
   const ctx = fakeCtx({ BETTER_AUTH_URL: "http://localhost:4400" }, "sprite");
-  assert.equal(resolveGatewayBase(ctx), null);
+  assert.equal(resolveGatewayBase(ctx, ctx.drivers.default), null);
+});
+
+test("local-process does not rewrite a loopback base", () => {
+  const ctx = fakeCtx({ BETTER_AUTH_URL: "http://localhost:4400" }, "local-process");
+  assert.equal(resolveGatewayBase(ctx, ctx.drivers.default), null);
 });
 
 test("a trailing slash on the base is normalized away", () => {
   const ctx = fakeCtx({ BETTER_AUTH_URL: "https://bento.example.com/" }, "docker");
-  assert.equal(resolveGatewayBase(ctx), "https://bento.example.com");
+  assert.equal(resolveGatewayBase(ctx, ctx.drivers.default), "https://bento.example.com");
 });
 
 /**
@@ -56,15 +70,17 @@ test("prepareRunMcp keeps going when writing the config throws", async () => {
   let writes = 0;
   let revokes = 0;
   const notes: string[] = [];
+  const driver = {
+    provider: "sprite",
+    workspace: "clone",
+    async *exec() {
+      writes += 1;
+      throw new Error("sprite not found");
+    },
+  } as unknown as SandboxDriver;
   const ctx = {
     env: { BETTER_AUTH_URL: "https://bento.example.com", BENTO_RUN_TIMEOUT_MIN: 30 },
-    driver: {
-      provider: "sprite",
-      async *exec() {
-        writes += 1;
-        throw new Error("sprite not found");
-      },
-    },
+    drivers: singleDriver(driver),
     db: {
       select() {
         return {
@@ -118,6 +134,7 @@ test("prepareRunMcp keeps going when writing the config throws", async () => {
     runId: "run-1",
     organizationId: "org-1",
     actingUserId: null,
+    driver,
     adapter,
     handle: { externalId: "bento-feature", provider: "sprite", workdir: "/workspace" },
     restrictNetwork: false,

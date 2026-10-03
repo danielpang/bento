@@ -280,6 +280,7 @@ export interface SpriteDriverOptions {
  */
 export class SpriteDriver implements SandboxDriver {
   provider = "sprite" as const;
+  readonly workspace = "clone" as const;
   /**
    * Which row of the price list an hour here belongs to.
    *

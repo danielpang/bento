@@ -19,7 +19,8 @@ import {
   swarms,
   type Db,
 } from "@bento/db";
-import { WorktreeManager } from "@bento/sandbox";
+import { WorktreeManager, type SandboxDriver } from "@bento/sandbox";
+import { singleDriver } from "../sandbox-driver.js";
 import type { AppContext } from "../../context.js";
 import { EventBus, type BoardEvent } from "../../events.js";
 import { loadEnv } from "../../env.js";
@@ -169,7 +170,7 @@ before(async () => {
     bus,
     userId: "u1",
     worktrees: new WorktreeManager(dataDir),
-    driver: { provider: "docker" },
+    drivers: singleDriver({ provider: "docker", workspace: "host" } as unknown as SandboxDriver),
     boss: {
       send: async () => "job",
       work: async () => "worker",

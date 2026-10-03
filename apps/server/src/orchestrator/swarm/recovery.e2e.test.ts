@@ -13,7 +13,8 @@ import {
   swarms,
   type Db,
 } from "@bento/db";
-import { LocalProcessDriver, type SandboxHandle } from "@bento/sandbox";
+import { LocalProcessDriver, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
+import { singleDriver } from "../sandbox-driver.js";
 import type { AppContext } from "../../context.js";
 import { EventBus, type BoardEvent } from "../../events.js";
 import { loadEnv } from "../../env.js";
@@ -81,7 +82,7 @@ before(async () => {
     db,
     pool,
     bus,
-    driver: new LocalProcessDriver(),
+    drivers: singleDriver(new LocalProcessDriver()),
     running: new Map(),
     liveInputs: new Map(),
     draining: false,
@@ -209,9 +210,10 @@ test("planner and worker runs reattach with only their missing Docker output", {
     });
 
     const attached: { key?: string; after?: number }[] = [];
-    const original = ctx.driver;
-    ctx.driver = {
+    const original = ctx.drivers;
+    ctx.drivers = singleDriver({
       provider: "docker",
+      workspace: "host",
       supportsStdin: false,
       async provision(): Promise<never> { throw new Error("must not provision"); },
       exec: async function* () { yield { kind: "exit" as const, exitCode: 1 }; },
@@ -224,7 +226,7 @@ test("planner and worker runs reattach with only their missing Docker output", {
         })();
       },
       async destroy() {},
-    } as AppContext["driver"];
+    } as SandboxDriver);
     try {
       await recoverInterruptedRuns(ctx);
       const deadline = Date.now() + 10_000;
@@ -242,7 +244,7 @@ test("planner and worker runs reattach with only their missing Docker output", {
       assert.equal(events.filter((event) => event.text === "After deploy.").length, 1);
       assert.ok(events.some((event) => event.sandboxCursor === 2));
     } finally {
-      ctx.driver = original;
+      ctx.drivers = original;
     }
   }
 });

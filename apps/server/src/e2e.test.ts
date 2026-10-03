@@ -28,7 +28,7 @@ import {
   stages,
 } from "@bento/db";
 import { SseParser } from "@bento/core";
-import { LocalProcessDriver, WorktreeManager, type SandboxHandle } from "@bento/sandbox";
+import { LocalProcessDriver, WorktreeManager, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
 import PgBoss from "pg-boss";
 import pg from "pg";
 import { createApp } from "./app.js";
@@ -37,6 +37,7 @@ import { publishFeatureBranches, resolvePublishBaseSha } from "./orchestrator/pu
 import { linkGitHubRemotes } from "./orchestrator/repo-remote.js";
 import { SecretBox } from "./secrets.js";
 import { ensureLocalUser, type AppContext } from "./context.js";
+import { singleDriver } from "./orchestrator/sandbox-driver.js";
 import { EventBus } from "./events.js";
 import { loadEnv } from "./env.js";
 import { createFeatureFlags } from "./feature-flags.js";
@@ -124,7 +125,7 @@ before(async () => {
     pool,
     boss,
     bus: new EventBus(),
-    driver: new LocalProcessDriver(),
+    drivers: singleDriver(new LocalProcessDriver()),
     worktrees: new WorktreeManager(dataDir),
     secretBox: new SecretBox("test-encryption-key-at-least-32-chars"),
     artifacts: new DiskArtifactStore(dataDir),
@@ -1071,6 +1072,7 @@ test("resuming a session recovers the messages the agent sent while detached", a
   const handle: SandboxHandle = { externalId: "local-recovery", provider: "local-process", workdir };
 
   const recoverArgs = {
+    driver: ctx.drivers.default,
     handle,
     adapter,
     featureId: feature.id,
@@ -1361,8 +1363,8 @@ test("a restart reattaches to a run still working in its sandbox", { timeout: 60
     },
     async destroy() {},
   };
-  const previousDriver = ctx.driver;
-  ctx.driver = fakeDriver as unknown as AppContext["driver"];
+  const previousDrivers = ctx.drivers;
+  ctx.drivers = singleDriver(fakeDriver as unknown as SandboxDriver);
   try {
     await recoverInterruptedRuns(ctx);
     assert.equal(await waitForRun(running!.id), "succeeded", "the reattached run finishes as itself");
@@ -1373,7 +1375,7 @@ test("a restart reattaches to a run still working in its sandbox", { timeout: 60
     assert.equal(attached.length, 1, "recovery attached exactly once");
     assert.equal(attached[0]?.externalId, `bento-${feature.id}`, "the attach went to the run's own sandbox");
   } finally {
-    ctx.driver = previousDriver;
+    ctx.drivers = previousDrivers;
   }
 });
 
@@ -1496,13 +1498,13 @@ test("a restart recovers what the agent said while no server was attached", { ti
     },
     async destroy() {},
   };
-  const previousDriver = ctx.driver;
-  ctx.driver = fakeDriver as unknown as AppContext["driver"];
+  const previousDrivers = ctx.drivers;
+  ctx.drivers = singleDriver(fakeDriver as unknown as SandboxDriver);
   try {
     await recoverInterruptedRuns(ctx);
     assert.equal(await waitForRun(running!.id), "succeeded", "the reattached run finishes as itself");
   } finally {
-    ctx.driver = previousDriver;
+    ctx.drivers = previousDrivers;
   }
 
   // Other execs follow the finish (artifact capture, the export); the
@@ -1600,8 +1602,8 @@ test("a restart closes runs the sandbox cannot give back", { timeout: 60_000 }, 
     },
     async destroy() {},
   };
-  const previousDriver = ctx.driver;
-  ctx.driver = fakeDriver as unknown as AppContext["driver"];
+  const previousDrivers = ctx.drivers;
+  ctx.drivers = singleDriver(fakeDriver as unknown as SandboxDriver);
   try {
     await recoverInterruptedRuns(ctx);
     for (const run of [gone, starting]) {
@@ -1613,7 +1615,7 @@ test("a restart closes runs the sandbox cannot give back", { timeout: 60_000 }, 
     }
     assert.equal(asked, 1, "a run that had not reached running is never attached");
   } finally {
-    ctx.driver = previousDriver;
+    ctx.drivers = previousDrivers;
   }
 });
 
@@ -1686,8 +1688,8 @@ test("a resumed live conversation hears new messages and never repeats the promp
     },
     async destroy() {},
   };
-  const previousDriver = ctx.driver;
-  ctx.driver = fakeDriver as unknown as AppContext["driver"];
+  const previousDrivers = ctx.drivers;
+  ctx.drivers = singleDriver(fakeDriver as unknown as SandboxDriver);
   try {
     await recoverInterruptedRuns(ctx);
     // The live session registers as part of the resume; a message sent
@@ -1712,7 +1714,7 @@ test("a resumed live conversation hears new messages and never repeats the promp
     const transcript = await (await app.request(`/api/runs/${running!.id}/transcript`)).text();
     assert.match(transcript, /you> a follow-up mid resume/, "the follow-up is the user's own transcript line");
   } finally {
-    ctx.driver = previousDriver;
+    ctx.drivers = previousDrivers;
   }
 });
 
@@ -4349,9 +4351,9 @@ test("publishing on demand exports the card's sandbox when the driver keeps no h
       return null;
     },
   };
-  const previousDriver = ctx.driver;
+  const previousDrivers = ctx.drivers;
   const previousGitHubApp = ctx.githubApp;
-  ctx.driver = fakeDriver as unknown as AppContext["driver"];
+  ctx.drivers = singleDriver(fakeDriver as unknown as SandboxDriver);
   ctx.githubApp = {
     forInstallation(installationId: string) {
       assert.equal(installationId, "sandbox-publish-installation");
@@ -4394,7 +4396,7 @@ test("publishing on demand exports the card's sandbox when the driver keeps no h
     assert.equal(body.failures[0]?.name, repo!.name);
     assert.match(body.failures[0]?.reason ?? "", /the sandbox is gone/);
   } finally {
-    ctx.driver = previousDriver;
+    ctx.drivers = previousDrivers;
     ctx.githubApp = previousGitHubApp;
   }
 });
@@ -4469,6 +4471,157 @@ test("a card created by mistake can be deleted, and a repeat answers 404", async
 });
 
 /**
+ * A sprite row on a server with no sprite driver cannot be deleted.
+ * The card stays, and the answer does not ask for a retry that will
+ * throw the same way.
+ */
+test("deleting a card whose driver is not configured does not ask for a retry", async () => {
+  const { project } = await setupProject("Delete missing driver");
+  const feature = await createFeature(project.id, "Sprite leftover");
+  await ctx.db.insert(sandboxes).values({
+    projectId: project.id,
+    featureId: feature.id,
+    provider: "sprite",
+    externalId: `delete-sprite-${feature.id}`,
+    status: "ready",
+    workdir: "/workspace",
+  });
+
+  const deleted = await app.request(`/api/features/${feature.id}`, { method: "DELETE" });
+  assert.equal(deleted.status, 409);
+  const body = (await deleted.json()) as { error: string };
+  assert.match(body.error, /No sprite driver is configured on this server/);
+  assert.doesNotMatch(body.error, /try again/i);
+  assert.equal((await app.request(`/api/features/${feature.id}`)).status, 200, "the card stays");
+});
+
+/**
+ * File transfer failures are 503 because the next attempt can work.
+ * A missing driver will not, so the client gets the refusal it used
+ * to stop on.
+ */
+test("attaching a file is refused when this server has no driver for the sandbox", async () => {
+  const { project, stages } = await setupProject("Attach missing driver");
+  const feature = await createFeature(project.id, "Attach");
+  const profile = await fakeProfile("attach-missing-driver");
+  await ctx.db.insert(agentRuns).values({
+    type: "pipeline",
+    featureId: feature.id,
+    stageId: stages[0]!.id,
+    agentProfileId: profile.id,
+    prompt: "work",
+    status: "succeeded",
+  });
+  await ctx.db.insert(sandboxes).values({
+    projectId: project.id,
+    featureId: feature.id,
+    provider: "sprite",
+    externalId: `attach-sprite-${feature.id}`,
+    status: "ready",
+    workdir: "/workspace",
+  });
+
+  const res = await app.request(`/api/features/${feature.id}/message`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      text: "see attached",
+      attachments: [{ name: "note.txt", mime: "text/plain", data: Buffer.from("hi").toString("base64") }],
+    }),
+  });
+  assert.equal(res.status, 409);
+  assert.deepEqual(await res.json(), {
+    error: "This workspace cannot receive attachments from this server.",
+  });
+});
+
+/**
+ * Rows stored as docker are driven by local-process on this server, so
+ * the 501 names that driver. A sprite row with no sprite driver is a
+ * missing driver, not a driver that cannot restore.
+ */
+test("rollback names the driver that was asked, and a missing driver is not unsupported rollback", async () => {
+  const { project, stages } = await setupProject("Rollback driver");
+  const feature = await createFeature(project.id, "Roll local");
+  const profile = await fakeProfile("rollback-driver");
+  const [dockerBox] = await ctx.db
+    .insert(sandboxes)
+    .values({
+      projectId: project.id,
+      featureId: feature.id,
+      provider: "docker",
+      externalId: `rollback-docker-${feature.id}`,
+      status: "ready",
+      workdir: "/workspace",
+    })
+    .returning();
+  const [localRun] = await ctx.db
+    .insert(agentRuns)
+    .values({
+      type: "pipeline",
+      featureId: feature.id,
+      stageId: stages[0]!.id,
+      agentProfileId: profile.id,
+      prompt: "work",
+      status: "succeeded",
+      sandboxId: dockerBox!.id,
+      checkpointId: "snap-local",
+    })
+    .returning();
+
+  const local = await app.request(`/api/runs/${localRun!.id}/rollback`, { method: "POST" });
+  assert.equal(local.status, 501);
+  const localBody = (await local.json()) as { error: string };
+  assert.match(localBody.error, /local-process sandboxes do not support rollback/);
+
+  const spriteFeature = await createFeature(project.id, "Roll sprite");
+  const [spriteBox] = await ctx.db
+    .insert(sandboxes)
+    .values({
+      projectId: project.id,
+      featureId: spriteFeature.id,
+      provider: "sprite",
+      externalId: `rollback-sprite-${spriteFeature.id}`,
+      status: "ready",
+      workdir: "/workspace",
+    })
+    .returning();
+  const [spriteRun] = await ctx.db
+    .insert(agentRuns)
+    .values({
+      type: "pipeline",
+      featureId: spriteFeature.id,
+      stageId: stages[0]!.id,
+      agentProfileId: profile.id,
+      prompt: "work",
+      status: "succeeded",
+      sandboxId: spriteBox!.id,
+      checkpointId: "snap-sprite",
+    })
+    .returning();
+
+  const sprite = await app.request(`/api/runs/${spriteRun!.id}/rollback`, { method: "POST" });
+  assert.equal(sprite.status, 501);
+  const spriteBody = (await sprite.json()) as { error: string };
+  assert.match(spriteBody.error, /no sprite driver configured on this server/);
+  assert.doesNotMatch(spriteBody.error, /do not support rollback/);
+});
+
+test("tools treats a non-uuid projectId as no project and does not error", async () => {
+  const plain = await app.request("/api/profiles/tools");
+  assert.equal(plain.status, 200);
+  const plainBody = await plain.json();
+
+  const bad = await app.request("/api/profiles/tools?projectId=nope");
+  assert.equal(bad.status, 200, "a non-uuid must not become an internal error");
+  assert.deepEqual(await bad.json(), plainBody);
+
+  const unknown = await app.request("/api/profiles/tools?projectId=22222222-2222-4222-8222-222222222222");
+  assert.equal(unknown.status, 200);
+  assert.deepEqual(await unknown.json(), plainBody, "an unknown project uses the default driver");
+});
+
+/**
  * The delete this feature exists for: a card that has actually run.
  *
  * Its sandbox is a machine somebody is billed for, so the row cannot go
@@ -4499,8 +4652,8 @@ test("deleting a worked card takes its runs, transcript and sandbox, and leaves 
   // This route is the first caller of driver.destroy in the product, so
   // the test watches the call rather than trusting the status code.
   const destroyed: SandboxHandle[] = [];
-  const realDestroy = ctx.driver.destroy.bind(ctx.driver);
-  ctx.driver.destroy = async (handle: SandboxHandle) => {
+  const realDestroy = ctx.drivers.default.destroy.bind(ctx.drivers.default);
+  ctx.drivers.default.destroy = async (handle: SandboxHandle) => {
     destroyed.push(handle);
     await realDestroy(handle);
   };
@@ -4508,7 +4661,7 @@ test("deleting a worked card takes its runs, transcript and sandbox, and leaves 
     const res = await app.request(`/api/features/${feature.id}`, { method: "DELETE" });
     assert.equal(res.status, 200);
   } finally {
-    ctx.driver.destroy = realDestroy;
+    ctx.drivers.default.destroy = realDestroy;
   }
 
   assert.deepEqual(
@@ -4599,8 +4752,8 @@ test("a sandbox that will not die keeps its card", async () => {
     workdir: "/workspace",
   });
 
-  const realDestroy = ctx.driver.destroy.bind(ctx.driver);
-  ctx.driver.destroy = async () => {
+  const realDestroy = ctx.drivers.default.destroy.bind(ctx.drivers.default);
+  ctx.drivers.default.destroy = async () => {
     throw new Error("the machine did not answer");
   };
   let body: { error: string };
@@ -4609,7 +4762,7 @@ test("a sandbox that will not die keeps its card", async () => {
     assert.equal(res.status, 502);
     body = (await res.json()) as { error: string };
   } finally {
-    ctx.driver.destroy = realDestroy;
+    ctx.drivers.default.destroy = realDestroy;
   }
   assert.match(body.error, /the machine did not answer/, "the reason reaches the person, not just the log");
   assert.match(body.error, /The card was not deleted/);
@@ -6330,16 +6483,16 @@ test("a finished card's sandbox is destroyed, and only once it is really gone", 
 
   const destroyed: string[] = [];
   let stillThere = true;
-  const previousDriver = ctx.driver;
-  ctx.driver = {
-    ...previousDriver,
+  const previousDrivers = ctx.drivers;
+  ctx.drivers = singleDriver({
+    ...previousDrivers.default,
     async destroy(handle: { externalId: string }) {
       destroyed.push(handle.externalId);
     },
     async exists() {
       return stillThere;
     },
-  } as unknown as AppContext["driver"];
+  } as SandboxDriver);
 
   try {
     // A driver that says the machine is still there must not have its
@@ -6365,7 +6518,7 @@ test("a finished card's sandbox is destroyed, and only once it is really gone", 
     // lets the sweep run over an already tidy deployment.
     await reapSandbox(ctx, feature.id);
   } finally {
-    ctx.driver = previousDriver;
+    ctx.drivers = previousDrivers;
   }
 });
 
@@ -6396,19 +6549,19 @@ test("a sandbox with a run still working it is not reaped, and is not forgotten 
   });
 
   let destroyCalls = 0;
-  const previousDriver = ctx.driver;
-  ctx.driver = {
-    ...previousDriver,
+  const previousDrivers = ctx.drivers;
+  ctx.drivers = singleDriver({
+    ...previousDrivers.default,
     async destroy() {
       destroyCalls += 1;
     },
-  } as unknown as AppContext["driver"];
+  } as SandboxDriver);
   try {
     await ctx.db.update(agentRuns).set({ status: "running" }).where(eq(agentRuns.id, run.id));
     await assert.rejects(() => reapSandbox(ctx, feature.id), /still working/);
     assert.equal(destroyCalls, 0, "the machine is not touched while an agent is on it");
   } finally {
-    ctx.driver = previousDriver;
+    ctx.drivers = previousDrivers;
     await ctx.db.update(agentRuns).set({ status: "cancelled" }).where(eq(agentRuns.id, run.id));
   }
 });
@@ -6639,6 +6792,47 @@ test("a failed gate holds the card, writes the reason, and records history", asy
   const held = history.find((e) => e.kind === "status_changed" && e.toStatus === "gated");
   assert.ok(held, "the hold must appear in the history");
   assert.deepEqual((held.detail as { failedCriteria?: string[] } | null)?.failedCriteria, ["run_succeeded"]);
+});
+
+/**
+ * The command runs on the row's driver. When that driver is not
+ * configured, the card is held with a failed check. Leaving it active
+ * with no check means nothing will ask again.
+ */
+test("a command gate records a failure when the sandbox driver is not configured", async () => {
+  const { project, stages } = await setupProject("Unconfigured command gate");
+  const feature = await createFeature(project.id, "Sprite gate");
+  const stage = stages[0]!;
+  await patchStage(stage.id, {
+    gateType: "auto",
+    gateCriteria: [{ type: "command", cmd: "true", timeoutSec: 30 }],
+  });
+  await placeOnStage(feature.id, stage.id);
+  await ctx.db.insert(sandboxes).values({
+    projectId: project.id,
+    featureId: feature.id,
+    provider: "sprite",
+    externalId: `gate-sprite-${feature.id}`,
+    status: "ready",
+    workdir: "/workspace",
+  });
+
+  await evaluateFeatureGate(ctx, feature.id);
+
+  const [row] = await ctx.db.select().from(features).where(eq(features.id, feature.id));
+  assert.equal(row?.status, "gated", "the card is held instead of staying active");
+  assert.equal(row?.currentStageId, stage.id, "the command was not run on another machine");
+  const checks = await ctx.db
+    .select({ status: gateChecks.status, criterion: gateChecks.criterion, detail: gateChecks.detail })
+    .from(gateChecks)
+    .where(and(eq(gateChecks.featureId, feature.id), eq(gateChecks.stageId, stage.id)));
+  assert.equal(checks.length, 1);
+  assert.equal(checks[0]?.status, "failed");
+  assert.equal((checks[0]?.criterion as { type?: string } | null)?.type, "command");
+  assert.match(
+    (checks[0]?.detail as { message?: string } | null)?.message ?? "",
+    /no sprite driver configured on this server/,
+  );
 });
 
 test("a late failed gate does not drag a finished card back to gated", async () => {
@@ -7076,15 +7270,15 @@ test("Ollama Cloud without a key is missing it, and a server of your own is not"
 });
 
 test("a Docker sandbox reaches an Ollama server on this machine's loopback", async () => {
-  const driver = ctx.driver;
-  ctx.driver = { provider: "docker" } as unknown as AppContext["driver"];
+  const previousDrivers = ctx.drivers;
+  ctx.drivers = singleDriver({ provider: "docker", workspace: "host" } as SandboxDriver);
   try {
     await withEnv({ OLLAMA_API_KEY: null, OLLAMA_BASE_URL: "http://localhost:11434" }, async () => {
       const { env } = await resolveAgentEnv(ctx, null, claudeCodeAdapter, "ollama/glm-5.1");
       assert.equal(env.OLLAMA_BASE_URL, "http://host.docker.internal:11434");
     });
   } finally {
-    ctx.driver = driver;
+    ctx.drivers = previousDrivers;
   }
 });
 

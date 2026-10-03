@@ -1,9 +1,11 @@
-import { and, asc, eq, gt, isNotNull, isNull, lt, or } from "drizzle-orm";
+import { and, asc, eq, gt, isNotNull, isNull, lt, ne, or } from "drizzle-orm";
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { z } from "zod";
-import { agentRuns, features, invitation, member, organization, organizationPolicies, user } from "@bento/db";
+import { agentRuns, features, invitation, member, organization, organizationPolicies, sandboxes, user, type Db } from "@bento/db";
 import type { AppContext } from "../context.js";
+import type { SandboxDriver } from "@bento/sandbox";
+import { driverForSandbox, SandboxDriverUnavailable } from "../orchestrator/sandbox-driver.js";
 import { tenantDb as db } from "../middleware/tenant.js";
 import { actor, activeOrg } from "../middleware/actor.js";
 import { getActiveOrganizationMembership } from "../access.js";
@@ -42,9 +44,10 @@ export function teamRoutes(ctx: AppContext) {
       return c.json({
         restrictNetwork: row?.restrictNetwork === true,
         canEdit: membership.role === "owner" || membership.role === "admin",
-        // Whether the deployment can honour it at all, so the control
-        // can say why it would refuse rather than failing at run time.
-        supported: ctx.driver.supportsRestrictedNetwork === true,
+        // Whether every driver a sandbox in this organization would
+        // run on can honour a restricted network, so the control can
+        // say why it would refuse rather than failing at run time.
+        supported: await restrictedNetworkSupported(ctx, db(c, ctx), membership.organizationId),
       });
     })
     .patch("/policy", zValidator("json", z.object({ restrictNetwork: z.boolean() })), async (c) => {
@@ -54,14 +57,11 @@ export function teamRoutes(ctx: AppContext) {
         return c.json({ error: "only organization owners and admins can change this" }, 403);
       }
       const { restrictNetwork } = c.req.valid("json");
-      if (restrictNetwork && !ctx.driver.supportsRestrictedNetwork) {
-        return c.json(
-          {
-            error:
-              "This deployment has no restricted network configured, so agents cannot be locked down yet. Set BENTO_SANDBOX_RESTRICTED_NETWORK on the server first.",
-          },
-          409,
-        );
+      if (restrictNetwork && !(await restrictedNetworkSupported(ctx, db(c, ctx), membership.organizationId))) {
+        const error = ctx.drivers.default.supportsRestrictedNetwork === true
+          ? "This team has a sandbox this deployment cannot lock down, so the lock cannot be turned on."
+          : "This deployment has no restricted network configured, so agents cannot be locked down yet. Set BENTO_SANDBOX_RESTRICTED_NETWORK on the server first.";
+        return c.json({ error }, 409);
       }
       await db(c, ctx)
         .insert(organizationPolicies)
@@ -207,4 +207,37 @@ export function teamRoutes(ctx: AppContext) {
 
     return c.text(lines.join("\n"));
   });
+}
+
+/**
+ * Whether every driver a sandbox in this organization would run on
+ * can lock its network.
+ *
+ * The deployment default, plus the driver each live sandbox row would
+ * keep. A card that already has a machine stays on that machine, so a
+ * lock the default can honour does not hold when that machine's driver
+ * cannot. An unconfigured provider cannot either. Destroyed rows are
+ * not provisioned again, so they do not count. This does not open
+ * egress: a run whose driver cannot lock the network still fails.
+ */
+async function restrictedNetworkSupported(ctx: AppContext, handle: Db, organizationId: string): Promise<boolean> {
+  if (ctx.drivers.default.supportsRestrictedNetwork !== true) return false;
+  const rows = await handle
+    .select({ provider: sandboxes.provider })
+    .from(sandboxes)
+    .where(and(eq(sandboxes.organizationId, organizationId), ne(sandboxes.status, "destroyed")));
+  const seen = new Set<string>();
+  for (const row of rows) {
+    if (seen.has(row.provider)) continue;
+    seen.add(row.provider);
+    let driver: SandboxDriver;
+    try {
+      driver = driverForSandbox(ctx.drivers, row);
+    } catch (err) {
+      if (err instanceof SandboxDriverUnavailable) return false;
+      throw err;
+    }
+    if (driver.supportsRestrictedNetwork !== true) return false;
+  }
+  return true;
 }

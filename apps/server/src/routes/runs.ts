@@ -11,6 +11,8 @@ import { actor } from "../middleware/actor.js";
 import { markCancelled } from "../orchestrator/run-executor.js";
 import { CARD_BUSY, startRunIfIdle } from "../orchestrator/start-run.js";
 import { enqueueRun } from "../orchestrator/queue.js";
+import type { SandboxDriver } from "@bento/sandbox";
+import { driverForSandbox, SandboxDriverUnavailable } from "../orchestrator/sandbox-driver.js";
 import { canAccessProject, getAccessibleFeature, getAccessibleRun, getAccessibleRunOutput } from "../access.js";
 import { requireSwarms } from "../orchestrator/swarm/gate.js";
 
@@ -148,9 +150,6 @@ export function runRoutes(ctx: AppContext) {
       const run = found.run;
       if (!TERMINAL.has(run.status)) return c.json({ error: "wait for the run to finish first" }, 409);
       if (!run.checkpointId) return c.json({ error: "this run has no snapshot to roll back to" }, 400);
-      if (!ctx.driver.restore) {
-        return c.json({ error: `${ctx.driver.provider} sandboxes do not support rollback` }, 501);
-      }
 
       const [sandbox] = await db(c, ctx)
         .select()
@@ -161,9 +160,23 @@ export function runRoutes(ctx: AppContext) {
       const externalId = sandbox?.externalId ?? (feature ? `bento-${feature.id}` : "");
       if (!externalId) return c.json({ error: "no sandbox to roll back" }, 409);
 
+      let driver: SandboxDriver;
       try {
-        await ctx.driver.restore(
-          { externalId, provider: ctx.driver.provider, workdir: sandbox?.workdir ?? "/workspace" },
+        driver = sandbox ? driverForSandbox(ctx.drivers, sandbox) : ctx.drivers.default;
+      } catch (err) {
+        if (!(err instanceof SandboxDriverUnavailable)) throw err;
+        // The driver was never asked to restore. "Does not support
+        // rollback" would name a capability the missing driver might
+        // have had. Name the provider that was asked.
+        return c.json({ error: err.message }, 501);
+      }
+      if (!driver.restore) {
+        return c.json({ error: `${driver.provider} sandboxes do not support rollback` }, 501);
+      }
+
+      try {
+        await driver.restore(
+          { externalId, provider: driver.provider, workdir: sandbox?.workdir ?? "/workspace" },
           run.checkpointId,
         );
       } catch (err) {

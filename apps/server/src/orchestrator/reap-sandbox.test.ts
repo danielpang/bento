@@ -22,7 +22,8 @@ import {
   stages,
   swarms,
 } from "@bento/db";
-import { WorktreeManager } from "@bento/sandbox";
+import { WorktreeManager, type SandboxDriver } from "@bento/sandbox";
+import { singleDriver } from "./sandbox-driver.js";
 import pg from "pg";
 import { DiskArtifactStore } from "../artifact-store.js";
 import { artifactStorageKey } from "./capture-artifacts.js";
@@ -83,15 +84,16 @@ before(async () => {
     pool,
     boss: { send: async () => "job" } as AppContext["boss"],
     bus: new EventBus(),
-    driver: {
+    drivers: singleDriver({
       provider: "docker",
+      workspace: "host",
       async destroy(handle: { externalId: string }) {
         destroyed.push(handle.externalId);
       },
       async exists() {
         return false;
       },
-    } as unknown as AppContext["driver"],
+    } as unknown as SandboxDriver),
     worktrees: new WorktreeManager(dataDir),
     secretBox: new SecretBox("test-encryption-key-at-least-32-chars"),
     artifacts: new DiskArtifactStore(dataDir),
@@ -436,4 +438,42 @@ test("a swarm's machine is not taken out from under an agent still working in it
   await assert.rejects(() => reapSwarmSandbox(ctx, swarm.swarmId), /still working/);
   const [row] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, swarm.sandboxId));
   assert.equal(row?.status, "ready", "the row still points at a machine that is there");
+});
+
+/**
+ * One card can hold two machines when the driver was switched or a
+ * rebuild left the older container. A row this process cannot drive
+ * must not abort the rest, and must not be marked destroyed.
+ */
+test("an unconfigured sandbox row does not skip the other machine or the workspace", async () => {
+  const { featureId, projectId } = await seedCard({ title: "Mixed machines", sandbox: false });
+  await ctx.db.insert(sandboxes).values([
+    {
+      projectId,
+      featureId,
+      provider: "sprite",
+      externalId: `sprite-${featureId}`,
+      status: "ready",
+      workdir: "/workspace",
+    },
+    {
+      projectId,
+      featureId,
+      provider: "docker",
+      externalId: `docker-${featureId}`,
+      status: "ready",
+      workdir: "/workspace",
+    },
+  ]);
+
+  await reapSandbox(ctx, featureId);
+
+  const rows = await ctx.db.select().from(sandboxes).where(eq(sandboxes.featureId, featureId));
+  const sprite = rows.find((row) => row.provider === "sprite");
+  const docker = rows.find((row) => row.provider === "docker");
+  assert.equal(sprite?.status, "ready", "a machine this process cannot delete stays");
+  assert.equal(docker?.status, "destroyed");
+  assert.equal(destroyed.includes(`docker-${featureId}`), true, "the docker machine was destroyed");
+  assert.equal(destroyed.includes(`sprite-${featureId}`), false, "the sprite was not asked");
+  await assert.rejects(() => stat(ctx.worktrees.workspacePath(featureId)), { code: "ENOENT" });
 });

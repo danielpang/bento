@@ -267,7 +267,9 @@ async function resolveRepositoryInput(
   organizationId: string | null,
 ): Promise<RepositoryResolution> {
   if (!input.githubRepoId) {
-    if (ctx.driver.provider === "sprite") return { ok: false, error: UNAVAILABLE };
+    // A clone driver has no host filesystem to mount a path onto.
+    // The project's own provider is not readable yet, so this is the default.
+    if (ctx.drivers.default.workspace === "clone") return { ok: false, error: UNAVAILABLE };
     // A hosted installation token must never be selected from a URL the
     // caller supplied. Runner/local paths carry no server credential.
     if (ctx.env.BENTO_MODE === "multi" && input.repoUrl) return { ok: false, error: UNAVAILABLE };

@@ -19,6 +19,7 @@ import {
   type Db,
 } from "@bento/db";
 import type { ExecChunk, SandboxDriver, SandboxHandle } from "@bento/sandbox";
+import { singleDriver } from "../orchestrator/sandbox-driver.js";
 import type { AppContext } from "../context.js";
 import { EventBus, type BoardEvent } from "../events.js";
 import { loadEnv } from "../env.js";
@@ -74,6 +75,7 @@ before(async () => {
   executed = [];
   const driver: SandboxDriver = {
     provider: "local-process",
+    workspace: "host",
     async provision(): Promise<SandboxHandle> {
       throw new Error("not used by this suite");
     },
@@ -97,7 +99,7 @@ before(async () => {
     db,
     pool,
     bus,
-    driver,
+    drivers: singleDriver(driver),
     userId: "u1",
   } as unknown as AppContext;
   bus.onBoardEvent(PROJECT, (event) => emitted.push(event));
