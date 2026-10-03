@@ -44,6 +44,9 @@ def close_inherited_stdio():
         os.close(devnull)
 
 def pump(src, dest_path, kind):
+    # One read, not a fill up to 64KiB. A buffered read waits for the
+    # buffer or for the process to exit, so a command that prints and
+    # then sleeps looks finished before a reattach can find it.
     with open(dest_path, "ab", buffering=0) as dest:
         while True:
             chunk = src.read(65536)
@@ -61,7 +64,7 @@ def run_daemon(directory, argv):
     os.set_blocking(read_fd, True)
     os.dup2(read_fd, 0)
     os.close(read_fd)
-    proc = subprocess.Popen(argv, stdin=0, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    proc = subprocess.Popen(argv, stdin=0, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True, bufsize=0)
     with open(os.path.join(directory, "pid"), "w") as handle:
         handle.write(str(proc.pid))
     import threading

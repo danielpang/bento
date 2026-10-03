@@ -514,10 +514,12 @@ test("sandbox size follows the sprite names with a modal prefix", () => {
 });
 
 test("destroy terminates the sandbox and deletes the hibernation image", async () => {
-  const env = fake({ running: true });
+  const state = { running: true };
+  const env = fake(state);
   let terminated = false;
   env.box.terminate = async () => {
     terminated = true;
+    state.running = false;
   };
   await driver(env.api).destroy({
     externalId: "bento-feature-1",
@@ -550,6 +552,38 @@ test("bento-exec records frames from byte 0 and writes exit last", async () => {
   const exitAt = followed.stdout.lastIndexOf("x 0\n");
   assert.ok(exitAt > followed.stdout.indexOf("o "));
   assert.ok(exitAt > followed.stdout.indexOf("e "));
+});
+
+test("bento-exec publishes output while the command is still running", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "bento-exec-live-"));
+  const script = path.join(dir, "bento-exec");
+  await writeFile(script, BENTO_EXEC_PYTHON, { mode: 0o755 });
+  const work = path.join(dir, "run");
+  const started = await run(script, ["start", work, "--", "sh", "-c", "echo alpha; sleep 30; echo beta"]);
+  assert.equal(started.code, 0, started.stderr);
+  const follow = spawn("python3", [script, "follow", work, "0"], { stdio: ["ignore", "pipe", "pipe"] });
+  let stdout = "";
+  follow.stdout.setEncoding("utf8");
+  follow.stdout.on("data", (chunk) => {
+    stdout += chunk;
+  });
+  const deadline = Date.now() + 5_000;
+  while (!stdout.includes("alpha") && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  try {
+    assert.match(stdout, /alpha/);
+    assert.doesNotMatch(stdout, /beta/);
+    assert.doesNotMatch(stdout, /x /);
+  } finally {
+    follow.kill("SIGKILL");
+    try {
+      const pid = Number((await readFile(path.join(work, "pid"), "utf8")).trim());
+      if (pid > 0) process.kill(-pid, "SIGKILL");
+    } catch {
+      // The command already exited.
+    }
+  }
 });
 
 test("bento-exec stdin accepts a write after start has exited", async () => {

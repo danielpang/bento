@@ -242,6 +242,8 @@ export class ModalDriver implements SandboxDriver {
   private apiPromise: Promise<ModalApi> | null = null;
   /** Sandbox objects this process created or attached, so an exit snapshot can still be read. */
   private readonly remembered = new Map<string, ModalBox>();
+  /** Sandboxes whose bento-exec matches this process. The image may be older. */
+  private readonly execInstalled = new Set<string>();
 
   constructor(private options: ModalDriverOptions) {
     this.cpu = options.cpu ?? 2;
@@ -546,7 +548,7 @@ export class ModalDriver implements SandboxDriver {
   async destroy(handle: SandboxHandle): Promise<void> {
     const api = await this.api();
     const box = (await api.fromName(handle.externalId)) ?? this.remembered.get(handle.externalId) ?? null;
-    if (box && (await box.poll()) === null) await box.terminate();
+    if (box) await this.stop(box);
     if (box) {
       try {
         const exitImage = await box.experimentalGetExitSnapshot();
@@ -615,6 +617,20 @@ export class ModalDriver implements SandboxDriver {
       }
     }
     throw last instanceof Error ? last : new Error(`could not create sandbox ${params.name}`);
+  }
+
+  /**
+   * `terminate` returns while the name still polls as running. The next
+   * provision would reuse that machine and exec into the shutdown.
+   */
+  private async stop(box: ModalBox): Promise<void> {
+    if ((await box.poll().catch(() => null)) !== null) return;
+    await box.terminate();
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+      if ((await box.poll().catch(() => 0)) !== null) return;
+      await sleep(250);
+    }
   }
 
   private async runningBox(api: ModalApi, name: string): Promise<ModalBox | null> {
@@ -749,7 +765,7 @@ export class ModalDriver implements SandboxDriver {
     const api = await this.api();
     if (prepared.kind === "running") {
       const box = (await api.fromName(handle.externalId)) ?? this.remembered.get(handle.externalId) ?? null;
-      if (box && (await box.poll().catch(() => null)) === null) await box.terminate();
+      if (box) await this.stop(box);
       this.remembered.delete(handle.externalId);
       if (handle.imageRef && handle.imageRef !== prepared.imageId) {
         await api.deleteImage(handle.imageRef).catch(() => {});
@@ -793,6 +809,7 @@ export class ModalDriver implements SandboxDriver {
     start: boolean,
   ): AsyncIterable<ExecChunk> {
     if (start) {
+      await this.installExec(box);
       const started = await runShell(
         box,
         "",
@@ -856,6 +873,18 @@ export class ModalDriver implements SandboxDriver {
       await proc.wait().catch(() => {});
       await this.closeStdin(box, dir);
     }
+  }
+
+  /**
+   * The toolchain image is cached by CLI set, not by this script, so a
+   * running sandbox can still have the copy it was built with. The
+   * daemon has to be the one this process follows.
+   */
+  private async installExec(box: ModalBox): Promise<void> {
+    if (this.execInstalled.has(box.sandboxId)) return;
+    await box.writeBytes(Buffer.from(BENTO_EXEC_PYTHON, "utf8"), "/usr/local/bin/bento-exec");
+    await runShell(box, "chmod 755 /usr/local/bin/bento-exec", 30_000);
+    this.execInstalled.add(box.sandboxId);
   }
 
   private async closeStdin(box: ModalBox, dir: string): Promise<void> {
