@@ -85,6 +85,7 @@ export function AgentSession({
   defaultShowDetail,
   showDetail: controlledShowDetail,
   visible = true,
+  blocked,
 }: {
   client: BentoClient;
   featureId: string;
@@ -110,6 +111,11 @@ export function AgentSession({
   showDetail?: boolean;
   /** Hidden drawer tabs keep the stream and draft, but defer scrolling. */
   visible?: boolean;
+  /**
+   * A message would start a run that cannot. The composer stays, disabled,
+   * with the reason and the control that fixes it.
+   */
+  blocked?: { message: string; action: string; onFix?: () => void };
 }) {
   const [events, setEvents] = useState<AgentEvent[]>([]);
   /**
@@ -661,10 +667,21 @@ export function AgentSession({
       )}
       {latestRun && !finished && (
         <div className="composer-dock">
+          {blocked && (
+            <div className="setup-prompt setup-prompt-inline" role="status">
+              <span>{blocked.message}</span>
+              {blocked.onFix && (
+                <button className="btn btn-primary" type="button" onClick={blocked.onFix}>
+                  {blocked.action}
+                </button>
+              )}
+            </div>
+          )}
           <form
             className="composer"
             onSubmit={(e) => {
               e.preventDefault();
+              if (blocked) return;
               void send();
             }}
           >
@@ -674,13 +691,14 @@ export function AgentSession({
               rows={1}
               value={say}
               onChange={(e) => setSay(e.target.value)}
-              disabled={busy}
-              placeholder={composer.placeholder}
+              disabled={busy || !!blocked}
+              placeholder={blocked ? "Add a repository before sending" : composer.placeholder}
               aria-label={composer.ariaLabel}
               // Enter sends, as it did when this was a single-line
               // field. Shift+Enter is the newline; wrapping a long
               // line grows the box on its own.
               onKeyDown={(e) => {
+                if (blocked) return;
                 if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
@@ -704,13 +722,14 @@ export function AgentSession({
             <button
               className="btn btn-primary composer-send"
               type="submit"
-              disabled={busy || !say.trim()}
+              disabled={busy || !!blocked || !say.trim()}
               aria-label={composer.ariaLabel}
               title={composer.ariaLabel}
             >
               <SendMark />
             </button>
           </form>
+          {!blocked && (
           <p className="muted composer-hint">
           {/* Nothing is running, so no delivery rule applies: saying one
               anyway ("delivered when the run ends") described a run that
@@ -727,6 +746,7 @@ export function AgentSession({
                   ? "This tool takes messages between runs: yours is delivered the moment the current run ends."
                   : "This tool takes messages between runs: yours is delivered the moment the current run ends, as a new run with a compacted transcript of this conversation."}
           </p>
+          )}
         </div>
       )}
 

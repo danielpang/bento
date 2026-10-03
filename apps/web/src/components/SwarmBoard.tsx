@@ -61,6 +61,8 @@ export function SwarmBoard({
   projectId,
   client,
   surfaces,
+  repositoriesMissing = false,
+  onAddRepository,
 }: {
   projectId: string;
   /**
@@ -75,6 +77,10 @@ export function SwarmBoard({
    */
   client: BentoClient;
   surfaces: ModeSurfaces;
+  /** A swarm cannot start until the project has a checkout. */
+  repositoriesMissing?: boolean;
+  /** Opens Repositories, from the warning inside New swarm. */
+  onAddRepository?: () => void;
 }) {
   const storage = useMemo(() => browserStorage(), []);
   const [swarms, setSwarms] = useState<SwarmSummary[] | null>(null);
@@ -545,6 +551,15 @@ export function SwarmBoard({
           agents={agents}
           surfaces={surfaces}
           busy={busy}
+          repositoriesMissing={repositoriesMissing}
+          onAddRepository={
+            onAddRepository
+              ? () => {
+                  setCreating(false);
+                  onAddRepository();
+                }
+              : undefined
+          }
           onClose={() => setCreating(false)}
           onCreate={async (input: NewSwarmInput) => {
             setBusy(true);

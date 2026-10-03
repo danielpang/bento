@@ -10,7 +10,7 @@ import { deferAfterCommit, tenantDb as db } from "../middleware/tenant.js";
 import { actor } from "../middleware/actor.js";
 import { markCancelled, modalNetworkForProject } from "../orchestrator/run-executor.js";
 import { armModalHibernation } from "../orchestrator/hibernate-sandbox.js";
-import { CARD_BUSY, startRunIfIdle } from "../orchestrator/start-run.js";
+import { CARD_BUSY, NO_REPOSITORIES, projectHasRepositories, startRunIfIdle } from "../orchestrator/start-run.js";
 import { enqueueRun } from "../orchestrator/queue.js";
 import type { SandboxDriver } from "@bento/sandbox";
 import { driverForSandbox, SandboxDriverUnavailable } from "../orchestrator/sandbox-driver.js";
@@ -42,6 +42,9 @@ export function runRoutes(ctx: AppContext) {
       // alone would let an agent run on a card nobody is watching.
       if (feature.status === "done" || feature.status === "cancelled") {
         return c.json({ error: `feature is ${feature.status}; reopen it first` }, 409);
+      }
+      if (!(await projectHasRepositories(db(c, ctx), feature.projectId))) {
+        return c.json({ error: NO_REPOSITORIES }, 409);
       }
       const [[stage], [profile]] = await Promise.all([
         db(c, ctx).select().from(stages).where(eq(stages.id, stageId)).limit(1),
@@ -93,6 +96,9 @@ export function runRoutes(ctx: AppContext) {
       const [owner] = await db(c, ctx).select().from(features).where(eq(features.id, previous.featureId));
       if (owner && (owner.status === "done" || owner.status === "cancelled")) {
         return c.json({ error: `feature is ${owner.status}; reopen it first` }, 409);
+      }
+      if (owner && !(await projectHasRepositories(db(c, ctx), owner.projectId))) {
+        return c.json({ error: NO_REPOSITORIES }, 409);
       }
 
       const run = await startRunIfIdle(db(c, ctx), {

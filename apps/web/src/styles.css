@@ -2828,6 +2828,12 @@ a.pr-row:hover .pr-external {
   min-width: 200px;
 }
 
+/* The same prompt inside a drawer or a dialog, where the board's
+   outer margin would shove it past the section it belongs to. */
+.setup-prompt-inline {
+  margin: 0;
+}
+
 /* Provider choice reads as a row of marks, not another dropdown: the
    logo is the fastest way to recognise who you are about to bill. */
 .provider-row {

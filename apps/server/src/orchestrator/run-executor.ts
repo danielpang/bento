@@ -83,7 +83,7 @@ import { extendRunGrant, revokeRunGrant, runGrantServerIds, sweepExpiredGrants }
 import { sweepExpiredOAuth } from "../mcp/oauth-sweep.js";
 import { shouldIncludeStageNotes, shouldShareAgentAuth } from "../settings.js";
 import { captureRunQueueDepth } from "./queue-snapshot.js";
-import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
+import { ACTIVE_RUN_STATUSES, projectHasRepositories, startRunIfIdle } from "./start-run.js";
 import { enqueueRun, INTERACTIVE_POLL_SECONDS, QUEUE_POLL_SECONDS, RUN_WORKER_POLL_SECONDS } from "./queue.js";
 import { HIBERNATE_SANDBOX_QUEUE, MODAL_SWEEP_QUEUE, scheduleModalHibernation, hibernateSandbox, sweepOrphanModalSandboxes } from "./hibernate-sandbox.js";
 import { modalRunHosts } from "./modal-hosts.js";
@@ -134,13 +134,39 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
    */
   const subject = await describeRunSubject(ctx, found);
   const { run, profile, project, repoRows } = subject;
-  // An agent needs somewhere to work. Thrown rather than failed as a
-  // run, the way it always was: the job retries, and a project with no
-  // repository is a setup problem the person fixes once.
-  if (repoRows.length === 0) {
-    throw new Error(`project ${project.id} has no repositories; add at least one before running agents`);
-  }
   const emitBoard = (status: string) => subject.emitBoard(status);
+  /**
+   * An agent needs a checkout. The console warns and refuses to start
+   * one; this is the run that was queued before that check, or by a
+   * door that did not have it.
+   *
+   * Cancelled, not failed, and not thrown. A throw left the row
+   * queued, so the job retried and every boot requeued it. Failing it
+   * told the card the agent had run and lost. Cancelling drops the
+   * queued work without a failure, and the warning on the board is
+   * what says why nothing started.
+   */
+  if (repoRows.length === 0) {
+    console.warn(`run ${runId} cannot start: project ${project.id} has no repositories`);
+    const [closed] = await ctx.db
+      .update(agentRuns)
+      .set({ status: "cancelled", endedAt: new Date(), error: null })
+      .where(and(eq(agentRuns.id, runId), eq(agentRuns.status, "queued")))
+      .returning({ id: agentRuns.id });
+    if (!closed) return;
+    emitBoard("cancelled");
+    ctx.bus.emitRunDone(runId, "cancelled");
+    // Not billed: the agent never started. Announced so a queued run
+    // does not sit open in analytics after the row is closed.
+    await announceRunFinished(ctx, runId, "cancelled", false);
+    // Settlement is what tells the card and the tree this run is over.
+    // A pipeline card otherwise waits on an evaluation that never
+    // comes, and a swarm leaf stays working with nobody on it. The
+    // tick that follows does not start another agent while the project
+    // still has no checkout.
+    await subject.settle(ctx);
+    return;
+  }
 
   /**
    * Claimed atomically rather than checked then set. Boot recovery
@@ -1956,6 +1982,12 @@ export async function deliverQueuedMessage(ctx: AppContext, runId: string): Prom
    * left the backlog.
    */
   if (feature.currentStageId && run.stageId !== feature.currentStageId) {
+    await requeueMessages(ctx.db, ids);
+    return;
+  }
+  // A follow-up would start another run. With no checkout that run
+  // is cancelled at once, so the messages wait until a repository exists.
+  if (!(await projectHasRepositories(ctx.db, feature.projectId))) {
     await requeueMessages(ctx.db, ids);
     return;
   }

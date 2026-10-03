@@ -270,7 +270,9 @@ async function requireProject(ctx: AppContext, projectId: string) {
  * Empty is not refused here, deliberately. This function describes a
  * run, and closing a run that a restart stranded has to work whether or
  * not the project still spans anything; only actually starting an agent
- * needs a checkout, and that is where the refusal lives.
+ * needs a checkout. That refusal cancels a run already queued. It
+ * does not throw: a throw leaves the row queued, and the job is then
+ * retried. It does not fail the run either: nothing ran.
  */
 async function repositoriesFor(ctx: AppContext, projectId: string) {
   const selected = await ctx.db

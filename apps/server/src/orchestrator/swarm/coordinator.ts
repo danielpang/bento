@@ -18,7 +18,7 @@ import type { BoardEvent } from "../../events.js";
 import { captureJobErrors } from "../../analytics.js";
 import { enqueueRun, INTERACTIVE_POLL_SECONDS } from "../queue.js";
 import { queueSwarmSandboxReap } from "../reap-sandbox.js";
-import { ACTIVE_RUN_STATUSES, SWARM_FULL, startRunIfIdle, type NewRun, type OutOfCompute } from "../start-run.js";
+import { ACTIVE_RUN_STATUSES, projectHasRepositories, SWARM_FULL, startRunIfIdle, type NewRun, type OutOfCompute } from "../start-run.js";
 import { plannerWakeMessage, type PlannerWakeItem } from "./planner-prompt.js";
 import { enqueueLanding } from "./landing.js";
 import { enqueueSwarmPublish } from "./complete.js";
@@ -419,9 +419,18 @@ async function runTick(
   }
 
   await warnLowBudget(tx, swarm, now);
-  const plannerRunId = await deliverPlannerWake(tx, swarm, deps, now);
-  const spawned = await spawnWorkers(tx, swarm, changed.tasks, deps, events, now);
-  const landing = await advanceLandingQueue(tx, swarm, changed.tasks, deps, events, now);
+  /**
+   * A run cancelled because the project has no checkout settles into
+   * this tick. The leaf above is recorded as stopped. Starting a
+   * planner, a worker, or a resolver here would queue another run for
+   * the same reason, and that run would cancel into another tick.
+   */
+  const canStartAgents = await projectHasRepositories(tx as unknown as Db, swarm.projectId);
+  const plannerRunId = canStartAgents ? await deliverPlannerWake(tx, swarm, deps, now) : null;
+  const spawned = canStartAgents
+    ? await spawnWorkers(tx, swarm, changed.tasks, deps, events, now)
+    : { runIds: [], refusal: null, cap: null };
+  const landing = await advanceLandingQueue(tx, swarm, changed.tasks, deps, events, now, canStartAgents);
   const status = await recomputeSwarmStatus(tx, swarm, changed.tasks, events, spawned);
 
   return {
@@ -1656,6 +1665,7 @@ async function advanceLandingQueue(
   deps: SwarmTickDeps,
   events: BoardEvent[],
   now: Date,
+  canStartAgents: boolean,
 ): Promise<LandingStep> {
   const byId = new Map(tasks.map((task) => [task.id, task]));
   const resolverRunIds: string[] = [];
@@ -1697,6 +1707,9 @@ async function advanceLandingQueue(
      * and everything behind it waits on it.
      */
     if (!landing.resolverRunId) {
+      // The queue still moves. Only the agent that would reconcile a
+      // conflict waits, for the same reason a worker is not spawned.
+      if (!canStartAgents) continue;
       const runId = await startResolver(tx, swarm, landing, byId.get(landing.taskId), deps, events, now);
       if (runId) resolverRunIds.push(runId);
       continue;

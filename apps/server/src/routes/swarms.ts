@@ -68,7 +68,7 @@ import { captureSwarmSpend } from "../orchestrator/swarm/spend.js";
 import { budgetRefusal } from "../orchestrator/swarm/ledger.js";
 import { recordSwarmAnswer } from "../orchestrator/swarm/messages.js";
 import { queueSwarmSlackNotify } from "../orchestrator/slack-notify.js";
-import { ACTIVE_RUN_STATUSES, SWARM_FULL, startRunIfIdle } from "../orchestrator/start-run.js";
+import { ACTIVE_RUN_STATUSES, NO_REPOSITORIES, projectHasRepositories, SWARM_FULL, startRunIfIdle } from "../orchestrator/start-run.js";
 import { enqueueRun } from "../orchestrator/queue.js";
 
 /**
@@ -526,6 +526,9 @@ export function swarmRoutes(ctx: AppContext) {
 
       if (project.executor === "runner") {
         return c.json({ error: RUNNER_PROJECT_REFUSAL, code: "RUNNER_PROJECT" }, 400);
+      }
+      if (!(await projectHasRepositories(db(c, ctx), project.id))) {
+        return c.json({ error: NO_REPOSITORIES }, 409);
       }
 
       /*
@@ -1161,6 +1164,9 @@ export function swarmRoutes(ctx: AppContext) {
         .where(eq(swarmTasks.swarmId, swarm.id));
       if (count > 0) {
         return c.json({ error: "This swarm already has a plan. Start it or send the planner a message." }, 409);
+      }
+      if (!(await projectHasRepositories(db(c, ctx), swarm.projectId))) {
+        return c.json({ error: NO_REPOSITORIES }, 409);
       }
       const plannerProfileId = swarm.plannerProfileId ?? latest.agentProfileId;
       const run = await startRunIfIdle(
