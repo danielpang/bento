@@ -208,12 +208,12 @@ export const stages = pgTable(
     gateCriteria: jsonb("gate_criteria").$type<unknown[]>().notNull().default([]),
     /**
      * When true, a successful run in this stage pushes the feature
-     * branch and opens (or updates) the pull request. Off for a stage
-     * added by hand: an investigation stage that commits nothing should
-     * not decide whether the card reaches GitHub. The seeded pipeline
-     * turns it on for implementation and code review (DEFAULT_STAGES).
+     * branch and opens (or updates) the pull request. On by default: it
+     * shipped off, and a new project's first card ran to completion
+     * with no pull request and nothing saying why. A stage that only
+     * investigates can turn it off.
      */
-    createPr: boolean("create_pr").notNull().default(false),
+    createPr: boolean("create_pr").notNull().default(true),
     ...timestamps,
   },
   (t) => [uniqueIndex("stages_pipeline_slug_idx").on(t.pipelineId, t.slug)],

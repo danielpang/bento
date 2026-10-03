@@ -5173,17 +5173,10 @@ test("a new project comes with an agent on every stage", { timeout: 60_000 }, as
     assert.ok(stage.defaultAgentProfileId, `${stage.name} should arrive with an agent`);
   }
 
-  // The stages that commit code publish without anyone finding the
-  // setting first; the planning stage keeps its empty branch off GitHub.
-  assert.deepEqual(
-    pipeline.stages.map((stage) => [stage.slug, stage.createPr]),
-    [
-      ["engineering-requirements", false],
-      ["implementation", true],
-      ["code-review", true],
-    ],
-    "pull requests are on for implementation and code review only",
-  );
+  // Every stage publishes without anyone finding the setting first.
+  for (const stage of pipeline.stages) {
+    assert.equal(stage.createPr, true, `${stage.slug} should open a pull request by default`);
+  }
 
   // The agents for stages the default pipeline leaves out are still
   // there, ready for a team that adds the stage back.

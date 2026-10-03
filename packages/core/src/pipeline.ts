@@ -8,9 +8,9 @@ export interface StageDefinition {
   gateCriteria: GateCriteria;
   /**
    * Whether a successful run here pushes the branch and opens or
-   * updates the pull request. On for the stages that commit code and
-   * off for the ones that only plan, so a new project's first card
-   * reaches GitHub without anyone finding the setting first.
+   * updates the pull request. On for every seeded stage, matching the
+   * column's default, so a new project's first card reaches GitHub
+   * without anyone finding the setting first.
    */
   createPr: boolean;
 }
@@ -28,7 +28,7 @@ export const DEFAULT_STAGES: StageDefinition[] = [
     description: "Define engineering requirements and technical system design.",
     gateType: "manual",
     gateCriteria: [],
-    createPr: false,
+    createPr: true,
   },
   {
     name: "Implementation",

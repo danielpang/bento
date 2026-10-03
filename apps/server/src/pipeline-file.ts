@@ -29,7 +29,8 @@ const stageEntry = z.object({
   gate: gateType.default("manual"),
   /** What must pass before an automatic stage advances. */
   requirements: gateCriteria.default([]),
-  createPr: z.boolean().default(false),
+  /** Omitted means on, the same as a stage added through the console. */
+  createPr: z.boolean().default(true),
   /** The agent that runs this stage, by name. */
   agent: z.string().max(200).nullish(),
 });

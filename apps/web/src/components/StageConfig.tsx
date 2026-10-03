@@ -419,7 +419,9 @@ function StageEditor({
     agentId: stage?.defaultAgentProfileId ?? null,
     gateType: (stage?.gateType as "manual" | "auto") ?? "manual",
     criteria: Array.isArray(stage?.gateCriteria) ? (stage.gateCriteria as GateCriterion[]) : [],
-    createPr: stage?.createPr ?? false,
+    // A new stage starts on, the same as the server's default, so the
+    // dialog shows what saving it will do.
+    createPr: stage?.createPr ?? true,
   }));
   const assigned = profiles.find((p) => p.id === draft.agentId);
 

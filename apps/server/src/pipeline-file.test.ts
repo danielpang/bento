@@ -86,6 +86,6 @@ test("the optional parts default rather than being required", () => {
   const { data } = parsed as { data: ReturnType<typeof structuredClone<typeof sample>> };
   assert.equal(data.pipeline.stages[0]!.gate, "manual");
   assert.deepEqual(data.pipeline.stages[0]!.requirements, []);
-  assert.equal(data.pipeline.stages[0]!.createPr, false);
+  assert.equal(data.pipeline.stages[0]!.createPr, true, "a stage publishes unless the file says otherwise");
   assert.deepEqual(data.agents, []);
 });
