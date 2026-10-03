@@ -43,6 +43,7 @@ export async function seedDefaultPipeline(
       description: stage.description,
       gateType: stage.gateType,
       gateCriteria: stage.gateCriteria as unknown[],
+      createPr: stage.createPr,
       ...(agents.has(stage.slug) ? { defaultAgentProfileId: agents.get(stage.slug)! } : {}),
     })),
   );

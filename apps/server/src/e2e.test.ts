@@ -5165,13 +5165,25 @@ test("a new project comes with an agent on every stage", { timeout: 60_000 }, as
       body: JSON.stringify({ name: "Seeded", localPath: repoDir }),
     }),
   );
-  const pipeline = await json<{ stages: { name: string; defaultAgentProfileId: string | null }[] }>(
+  const pipeline = await json<{ stages: { name: string; slug: string; createPr: boolean; defaultAgentProfileId: string | null }[] }>(
     await app.request(`/api/projects/${project.id}/pipeline`),
   );
   assert.equal(pipeline.stages.length, 3);
   for (const stage of pipeline.stages) {
     assert.ok(stage.defaultAgentProfileId, `${stage.name} should arrive with an agent`);
   }
+
+  // The stages that commit code publish without anyone finding the
+  // setting first; the planning stage keeps its empty branch off GitHub.
+  assert.deepEqual(
+    pipeline.stages.map((stage) => [stage.slug, stage.createPr]),
+    [
+      ["engineering-requirements", false],
+      ["implementation", true],
+      ["code-review", true],
+    ],
+    "pull requests are on for implementation and code review only",
+  );
 
   // The agents for stages the default pipeline leaves out are still
   // there, ready for a team that adds the stage back.
