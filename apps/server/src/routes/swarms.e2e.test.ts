@@ -141,6 +141,15 @@ before(async () => {
     .values({ ownerId: userId, name: "Swarms", defaultBranch: "main" })
     .returning();
   projectId = project!.id;
+  // Creating a swarm starts a planner, which a project with no
+  // checkout refuses. The git checkout above is that repository.
+  await db.insert(repositories).values({
+    projectId,
+    name: "app",
+    localPath: repoDir,
+    defaultBranch: "main",
+    position: 0,
+  });
 });
 
 after(async () => {
@@ -1154,8 +1163,20 @@ async function readSwarm(id: string) {
  * One node, opened.
  * ---------------------------------------------------------------- */
 
-/** The project's checkout, for the tests that need git to answer. */
+/**
+ * The project's checkout, for the tests that need git to answer.
+ *
+ * The fixture already has that repository, so this only adds one when
+ * a test removed it. A second row named "app" would collide with the
+ * unique name.
+ */
 async function withRepository<T>(run: () => Promise<T>): Promise<T> {
+  const [existing] = await db
+    .select({ id: repositories.id })
+    .from(repositories)
+    .where(eq(repositories.projectId, projectId))
+    .limit(1);
+  if (existing) return run();
   const [row] = await db
     .insert(repositories)
     .values({ projectId, name: "app", localPath: repoDir, defaultBranch: "main", position: 0 })
@@ -1395,6 +1416,13 @@ test("a team over its plan is told before a swarm is written, not after", async 
     .insert(projects)
     .values({ ownerId: ctx.userId!, organizationId: "org-a", name: "Team", defaultBranch: "main" })
     .returning();
+  await db.insert(repositories).values({
+    projectId: team!.id,
+    name: "app",
+    localPath: repoDir,
+    defaultBranch: "main",
+    position: 0,
+  });
   const asked: string[] = [];
   ctx.entitlements = {
     canAddMember: async () => null,

@@ -304,7 +304,10 @@ export async function landWorkerBranch(request: LandRequest): Promise<LandOutcom
     const detail = detailOf(err);
     return isConflict(detail) ? { ok: false, reason: "conflict", detail } : { ok: false, reason: "error", detail };
   } finally {
-    await rm(root, { recursive: true, force: true });
+    // A git directory can still be receiving files when this removes it,
+    // and a single pass then fails with ENOTEMPTY. Retrying is what
+    // Node does for that error once maxRetries is set.
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   }
 }
 
@@ -374,7 +377,10 @@ export async function landWorkerBundles(request: {
     const detail = detailOf(err);
     return isConflict(detail) ? { ok: false, reason: "conflict", detail } : { ok: false, reason: "error", detail };
   } finally {
-    await rm(root, { recursive: true, force: true });
+    // A git directory can still be receiving files when this removes it,
+    // and a single pass then fails with ENOTEMPTY. Retrying is what
+    // Node does for that error once maxRetries is set.
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   }
 }
 
