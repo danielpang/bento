@@ -198,9 +198,10 @@ export const stages = pgTable(
     gateCriteria: jsonb("gate_criteria").$type<unknown[]>().notNull().default([]),
     /**
      * When true, a successful run in this stage pushes the feature
-     * branch and opens (or updates) the pull request. Off by default:
-     * an investigation stage that commits nothing should not decide
-     * whether the card reaches GitHub.
+     * branch and opens (or updates) the pull request. Off for a stage
+     * added by hand: an investigation stage that commits nothing should
+     * not decide whether the card reaches GitHub. The seeded pipeline
+     * turns it on for implementation and code review (DEFAULT_STAGES).
      */
     createPr: boolean("create_pr").notNull().default(false),
     ...timestamps,

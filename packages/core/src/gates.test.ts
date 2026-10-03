@@ -21,3 +21,19 @@ test("default pipeline has three valid stages", () => {
     gateCriteria.parse(stage.gateCriteria);
   }
 });
+
+/**
+ * The stages that commit code publish by default; the planning stage
+ * does not. A first card should reach GitHub without anyone hunting
+ * for the setting, and a plan should not push an empty branch.
+ */
+test("default pipeline opens pull requests from implementation and code review", () => {
+  assert.deepEqual(
+    DEFAULT_STAGES.map((stage) => [stage.slug, stage.createPr]),
+    [
+      ["engineering-requirements", false],
+      ["implementation", true],
+      ["code-review", true],
+    ],
+  );
+});

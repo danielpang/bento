@@ -11,7 +11,7 @@ Per stage: name, agent, advance mode, requirements, pull request flag.
 | Manual | A user approves or rejects |
 | Automatic | All requirements pass. With none listed, advance when the agent finishes successfully |
 
-New projects start with three stages (engineering requirements, implementation, code review), each with manual approval. The Product Manager, Product Designer, and QA Engineer agents are still created; add a stage and assign one to bring it back.
+New projects start with three stages (engineering requirements, implementation, code review), each with manual approval. Implementation and code review open a pull request after a successful run; engineering requirements does not. The Product Manager, Product Designer, and QA Engineer agents are still created; add a stage and assign one to bring it back.
 
 A stage with an assigned agent starts when a card arrives. Sending a card back stops the agent and waits for user input.
 
