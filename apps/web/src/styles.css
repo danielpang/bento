@@ -395,6 +395,27 @@ button {
   margin-right: 12px;
 }
 
+/* Brand and the project picker travel together. Settings and Sign out
+   travel together too, so a narrow screen can place each cluster
+   without splitting one button onto a line of its own. */
+.workspace-identity,
+.workspace-actions {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+
+/* Shrink the project name before the row overflows. The brand stays
+   intact: only the picker, which already ellipsizes, gives up width. */
+.workspace-identity {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.workspace-actions {
+  flex: none;
+}
+
 .workspace-toolbar .topbar-nav {
   align-self: stretch;
 }
@@ -3460,6 +3481,56 @@ a.pr-row:hover .pr-external {
     margin-right: 0;
   }
 
+  /* Two lines, in the same order as the wide row. Line one is the
+     project, so the name stays readable instead of collapsing to the
+     caret. Line two is the board switch, Spend, Settings, and Sign
+     out: Sign out stays with the gear, not on a line by itself. */
+  .workspace-nav {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    column-gap: 8px;
+    row-gap: 8px;
+  }
+
+  .workspace-identity {
+    grid-column: 1 / -1;
+    grid-row: 1;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .workspace-actions {
+    grid-column: 3;
+    grid-row: 2;
+    justify-self: end;
+    gap: 4px;
+  }
+
+  .workspace-nav > .seg {
+    grid-column: 1;
+    grid-row: 2;
+    justify-self: start;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .workspace-nav > .spend-button {
+    grid-column: 2;
+    grid-row: 2;
+    justify-self: end;
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+  }
+
+  .workspace-nav > .spend-button .spend-button-label,
+  .workspace-nav > .spend-button .spend-button-amount {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
   .workspace-nav > .topbar-spacer,
   .workspace-toolbar > .topbar-spacer {
     display: none;
@@ -3467,6 +3538,21 @@ a.pr-row:hover .pr-external {
 
   .workspace-nav .picker-trigger {
     gap: 8px;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  /* Coarse pointers enlarge every .btn. On this row that extra padding
+     is what pushed Sign out onto its own line. The hit target still
+     clears 44px: the pseudo-element grows, the drawn box does not. */
+  .topbar .settings-gear,
+  .topbar .icon-button {
+    padding: 6px 8px;
+  }
+
+  .workspace-nav .settings-gear::after,
+  .workspace-nav .icon-button::after {
+    inset: -9px -8px;
   }
 
   .workspace-toolbar {
@@ -3476,7 +3562,8 @@ a.pr-row:hover .pr-external {
   }
 
   .workspace-project {
-    flex: 1;
+    flex: 1 1 auto;
+    min-width: 0;
     max-width: none;
   }
 
