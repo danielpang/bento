@@ -104,7 +104,7 @@ export function ConfigSettings({ client }: { client: BentoClient }) {
         ) : projects === null ? (
           <ListRowsSkeleton rows={2} />
         ) : projects.length === 0 ? (
-          <p className="muted">No projects yet. Create one from the board, then export its pipeline here.</p>
+          <p className="muted">No projects yet. Create a project first, then export its pipeline here.</p>
         ) : (
           <label className="field">
             <span className="label">Project</span>
