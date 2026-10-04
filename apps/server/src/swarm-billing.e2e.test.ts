@@ -479,6 +479,13 @@ test("a project with no organization asks the plan nothing", async () => {
     .insert(projects)
     .values({ ownerId: ctx.userId!, organizationId: null, name: "Personal", defaultBranch: "main" })
     .returning();
+  await db.insert(repositories).values({
+    projectId: personal!.id,
+    name: "app",
+    localPath: "/tmp/personal",
+    defaultBranch: "main",
+    position: 0,
+  });
 
   asked = [];
   const res = await post("/api/swarms", { projectId: personal!.id, title: "Mine", goal: "just me" });

@@ -62,6 +62,12 @@ before(async () => {
     `insert into projects (id,owner_id,organization_id,name,default_branch) values ($1,'u1',null,'P','main')`,
     [PROJECT],
   );
+  // A tick will not start a planner, a worker, or a resolver on a
+  // project with no checkout. These tests are about that start.
+  await pool.query(
+    `insert into repositories (project_id,name,local_path,position) values ($1,'app','/tmp/app',0)`,
+    [PROJECT],
+  );
   await pool.query(
     `insert into agent_profiles (id,owner_id,organization_id,name,cli,model) values ($1,'u1',null,'A','fake','fake-1')`,
     [PROFILE],

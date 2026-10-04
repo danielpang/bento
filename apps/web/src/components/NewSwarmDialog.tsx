@@ -17,6 +17,7 @@ import type { ModeSurfaces } from "../swarm/plan.js";
 import type { NewPlanSource, NewSwarmInput } from "../swarm/types.js";
 import type { SwarmAgent } from "../swarm/client.js";
 import { SwarmAgentSelect } from "./SwarmAgentSelect.js";
+import { REPOSITORY_SETUP_ACTION, REPOSITORY_SETUP_MESSAGE } from "../repository-setup.js";
 import {
   DEFAULT_RUN_SETTINGS,
   SwarmRunSettingsFields,
@@ -56,6 +57,8 @@ export function NewSwarmDialog({
   agents,
   surfaces,
   busy,
+  repositoriesMissing = false,
+  onAddRepository,
   onClose,
   onCreate,
 }: {
@@ -63,6 +66,10 @@ export function NewSwarmDialog({
   agents: SwarmAgent[];
   surfaces: ModeSurfaces;
   busy?: boolean;
+  /** Create stays disabled until the project has a repository. */
+  repositoriesMissing?: boolean;
+  /** Closes this dialog and opens Repositories. */
+  onAddRepository?: () => void;
   onClose: () => void;
   onCreate: (input: NewSwarmInput) => Promise<void>;
 }) {
@@ -128,7 +135,8 @@ export function NewSwarmDialog({
     branchRefusal === null &&
     budgetUsd !== undefined &&
     timeLimitMin !== undefined &&
-    reading === 0;
+    reading === 0 &&
+    !repositoriesMissing;
 
   return (
     <Modal
@@ -147,6 +155,16 @@ export function NewSwarmDialog({
       }
     >
       <div className="swarm-new">
+        {repositoriesMissing && (
+          <div className="setup-prompt setup-prompt-inline" role="status">
+            <span>{REPOSITORY_SETUP_MESSAGE}</span>
+            {onAddRepository && (
+              <button className="btn btn-primary" type="button" onClick={onAddRepository}>
+                {REPOSITORY_SETUP_ACTION}
+              </button>
+            )}
+          </div>
+        )}
         <label className="field">
           <span className="field-heading">Name</span>
           <input

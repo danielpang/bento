@@ -1,5 +1,5 @@
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
-import { agentRuns, swarmLandings, type Db } from "@bento/db";
+import { agentRuns, repositories, swarmLandings, type Db } from "@bento/db";
 import type { Analytics } from "../analytics.js";
 import type { Entitlements } from "../context.js";
 import { budgetRefusal } from "./swarm/ledger.js";
@@ -79,6 +79,28 @@ export const ACTIVE_RUN_STATUSES = ["queued", "starting", "running"] as const;
 
 /** What every door tells the user when a card is already being worked. */
 export const CARD_BUSY = "an agent is already working this card; wait for it to finish or cancel it first";
+
+/**
+ * What a person sees when a run is asked for and the project has
+ * nowhere for an agent to work.
+ *
+ * Said by every start route. The console shows the same sentence
+ * beside a button that opens Repositories. A run is not created, and
+ * one that was already queued is cancelled rather than failed: a
+ * failure reads as the agent having run.
+ */
+export const NO_REPOSITORIES =
+  "This project has no repositories, so agents cannot run. Open Repositories in the top bar and add one.";
+
+/** Whether the project has a checkout an agent can be given. */
+export async function projectHasRepositories(db: Db, projectId: string): Promise<boolean> {
+  const [row] = await db
+    .select({ id: repositories.id })
+    .from(repositories)
+    .where(eq(repositories.projectId, projectId))
+    .limit(1);
+  return row !== undefined;
+}
 
 /**
  * The same condition, said to somebody deleting the card. CARD_BUSY
