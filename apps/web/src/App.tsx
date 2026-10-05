@@ -130,8 +130,10 @@ function RouteFallback() {
   return (
     <div className="app" aria-busy="true">
       <header className="topbar workspace-nav">
-        <BrandLockup />
-        <div className="workspace-project" aria-hidden="true"><Skeleton className="skeleton-picker" /></div>
+        <div className="workspace-identity">
+          <BrandLockup />
+          <div className="workspace-project" aria-hidden="true"><Skeleton className="skeleton-picker" /></div>
+        </div>
         <span className="topbar-spacer" />
       </header>
       <div className="workspace-toolbar" aria-hidden="true">
@@ -1429,15 +1431,15 @@ function GearMark() {
 /**
  * The console's chrome.
  *
- * Two renderings of one set of controls. Above 720px they are a row, as
- * they always were. Below it the row is a menu behind a hamburger, and
- * only the three things worth a tap without one stay out: the project
- * picker, the search field, and the primary action.
+ * Above 720px every control is one row. Below it the row is two lines
+ * on purpose, in the same order. The project picker takes the first
+ * line, so its name stays readable. The board switch, Spend, the gear,
+ * and Sign out share the second, so Sign out is not left on a line by
+ * itself. Letting the wide row wrap instead squeezed the project name
+ * down to its caret and dropped Sign out onto the line under it.
  *
- * The narrow layout was not a small version of the wide one, it was the
- * wide one wrapping. A picker, a search field, four ghost buttons, a
- * gear and Sign out came to three rows of scattered text stacked above
- * a board with no height left to show a card in.
+ * The board's other tools stay in the menu behind the hamburger. The
+ * search field and the primary action stay out, on the toolbar.
  */
 function TopBar({
   actions = [],
@@ -1489,17 +1491,21 @@ function TopBar({
   return (
     <>
     <header className="topbar workspace-nav">
-      <BrandLockup />
-      {picker && <div className="workspace-project">{picker}</div>}
+      <div className="workspace-identity">
+        <BrandLockup />
+        {picker && <div className="workspace-project">{picker}</div>}
+      </div>
       {/* Beside the picker it qualifies: which project, then which of
           its boards. The row's own gap separates them. */}
       {boardToggle}
       <span className="topbar-spacer" />
       {meta}
-      <a className="btn btn-ghost settings-gear" aria-label="Settings" title="Settings" href="/settings">
-        <GearMark />
-      </a>
-      {showSignOut && <SignOutButton onClick={() => signOut()} />}
+      <div className="workspace-actions">
+        <a className="btn btn-ghost settings-gear" aria-label="Settings" title="Settings" href="/settings">
+          <GearMark />
+        </a>
+        {showSignOut && <SignOutButton onClick={() => signOut()} />}
+      </div>
     </header>
     <div className="workspace-toolbar">
       <nav className={showSwarmSwitcher ? "topbar-nav topbar-nav-swarms" : "topbar-nav"} aria-label="Board">
