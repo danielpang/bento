@@ -78,17 +78,52 @@ export function autoDrivers(drivers: SandboxDrivers): SandboxDriver[] {
 }
 
 /**
+ * What a stored provider setting means on this server: the drivers it
+ * would provision with, first choice first, and why.
+ *
+ * Null is the deployment default. A name that is the default is the
+ * default too, chosen by the project. "auto" is the sprite-then-Modal
+ * order, and only on a server whose default is itself one of those
+ * remote providers: a docker or local-process deployment that merely
+ * holds a Fly token (for reaping, for a test) keeps the driver it was
+ * configured with, so no new project there lands on a paid machine
+ * by surprise. Any other name is that driver when it was built, else
+ * the default, rather than a failed card.
+ *
+ * Pure, and the one place this is decided: the run executor, the
+ * project route that validates a change, and the Team route that asks
+ * whether a network lock can be honored all read the same answer. The
+ * beta gate on a named provider is driversForProject's, which asks
+ * this after it.
+ */
+export function candidateDrivers(drivers: SandboxDrivers, setting: string | null): ProvisionDrivers {
+  const byDefault: ProvisionDrivers = { driver: drivers.default, fallbacks: [], selection: "default" };
+  if (!setting) return byDefault;
+  if (setting === drivers.default.provider) return { ...byDefault, selection: "project" };
+  if (setting === "auto") {
+    if (!AUTO_PROVIDER_ORDER.includes(drivers.default.provider)) return byDefault;
+    const [first, ...rest] = autoDrivers(drivers);
+    if (!first) return byDefault;
+    return { driver: first, fallbacks: rest, selection: "auto" };
+  }
+  const named = drivers.get(setting);
+  return named ? { driver: named, fallbacks: [], selection: "project" } : byDefault;
+}
+
+/** Every driver a choice could land on, first choice first. */
+export function allCandidates(choice: ProvisionDrivers): SandboxDriver[] {
+  return [choice.driver, ...choice.fallbacks];
+}
+
+/**
  * The drivers a new sandbox on a project would use.
  *
- * No setting, or a setting that names the deployment default, uses the
- * default. "auto" is the sprite-then-Modal order from `autoDrivers`,
- * and the default when this server runs neither. It is not behind the
- * beta flag: it is what every new project starts on, and a default
- * cannot be a feature some people lack. A named choice is ignored
- * unless this run is on the beta testers flag: the console that sets
- * the column is behind the same flag, and a run started for someone
- * who is not must not leave it. An unknown name falls through to the
- * default rather than failing the card. An existing sandbox row does
+ * candidateDrivers decides what the setting means. "auto" is not
+ * behind the beta flag: it is what every new project starts on, and a
+ * default cannot be a feature some people lack. A named choice is
+ * ignored unless this run is on the beta testers flag: the console
+ * that sets the column is behind the same flag, and a run started for
+ * someone who is not must not leave it. An existing sandbox row does
  * not come through here.
  */
 export async function driversForProject(
@@ -97,19 +132,11 @@ export async function driversForProject(
   actingUserId: string | null,
 ): Promise<ProvisionDrivers> {
   const wanted = project.sandboxProvider;
-  const byDefault: ProvisionDrivers = { driver: ctx.drivers.default, fallbacks: [], selection: "default" };
-  if (!wanted) return byDefault;
-  if (wanted === ctx.drivers.default.provider) return { ...byDefault, selection: "project" };
-  if (wanted === "auto") {
-    const [first, ...rest] = autoDrivers(ctx.drivers);
-    if (!first) return byDefault;
-    return { driver: first, fallbacks: rest, selection: "auto" };
+  if (wanted && wanted !== "auto" && wanted !== ctx.drivers.default.provider) {
+    const beta = await isBetaRun(ctx, { actingUserId, projectOwnerId: project.ownerId });
+    if (!beta) return candidateDrivers(ctx.drivers, null);
   }
-  const beta = await isBetaRun(ctx, { actingUserId, projectOwnerId: project.ownerId });
-  if (!beta) return byDefault;
-  const named = ctx.drivers.get(wanted);
-  if (!named) return byDefault;
-  return { driver: named, fallbacks: [], selection: "project" };
+  return candidateDrivers(ctx.drivers, wanted);
 }
 
 /** The first driver a new sandbox on a project would use. */
@@ -236,17 +263,6 @@ export async function driversForSwarmProvision(
   return driversForProject(ctx, project, actingUserId);
 }
 
-/** The first driver a swarm run provisions with. */
-export async function driverForSwarmProvision(
-  db: Db,
-  ctx: AppContext,
-  swarm: { id: string; sandboxId: string | null },
-  task: { id: string } | null,
-  actingUserId: string | null,
-): Promise<SandboxDriver> {
-  return (await driversForSwarmProvision(db, ctx, swarm, task, actingUserId)).driver;
-}
-
 /**
  * The drivers this run provisions with. A card looks up its feature.
  * A swarm looks up its own machines, then the project's provider.
@@ -261,18 +277,6 @@ export async function driversForRun(
 ): Promise<ProvisionDrivers> {
   if (subject.kind === "pipeline") return driversForProvision(db, ctx, subject.feature.id, actingUserId);
   return driversForSwarmProvision(db, ctx, subject.swarm, subject.task, actingUserId);
-}
-
-/** The first driver this run provisions with. */
-export async function driverForRun(
-  db: Db,
-  ctx: AppContext,
-  subject:
-    | { kind: "pipeline"; feature: { id: string } }
-    | { kind: "swarm"; swarm: { id: string; sandboxId: string | null }; task: { id: string } | null },
-  actingUserId: string | null,
-): Promise<SandboxDriver> {
-  return (await driversForRun(db, ctx, subject, actingUserId)).driver;
 }
 
 /**

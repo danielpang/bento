@@ -11,6 +11,7 @@ import { LineChannel, collectExec } from "./driver.js";
 import {
   FILESYSTEM_RETRY_DELAYS_MS,
   SpriteDriver,
+  SpriteProvisionLeak,
   EXEC_HANDSHAKE_RETRY_DELAYS_MS,
   SPRITE_ACQUIRE_RATE_LIMIT_WAITS,
   SPRITE_ACQUIRE_RETRY_DELAYS_MS,
@@ -594,6 +595,62 @@ test("Sprite provisioning still fails when the checkout probe fails for other re
     assert.match(result.message, pattern);
     assert.equal(probes, retriable ? FILESYSTEM_RETRY_DELAYS_MS.length + 1 : 1);
   }
+});
+
+/**
+ * A sprite the driver created and then could not prepare is a running
+ * machine with nothing pointing at it. The failure travels wrapped in
+ * the sprite's name so the caller can destroy it when it moves the
+ * card elsewhere; a sprite that already existed was somebody's before
+ * this call and comes back as the plain failure.
+ */
+test("Sprite provisioning names a sprite it created and failed to prepare, and not one it reused", async () => {
+  const failingSprite = () => ({
+    spawn(_file: string, _args: string[]) {
+      const child = fakeChild();
+      queueMicrotask(() => {
+        child.stderr.write("curl: (7) could not reach the installer\n");
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 1);
+      });
+      return child;
+    },
+    filesystem() {
+      return {
+        async readdir() {
+          return [];
+        },
+      };
+    },
+  });
+
+  const created = new SpriteDriver({ token: "token" });
+  const createdSprite = failingSprite();
+  stubClient(created, createdSprite);
+  (created as unknown as { client: unknown }).client = {
+    async getSprite() {
+      throw new APIError("sprite not found", { statusCode: 404 });
+    },
+    async createSprite() {
+      return createdSprite;
+    },
+  };
+  const leak = await created
+    .provision({ projectId: "project", workspaceKey: "feature", hostWorkspacePath: "/unused" })
+    .then(() => null, (err: unknown) => err);
+  assert.ok(leak instanceof SpriteProvisionLeak, "a created sprite that fails to prepare is reported as a leak");
+  assert.equal(leak.externalId, spriteName("feature"));
+  assert.ok(leak.cause instanceof Error);
+  assert.match(leak.cause.message, /could not reach the installer|exit/);
+
+  const reused = new SpriteDriver({ token: "token" });
+  stubClient(reused, failingSprite());
+  const plain = await reused
+    .provision({ projectId: "project", workspaceKey: "feature", hostWorkspacePath: "/unused" })
+    .then(() => null, (err: unknown) => err);
+  assert.ok(plain instanceof Error);
+  assert.ok(!(plain instanceof SpriteProvisionLeak), "a reused sprite is not the driver's to report as leaked");
 });
 
 /**

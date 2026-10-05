@@ -130,16 +130,26 @@ what the agent said while no server was attached" in `e2e.test.ts`.
 
 `projects.sandbox_provider` defaults to `auto`: a Fly sprite first,
 then a Modal sandbox when the sprite cannot be provisioned, among
-whichever of those two the process has credentials for, and the
-deployment default when it has neither. Null is the deployment default
+whichever of those two the process has credentials for. It engages
+only on a deployment whose default driver is itself one of those
+remote providers; a docker or local-process deployment that merely
+holds a Fly token keeps its configured driver, so a local developer
+never gets a paid machine by surprise. Null is the deployment default
 with no fallback, which is what projects from before `auto` hold, and
-a named provider pins the project to it. The order lives in one place,
-`driversForProject` in `apps/server/src/orchestrator/sandbox-driver.ts`,
-which answers `{ driver, fallbacks, selection }`; `provisionWorkspace`
-asks the drivers in that order and returns the one that made the
-machine, and the executor uses that driver from then on. An existing
-sandbox row keeps its driver with no fallback, so a hibernated Modal
-machine resumes on Modal and a swarm never splits across providers.
+a named provider pins the project to it. What a setting means lives in
+one place, `candidateDrivers` in
+`apps/server/src/orchestrator/sandbox-driver.ts`, which answers
+`{ driver, fallbacks, selection }`; the executor, the project route
+that validates a change, and the Team route that decides whether a
+network lock can be honored all read it, so do not re-derive it.
+`provisionWorkspace` asks the drivers in that order and returns the
+one that made the machine, and the executor uses that driver from then
+on. An existing sandbox row keeps its driver with no fallback, so a
+hibernated Modal machine resumes on Modal and a swarm never splits
+across providers. A driver that created a machine and then failed to
+prepare it says so (`SpriteProvisionLeak`, `ModalProvisionLeak`), and
+the loop destroys a machine it is walking away from, because the row
+will name the other provider and nothing would ever find it.
 
 Every provision emits `sandbox provisioned` to PostHog with the
 `provider` that answered, the `selection` that chose it, and
@@ -232,7 +242,10 @@ always on.
   ready. The card tools on the MCP gateway (`create_card`,
   `set_pull_request`, `add_pull_request_comment`) are rolled out to
   every run; only the board's group view of split cards is still on
-  the flag.
+  the flag. The Modal fallback on `auto` is the other exception: it is
+  on for every run, beta or not, while the card that pins a project to
+  a provider stays on the flag, because a default cannot be a feature
+  some people lack.
 
 Do not mint a second flag for "show this to testers". This is that flag.
 

@@ -3073,6 +3073,12 @@ test("network lockdown is refused when a live sandbox would use a driver that ca
     await ctx.db.update(projects).set({ sandboxProvider: null }).where(eq(projects.id, project!.id));
     const cleared = (await (await app.request("/api/team/policy", { headers })).json()) as { supported: boolean };
     assert.equal(cleared.supported, true, "a null project setting uses the default driver");
+
+    // "auto" is read the way the executor reads it: on this docker
+    // deployment it is docker, which can lock, whatever tokens are set.
+    await ctx.db.update(projects).set({ sandboxProvider: "auto" }).where(eq(projects.id, project!.id));
+    const onAuto = (await (await app.request("/api/team/policy", { headers })).json()) as { supported: boolean };
+    assert.equal(onAuto.supported, true, "auto on a docker deployment provisions docker, which honours the lock");
   } finally {
     ctx.drivers = previous;
   }

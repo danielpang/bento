@@ -5,7 +5,7 @@ import { z } from "zod";
 import { agentRuns, features, invitation, member, organization, organizationPolicies, projects, sandboxes, user, type Db } from "@bento/db";
 import type { AppContext } from "../context.js";
 import type { SandboxDriver } from "@bento/sandbox";
-import { driverForSandbox, SandboxDriverUnavailable } from "../orchestrator/sandbox-driver.js";
+import { allCandidates, candidateDrivers, driverForSandbox, SandboxDriverUnavailable } from "../orchestrator/sandbox-driver.js";
 import { tenantDb as db } from "../middleware/tenant.js";
 import { actor, activeOrg } from "../middleware/actor.js";
 import { getActiveOrganizationMembership } from "../access.js";
@@ -223,9 +223,12 @@ const PROJECT_LOCK_ERROR =
  * that already has a machine stays on that machine, so a lock the
  * default can honour does not hold when that machine's driver cannot.
  * An unconfigured sandbox provider cannot either. Destroyed rows are
- * not provisioned again, so they do not count. A project set to a
- * driver that is not built here falls through to the default, which
- * was already checked. This does not open egress: a run whose driver
+ * not provisioned again, so they do not count. A project's setting
+ * means what candidateDrivers says it means, the same answer the run
+ * executor gets: "auto" is honored when one driver in its order can
+ * lock the network, since the others are never asked, and a driver
+ * that is not built here falls through to the default, which was
+ * already checked. This does not open egress: a run whose driver
  * cannot lock the network still fails.
  */
 async function restrictedNetworkRefusal(ctx: AppContext, handle: Db, organizationId: string): Promise<string | null> {
@@ -257,10 +260,8 @@ async function restrictedNetworkRefusal(ctx: AppContext, handle: Db, organizatio
     const wanted = row.sandboxProvider;
     if (seenProviders.has(wanted)) continue;
     seenProviders.add(wanted);
-    // Null, and a setting that names the default, are the default driver.
-    if (!wanted || wanted === ctx.drivers.default.provider) continue;
-    const driver = ctx.drivers.get(wanted) ?? ctx.drivers.default;
-    if (driver.supportsRestrictedNetwork !== true) return PROJECT_LOCK_ERROR;
+    const could = allCandidates(candidateDrivers(ctx.drivers, wanted));
+    if (!could.some((driver) => driver.supportsRestrictedNetwork === true)) return PROJECT_LOCK_ERROR;
   }
   return null;
 }

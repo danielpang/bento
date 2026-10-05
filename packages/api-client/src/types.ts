@@ -10,9 +10,9 @@ export interface Project {
   autoStartPipeline: boolean;
   /**
    * Sandbox provider for new cards. "auto" tries a Fly sprite and
-   * falls back to Modal, and is what a new project starts on. Null
-   * means the deployment default. Cards that already have a sandbox
-   * keep it.
+   * falls back to Modal on a hosted deployment, and is what a new
+   * project starts on. Null means the deployment default. Cards that
+   * already have a sandbox keep it.
    */
   sandboxProvider: SandboxProvider | null;
   /** Whether a card created in this project files an issue in Linear. */

@@ -1,6 +1,13 @@
 import { and, eq, isNull, sql } from "drizzle-orm";
 import { repositories, sandboxes } from "@bento/db";
-import { ModalProvisionLeak, persistedSandboxProvider, type PreparedRepository, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
+import {
+  ModalProvisionLeak,
+  SpriteProvisionLeak,
+  persistedSandboxProvider,
+  type PreparedRepository,
+  type SandboxDriver,
+  type SandboxHandle,
+} from "@bento/sandbox";
 import type { AppContext } from "../context.js";
 import type { AgentBinary } from "@bento/sandbox";
 import { githubConnectionFor } from "../github.js";
@@ -295,28 +302,28 @@ export async function provisionWorkspace(
 
   /**
    * First driver that answers wins. A driver that throws is cleaned up
-   * after (a Modal machine it leaked is destroyed), and the next one
-   * is asked; the last one's error is the run's. The move is said in
-   * the transcript and counted in error tracking, because a sprite
-   * that keeps failing is something to look at even while every run
-   * still lands on Modal.
+   * after (a machine it created and is now walking away from is
+   * destroyed), and the next one is asked; the last one's error is
+   * the run's. The move is said in the transcript and counted in
+   * error tracking, because a sprite that keeps failing is something
+   * to look at even while every run still lands on Modal. The
+   * transcript line is best effort: a run that cannot write a message
+   * still gets its machine.
    */
-  let chosen: SandboxDriver = usable[0]!;
-  let handle: SandboxHandle | undefined;
+  let provisioned: { handle: SandboxHandle; driver: SandboxDriver } | undefined;
   let fellBackFrom: string | null = null;
   let attempts = 0;
   for (const candidate of usable) {
     attempts += 1;
+    const next = usable[attempts];
     try {
-      handle = await provisionWith(candidate);
-      chosen = candidate;
+      provisioned = { handle: await provisionWith(candidate), driver: candidate };
       break;
     } catch (err) {
-      await cleanupFailedAttempt(ctx, candidate, err, input.owner);
-      const next = usable[attempts];
+      await cleanupFailedAttempt(ctx, candidate, err, input.owner, next !== undefined);
       if (!next) throw err;
       fellBackFrom ??= candidate.provider;
-      const reason = err instanceof ModalProvisionLeak ? (err.cause ?? err) : err;
+      const reason = provisionFailureCause(err);
       console.warn(
         `${candidate.provider} could not provision a sandbox for ${workspaceKey}; trying ${next.provider}:`,
         reason,
@@ -330,13 +337,17 @@ export async function provisionWorkspace(
           ? { feature_id: input.owner.featureId }
           : { swarm_id: input.owner.swarmId, swarm_task_id: input.owner.swarmTaskId ?? null }),
       });
-      await input.say(
-        `${providerLabel(candidate.provider)} could not provide a sandbox (${reasonSentence(reason)}). Trying ${providerLabel(next.provider)}.`,
-      );
+      try {
+        await input.say(
+          `${providerLabel(candidate.provider)} could not provide a sandbox (${reasonSentence(reason)}). Trying ${providerLabel(next.provider)}.`,
+        );
+      } catch (sayErr) {
+        console.warn(`could not note the sandbox fallback for ${workspaceKey} in the transcript:`, sayErr);
+      }
     }
   }
-  if (!handle) throw new Error("no sandbox driver provisioned a machine");
-  const driverUsed = chosen;
+  if (!provisioned) throw new Error("no sandbox driver provisioned a machine");
+  const { handle, driver: driverUsed } = provisioned;
 
   try {
     /**
@@ -411,6 +422,17 @@ export async function provisionWorkspace(
   }
 }
 
+/**
+ * The failure a provision actually hit. A driver that created a
+ * machine and then failed wraps the failure in a leak error so the
+ * machine can be cleaned up; the person reading the run wants the
+ * reason, not the wrapper.
+ */
+export function provisionFailureCause(err: unknown): unknown {
+  if (err instanceof ModalProvisionLeak || err instanceof SpriteProvisionLeak) return err.cause ?? err;
+  return err;
+}
+
 /** The error a transcript line can carry: its sentence, on one line. */
 function reasonSentence(err: unknown): string {
   const text = err instanceof Error ? err.message : String(err);
@@ -421,18 +443,36 @@ function reasonSentence(err: unknown): string {
 /**
  * What a driver that threw out of provision leaves behind.
  *
- * Only Modal says: a machine it made and then lost track of comes
- * back as ModalProvisionLeak, and is destroyed here so it does not
- * bill with nobody looking. A hibernated row for this owner would
- * also hide it from the sweep, so that row stops counting as live.
- * Every other driver either made nothing or cleaned up itself.
+ * A Modal machine it made and then lost track of comes back as
+ * ModalProvisionLeak, and is destroyed here so it does not bill with
+ * nobody looking. A hibernated row for this owner would also hide it
+ * from the sweep, so that row stops counting as live.
+ *
+ * A sprite it created and then failed to prepare comes back as
+ * SpriteProvisionLeak. When this was the last driver, the sprite is
+ * kept: it is named after the workspace, so the next run of this card
+ * finds it by name and reuses it, which is what every retry did before
+ * there was a fallback. When the loop is moving on to another driver,
+ * no later run will come looking for it (the row will say the other
+ * provider), so it is destroyed now rather than left running with
+ * nothing that can find it.
  */
 async function cleanupFailedAttempt(
   ctx: AppContext,
   driver: SandboxDriver,
   err: unknown,
   owner: { featureId: string } | { swarmId: string; swarmTaskId?: string | null },
+  movingOn: boolean,
 ): Promise<void> {
+  if (err instanceof SpriteProvisionLeak) {
+    if (!movingOn) return;
+    await driver
+      .destroy({ externalId: err.externalId, provider: "sprite", workdir: "/workspace" })
+      .catch((destroyErr) => {
+        console.warn(`could not destroy sprite ${err.externalId} after a failed provision:`, destroyErr);
+      });
+    return;
+  }
   if (!(err instanceof ModalProvisionLeak)) return;
   const ownerWhere =
     "featureId" in owner

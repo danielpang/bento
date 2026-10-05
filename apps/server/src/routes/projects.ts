@@ -33,7 +33,7 @@ import {
   visibleProjectFilter,
 } from "../access.js";
 import { getBetaTester } from "../feature-flags.js";
-import { autoDrivers, driverForProject } from "../orchestrator/sandbox-driver.js";
+import { allCandidates, candidateDrivers, driverForProject } from "../orchestrator/sandbox-driver.js";
 import { githubForOrganization } from "../github.js";
 import { branchExists, detectDefaultBranch, githubRemoteOf, linkGitHubRemotes } from "../orchestrator/repo-remote.js";
 import { ACTIVE_RUN_STATUSES } from "../orchestrator/start-run.js";
@@ -451,6 +451,12 @@ export function projectRoutes(ctx: AppContext) {
                 },
               ]
             : [];
+      // Checked against the driver this project's first run would use.
+      // A new row starts on "auto" (the column's default), and on a
+      // hosted deployment that is a clone driver, which cannot mount a
+      // path on this server; the add-repository route refuses the
+      // same input for the same reason, so create and add agree.
+      const newProjectDriver = candidateDrivers(ctx.drivers, "auto").driver;
       const repoInputs = [];
       for (const requested of requestedInputs) {
         const resolved = await resolveRepositoryInput(
@@ -458,7 +464,7 @@ export function projectRoutes(ctx: AppContext) {
           c,
           requested,
           membership?.organizationId ?? null,
-          ctx.drivers.default,
+          newProjectDriver,
         );
         if (!resolved.ok) return c.json({ error: resolved.error }, 400);
         repoInputs.push(resolved.repo);
@@ -884,18 +890,10 @@ export function projectRoutes(ctx: AppContext) {
           ) {
             return c.json({ error: "that sandbox provider is not available on this server" }, 400);
           }
-          // Every driver the choice could land on. "auto" is its order,
-          // or the default when this server runs none of it, and it
-          // honors a locked network as long as one of them can: the
-          // ones that cannot are never asked.
-          const chosen = body.sandboxProvider === null
-            ? [ctx.drivers.default]
-            : body.sandboxProvider === "auto"
-              ? (autoDrivers(ctx.drivers).length > 0 ? autoDrivers(ctx.drivers) : [ctx.drivers.default])
-              : [ctx.drivers.get(body.sandboxProvider)].filter((d) => d !== undefined);
-          if (chosen.length === 0) {
-            return c.json({ error: "that sandbox provider is not available on this server" }, 400);
-          }
+          // Every driver the choice could land on, as the executor will
+          // resolve it. A lock is honored as long as one of them can:
+          // the ones that cannot are never asked.
+          const chosen = allCandidates(candidateDrivers(ctx.drivers, body.sandboxProvider));
           if (
             (await organizationRestrictsNetwork(ctx, c, project.organizationId))
             && !chosen.some((d) => d.supportsRestrictedNetwork === true)

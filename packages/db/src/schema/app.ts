@@ -52,10 +52,12 @@ export const projects = pgTable("projects", {
   executor: text("executor", { enum: ["server", "runner"] }).notNull().default("server"),
   /**
    * Sandbox provider this project asked for. New projects start on
-   * "auto", which provisions a Fly sprite and falls back to Modal when
-   * the sprite cannot be made. A named provider pins the project to
-   * it. Null means the deployment default, which is what projects
-   * created before "auto" existed hold. Stored and returned with the
+   * "auto", which on a deployment whose default is a remote provider
+   * provisions a Fly sprite and falls back to Modal when the sprite
+   * cannot be made, and elsewhere is the deployment default. A named
+   * provider pins the project to it. Null means the deployment
+   * default, which is what projects created before "auto" existed
+   * hold. Stored and returned with the
    * project. A beta tester who is an owner or admin sets a named
    * provider; null clears it.
    */

@@ -41,7 +41,7 @@ import {
   swarmTasks,
   swarms,
 } from "@bento/db";
-import { collectExec, isExecTimeout, LineChannel, ModalProvisionLeak, repositoryPathIn, type PreparedRepository, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
+import { collectExec, isExecTimeout, LineChannel, repositoryPathIn, type PreparedRepository, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
 import { captureJobErrors } from "../analytics.js";
 import type { AppContext } from "../context.js";
 import { unbilledReason } from "../unbilled-reasons.js";
@@ -53,9 +53,9 @@ import { branchForRun, cardBranch } from "./branch-rotation.js";
 import { recoverAncestryPublishFailures } from "./rebase-run.js";
 import { runRepositorySetup } from "./repo-setup.js";
 import { captureRunArtifacts } from "./capture-artifacts.js";
-import { provisionWorkspace } from "./sandbox-provision.js";
+import { provisionFailureCause, provisionWorkspace } from "./sandbox-provision.js";
 export { sandboxProvisionConflict } from "./sandbox-provision.js";
-import { driversForRun, driverForSandbox, SandboxDriverUnavailable, type ProvisionDrivers } from "./sandbox-driver.js";
+import { allCandidates, driversForRun, driverForSandbox, SandboxDriverUnavailable, type ProvisionDrivers } from "./sandbox-driver.js";
 import { evaluateFeatureGate } from "./gate-evaluator.js";
 import { buildResolverPrompt, buildStagePrompt, repositoryInstructions } from "./prompt.js";
 import {
@@ -314,7 +314,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     // on "auto" includes a Modal fallback behind a sprite that cannot
     // honor the restriction and so is never asked.
     const modalNetwork =
-      restrictNetwork && [driver, ...chosenDrivers.fallbacks].some((d) => d.provider === "modal")
+      restrictNetwork && allCandidates(chosenDrivers).some((d) => d.provider === "modal")
         ? await modalNetworkForProject(ctx, project.id, subject.organizationId, profile.cli, profile.model)
         : {};
     // The workspace, from the function both boards provision through.
@@ -418,7 +418,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       ...(subject.kind === "pipeline" ? { feature_id: subject.feature.id } : { swarm_id: subject.swarm.id }),
       source: "sandbox_provision",
     });
-    const reported = err instanceof ModalProvisionLeak ? (err.cause ?? err) : err;
+    const reported = provisionFailureCause(err);
     await finishRun(ctx, runId, { ok: false, error: `sandbox provisioning failed: ${describeSandboxError(reported)}` }, null);
     emitBoard("failed");
     await subject.settle(ctx);

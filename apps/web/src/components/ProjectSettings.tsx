@@ -85,9 +85,6 @@ export function ProjectSettings({
 const SANDBOX_PROVIDER_HELP =
   "Applies to new cards. Cards that already have a sandbox keep it until they finish. Auto starts on Fly Sprites and moves to Modal when Fly cannot provide a machine.";
 
-/** The order Auto tries providers in, as the server resolves it. */
-const AUTO_ORDER = ["sprite", "modal"];
-
 function providerName(provider: string): string {
   if (provider === "sprite") return "Fly Sprites";
   if (provider === "modal") return "Modal";
@@ -96,12 +93,12 @@ function providerName(provider: string): string {
 
 /**
  * What a choice does on this server. Auto names the providers it
- * would try here, in order, so a server with only one of them does
- * not promise a fallback it cannot make.
+ * would try here, in the order the server lists them, so a server
+ * with only one of them does not promise a fallback it cannot make.
  */
 function sandboxProviderLabel(provider: string, setting: SandboxProviderSetting): string {
   if (provider === "auto") {
-    const order = AUTO_ORDER.filter((p) => setting.available.includes(p)).map(providerName);
+    const order = setting.available.filter((p) => p !== "auto").map(providerName);
     return order.length > 0 ? `Auto (${order.join(", then ")})` : "Auto (deployment default)";
   }
   const name = providerName(provider);

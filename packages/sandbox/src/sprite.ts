@@ -267,6 +267,24 @@ export interface SpriteDriverOptions {
 }
 
 /**
+ * Provision created a sprite and then could not prepare it.
+ *
+ * The run's error stays the original failure (`cause`). The machine
+ * is named after its workspace, so a retry of the same card finds it
+ * by name; a caller that moves the card to another provider instead
+ * has to destroy it, because nothing will come looking for it again.
+ */
+export class SpriteProvisionLeak extends Error {
+  readonly externalId: string;
+  constructor(message: string, externalId: string, cause: unknown) {
+    super(message);
+    this.name = "SpriteProvisionLeak";
+    this.externalId = externalId;
+    this.cause = cause;
+  }
+}
+
+/**
  * Runs agents in Fly Sprites: persistent Linux machines that hibernate
  * when idle and wake on demand.
  *
@@ -318,6 +336,28 @@ export class SpriteDriver implements SandboxDriver {
     const { sprite, created } = await this.acquireSprite(name, say);
     await say(created ? `Created cloud sandbox ${name}.` : `Reusing this card's cloud sandbox (${name}).`);
 
+    /**
+     * A sprite that was just created and cannot be prepared is still
+     * a running machine, named after this workspace and billing. The
+     * failure travels wrapped in its name, so the caller can decide
+     * whether the next run will come back for it or it has to go now.
+     * A reused sprite was somebody's before this call and stays theirs.
+     */
+    try {
+      return await this.prepareSprite(sprite, name, spec, say);
+    } catch (err) {
+      if (!created) throw err;
+      throw new SpriteProvisionLeak(err instanceof Error ? err.message : "sandbox provisioning failed", name, err);
+    }
+  }
+
+  /** Everything provision does once it has the machine: tools, checkouts, and the sweep of old ones. */
+  private async prepareSprite(
+    sprite: Sprite,
+    name: string,
+    spec: ProvisionSpec,
+    say: (message: string) => Promise<void>,
+  ): Promise<SandboxHandle> {
     /**
      * The CLIs this card can spawn, which the caller narrows to its
      * pipeline's agents plus the one this run uses. A caller that names

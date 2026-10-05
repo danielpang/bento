@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { eq } from "drizzle-orm";
 import { createDb, createPool, features, pipelines, projects, runMigrations, sandboxes } from "@bento/db";
-import { WorktreeManager, type ProvisionSpec, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
+import { SpriteProvisionLeak, WorktreeManager, type ProvisionSpec, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
 import pg from "pg";
 import { ensureLocalUser, type AppContext } from "../context.js";
 import { loadEnv } from "../env.js";
@@ -88,7 +88,7 @@ async function seedFeature(title: string): Promise<string> {
 function stubDriver(
   provider: "sprite" | "modal",
   asked: string[],
-  opts: { fail?: Error; restricted?: boolean } = {},
+  opts: { fail?: Error; restricted?: boolean; destroyed?: string[] } = {},
 ): SandboxDriver {
   return {
     provider,
@@ -103,7 +103,9 @@ function stubDriver(
     exec: async function* () {
       yield { kind: "exit" as const, exitCode: 0 };
     },
-    async destroy() {},
+    async destroy(handle: SandboxHandle) {
+      opts.destroyed?.push(handle.externalId);
+    },
   } as unknown as SandboxDriver;
 }
 
@@ -271,6 +273,66 @@ test("a locked network with no driver that honors it refuses before asking any",
 
   await assert.rejects(provisionOn(featureId, sprite, [other], said, true), /without network access/);
   assert.deepEqual(asked, []);
+});
+
+test("a sprite created and then failed is destroyed when the loop moves on to Modal", async () => {
+  const featureId = await seedFeature("Leaked sprite, Modal next");
+  const asked: string[] = [];
+  const said: string[] = [];
+  const destroyed: string[] = [];
+  const leak = new SpriteProvisionLeak("tool install failed", `bento-${featureId}`, new Error("tool install failed"));
+  const sprite = stubDriver("sprite", asked, { fail: leak, destroyed });
+  const modal = stubDriver("modal", asked, { restricted: true });
+
+  const result = await provisionOn(featureId, sprite, [modal], said);
+
+  assert.equal(result.driver, modal);
+  assert.deepEqual(asked, ["sprite", "modal"]);
+  assert.deepEqual(destroyed, [`bento-${featureId}`]);
+  // The transcript and the metric carry the failure, not the wrapper.
+  assert.deepEqual(said, ["Fly Sprites could not provide a sandbox (tool install failed). Trying Modal."]);
+  const [row] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.featureId, featureId));
+  assert.equal(row?.provider, "modal");
+});
+
+test("a sprite created and then failed is kept when it was the last driver, for the retry to reuse", async () => {
+  const featureId = await seedFeature("Leaked sprite, nothing next");
+  const asked: string[] = [];
+  const said: string[] = [];
+  const destroyed: string[] = [];
+  const leak = new SpriteProvisionLeak("clone failed", `bento-${featureId}`, new Error("clone failed"));
+  const sprite = stubDriver("sprite", asked, { fail: leak, destroyed });
+
+  await assert.rejects(provisionOn(featureId, sprite, [], said), (err: unknown) => err === leak);
+  assert.deepEqual(asked, ["sprite"]);
+  assert.deepEqual(destroyed, []);
+});
+
+test("a transcript that cannot be written does not stop the fallback", async () => {
+  const featureId = await seedFeature("Transcript down");
+  const asked: string[] = [];
+  const sprite = stubDriver("sprite", asked, { fail: new Error("sprite failed") });
+  const modal = stubDriver("modal", asked, { restricted: true });
+
+  const result = await provisionWorkspace(ctx, {
+    driver: sprite,
+    fallbackDrivers: [modal],
+    selection: "auto",
+    projectId,
+    organizationId: null,
+    workspaceKey: featureId,
+    branch: `bento/${featureId}`,
+    repoRows: [],
+    authMounts: [],
+    restrictNetwork: false,
+    owner: { featureId },
+    say: async () => {
+      throw new Error("messages insert failed");
+    },
+  });
+
+  assert.equal(result.driver, modal);
+  assert.deepEqual(asked, ["sprite", "modal"]);
 });
 
 test("a fallback of another workspace shape is not tried", async () => {
