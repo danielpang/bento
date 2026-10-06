@@ -53,7 +53,7 @@ import { branchForRun, cardBranch } from "./branch-rotation.js";
 import { recoverAncestryPublishFailures } from "./rebase-run.js";
 import { runRepositorySetup } from "./repo-setup.js";
 import { captureRunArtifacts } from "./capture-artifacts.js";
-import { provisionFailureCause, provisionWorkspace } from "./sandbox-provision.js";
+import { SandboxProvisionError, provisionFailureCause, provisionWorkspace } from "./sandbox-provision.js";
 export { sandboxProvisionConflict } from "./sandbox-provision.js";
 import { allCandidates, driversForRun, driverForSandbox, SandboxDriverUnavailable, type ProvisionDrivers } from "./sandbox-driver.js";
 import { evaluateFeatureGate } from "./gate-evaluator.js";
@@ -412,14 +412,27 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       await ctx.db.update(agentRuns).set({ sandboxId: workspace.sandboxRow.id }).where(eq(agentRuns.id, runId));
     }
   } catch (err) {
-    console.error(`sandbox provisioning failed for run ${runId}:`, err);
-    ctx.analytics?.captureException(err, run.startedBy, subject.organizationId, {
+    /**
+     * The log and error tracking get every attempt with its provider,
+     * phase and blame. The run record gets what the person can act
+     * on: the project's own failure in the driver's words, or, when
+     * the providers failed, one generic sentence that names none of
+     * them. The "sandbox provisioning failed:" prefix stays on both,
+     * because the unbilled-reason rules and the swarm cost query read
+     * it.
+     */
+    const reported = provisionFailureCause(err);
+    const attempts = err instanceof SandboxProvisionError ? err.describeFailures() : [];
+    console.error(`sandbox provisioning failed for run ${runId}:`, reported, ...(attempts.length > 0 ? [attempts] : []));
+    ctx.analytics?.captureException(reported, run.startedBy, subject.organizationId, {
       run_id: runId,
       ...(subject.kind === "pipeline" ? { feature_id: subject.feature.id } : { swarm_id: subject.swarm.id }),
       source: "sandbox_provision",
+      ...(err instanceof SandboxProvisionError ? { blame: err.blame, attempts } : {}),
     });
-    const reported = provisionFailureCause(err);
-    await finishRun(ctx, runId, { ok: false, error: `sandbox provisioning failed: ${describeSandboxError(reported)}` }, null);
+    const shown =
+      err instanceof SandboxProvisionError && err.blame === "provider" ? err.message : describeSandboxError(reported);
+    await finishRun(ctx, runId, { ok: false, error: `sandbox provisioning failed: ${shown}` }, null);
     emitBoard("failed");
     await subject.settle(ctx);
     return;

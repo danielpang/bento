@@ -20,6 +20,11 @@ export type UnbilledReason = {
 
 export const UNBILLED_REASONS: readonly UnbilledReason[] = [
   {
+    id: "sandbox-unavailable",
+    summary: "No sandbox provider could make the machine before the agent started.",
+    match: { kind: "prefix", text: "sandbox provisioning failed: Sandbox failed to provision" },
+  },
+  {
     id: "sprite-driver-error",
     summary: "Fly or the Sprite driver failed while the machine was being created, before the agent started.",
     match: { kind: "pattern", text: "^sandbox provisioning failed: [A-Za-z][A-Za-z0-9]*Error(?:[^A-Za-z0-9_]|$)" },

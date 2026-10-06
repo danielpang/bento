@@ -172,9 +172,15 @@ a sprite by its workspace name (`spriteName`), whatever the failure
 and without waiting for the destroy, and a Modal machine the driver
 reports through `ModalProvisionLeak`. A sprite that was the last
 driver tried is kept for the next run to reuse by name. The
-transcript never names a provider: a fallback reads "The sandbox
-failed to create. Retrying." and the provider goes to the log and to
-error tracking. Every swarm run that has a task, the final check's
+transcript never names a provider: a fallback reads "Failed to
+provision sandbox, retrying.", and when every provider failed the run
+record says only "Sandbox failed to provision, we're investigating
+the issue. Please try again later." (`SANDBOX_UNAVAILABLE_MESSAGE`,
+which the unbilled-reason rules match). The providers, phases and
+reasons go to the log and to error tracking on
+`SandboxProvisionError`. A failure that is the project's (git
+refused the checkout) is shown in git's words, because that is what
+the person has to fix. Every swarm run that has a task, the final check's
 judge included, gets a machine of its own, so two runs never
 provision one sprite at once.
 

@@ -9,6 +9,12 @@ test("unbilled reason ids are unique", () => {
 
 test("provider failures before a Sprite starts are not billed", () => {
   assert.equal(
+    unbilledReason(
+      "sandbox provisioning failed: Sandbox failed to provision, we're investigating the issue. Please try again later.",
+    )?.id,
+    "sandbox-unavailable",
+  );
+  assert.equal(
     unbilledReason("sandbox provisioning failed: APIError: service temporarily unavailable")?.id,
     "sprite-driver-error",
   );

@@ -14,7 +14,7 @@ import { SecretBox } from "../secrets.js";
 import { recordingAnalytics } from "../test-analytics.js";
 import { singleDriver } from "./sandbox-driver.js";
 import { SANDBOX_PROVISIONED_EVENT } from "./sandbox-metrics.js";
-import { provisionWorkspace } from "./sandbox-provision.js";
+import { SANDBOX_UNAVAILABLE_MESSAGE, SandboxProvisionError, provisionWorkspace } from "./sandbox-provision.js";
 
 /**
  * The "auto" order at the point it matters: provisionWorkspace asking
@@ -190,7 +190,7 @@ test("auto falls back to Modal when the sprite cannot be provisioned", async () 
   assert.equal(row?.size, "modal-small");
   assert.equal(row?.status, "busy");
   // The transcript never names a provider; the log and error tracking do.
-  assert.deepEqual(said, ["The sandbox failed to create. Retrying."]);
+  assert.deepEqual(said, ["Failed to provision sandbox, retrying."]);
 
   const events = provisionEvents().slice(before);
   assert.equal(events.length, 1);
@@ -218,7 +218,15 @@ test("a project that named its provider fails plainly instead of moving", async 
   const sprite = stubDriver("sprite", asked, { fail: new Error("sprites API returned 503") });
   const before = provisionEvents().length;
 
-  await assert.rejects(provisionOn(featureId, sprite, [], said), /sprites API returned 503/);
+  // One provider asked and failed is still the generic sentence: the
+  // run record never says which provider was behind the card.
+  await assert.rejects(provisionOn(featureId, sprite, [], said), (err: unknown) => {
+    assert.ok(err instanceof SandboxProvisionError);
+    assert.equal(err.message, SANDBOX_UNAVAILABLE_MESSAGE);
+    assert.equal(err.blame, "provider");
+    assert.match((err.cause as Error).message, /sprites API returned 503/);
+    return true;
+  });
 
   assert.deepEqual(asked, ["sprite"]);
   assert.deepEqual(said, []);
@@ -236,17 +244,21 @@ test("when every driver fails, the last error is the run's and the first is stil
   const before = provisionEvents().length;
   const exceptionsBefore = analytics.exceptions.length;
 
-  // The run's error is the last driver's, carrying the first's, so a
-  // card that failed twice for two reasons shows both.
+  // The run's error is one generic sentence that names no provider.
+  // Both attempts, with their reasons, ride on the error for the log
+  // and error tracking.
   await assert.rejects(provisionOn(featureId, sprite, [modal], said), (err: unknown) => {
-    assert.ok(err instanceof Error);
-    assert.match(err.message, /^modal failed\nBefore that, sprite failed: sprite failed$/);
+    assert.ok(err instanceof SandboxProvisionError);
+    assert.equal(err.message, SANDBOX_UNAVAILABLE_MESSAGE);
+    assert.equal(err.blame, "provider");
+    assert.deepEqual(err.failures.map((f) => f.provider), ["sprite", "modal"]);
+    assert.deepEqual(err.describeFailures(), ["sprite: sprite failed", "modal: modal failed"]);
     assert.equal((err.cause as Error).message, "modal failed");
     return true;
   });
 
   assert.deepEqual(asked, ["sprite", "modal"]);
-  assert.deepEqual(said, ["The sandbox failed to create. Retrying."]);
+  assert.deepEqual(said, ["Failed to provision sandbox, retrying."]);
   assert.equal(provisionEvents().length, before);
   const fallbackErrors = analytics.exceptions.slice(exceptionsBefore);
   assert.equal(fallbackErrors.length, 1);
@@ -325,7 +337,16 @@ test("a failure the driver blames on the project ends the run and keeps the spri
   const sprite = stubDriver("sprite", asked, { fail: refused, destroyed });
   const modal = stubDriver("modal", asked, { restricted: true });
 
-  await assert.rejects(provisionOn(featureId, sprite, [modal], said), (err: unknown) => err === refused);
+  // The project's failure is shown in git's words, since that is what
+  // the person has to fix; only the provider's is made generic.
+  await assert.rejects(provisionOn(featureId, sprite, [modal], said), (err: unknown) => {
+    assert.ok(err instanceof SandboxProvisionError);
+    assert.equal(err.blame, "project");
+    assert.equal(err.cause, refused);
+    assert.match(err.message, /exit code 128/);
+    assert.deepEqual(err.describeFailures(), ["sprite checkout (project): provisioning script failed with exit code 128"]);
+    return true;
+  });
   assert.deepEqual(asked, ["sprite"], "Modal would refuse the same clone, so it is not asked");
   assert.deepEqual(destroyed, [], "the sprite stays for the retry to reuse by name");
   assert.deepEqual(said, []);
@@ -346,7 +367,7 @@ test("a failure the driver blames on the provider moves on to Modal, with its ph
   assert.equal(result.driver, modal);
   assert.deepEqual(asked, ["sprite", "modal"]);
   assert.deepEqual(destroyed, [spriteName(featureId)]);
-  assert.deepEqual(said, ["The sandbox failed to create. Retrying."]);
+  assert.deepEqual(said, ["Failed to provision sandbox, retrying."]);
   const recorded = analytics.exceptions.slice(exceptionsBefore);
   assert.equal(recorded.length, 1);
   assert.equal(recorded[0]?.error.message, "Network error: fetch failed", "error tracking gets the cause, not the wrapper");
@@ -443,7 +464,7 @@ test("a sprite that failed is destroyed by name when the loop moves on to Modal,
   assert.deepEqual(asked, ["sprite", "modal"]);
   assert.deepEqual(destroyed, [spriteName(featureId)]);
   assert.equal(destroyed[0], `bento-${featureId}`);
-  assert.deepEqual(said, ["The sandbox failed to create. Retrying."]);
+  assert.deepEqual(said, ["Failed to provision sandbox, retrying."]);
   const [row] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.featureId, featureId));
   assert.equal(row?.provider, "modal");
 });
@@ -456,7 +477,11 @@ test("a sprite that failed is kept when it was the last driver, for the retry to
   const failure = new Error("clone failed");
   const sprite = stubDriver("sprite", asked, { fail: failure, destroyed });
 
-  await assert.rejects(provisionOn(featureId, sprite, [], said), (err: unknown) => err === failure);
+  await assert.rejects(provisionOn(featureId, sprite, [], said), (err: unknown) => {
+    assert.ok(err instanceof SandboxProvisionError);
+    assert.equal(err.cause, failure);
+    return true;
+  });
   assert.deepEqual(asked, ["sprite"]);
   assert.deepEqual(destroyed, []);
 });
@@ -512,6 +537,10 @@ test("a fallback of another workspace shape is not tried", async () => {
   const sprite = stubDriver("sprite", asked, { fail: new Error("sprite failed") });
   const host = { ...stubDriver("modal", asked), workspace: "host" } as SandboxDriver;
 
-  await assert.rejects(provisionOn(featureId, sprite, [host], said), /sprite failed/);
+  await assert.rejects(provisionOn(featureId, sprite, [host], said), (err: unknown) => {
+    assert.ok(err instanceof SandboxProvisionError);
+    assert.match((err.cause as Error).message, /sprite failed/);
+    return true;
+  });
   assert.deepEqual(asked, ["sprite"]);
 });

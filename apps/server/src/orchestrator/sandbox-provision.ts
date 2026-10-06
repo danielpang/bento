@@ -9,6 +9,8 @@ import {
   provisionBlame,
   spriteName,
   type PreparedRepository,
+  type ProvisionBlame,
+  type ProvisionPhase,
   type SandboxDriver,
   type SandboxHandle,
 } from "@bento/sandbox";
@@ -349,7 +351,7 @@ export async function provisionWorkspace(
   let provisioned: { handle: SandboxHandle; driver: SandboxDriver } | undefined;
   let fellBackFrom: string | null = null;
   let attempts = 0;
-  const earlierFailures: { provider: string; reason: unknown }[] = [];
+  const earlierFailures: ProvisionAttemptFailure[] = [];
   for (const candidate of usable) {
     attempts += 1;
     const next = usable[attempts];
@@ -369,9 +371,14 @@ export async function provisionWorkspace(
       const movingOn = next !== undefined && blame !== "project";
       await cleanupFailedAttempt(ctx, candidate, err, input.owner, workspaceKey, movingOn);
       const reason = provisionFailureCause(err);
-      if (!movingOn) throw withEarlierFailures(err, earlierFailures);
+      const failure = {
+        provider: candidate.provider,
+        ...(err instanceof ProvisionFailure ? { phase: err.phase, blame: err.blame } : {}),
+        reason,
+      };
+      if (!movingOn) throw new SandboxProvisionError(blame ?? "provider", [...earlierFailures, failure], err);
       fellBackFrom ??= candidate.provider;
-      earlierFailures.push({ provider: candidate.provider, reason });
+      earlierFailures.push(failure);
       console.warn(
         `${candidate.provider} could not provision a sandbox for ${workspaceKey}; trying ${next.provider}:`,
         reason,
@@ -386,7 +393,7 @@ export async function provisionWorkspace(
           ? { feature_id: input.owner.featureId }
           : { swarm_id: input.owner.swarmId, swarm_task_id: input.owner.swarmTaskId ?? null }),
       });
-      await input.say("The sandbox failed to create. Retrying.").catch((sayErr) => {
+      await input.say("Failed to provision sandbox, retrying.").catch((sayErr) => {
         console.warn(`could not note the sandbox retry for ${workspaceKey} in the transcript:`, sayErr);
       });
     }
@@ -474,8 +481,65 @@ export async function provisionWorkspace(
  * reason, not the wrapper.
  */
 export function provisionFailureCause(err: unknown): unknown {
+  if (err instanceof SandboxProvisionError) return provisionFailureCause(err.cause);
   if (err instanceof ModalProvisionLeak || err instanceof ProvisionFailure) return err.cause ?? err;
   return err;
+}
+
+/** One driver's failed attempt, as the log and error tracking record it. */
+export interface ProvisionAttemptFailure {
+  provider: string;
+  phase?: ProvisionPhase;
+  blame?: ProvisionBlame;
+  reason: unknown;
+}
+
+/**
+ * What a run is told when no provider could make its machine. One
+ * sentence that names no provider: which providers were tried, and
+ * in what order, is Bento's business, not the card's.
+ */
+export const SANDBOX_UNAVAILABLE_MESSAGE =
+  "Sandbox failed to provision, we're investigating the issue. Please try again later.";
+
+/**
+ * The provisioning loop's final answer when every driver it asked
+ * failed.
+ *
+ * The message is what the run record shows. For the provider's
+ * failure it is the generic sentence above, whether one driver was
+ * asked or two; the run record must not say which providers were
+ * behind a card, and a person reading it cannot act on a control
+ * plane anyway. For the project's failure it is the cause's own
+ * words (git's, usually), because that is what the person has to
+ * fix. Every attempt, with its provider, phase and blame, is kept on
+ * `failures` for the log and error tracking, and the last cause is
+ * `cause`.
+ */
+export class SandboxProvisionError extends Error {
+  readonly blame: ProvisionBlame;
+  readonly failures: ProvisionAttemptFailure[];
+
+  constructor(blame: ProvisionBlame, failures: ProvisionAttemptFailure[], cause: unknown) {
+    const last = failures.at(-1)?.reason ?? cause;
+    super(
+      blame === "project" ? (last instanceof Error ? last.message : String(last)) : SANDBOX_UNAVAILABLE_MESSAGE,
+      { cause },
+    );
+    this.name = "SandboxProvisionError";
+    this.blame = blame;
+    this.failures = failures;
+  }
+
+  /** The attempts, one line each, for a log or an error tracking property. */
+  describeFailures(): string[] {
+    return this.failures.map(({ provider, phase, blame, reason }) => {
+      const text = reason instanceof Error ? reason.message : String(reason);
+      const where = phase ? ` ${phase}` : "";
+      const whose = blame ? ` (${blame})` : "";
+      return `${provider}${where}${whose}: ${text.split("\n")[0]?.trim() ?? "unknown error"}`;
+    });
+  }
 }
 
 const execFileAsync = promisify(execFile);
@@ -505,31 +569,6 @@ export async function verifyCloneUrls(repoRows: { name: string; repoUrl: string 
       );
     }
   }
-}
-
-/**
- * The last driver's error, carrying what the drivers before it said.
- *
- * The run record shows the error it is handed, and when every driver
- * failed the last one's reason is rarely the whole story: the sprite
- * failing on clone auth and Modal failing on quota are two different
- * problems, and the person reading the card should see both. The
- * earlier failures are appended to the message by provider, and kept
- * on the error for anything that reads it as data.
- */
-export function withEarlierFailures(
-  err: unknown,
-  earlier: { provider: string; reason: unknown }[],
-): unknown {
-  if (earlier.length === 0 || !(err instanceof Error)) return err;
-  const lines = earlier.map(({ provider, reason }) => {
-    const text = reason instanceof Error ? reason.message : String(reason);
-    return `Before that, ${provider} failed: ${text.split("\n")[0]?.trim() ?? "unknown error"}`;
-  });
-  const combined = new Error(`${err.message}\n${lines.join("\n")}`, { cause: err });
-  combined.name = err.name;
-  (combined as Error & { earlierFailures?: typeof earlier }).earlierFailures = earlier;
-  return combined;
 }
 
 /**
