@@ -189,7 +189,8 @@ Every provision emits `sandbox provisioned` to PostHog with the
 `fell_back_from` when Fly did not; a sprite failure that Modal covered
 also goes to error tracking as `sandbox_provision_fallback`. A new
 place that provisions must go through `provisionWorkspace` so it is
-counted.
+counted. The whole path, from a run asking for a machine to an agent
+starting in one, is drawn in `docs/images/auto-sandbox-flow.png`.
 
 ## Starting a run goes through startRunIfIdle, never a bare insert
 
