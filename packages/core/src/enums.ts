@@ -39,11 +39,12 @@ export function isSpendRun(run: { status: string; role?: string | null }): boole
 }
 
 /**
- * What a project asks for its sandboxes. "auto" is the server's own
- * order: a Fly sprite, then a Modal sandbox when the sprite cannot be
- * provisioned. The named providers pin a project to one of them. A
- * sandbox row never carries "auto": by the time a machine exists, one
- * provider made it.
+ * What a project's sandbox_provider column can hold. "auto" is the
+ * server's own order, a Fly sprite then a Modal sandbox when the
+ * sprite cannot be provisioned, and is what every project holds. The
+ * named providers pin a project to one of them, which only an
+ * operator does, by hand. A sandbox row never carries "auto": by the
+ * time a machine exists, one provider made it.
  */
 export const sandboxProvider = z.enum(["auto", "docker", "sprite", "modal"]);
 export type SandboxProvider = z.infer<typeof sandboxProvider>;

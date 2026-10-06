@@ -9,10 +9,9 @@ export interface Project {
   /** Whether an issue arriving from Linear starts this project's pipeline. */
   autoStartPipeline: boolean;
   /**
-   * Sandbox provider for new cards. "auto" tries a Fly sprite and
-   * falls back to Modal on a hosted deployment, and is what a new
-   * project starts on. Null means the deployment default. Cards that
-   * already have a sandbox keep it.
+   * Where new cards run. Always "auto" (a Fly sprite, then Modal, on
+   * a hosted deployment): nothing in the product sets anything else,
+   * and the row carries it only because the column does.
    */
   sandboxProvider: SandboxProvider | null;
   /** Whether a card created in this project files an issue in Linear. */
@@ -27,21 +26,6 @@ export interface Project {
   linearTeamName: string | null;
   linearProjectId: string | null;
   linearProjectName: string | null;
-}
-
-/**
- * The sandbox provider a project would use for a new card.
- *
- * `current` is the stored column. Null means the deployment default.
- * `available` is "auto" and then the providers this server can run,
- * in the order "auto" tries them. `canManage` is false for a member
- * who can see the project but cannot change it.
- */
-export interface SandboxProviderSetting {
-  current: SandboxProvider | null;
-  default: string;
-  available: string[];
-  canManage: boolean;
 }
 
 export interface Repository {

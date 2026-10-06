@@ -214,6 +214,14 @@ test("migration 0045 lets a project hold auto and starts new rows there", () => 
   assert.match(journal, /"tag": "0045_project_sandbox_provider_auto"/);
 });
 
+test("migration 0046 moves every project to auto and keeps the column", () => {
+  const sql = readFileSync(new URL("../../../../packages/db/migrations/0046_project_sandbox_provider_always_auto.sql", import.meta.url), "utf8");
+  assert.match(sql, /UPDATE projects SET sandbox_provider = 'auto'/);
+  assert.doesNotMatch(sql, /DROP COLUMN/);
+  const journal = readFileSync(new URL("../../../../packages/db/migrations/meta/_journal.json", import.meta.url), "utf8");
+  assert.match(journal, /"tag": "0046_project_sandbox_provider_always_auto"/);
+});
+
 test("driverForProject returns the default even when sprite is also registered", async () => {
   const drivers = driversFor({ BENTO_SANDBOX_DRIVER: "docker", SPRITES_TOKEN: "test-token" });
   assert.equal(await projectDriver(drivers), drivers.default);

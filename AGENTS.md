@@ -126,22 +126,25 @@ So when touching this: an adapter with `sessionRecovery` must give
 before it reads the stream, not after. The test is "a restart recovers
 what the agent said while no server was attached" in `e2e.test.ts`.
 
-## A new project is on "auto", and only "auto" ever falls back
+## Every project is on "auto", and only "auto" ever falls back
 
-`projects.sandbox_provider` defaults to `auto`: a Fly sprite first,
-then a Modal sandbox when the sprite cannot be provisioned, among
-whichever of those two the process has credentials for. It engages
-only on a deployment whose default driver is itself one of those
-remote providers; a docker or local-process deployment that merely
-holds a Fly token keeps its configured driver, so a local developer
-never gets a paid machine by surprise. Null is the deployment default
-with no fallback, which is what projects from before `auto` hold, and
-a named provider pins the project to it. What a setting means lives in
-one place, `candidateDrivers` in
+`projects.sandbox_provider` is `auto` on every row: a Fly sprite
+first, then a Modal sandbox when the sprite cannot be provisioned,
+among whichever of those two the process has credentials for. It
+engages only on a deployment whose default driver is itself one of
+those remote providers; a docker or local-process deployment that
+merely holds a Fly token keeps its configured driver, so a local
+developer never gets a paid machine by surprise. Nothing in the
+product sets the column to anything else: the settings card and the
+API that once let a beta tester pin a project are gone, and migration
+0046 moved every pinned row to `auto`. The column and its other
+values (null for the deployment default, a provider name to pin) are
+kept for an operator to set by hand in an emergency, without a
+deploy. What a setting means lives in one place, `candidateDrivers` in
 `apps/server/src/orchestrator/sandbox-driver.ts`, which answers
-`{ driver, fallbacks, selection }`; the executor, the project route
-that validates a change, and the Team route that decides whether a
-network lock can be honored all read it, so do not re-derive it.
+`{ driver, fallbacks, selection }`; the executor, project creation,
+and the Team route that decides whether a network lock can be honored
+all read it, so do not re-derive it.
 `provisionWorkspace` asks the drivers in that order and returns the
 one that made the machine, and the executor uses that driver from then
 on. An existing sandbox row keeps its driver with no fallback, so a
@@ -242,10 +245,9 @@ always on.
   ready. The card tools on the MCP gateway (`create_card`,
   `set_pull_request`, `add_pull_request_comment`) are rolled out to
   every run; only the board's group view of split cards is still on
-  the flag. The Modal fallback on `auto` is the other exception: it is
-  on for every run, beta or not, while the card that pins a project to
-  a provider stays on the flag, because a default cannot be a feature
-  some people lack.
+  the flag. The sandbox provider is not a product setting at all: every
+  project is on `auto`, beta or not, and nothing in the console or the
+  API changes it.
 
 Do not mint a second flag for "show this to testers". This is that flag.
 
