@@ -9,7 +9,14 @@ const envSchema = z.object({
   DATABASE_URL: z.string().default("postgres://postgres:postgres@localhost:5439/app"),
   /** Where worktrees and other server state live. */
   BENTO_DATA_DIR: z.string().default(path.join(os.homedir(), ".bento")),
-  /** docker = isolated containers (default); local-process = no isolation, dev/test only. */
+  /**
+   * docker = isolated containers (default); local-process = no
+   * isolation, dev/test only. This is the deployment default: what a
+   * project with no provider of its own uses. A new project starts on
+   * "auto", which on a sprite deployment is the sprite with Modal
+   * behind it when this process has Modal credentials, and on a
+   * docker or local-process deployment is that default.
+   */
   BENTO_SANDBOX_DRIVER: z.enum(["docker", "local-process", "sprite"]).default("docker"),
   /** Required when BENTO_SANDBOX_DRIVER=sprite. */
   SPRITES_TOKEN: z.string().optional(),

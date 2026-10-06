@@ -51,11 +51,15 @@ export const projects = pgTable("projects", {
    */
   executor: text("executor", { enum: ["server", "runner"] }).notNull().default("server"),
   /**
-   * Remote sandbox provider this project asked for. Null means the
-   * deployment default. Stored and returned with the project. A beta
-   * tester who is an owner or admin sets it; null clears it.
+   * Where this project's new cards run. "auto" on every row: on a
+   * deployment whose default is a remote provider that is a Fly
+   * sprite with Modal behind it when the sprite cannot be made, and
+   * elsewhere it is the deployment default. Nothing in the product
+   * writes another value. The column keeps its other meanings (null
+   * is the deployment default, a provider name pins the project) for
+   * an operator to set by hand in an emergency.
    */
-  sandboxProvider: text("sandbox_provider", { enum: ["sprite", "modal", "docker"] }),
+  sandboxProvider: text("sandbox_provider", { enum: ["auto", "sprite", "modal", "docker"] }).default("auto"),
   /**
    * Whether an issue arriving from Linear enters this project's first
    * stage instead of waiting in the backlog. Per project, because one

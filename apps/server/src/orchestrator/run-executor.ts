@@ -41,7 +41,7 @@ import {
   swarmTasks,
   swarms,
 } from "@bento/db";
-import { collectExec, isExecTimeout, LineChannel, ModalProvisionLeak, repositoryPathIn, type PreparedRepository, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
+import { collectExec, isExecTimeout, LineChannel, repositoryPathIn, type PreparedRepository, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
 import { captureJobErrors } from "../analytics.js";
 import type { AppContext } from "../context.js";
 import { unbilledReason } from "../unbilled-reasons.js";
@@ -53,9 +53,9 @@ import { branchForRun, cardBranch } from "./branch-rotation.js";
 import { recoverAncestryPublishFailures } from "./rebase-run.js";
 import { runRepositorySetup } from "./repo-setup.js";
 import { captureRunArtifacts } from "./capture-artifacts.js";
-import { provisionWorkspace } from "./sandbox-provision.js";
+import { SandboxProvisionError, provisionFailureCause, provisionWorkspace } from "./sandbox-provision.js";
 export { sandboxProvisionConflict } from "./sandbox-provision.js";
-import { driverForRun, driverForSandbox, SandboxDriverUnavailable } from "./sandbox-driver.js";
+import { allCandidates, driversForRun, driverForSandbox, SandboxDriverUnavailable, type ProvisionDrivers } from "./sandbox-driver.js";
 import { evaluateFeatureGate } from "./gate-evaluator.js";
 import { buildResolverPrompt, buildStagePrompt, repositoryInstructions } from "./prompt.js";
 import {
@@ -185,11 +185,14 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   emitBoard("starting");
 
   // A live sandbox keeps the driver that created it. A card or swarm
-  // with none follows the project's provider, which is the deployment
-  // default until a beta tester sets one.
+  // with none follows the project's provider: "auto" on every project,
+  // which on a hosted deployment is a sprite with Modal behind it,
+  // unless an operator pinned the row by hand.
   let driver: SandboxDriver;
+  let chosenDrivers: ProvisionDrivers;
   try {
-    driver = await driverForRun(ctx.db, ctx, subject, run.startedBy);
+    chosenDrivers = await driversForRun(ctx.db, ctx, subject, run.startedBy);
+    driver = chosenDrivers.driver;
   } catch (err) {
     console.error(`sandbox provisioning failed for run ${runId}:`, err);
     await finishRun(ctx, runId, { ok: false, error: `sandbox provisioning failed: ${describeSandboxError(err)}` }, null);
@@ -333,8 +336,11 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   // MCP attach after it read this.
   const restrictNetwork = await organizationRestrictsNetwork(ctx, subject.organizationId);
   try {
+    // The allowlist is built when Modal may make this machine, which
+    // on "auto" includes a Modal fallback behind a sprite that cannot
+    // honor the restriction and so is never asked.
     const modalNetwork =
-      restrictNetwork && driver.provider === "modal"
+      restrictNetwork && allCandidates(chosenDrivers).some((d) => d.provider === "modal")
         ? await modalNetworkForProject(ctx, project.id, subject.organizationId, profile.cli, profile.model)
         : {};
     // The workspace, from the function both boards provision through.
@@ -342,6 +348,9 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     // live in that function, so a swarm and a card take the same path.
     const workspace = await provisionWorkspace(ctx, {
       driver,
+      fallbackDrivers: chosenDrivers.fallbacks,
+      selection: chosenDrivers.selection,
+      startedBy: run.startedBy,
       projectId: project.id,
       organizationId: subject.organizationId,
       workspaceKey: subject.workspaceKey,
@@ -412,6 +421,10 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     });
     handle = workspace.handle;
     prepared = workspace.prepared;
+    // The driver that made the machine, which on "auto" is the fallback
+    // when the first choice could not. Everything from here (exec,
+    // attach, destroy) goes through the owner of the handle.
+    driver = workspace.driver;
     // A swarm records the branch and the machine it just got, so
     // stopping it can find both without rebuilding their names.
     if (subject.kind === "swarm" && workspace.sandboxRow) {
@@ -425,14 +438,27 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       await ctx.db.update(agentRuns).set({ sandboxId: workspace.sandboxRow.id }).where(eq(agentRuns.id, runId));
     }
   } catch (err) {
-    console.error(`sandbox provisioning failed for run ${runId}:`, err);
-    ctx.analytics?.captureException(err, run.startedBy, subject.organizationId, {
+    /**
+     * The log and error tracking get every attempt with its provider,
+     * phase and blame. The run record gets what the person can act
+     * on: the project's own failure in the driver's words, or, when
+     * the providers failed, one generic sentence that names none of
+     * them. The "sandbox provisioning failed:" prefix stays on both,
+     * because the unbilled-reason rules and the swarm cost query read
+     * it.
+     */
+    const reported = provisionFailureCause(err);
+    const attempts = err instanceof SandboxProvisionError ? err.describeFailures() : [];
+    console.error(`sandbox provisioning failed for run ${runId}:`, reported, ...(attempts.length > 0 ? [attempts] : []));
+    ctx.analytics?.captureException(reported, run.startedBy, subject.organizationId, {
       run_id: runId,
       ...(subject.kind === "pipeline" ? { feature_id: subject.feature.id } : { swarm_id: subject.swarm.id }),
       source: "sandbox_provision",
+      ...(err instanceof SandboxProvisionError ? { blame: err.blame, attempts } : {}),
     });
-    const reported = err instanceof ModalProvisionLeak ? (err.cause ?? err) : err;
-    await finishRun(ctx, runId, { ok: false, error: `sandbox provisioning failed: ${describeSandboxError(reported)}` }, null);
+    const shown =
+      err instanceof SandboxProvisionError && err.blame === "provider" ? err.message : describeSandboxError(reported);
+    await finishRun(ctx, runId, { ok: false, error: `sandbox provisioning failed: ${shown}` }, null);
     emitBoard("failed");
     await subject.settle(ctx);
     return;

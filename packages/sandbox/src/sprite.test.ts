@@ -7,7 +7,7 @@ import { PassThrough } from "node:stream";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { APIError, FilesystemError, Sprite as SpriteClass, SpriteCommand, type Sprite } from "@fly/sprites";
-import { LineChannel, collectExec } from "./driver.js";
+import { LineChannel, ProvisionFailure, collectExec } from "./driver.js";
 import {
   FILESYSTEM_RETRY_DELAYS_MS,
   SpriteDriver,
@@ -594,6 +594,109 @@ test("Sprite provisioning still fails when the checkout probe fails for other re
     assert.match(result.message, pattern);
     assert.equal(probes, retriable ? FILESYSTEM_RETRY_DELAYS_MS.length + 1 : 1);
   }
+});
+
+/**
+ * Every provision failure says which phase it died in and whose fault
+ * it is, because the caller asks another provider only for Fly's.
+ * Getting the machine and installing the tools are Fly's; a clone git
+ * refused is the project's; a clone that died because the machine
+ * could not reach the remote, or because the sandbox stopped
+ * answering, is Fly's again.
+ */
+test("Sprite provisioning tags each failure with its phase and whose fault it is", async () => {
+  const scripted = (
+    behave: (script: string) => { exit: number; stdout?: string; stderr?: string },
+    filesystem?: () => unknown,
+  ) => ({
+    spawn(_file: string, args: string[]) {
+      const outcome = behave(args[1] ?? "");
+      const child = fakeChild();
+      queueMicrotask(() => {
+        if (outcome.stdout) child.stdout.write(outcome.stdout);
+        if (outcome.stderr) child.stderr.write(outcome.stderr);
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", outcome.exit);
+      });
+      return child;
+    },
+    filesystem: filesystem ?? (() => ({ async readdir() { return []; } })),
+  });
+  const failure = async (driver: SpriteDriver) =>
+    driver
+      .provision({
+        projectId: "project",
+        workspaceKey: "feature",
+        hostWorkspacePath: "/unused",
+        repositories: [{ name: "api", cloneUrl: "https://github.com/acme/api.git", branch: "feature/work" }],
+      })
+      .then(() => null, (err: unknown) => err);
+
+  // The control plane refused the machine: Fly's, in the acquire phase.
+  const refused = new SpriteDriver({ token: "token" });
+  (refused as unknown as { client: unknown }).client = {
+    async getSprite() {
+      throw new APIError("forbidden", { statusCode: 403 });
+    },
+  };
+  const acquire = await failure(refused);
+  assert.ok(acquire instanceof ProvisionFailure);
+  assert.equal(acquire.phase, "acquire");
+  assert.equal(acquire.blame, "provider");
+  assert.match(acquire.message, /forbidden/);
+
+  // The installer died: Fly's, in the install phase.
+  const installFails = new SpriteDriver({ token: "token" });
+  stubClient(installFails, scripted((script) => (script.includes("tools-absent") ? { exit: 1, stderr: "curl: (7) could not reach the installer\n" } : { exit: 0 })));
+  const install = await failure(installFails);
+  assert.ok(install instanceof ProvisionFailure);
+  assert.equal(install.phase, "install");
+  assert.equal(install.blame, "provider");
+  assert.equal(install.stderr, "curl: (7) could not reach the installer\n");
+
+  // git refused the clone: the project's, in the checkout phase.
+  const cloneFails = new SpriteDriver({ token: "token" });
+  stubClient(cloneFails, scripted((script) => {
+    if (script.includes("tools-absent")) return { exit: 0, stdout: "tools-present\n" };
+    if (script.includes("git clone")) return { exit: 128, stderr: "fatal: repository 'https://github.com/acme/api.git/' not found\n" };
+    return { exit: 0 };
+  }));
+  const checkout = await failure(cloneFails);
+  assert.ok(checkout instanceof ProvisionFailure);
+  assert.equal(checkout.phase, "checkout");
+  assert.equal(checkout.blame, "project");
+  assert.match(checkout.stderr ?? "", /not found/);
+
+  // The machine could not reach the remote at all: Fly's network, not the repository.
+  const noRoute = new SpriteDriver({ token: "token" });
+  stubClient(noRoute, scripted((script) => {
+    if (script.includes("tools-absent")) return { exit: 0, stdout: "tools-present\n" };
+    if (script.includes("git clone")) return { exit: 128, stderr: "fatal: unable to access 'https://github.com/acme/api.git/': Could not resolve host: github.com\n" };
+    return { exit: 0 };
+  }));
+  const unreachable = await failure(noRoute);
+  assert.ok(unreachable instanceof ProvisionFailure);
+  assert.equal(unreachable.phase, "checkout");
+  assert.equal(unreachable.blame, "provider");
+
+  // The sweep of old checkouts hit a transport failure: Fly's, in the cleanup phase.
+  const sweepFails = new SpriteDriver({ token: "token" });
+  stubClient(
+    sweepFails,
+    scripted(
+      (script) => (script.includes("tools-absent") ? { exit: 0, stdout: "tools-present\n" } : { exit: 0 }),
+      () => ({
+        async readdir() {
+          throw new TypeError("fetch failed", { cause: new Error("ECONNRESET") });
+        },
+      }),
+    ),
+  );
+  const cleanup = await failure(sweepFails);
+  assert.ok(cleanup instanceof ProvisionFailure);
+  assert.equal(cleanup.phase, "cleanup");
+  assert.equal(cleanup.blame, "provider");
 });
 
 /**

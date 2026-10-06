@@ -954,10 +954,8 @@ test("every entity route refuses a foreign tenant", async () => {
 
   const attempts: [string, string, RequestInit?][] = [
     ["GET", `/api/projects/${project.id}`],
-    ["GET", `/api/projects/${project.id}/sandbox-provider`],
     ["PATCH", `/api/projects/${project.id}`, { body: JSON.stringify({ name: "Stolen" }) }],
     ["PATCH", `/api/projects/${project.id}`, { body: JSON.stringify({ autoStartPipeline: true }) }],
-    ["PATCH", `/api/projects/${project.id}`, { body: JSON.stringify({ sandboxProvider: "modal" }) }],
     ["GET", `/api/projects/${project.id}/pipeline`],
     ["GET", `/api/projects/${project.id}/pipeline/export`],
     [
@@ -2981,11 +2979,74 @@ test("network lockdown is refused when the deployment cannot honour it", async (
 });
 
 /**
- * The default driver can lock its network, and so can a card with no
- * machine yet. A live sprite row is provisioned on sprite, which
- * cannot, so the lock must not say it can be honoured.
+ * A sprite cannot lock its network, but a locked team on a sprite
+ * deployment never gets a sprite: auto skips it and goes to Modal. So
+ * the lock is offered whenever Modal is there to take those runs, and
+ * refused on a sprite deployment that has nothing else.
  */
-test("network lockdown is refused when a live sandbox would use a driver that cannot lock the network", async () => {
+test("network lockdown on a sprite deployment is offered when Modal can take the runs", async () => {
+  const signup = await jsonPost("/api/auth/sign-up/email", {
+    email: "sprite-modal-lock@bento.test",
+    password: "correct-horse-battery",
+    name: "Sprite Modal Lock",
+  });
+  const token = signup.headers.get("set-auth-token")!;
+  const org = (await (
+    await jsonPost("/api/auth/organization/create", { name: "Sprite Modal Lock Co", slug: "sprite-modal-lock-co" }, token)
+  ).json()) as { id: string };
+  await jsonPost("/api/auth/organization/set-active", { organizationId: org.id }, token);
+  const headers = { "content-type": "application/json", authorization: `Bearer ${token}` };
+
+  const previous = ctx.drivers;
+  try {
+    ctx.drivers = createDrivers(
+      loadEnv({ BENTO_MODE: "multi", DATABASE_URL: testUrl, BENTO_SANDBOX_DRIVER: "sprite", SPRITES_TOKEN: "test-token" } as NodeJS.ProcessEnv),
+    );
+    const spriteOnly = (await (await app.request("/api/team/policy", { headers })).json()) as { supported: boolean };
+    assert.equal(spriteOnly.supported, false, "a sprite deployment with nothing behind the sprite cannot lock");
+    const refused = await app.request("/api/team/policy", {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ restrictNetwork: true }),
+    });
+    assert.equal(refused.status, 409);
+    assert.match(((await refused.json()) as { error: string }).error, /Modal credentials/);
+
+    ctx.drivers = createDrivers(
+      loadEnv({
+        BENTO_MODE: "multi",
+        DATABASE_URL: testUrl,
+        BENTO_SANDBOX_DRIVER: "sprite",
+        SPRITES_TOKEN: "test-token",
+        MODAL_TOKEN_ID: "id",
+        MODAL_TOKEN_SECRET: "secret",
+      } as NodeJS.ProcessEnv),
+    );
+    const withModal = (await (await app.request("/api/team/policy", { headers })).json()) as { supported: boolean };
+    assert.equal(withModal.supported, true, "auto on this deployment can land on Modal, which locks");
+    const locked = await app.request("/api/team/policy", {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ restrictNetwork: true }),
+    });
+    assert.equal(locked.status, 200);
+    const [policy] = await ctx.db
+      .select({ restrictNetwork: organizationPolicies.restrictNetwork })
+      .from(organizationPolicies)
+      .where(eq(organizationPolicies.organizationId, org.id));
+    assert.equal(policy?.restrictNetwork, true, "the lock was stored");
+  } finally {
+    ctx.drivers = previous;
+  }
+});
+
+/**
+ * The lock applies to new cards. A card that already has a sprite
+ * keeps it, and keeps the sprite's open network, so a live sprite row
+ * does not stand in the lock's way. A project pinned to the sprite
+ * does: every new card of it would need a machine that cannot lock.
+ */
+test("network lockdown applies to new cards, so a live sprite does not block it but a pinned project does", async () => {
   const signup = await jsonPost("/api/auth/sign-up/email", {
     email: "sprite-lock@bento.test",
     password: "correct-horse-battery",
@@ -3010,7 +3071,7 @@ test("network lockdown is refused when a live sandbox would use a driver that ca
   try {
     const headers = { authorization: `Bearer ${token}` };
     const open = (await (await app.request("/api/team/policy", { headers })).json()) as { supported: boolean };
-    assert.equal(open.supported, true, "the default driver can honour the lock when no live row needs another");
+    assert.equal(open.supported, true, "the default driver can honour the lock");
 
     const [owner] = await ctx.db.select({ id: user.id }).from(user).where(eq(user.email, "sprite-lock@bento.test"));
     const [project] = await ctx.db
@@ -3025,251 +3086,56 @@ test("network lockdown is refused when a live sandbox would use a driver that ca
       .insert(features)
       .values({ projectId: project!.id, pipelineId: pipeline!.id, title: "Sprite card", status: "active" })
       .returning();
-    const [sandbox] = await ctx.db
-      .insert(sandboxes)
-      .values({
-        projectId: project!.id,
-        featureId: feature!.id,
-        provider: "sprite",
-        externalId: `policy-sprite-${feature!.id}`,
-        status: "ready",
-        workdir: "/workspace",
-      })
-      .returning();
+    await ctx.db.insert(sandboxes).values({
+      projectId: project!.id,
+      featureId: feature!.id,
+      provider: "sprite",
+      externalId: `policy-sprite-${feature!.id}`,
+      status: "ready",
+      workdir: "/workspace",
+    });
 
-    const blocked = (await (await app.request("/api/team/policy", { headers })).json()) as { supported: boolean };
-    assert.equal(blocked.supported, false, "a live sprite row would provision a driver that cannot lock the network");
-
-    const refused = await app.request("/api/team/policy", {
+    const withLive = (await (await app.request("/api/team/policy", { headers })).json()) as { supported: boolean };
+    assert.equal(withLive.supported, true, "a card that already has a sprite keeps it; the lock is for new cards");
+    const locked = await app.request("/api/team/policy", {
       method: "PATCH",
       headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
       body: JSON.stringify({ restrictNetwork: true }),
     });
-    assert.equal(refused.status, 409);
-    const refusedBody = (await refused.json()) as { error: string };
-    assert.match(refusedBody.error, /cannot lock down/);
-    assert.doesNotMatch(refusedBody.error, /BENTO_SANDBOX_RESTRICTED_NETWORK/);
+    assert.equal(locked.status, 200);
     const [policy] = await ctx.db
       .select({ restrictNetwork: organizationPolicies.restrictNetwork })
       .from(organizationPolicies)
       .where(eq(organizationPolicies.organizationId, org.id));
-    assert.notEqual(policy?.restrictNetwork, true, "the lock was not stored");
-
-    await ctx.db.update(sandboxes).set({ status: "destroyed" }).where(eq(sandboxes.id, sandbox!.id));
-    const after = (await (await app.request("/api/team/policy", { headers })).json()) as { supported: boolean };
-    assert.equal(after.supported, true, "a destroyed row is not provisioned again");
+    assert.equal(policy?.restrictNetwork, true, "the lock was stored");
+    await app.request("/api/team/policy", {
+      method: "PATCH",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({ restrictNetwork: false }),
+    });
 
     await ctx.db.update(projects).set({ sandboxProvider: "sprite" }).where(eq(projects.id, project!.id));
     const projectBlocked = (await (await app.request("/api/team/policy", { headers })).json()) as { supported: boolean };
-    assert.equal(projectBlocked.supported, false, "a project set to sprite would provision a driver that cannot lock the network");
+    assert.equal(projectBlocked.supported, false, "a project pinned to sprite would provision a driver that cannot lock the network");
     const projectRefused = await app.request("/api/team/policy", {
       method: "PATCH",
       headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
       body: JSON.stringify({ restrictNetwork: true }),
     });
     assert.equal(projectRefused.status, 409);
-    assert.match(((await projectRefused.json()) as { error: string }).error, /project set to a sandbox provider/);
+    assert.match(((await projectRefused.json()) as { error: string }).error, /project pinned to a sandbox provider/);
 
     await ctx.db.update(projects).set({ sandboxProvider: null }).where(eq(projects.id, project!.id));
     const cleared = (await (await app.request("/api/team/policy", { headers })).json()) as { supported: boolean };
     assert.equal(cleared.supported, true, "a null project setting uses the default driver");
+
+    // "auto" is read the way the executor reads it: on this docker
+    // deployment it is docker, which can lock, whatever tokens are set.
+    await ctx.db.update(projects).set({ sandboxProvider: "auto" }).where(eq(projects.id, project!.id));
+    const onAuto = (await (await app.request("/api/team/policy", { headers })).json()) as { supported: boolean };
+    assert.equal(onAuto.supported, true, "auto on a docker deployment provisions docker, which honours the lock");
   } finally {
     ctx.drivers = previous;
-  }
-});
-
-test("sandbox provider changes are limited to beta testers who own or administer the project", async () => {
-  const owner = await jsonPost("/api/auth/sign-up/email", {
-    email: "sandbox-owner@bento.test",
-    password: "correct-horse-battery",
-    name: "Sandbox Owner",
-  });
-  const teammate = await jsonPost("/api/auth/sign-up/email", {
-    email: "sandbox-member@bento.test",
-    password: "correct-horse-battery",
-    name: "Sandbox Member",
-  });
-  const ownerToken = owner.headers.get("set-auth-token")!;
-  const teammateToken = teammate.headers.get("set-auth-token")!;
-  const teammateId = ((await teammate.json()) as { user: { id: string } }).user.id;
-
-  const organization = (await (
-    await jsonPost("/api/auth/organization/create", { name: "Sandbox Roles", slug: "sandbox-roles" }, ownerToken)
-  ).json()) as { id: string };
-  await jsonPost("/api/auth/organization/set-active", { organizationId: organization.id }, ownerToken);
-  const created = await jsonPost("/api/projects", { name: "Sandbox roles", localPath: "/tmp" }, ownerToken);
-  assert.equal(created.status, 201);
-  const projectId = ((await created.json()) as { id: string; sandboxProvider: string | null }).id;
-
-  const invitation = (await (
-    await jsonPost(
-      "/api/auth/organization/invite-member",
-      { email: "sandbox-member@bento.test", role: "member", organizationId: organization.id },
-      ownerToken,
-    )
-  ).json()) as { id: string };
-  await jsonPost("/api/auth/organization/accept-invitation", { invitationId: invitation.id }, teammateToken);
-  await jsonPost("/api/auth/organization/set-active", { organizationId: organization.id }, teammateToken);
-
-  const previousFlags = ctx.featureFlags;
-  const previousDrivers = ctx.drivers;
-  ctx.featureFlags = new FeatureFlags(null, true);
-  ctx.drivers = createDrivers(
-    loadEnv({
-      BENTO_MODE: "multi",
-      DATABASE_URL: testUrl,
-      BENTO_SANDBOX_DRIVER: "docker",
-      BENTO_SANDBOX_RESTRICTED_NETWORK: "bento-locked",
-      SPRITES_TOKEN: "test-token",
-      MODAL_TOKEN_ID: "id",
-      MODAL_TOKEN_SECRET: "secret",
-    } as NodeJS.ProcessEnv),
-  );
-  const asUser = (token: string, path: string, init: RequestInit = {}) =>
-    app.request(path, {
-      ...init,
-      headers: { authorization: `Bearer ${token}`, "content-type": "application/json", ...(init.headers ?? {}) },
-    });
-
-  try {
-    const memberView = await asUser(teammateToken, `/api/projects/${projectId}/sandbox-provider`);
-    assert.equal(memberView.status, 200);
-    const memberBody = (await memberView.json()) as {
-      current: string | null;
-      default: string;
-      available: string[];
-      canManage: boolean;
-    };
-    assert.equal(memberBody.current, null);
-    assert.equal(memberBody.default, "docker");
-    assert.deepEqual(memberBody.available, ["sprite", "modal"]);
-    assert.equal(memberBody.canManage, false);
-
-    const memberWrite = await asUser(teammateToken, `/api/projects/${projectId}`, {
-      method: "PATCH",
-      body: JSON.stringify({ sandboxProvider: "modal" }),
-    });
-    assert.equal(memberWrite.status, 403);
-    const [afterMember] = await ctx.db
-      .select({ sandboxProvider: projects.sandboxProvider })
-      .from(projects)
-      .where(eq(projects.id, projectId));
-    assert.equal(afterMember?.sandboxProvider, null);
-
-    await ctx.db
-      .update(member)
-      .set({ role: "admin" })
-      .where(and(eq(member.userId, teammateId), eq(member.organizationId, organization.id)));
-    const adminWrite = await asUser(teammateToken, `/api/projects/${projectId}`, {
-      method: "PATCH",
-      body: JSON.stringify({ sandboxProvider: "modal" }),
-    });
-    assert.equal(adminWrite.status, 200);
-    assert.equal(((await adminWrite.json()) as { sandboxProvider: string | null }).sandboxProvider, "modal");
-
-    const ownerReset = await asUser(ownerToken, `/api/projects/${projectId}`, {
-      method: "PATCH",
-      body: JSON.stringify({ sandboxProvider: null }),
-    });
-    assert.equal(ownerReset.status, 200);
-    assert.equal(((await ownerReset.json()) as { sandboxProvider: string | null }).sandboxProvider, null);
-
-    const unavailable = await asUser(ownerToken, `/api/projects/${projectId}`, {
-      method: "PATCH",
-      body: JSON.stringify({ sandboxProvider: "docker" }),
-    });
-    assert.equal(unavailable.status, 400);
-
-    await ctx.db
-      .insert(organizationPolicies)
-      .values({ organizationId: organization.id, restrictNetwork: true })
-      .onConflictDoUpdate({
-        target: organizationPolicies.organizationId,
-        set: { restrictNetwork: true },
-      });
-    const spriteRefused = await asUser(ownerToken, `/api/projects/${projectId}`, {
-      method: "PATCH",
-      body: JSON.stringify({ sandboxProvider: "sprite" }),
-    });
-    assert.equal(spriteRefused.status, 409);
-    assert.match(((await spriteRefused.json()) as { error: string }).error, /cannot honor that/);
-    const [stillDefault] = await ctx.db
-      .select({ sandboxProvider: projects.sandboxProvider })
-      .from(projects)
-      .where(eq(projects.id, projectId));
-    assert.equal(stillDefault?.sandboxProvider, null);
-
-    const modalAllowed = await asUser(ownerToken, `/api/projects/${projectId}`, {
-      method: "PATCH",
-      body: JSON.stringify({ sandboxProvider: "modal" }),
-    });
-    assert.equal(modalAllowed.status, 200);
-    assert.equal(((await modalAllowed.json()) as { sandboxProvider: string | null }).sandboxProvider, "modal");
-  } finally {
-    ctx.featureFlags = previousFlags;
-    ctx.drivers = previousDrivers;
-  }
-});
-
-test("a non-tester cannot read or set the sandbox provider, and can still rename the project", async () => {
-  const owner = await jsonPost("/api/auth/sign-up/email", {
-    email: "sandbox-closed@bento.test",
-    password: "correct-horse-battery",
-    name: "Sandbox Closed",
-  });
-  const token = owner.headers.get("set-auth-token")!;
-  const organization = (await (
-    await jsonPost("/api/auth/organization/create", { name: "Sandbox Closed", slug: "sandbox-closed" }, token)
-  ).json()) as { id: string };
-  await jsonPost("/api/auth/organization/set-active", { organizationId: organization.id }, token);
-  const created = await jsonPost("/api/projects", { name: "Closed project", localPath: "/tmp" }, token);
-  assert.equal(created.status, 201);
-  const projectId = ((await created.json()) as { id: string }).id;
-
-  const previousFlags = ctx.featureFlags;
-  const previousDrivers = ctx.drivers;
-  ctx.featureFlags = new FeatureFlags(null, false);
-  ctx.drivers = createDrivers(
-    loadEnv({
-      BENTO_MODE: "multi",
-      DATABASE_URL: testUrl,
-      BENTO_SANDBOX_DRIVER: "docker",
-      MODAL_TOKEN_ID: "id",
-      MODAL_TOKEN_SECRET: "secret",
-    } as NodeJS.ProcessEnv),
-  );
-  const headers = { authorization: `Bearer ${token}`, "content-type": "application/json" };
-  try {
-    const hidden = await app.request(`/api/projects/${projectId}/sandbox-provider`, { headers });
-    assert.equal(hidden.status, 404);
-    const refused = await app.request(`/api/projects/${projectId}`, {
-      method: "PATCH",
-      headers,
-      body: JSON.stringify({ sandboxProvider: "modal" }),
-    });
-    assert.equal(refused.status, 404);
-    const [unchanged] = await ctx.db
-      .select({ sandboxProvider: projects.sandboxProvider, name: projects.name })
-      .from(projects)
-      .where(eq(projects.id, projectId));
-    assert.equal(unchanged?.sandboxProvider, null);
-    assert.equal(unchanged?.name, "Closed project");
-
-    const renamed = await app.request(`/api/projects/${projectId}`, {
-      method: "PATCH",
-      headers,
-      body: JSON.stringify({ name: "Still closed" }),
-    });
-    assert.equal(renamed.status, 200);
-    assert.equal(((await renamed.json()) as { name: string; sandboxProvider: string | null }).name, "Still closed");
-    const [after] = await ctx.db
-      .select({ sandboxProvider: projects.sandboxProvider })
-      .from(projects)
-      .where(eq(projects.id, projectId));
-    assert.equal(after?.sandboxProvider, null);
-  } finally {
-    ctx.featureFlags = previousFlags;
-    ctx.drivers = previousDrivers;
   }
 });
 

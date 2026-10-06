@@ -25,7 +25,6 @@ import type {
   Pipeline,
   Project,
   ProjectCompletions,
-  SandboxProviderSetting,
   ProjectSession,
   ProjectUsage,
   RelatedGroup,
@@ -664,27 +663,14 @@ export class BentoClient {
   }
 
   /**
-   * The project's own settings: its name, whether an arriving Linear
-   * issue starts its pipeline, and which sandbox provider new cards
-   * use. Only what is passed is written. Null sandboxProvider resets
-   * the project to the deployment default.
+   * The project's own settings: its name, and whether an arriving
+   * Linear issue starts its pipeline. Only what is passed is written.
    */
-  updateProject(
-    projectId: string,
-    patch: { name?: string; autoStartPipeline?: boolean; sandboxProvider?: Project["sandboxProvider"] },
-  ) {
+  updateProject(projectId: string, patch: { name?: string; autoStartPipeline?: boolean }) {
     return this.request<Project>(`/api/projects/${projectId}`, {
       method: "PATCH",
       body: JSON.stringify(patch),
     });
-  }
-
-  /**
-   * Which sandbox provider new cards on this project use, which ones
-   * this server can run, and whether this caller may change it.
-   */
-  getSandboxProvider(projectId: string) {
-    return this.request<SandboxProviderSetting>(`/api/projects/${projectId}/sandbox-provider`);
   }
 
   /**

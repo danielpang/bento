@@ -32,6 +32,48 @@ export interface SandboxHandle {
   createdSandbox?: boolean;
 }
 
+/** Where a provision died: getting the machine, installing the agent CLIs, making the checkouts, or sweeping old ones. */
+export type ProvisionPhase = "acquire" | "install" | "checkout" | "cleanup";
+
+/**
+ * Whose fault a provision failure is. "provider" is the sandbox
+ * provider's: its control plane, its machine, its network. "project"
+ * is the project's: a clone URL that does not resolve, a branch that
+ * is not there, a credential that was refused. Only the first is a
+ * reason to try another provider; the second would fail there too.
+ */
+export type ProvisionBlame = "provider" | "project";
+
+/**
+ * A provision failure that says which phase it died in and whose
+ * fault it is, for the caller deciding whether another provider is
+ * worth asking. The message is the cause's, and the cause's stdout
+ * and stderr ride along, so a run record reads the same as before.
+ */
+export class ProvisionFailure extends Error {
+  readonly provider: SandboxHandle["provider"];
+  readonly phase: ProvisionPhase;
+  readonly blame: ProvisionBlame;
+  readonly stdout?: string;
+  readonly stderr?: string;
+
+  constructor(provider: SandboxHandle["provider"], phase: ProvisionPhase, blame: ProvisionBlame, cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = "ProvisionFailure";
+    this.provider = provider;
+    this.phase = phase;
+    this.blame = blame;
+    const output = cause as { stdout?: unknown; stderr?: unknown } | null;
+    if (typeof output?.stdout === "string") this.stdout = output.stdout;
+    if (typeof output?.stderr === "string") this.stderr = output.stderr;
+  }
+}
+
+/** Whose fault a provision failure was, or null for an error no driver tagged. */
+export function provisionBlame(err: unknown): ProvisionBlame | null {
+  return err instanceof ProvisionFailure ? err.blame : null;
+}
+
 export interface ProvisionSpec {
   projectId: string;
   /**

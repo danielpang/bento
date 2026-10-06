@@ -208,7 +208,16 @@ async function swarmSubject(
   /** The shape the swarm was created with, which the deployment either honours or refuses. */
   const workerIsolation: WorkerIsolation = swarm.workerIsolation;
 
-  const perTask = (run.role === "worker" || run.role === "subplanner" || run.role === "resolver") && task;
+  /**
+   * A judge is on it too, though it changes nothing: the final check
+   * runs while the planner may still be on the swarm's machine, and
+   * two runs provisioning one sprite at once is how a fallback on one
+   * of them deletes the machine under the other. The judge reads the
+   * swarm's branch from a checkout of its own, cut the way a worker's
+   * is, and leaves it as it found it.
+   */
+  const perTask =
+    (run.role === "worker" || run.role === "subplanner" || run.role === "resolver" || run.role === "judge") && task;
   const branch = perTask
     ? (task.branchName ?? workerBranchName(swarm.branchName ?? swarmBranchName(swarm.slug), task.id))
     : (swarm.branchName ?? swarmBranchName(swarm.slug));

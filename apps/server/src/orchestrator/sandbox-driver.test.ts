@@ -17,7 +17,16 @@ import { createApp } from "../app.js";
 import { createDrivers, ensureLocalUser, type AppContext } from "../context.js";
 import { loadEnv } from "../env.js";
 import { FeatureFlags } from "../feature-flags.js";
-import { driverForProject, driverForProvision, driverForSandbox, driverForSwarmProvision } from "./sandbox-driver.js";
+import {
+  autoDrivers,
+  candidateDrivers,
+  driverForProject,
+  driverForProvision,
+  driverForSandbox,
+  driversForProject,
+  driversForProvision,
+  driversForSwarmProvision,
+} from "./sandbox-driver.js";
 
 /**
  * Registry resolution. Constructors do not open a socket: DockerDriver
@@ -113,6 +122,106 @@ test("migration 0044 adds a nullable project sandbox provider", () => {
   assert.match(journal, /"tag": "0044_project_sandbox_provider"/);
 });
 
+test("auto is the sprite with Modal behind it on a sprite deployment, and the configured driver elsewhere", async () => {
+  const ctxFor = (drivers: ReturnType<typeof driversFor>) =>
+    ({ drivers, env: { BENTO_MODE: "local" } }) as AppContext;
+  const auto = { sandboxProvider: "auto", ownerId: "owner" };
+
+  // The hosted shape: the default is the sprite, Modal is built too.
+  const hosted = driversFor({
+    BENTO_SANDBOX_DRIVER: "sprite",
+    SPRITES_TOKEN: "test-token",
+    MODAL_TOKEN_ID: "id",
+    MODAL_TOKEN_SECRET: "secret",
+  });
+  assert.deepEqual(autoDrivers(hosted).map((d) => d.provider), ["sprite", "modal"]);
+  const onHosted = await driversForProject(ctxFor(hosted), auto, null);
+  assert.equal(onHosted.driver, hosted.default);
+  assert.equal(onHosted.driver.provider, "sprite");
+  assert.deepEqual(onHosted.fallbacks, [hosted.get("modal")]);
+  assert.equal(onHosted.selection, "auto");
+  assert.equal(await driverForProject(ctxFor(hosted), auto, null), hosted.default);
+
+  // A sprite deployment with no Modal credentials: the sprite, with
+  // nothing behind it.
+  const spriteOnly = driversFor({ BENTO_SANDBOX_DRIVER: "sprite", SPRITES_TOKEN: "test-token" });
+  const onSpriteOnly = await driversForProject(ctxFor(spriteOnly), auto, null);
+  assert.equal(onSpriteOnly.driver, spriteOnly.default);
+  assert.deepEqual(onSpriteOnly.fallbacks, []);
+  assert.equal(onSpriteOnly.selection, "auto");
+
+  // A docker or local-process deployment keeps its configured driver
+  // even when it holds the tokens: auto never moves a new project
+  // onto a paid machine the operator did not pick.
+  for (const defaultDriver of ["docker", "local-process"] as const) {
+    const local = driversFor({
+      BENTO_SANDBOX_DRIVER: defaultDriver,
+      SPRITES_TOKEN: "test-token",
+      MODAL_TOKEN_ID: "id",
+      MODAL_TOKEN_SECRET: "secret",
+    });
+    assert.deepEqual(autoDrivers(local).map((d) => d.provider), ["sprite", "modal"]);
+    const onLocal = await driversForProject(ctxFor(local), auto, null);
+    assert.equal(onLocal.driver, local.default);
+    assert.equal(onLocal.driver.provider, defaultDriver);
+    assert.deepEqual(onLocal.fallbacks, []);
+    assert.equal(onLocal.selection, "default");
+  }
+  const neither = driversFor({ BENTO_SANDBOX_DRIVER: "docker" });
+  assert.deepEqual(autoDrivers(neither), []);
+  assert.equal((await driversForProject(ctxFor(neither), auto, null)).selection, "default");
+
+  // A named provider and the default carry no fallback.
+  const named = await driversForProject(ctxFor(hosted), { sandboxProvider: "modal", ownerId: "owner" }, null);
+  assert.equal(named.driver, hosted.get("modal"));
+  assert.deepEqual(named.fallbacks, []);
+  assert.equal(named.selection, "project");
+  const unset = await driversForProject(ctxFor(hosted), { sandboxProvider: null, ownerId: "owner" }, null);
+  assert.equal(unset.driver, hosted.default);
+  assert.deepEqual(unset.fallbacks, []);
+  assert.equal(unset.selection, "default");
+});
+
+test("candidateDrivers is the one reading of a stored setting, shared by the routes", () => {
+  const hosted = driversFor({
+    BENTO_SANDBOX_DRIVER: "sprite",
+    SPRITES_TOKEN: "test-token",
+    MODAL_TOKEN_ID: "id",
+    MODAL_TOKEN_SECRET: "secret",
+  });
+  const sprite = hosted.get("sprite")!;
+  const modal = hosted.get("modal")!;
+  assert.deepEqual(candidateDrivers(hosted, null), { driver: sprite, fallbacks: [], selection: "default" });
+  assert.deepEqual(candidateDrivers(hosted, "sprite"), { driver: sprite, fallbacks: [], selection: "project" });
+  assert.deepEqual(candidateDrivers(hosted, "modal"), { driver: modal, fallbacks: [], selection: "project" });
+  assert.deepEqual(candidateDrivers(hosted, "auto"), { driver: sprite, fallbacks: [modal], selection: "auto" });
+  // A name this server did not build is the default, not a failed card.
+  assert.deepEqual(candidateDrivers(hosted, "docker"), { driver: sprite, fallbacks: [], selection: "default" });
+
+  const local = driversFor({ BENTO_SANDBOX_DRIVER: "docker", MODAL_TOKEN_ID: "id", MODAL_TOKEN_SECRET: "secret" });
+  assert.deepEqual(candidateDrivers(local, "auto"), { driver: local.default, fallbacks: [], selection: "default" });
+  assert.deepEqual(candidateDrivers(local, "modal"), { driver: local.get("modal"), fallbacks: [], selection: "project" });
+  assert.deepEqual(candidateDrivers(local, "docker"), { driver: local.default, fallbacks: [], selection: "project" });
+});
+
+test("migration 0045 lets a project hold auto and starts new rows there", () => {
+  const sql = readFileSync(new URL("../../../../packages/db/migrations/0045_project_sandbox_provider_auto.sql", import.meta.url), "utf8");
+  assert.match(sql, /DROP CONSTRAINT projects_sandbox_provider_check/);
+  assert.match(sql, /CHECK \(sandbox_provider IN \('auto', 'sprite', 'modal', 'docker'\)\)/);
+  assert.match(sql, /ALTER COLUMN sandbox_provider SET DEFAULT 'auto'/);
+  assert.doesNotMatch(sql, /NOT NULL/);
+  const journal = readFileSync(new URL("../../../../packages/db/migrations/meta/_journal.json", import.meta.url), "utf8");
+  assert.match(journal, /"tag": "0045_project_sandbox_provider_auto"/);
+});
+
+test("migration 0046 moves every project to auto and keeps the column", () => {
+  const sql = readFileSync(new URL("../../../../packages/db/migrations/0046_project_sandbox_provider_always_auto.sql", import.meta.url), "utf8");
+  assert.match(sql, /UPDATE projects SET sandbox_provider = 'auto'/);
+  assert.doesNotMatch(sql, /DROP COLUMN/);
+  const journal = readFileSync(new URL("../../../../packages/db/migrations/meta/_journal.json", import.meta.url), "utf8");
+  assert.match(journal, /"tag": "0046_project_sandbox_provider_always_auto"/);
+});
+
 test("driverForProject returns the default even when sprite is also registered", async () => {
   const drivers = driversFor({ BENTO_SANDBOX_DRIVER: "docker", SPRITES_TOKEN: "test-token" });
   assert.equal(await projectDriver(drivers), drivers.default);
@@ -165,7 +274,7 @@ test("a hosted sprite config reports driver sprite from health", async () => {
   }
 });
 
-test("driverForProject ignores a stored modal when beta is off, and a hibernated modal row still resolves to Modal", async () => {
+test("a pinned provider is honored for everyone, and a hibernated modal row still resolves to Modal", async () => {
   const baseUrl = process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5439/app";
   const testDbName = "sandbox_driver_provider_test";
   const testUrl = baseUrl.replace(/\/[^/]+$/, `/${testDbName}`);
@@ -193,12 +302,27 @@ test("driverForProject ignores a stored modal when beta is off, and a hibernated
     } as AppContext;
 
     const featureId = randomUUID();
+    // A row an operator pinned by hand is honored whether or not the
+    // run is on the beta flag: this context has it off.
     const [project] = await db
       .insert(projects)
-      .values({ ownerId, name: "Modal when beta is off", sandboxProvider: "modal" })
+      .values({ ownerId, name: "Pinned to Modal", sandboxProvider: "modal" })
       .returning();
-    assert.equal(await driverForProject(ctx, project!, null), drivers.default);
-    assert.equal((await driverForProject(ctx, project!, ownerId)).provider, "docker");
+    assert.equal(await driverForProject(ctx, project!, null), drivers.get("modal"));
+    assert.equal((await driverForProject(ctx, project!, ownerId)).provider, "modal");
+    const pinned = await driversForProject(ctx, project!, null);
+    assert.equal(pinned.selection, "project");
+    assert.deepEqual(pinned.fallbacks, []);
+
+    // A project inserted without a provider starts on auto. On this
+    // docker deployment that is docker, whatever tokens are set, and
+    // the flag is never asked.
+    const [fresh] = await db.insert(projects).values({ ownerId, name: "Fresh project" }).returning();
+    assert.equal(fresh?.sandboxProvider, "auto");
+    const onAuto = await driversForProject(ctx, fresh!, null);
+    assert.equal(onAuto.driver, drivers.default);
+    assert.equal(onAuto.selection, "default");
+    assert.deepEqual(onAuto.fallbacks, []);
 
     const [pipeline] = await db
       .insert(pipelines)
@@ -210,7 +334,7 @@ test("driverForProject ignores a stored modal when beta is off, and a hibernated
       pipelineId: pipeline!.id,
       title: "Hibernated",
     });
-    assert.equal((await driverForProvision(db, ctx, featureId, null)).provider, "docker");
+    assert.equal((await driverForProvision(db, ctx, featureId, null)).provider, "modal");
 
     await db.insert(sandboxes).values({
       projectId: project!.id,
@@ -223,6 +347,10 @@ test("driverForProject ignores a stored modal when beta is off, and a hibernated
     const resolved = await driverForProvision(db, ctx, featureId, null);
     assert.equal(resolved, drivers.get("modal"));
     assert.equal(resolved.provider, "modal");
+    // An existing machine is kept as is, with nothing to fall back to.
+    const existing = await driversForProvision(db, ctx, featureId, null);
+    assert.equal(existing.selection, "existing");
+    assert.deepEqual(existing.fallbacks, []);
   } finally {
     await pool.end();
   }
@@ -272,14 +400,15 @@ test("a swarm on a modal project uses Modal, and a live Sprite swarm stays on Sp
       })
       .returning();
 
-    const fresh = await driverForSwarmProvision(db, betaOn, swarm!, null, ownerId);
+    const fresh = (await driversForSwarmProvision(db, betaOn, swarm!, null, ownerId)).driver;
     assert.equal(fresh, drivers.get("modal"));
     assert.notEqual(fresh, drivers.default);
     assert.equal(fresh.provider, "modal");
 
-    const ignored = await driverForSwarmProvision(db, betaOff, swarm!, null, ownerId);
-    assert.equal(ignored, drivers.default);
-    assert.equal(ignored.provider, "docker");
+    // The pin is not a beta feature: a context with the flag off reads it the same way.
+    const alsoModal = (await driversForSwarmProvision(db, betaOff, swarm!, null, ownerId)).driver;
+    assert.equal(alsoModal, drivers.get("modal"));
+    assert.equal(alsoModal.provider, "modal");
 
     const [spriteSwarm] = await db
       .insert(swarms)
@@ -302,13 +431,16 @@ test("a swarm on a modal project uses Modal, and a live Sprite swarm stays on Sp
         workdir: "/workspace",
       })
       .returning();
-    const kept = await driverForSwarmProvision(
+    const keptChoice = await driversForSwarmProvision(
       db,
       betaOn,
       { ...spriteSwarm!, sandboxId: spriteRow!.id },
       null,
       ownerId,
     );
+    const kept = keptChoice.driver;
+    assert.equal(keptChoice.selection, "existing");
+    assert.deepEqual(keptChoice.fallbacks, []);
     assert.equal(kept, drivers.get("sprite"));
     assert.equal(kept.provider, "sprite");
     assert.notEqual(kept, drivers.default);
