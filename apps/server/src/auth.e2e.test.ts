@@ -3066,7 +3066,7 @@ test("network lockdown is refused when a live sandbox would use a driver that ca
       body: JSON.stringify({ restrictNetwork: true }),
     });
     assert.equal(projectRefused.status, 409);
-    assert.match(((await projectRefused.json()) as { error: string }).error, /project set to a sandbox provider/);
+    assert.match(((await projectRefused.json()) as { error: string }).error, /project pinned to a sandbox provider/);
 
     await ctx.db.update(projects).set({ sandboxProvider: null }).where(eq(projects.id, project!.id));
     const cleared = (await (await app.request("/api/team/policy", { headers })).json()) as { supported: boolean };

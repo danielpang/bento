@@ -2,8 +2,8 @@ import { and, eq, isNull, sql } from "drizzle-orm";
 import { repositories, sandboxes } from "@bento/db";
 import {
   ModalProvisionLeak,
-  SpriteProvisionLeak,
   persistedSandboxProvider,
+  spriteName,
   type PreparedRepository,
   type SandboxDriver,
   type SandboxHandle,
@@ -320,7 +320,7 @@ export async function provisionWorkspace(
       provisioned = { handle: await provisionWith(candidate), driver: candidate };
       break;
     } catch (err) {
-      await cleanupFailedAttempt(ctx, candidate, err, input.owner, next !== undefined);
+      await cleanupFailedAttempt(ctx, candidate, err, input.owner, workspaceKey, next !== undefined);
       if (!next) throw err;
       fellBackFrom ??= candidate.provider;
       const reason = provisionFailureCause(err);
@@ -429,8 +429,7 @@ export async function provisionWorkspace(
  * reason, not the wrapper.
  */
 export function provisionFailureCause(err: unknown): unknown {
-  if (err instanceof ModalProvisionLeak || err instanceof SpriteProvisionLeak) return err.cause ?? err;
-  return err;
+  return err instanceof ModalProvisionLeak ? (err.cause ?? err) : err;
 }
 
 /** The error a transcript line can carry: its sentence, on one line. */
@@ -448,29 +447,32 @@ function reasonSentence(err: unknown): string {
  * nobody looking. A hibernated row for this owner would also hide it
  * from the sweep, so that row stops counting as live.
  *
- * A sprite it created and then failed to prepare comes back as
- * SpriteProvisionLeak. When this was the last driver, the sprite is
- * kept: it is named after the workspace, so the next run of this card
- * finds it by name and reuses it, which is what every retry did before
- * there was a fallback. When the loop is moving on to another driver,
- * no later run will come looking for it (the row will say the other
- * provider), so it is destroyed now rather than left running with
- * nothing that can find it.
+ * A sprite is named after its workspace, so the driver does not have
+ * to say whether it made one: whatever the failure (a create that
+ * errored after the machine came up, an install or a clone that died
+ * on a machine that was already there), a sprite by this name may be
+ * running. When the sprite was the last driver it is left alone: the
+ * next run of this card finds it by name and reuses it, which is what
+ * every retry did before there was a fallback. When the loop is
+ * moving on to another driver, no later run will come looking for it
+ * (the row will say the other provider), so it is destroyed by name
+ * now rather than left running and billing with nothing that can
+ * find it. A name that is not there is not an error.
  */
 async function cleanupFailedAttempt(
   ctx: AppContext,
   driver: SandboxDriver,
   err: unknown,
   owner: { featureId: string } | { swarmId: string; swarmTaskId?: string | null },
+  workspaceKey: string,
   movingOn: boolean,
 ): Promise<void> {
-  if (err instanceof SpriteProvisionLeak) {
+  if (driver.provider === "sprite") {
     if (!movingOn) return;
-    await driver
-      .destroy({ externalId: err.externalId, provider: "sprite", workdir: "/workspace" })
-      .catch((destroyErr) => {
-        console.warn(`could not destroy sprite ${err.externalId} after a failed provision:`, destroyErr);
-      });
+    const name = spriteName(workspaceKey);
+    await driver.destroy({ externalId: name, provider: "sprite", workdir: "/workspace" }).catch((destroyErr) => {
+      console.warn(`could not destroy sprite ${name} after a failed provision:`, destroyErr);
+    });
     return;
   }
   if (!(err instanceof ModalProvisionLeak)) return;

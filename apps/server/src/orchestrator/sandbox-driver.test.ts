@@ -274,7 +274,7 @@ test("a hosted sprite config reports driver sprite from health", async () => {
   }
 });
 
-test("driverForProject ignores a stored modal when beta is off, and a hibernated modal row still resolves to Modal", async () => {
+test("a pinned provider is honored for everyone, and a hibernated modal row still resolves to Modal", async () => {
   const baseUrl = process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5439/app";
   const testDbName = "sandbox_driver_provider_test";
   const testUrl = baseUrl.replace(/\/[^/]+$/, `/${testDbName}`);
@@ -302,12 +302,17 @@ test("driverForProject ignores a stored modal when beta is off, and a hibernated
     } as AppContext;
 
     const featureId = randomUUID();
+    // A row an operator pinned by hand is honored whether or not the
+    // run is on the beta flag: this context has it off.
     const [project] = await db
       .insert(projects)
-      .values({ ownerId, name: "Modal when beta is off", sandboxProvider: "modal" })
+      .values({ ownerId, name: "Pinned to Modal", sandboxProvider: "modal" })
       .returning();
-    assert.equal(await driverForProject(ctx, project!, null), drivers.default);
-    assert.equal((await driverForProject(ctx, project!, ownerId)).provider, "docker");
+    assert.equal(await driverForProject(ctx, project!, null), drivers.get("modal"));
+    assert.equal((await driverForProject(ctx, project!, ownerId)).provider, "modal");
+    const pinned = await driversForProject(ctx, project!, null);
+    assert.equal(pinned.selection, "project");
+    assert.deepEqual(pinned.fallbacks, []);
 
     // A project inserted without a provider starts on auto. On this
     // docker deployment that is docker, whatever tokens are set, and
@@ -329,7 +334,7 @@ test("driverForProject ignores a stored modal when beta is off, and a hibernated
       pipelineId: pipeline!.id,
       title: "Hibernated",
     });
-    assert.equal((await driverForProvision(db, ctx, featureId, null)).provider, "docker");
+    assert.equal((await driverForProvision(db, ctx, featureId, null)).provider, "modal");
 
     await db.insert(sandboxes).values({
       projectId: project!.id,
@@ -400,9 +405,10 @@ test("a swarm on a modal project uses Modal, and a live Sprite swarm stays on Sp
     assert.notEqual(fresh, drivers.default);
     assert.equal(fresh.provider, "modal");
 
-    const ignored = (await driversForSwarmProvision(db, betaOff, swarm!, null, ownerId)).driver;
-    assert.equal(ignored, drivers.default);
-    assert.equal(ignored.provider, "docker");
+    // The pin is not a beta feature: a context with the flag off reads it the same way.
+    const alsoModal = (await driversForSwarmProvision(db, betaOff, swarm!, null, ownerId)).driver;
+    assert.equal(alsoModal, drivers.get("modal"));
+    assert.equal(alsoModal.provider, "modal");
 
     const [spriteSwarm] = await db
       .insert(swarms)

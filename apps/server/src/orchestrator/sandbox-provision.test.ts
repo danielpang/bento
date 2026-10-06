@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { eq } from "drizzle-orm";
 import { createDb, createPool, features, pipelines, projects, runMigrations, sandboxes } from "@bento/db";
-import { SpriteProvisionLeak, WorktreeManager, type ProvisionSpec, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
+import { WorktreeManager, spriteName, type ProvisionSpec, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
 import pg from "pg";
 import { ensureLocalUser, type AppContext } from "../context.js";
 import { loadEnv } from "../env.js";
@@ -275,37 +275,56 @@ test("a locked network with no driver that honors it refuses before asking any",
   assert.deepEqual(asked, []);
 });
 
-test("a sprite created and then failed is destroyed when the loop moves on to Modal", async () => {
-  const featureId = await seedFeature("Leaked sprite, Modal next");
+test("a sprite that failed is destroyed by name when the loop moves on to Modal, whatever the failure", async () => {
+  // A plain error, not a leak report: the driver cannot always know
+  // whether a create that errored made the machine, so the sprite is
+  // destroyed by its workspace name on any failure that moves on.
+  const featureId = await seedFeature("Sprite failed, Modal next");
   const asked: string[] = [];
   const said: string[] = [];
   const destroyed: string[] = [];
-  const leak = new SpriteProvisionLeak("tool install failed", `bento-${featureId}`, new Error("tool install failed"));
-  const sprite = stubDriver("sprite", asked, { fail: leak, destroyed });
+  const sprite = stubDriver("sprite", asked, { fail: new Error("tool install failed"), destroyed });
   const modal = stubDriver("modal", asked, { restricted: true });
 
   const result = await provisionOn(featureId, sprite, [modal], said);
 
   assert.equal(result.driver, modal);
   assert.deepEqual(asked, ["sprite", "modal"]);
-  assert.deepEqual(destroyed, [`bento-${featureId}`]);
-  // The transcript and the metric carry the failure, not the wrapper.
+  assert.deepEqual(destroyed, [spriteName(featureId)]);
+  assert.equal(destroyed[0], `bento-${featureId}`);
   assert.deepEqual(said, ["Fly Sprites could not provide a sandbox (tool install failed). Trying Modal."]);
   const [row] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.featureId, featureId));
   assert.equal(row?.provider, "modal");
 });
 
-test("a sprite created and then failed is kept when it was the last driver, for the retry to reuse", async () => {
-  const featureId = await seedFeature("Leaked sprite, nothing next");
+test("a sprite that failed is kept when it was the last driver, for the retry to reuse by name", async () => {
+  const featureId = await seedFeature("Sprite failed, nothing next");
   const asked: string[] = [];
   const said: string[] = [];
   const destroyed: string[] = [];
-  const leak = new SpriteProvisionLeak("clone failed", `bento-${featureId}`, new Error("clone failed"));
-  const sprite = stubDriver("sprite", asked, { fail: leak, destroyed });
+  const failure = new Error("clone failed");
+  const sprite = stubDriver("sprite", asked, { fail: failure, destroyed });
 
-  await assert.rejects(provisionOn(featureId, sprite, [], said), (err: unknown) => err === leak);
+  await assert.rejects(provisionOn(featureId, sprite, [], said), (err: unknown) => err === failure);
   assert.deepEqual(asked, ["sprite"]);
   assert.deepEqual(destroyed, []);
+});
+
+test("a destroy that fails does not stop the fallback", async () => {
+  const featureId = await seedFeature("Sprite failed, destroy failed");
+  const asked: string[] = [];
+  const said: string[] = [];
+  const sprite = {
+    ...stubDriver("sprite", asked, { fail: new Error("sprite failed") }),
+    async destroy() {
+      throw new Error("control plane is down");
+    },
+  } as SandboxDriver;
+  const modal = stubDriver("modal", asked, { restricted: true });
+
+  const result = await provisionOn(featureId, sprite, [modal], said);
+  assert.equal(result.driver, modal);
+  assert.deepEqual(asked, ["sprite", "modal"]);
 });
 
 test("a transcript that cannot be written does not stop the fallback", async () => {

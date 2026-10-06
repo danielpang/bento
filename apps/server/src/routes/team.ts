@@ -212,7 +212,7 @@ const DEPLOYMENT_LOCK_ERROR =
 const SANDBOX_LOCK_ERROR =
   "This team has a sandbox this deployment cannot lock down, so the lock cannot be turned on.";
 const PROJECT_LOCK_ERROR =
-  "This team has a project set to a sandbox provider that cannot lock its network, so the lock cannot be turned on.";
+  "This team has a project pinned to a sandbox provider that cannot lock its network, so the lock cannot be turned on. Ask your Bento operator to put the project back on automatic provider selection.";
 
 /**
  * Why this organization cannot turn a restricted network on, or null

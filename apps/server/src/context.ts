@@ -203,9 +203,11 @@ export function reportSpriteLookupRetry(analytics: Analytics | null | undefined,
  *
  * `default` is today's switch on BENTO_SANDBOX_DRIVER. `get` returns a
  * driver only when this server actually built one. `selectable` is the
- * remote providers a project could choose: sprite when that driver was
- * built, modal when both Modal token vars are set. Docker and
- * local-process are how a process runs, not choices.
+ * remote providers this server runs beside the default: sprite when
+ * that driver was built, modal when both Modal token vars are set.
+ * Reported on /api/health for an operator reading a deployment;
+ * nothing in the product offers them as a choice. Docker and
+ * local-process are how a process runs, not providers.
  */
 export interface SandboxDrivers {
   readonly default: SandboxDriver;

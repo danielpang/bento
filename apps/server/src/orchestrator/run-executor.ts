@@ -159,9 +159,9 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   emitBoard("starting");
 
   // A live sandbox keeps the driver that created it. A card or swarm
-  // with none follows the project's provider: "auto" for a new
-  // project, which is a sprite with Modal behind it, a provider a
-  // beta tester named, or the deployment default.
+  // with none follows the project's provider: "auto" on every project,
+  // which on a hosted deployment is a sprite with Modal behind it,
+  // unless an operator pinned the row by hand.
   let driver: SandboxDriver;
   let chosenDrivers: ProvisionDrivers;
   try {

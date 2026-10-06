@@ -149,10 +149,15 @@ all read it, so do not re-derive it.
 one that made the machine, and the executor uses that driver from then
 on. An existing sandbox row keeps its driver with no fallback, so a
 hibernated Modal machine resumes on Modal and a swarm never splits
-across providers. A driver that created a machine and then failed to
-prepare it says so (`SpriteProvisionLeak`, `ModalProvisionLeak`), and
-the loop destroys a machine it is walking away from, because the row
-will name the other provider and nothing would ever find it.
+across providers. A pinned row is honored for every organization,
+beta or not: a pin ignored for some of them would be no use in the
+emergency it exists for. When the loop walks away from a driver that
+failed, it destroys what that driver may have left running, because
+the row will name the other provider and nothing would ever find it:
+a sprite by its workspace name (`spriteName`), whatever the failure,
+and a Modal machine the driver reports through `ModalProvisionLeak`.
+A sprite that was the last driver tried is kept for the next run to
+reuse by name.
 
 Every provision emits `sandbox provisioned` to PostHog with the
 `provider` that answered, the `selection` that chose it, and

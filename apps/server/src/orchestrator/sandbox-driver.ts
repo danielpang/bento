@@ -2,7 +2,6 @@ import { and, desc, eq, isNull, ne } from "drizzle-orm";
 import { features, projects, sandboxes, swarms, type Db } from "@bento/db";
 import type { SandboxDriver } from "@bento/sandbox";
 import type { AppContext, SandboxDrivers } from "../context.js";
-import { isBetaRun } from "../feature-flags.js";
 import type { SandboxSelection } from "./sandbox-metrics.js";
 
 /**
@@ -90,11 +89,9 @@ export function autoDrivers(drivers: SandboxDrivers): SandboxDriver[] {
  * by surprise. Any other name is that driver when it was built, else
  * the default, rather than a failed card.
  *
- * Pure, and the one place this is decided: the run executor, the
- * project route that validates a change, and the Team route that asks
- * whether a network lock can be honored all read the same answer. The
- * beta gate on a named provider is driversForProject's, which asks
- * this after it.
+ * Pure, and the one place this is decided: the run executor, project
+ * creation, and the Team route that asks whether a network lock can
+ * be honored all read the same answer.
  */
 export function candidateDrivers(drivers: SandboxDrivers, setting: string | null): ProvisionDrivers {
   const byDefault: ProvisionDrivers = { driver: drivers.default, fallbacks: [], selection: "default" };
@@ -118,25 +115,21 @@ export function allCandidates(choice: ProvisionDrivers): SandboxDriver[] {
 /**
  * The drivers a new sandbox on a project would use.
  *
- * candidateDrivers decides what the setting means. "auto" is not
- * behind the beta flag: it is what every new project starts on, and a
- * default cannot be a feature some people lack. A named choice is
- * ignored unless this run is on the beta testers flag: the console
- * that sets the column is behind the same flag, and a run started for
- * someone who is not must not leave it. An existing sandbox row does
- * not come through here.
+ * candidateDrivers decides what the setting means, for every run. The
+ * column is not a product setting and nothing behind the beta flag
+ * writes it, so a row an operator pinned by hand is honored for every
+ * organization, beta or not: a pin ignored for some of them would be
+ * no use in the emergency it exists for. An existing sandbox row does
+ * not come through here. The acting user is kept in the signature
+ * for the callers that have one, so a future per-person decision has
+ * somewhere to go.
  */
 export async function driversForProject(
   ctx: AppContext,
   project: { sandboxProvider: string | null; ownerId: string },
-  actingUserId: string | null,
+  _actingUserId: string | null,
 ): Promise<ProvisionDrivers> {
-  const wanted = project.sandboxProvider;
-  if (wanted && wanted !== "auto" && wanted !== ctx.drivers.default.provider) {
-    const beta = await isBetaRun(ctx, { actingUserId, projectOwnerId: project.ownerId });
-    if (!beta) return candidateDrivers(ctx.drivers, null);
-  }
-  return candidateDrivers(ctx.drivers, wanted);
+  return candidateDrivers(ctx.drivers, project.sandboxProvider);
 }
 
 /** The first driver a new sandbox on a project would use. */
