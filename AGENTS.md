@@ -152,16 +152,24 @@ hibernated Modal machine resumes on Modal and a swarm never splits
 across providers. A team with the network lock on is a Modal team: a
 sprite cannot restrict egress, so `provisionWorkspace` never asks it
 for a locked run and goes straight to Modal, and the Team route
-offers the lock whenever Modal is there to take those runs. A team
-without the lock keeps the ordinary auto order. A pinned row is honored for every organization,
+offers the lock whenever Modal is there to take those runs. The lock
+applies to new cards: a card that already has a machine keeps it,
+and a machine that cannot lock keeps the network it was made with,
+which the card's transcript says. A team without the lock keeps the
+ordinary auto order. A pinned row is honored for every organization,
 beta or not: a pin ignored for some of them would be no use in the
 emergency it exists for. When the loop walks away from a driver that
 failed, it destroys what that driver may have left running, because
 the row will name the other provider and nothing would ever find it:
-a sprite by its workspace name (`spriteName`), whatever the failure,
-and a Modal machine the driver reports through `ModalProvisionLeak`.
-A sprite that was the last driver tried is kept for the next run to
-reuse by name.
+a sprite by its workspace name (`spriteName`), whatever the failure
+and without waiting for the destroy, and a Modal machine the driver
+reports through `ModalProvisionLeak`. A sprite that was the last
+driver tried is kept for the next run to reuse by name. The
+transcript never names a provider: a fallback reads "The sandbox
+failed to create. Retrying." and the provider goes to the log and to
+error tracking. Every swarm run that has a task, the final check's
+judge included, gets a machine of its own, so two runs never
+provision one sprite at once.
 
 Every provision emits `sandbox provisioned` to PostHog with the
 `provider` that answered, the `selection` that chose it, and

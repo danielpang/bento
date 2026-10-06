@@ -3041,11 +3041,12 @@ test("network lockdown on a sprite deployment is offered when Modal can take the
 });
 
 /**
- * The default driver can lock its network, and so can a card with no
- * machine yet. A live sprite row is provisioned on sprite, which
- * cannot, so the lock must not say it can be honoured.
+ * The lock applies to new cards. A card that already has a sprite
+ * keeps it, and keeps the sprite's open network, so a live sprite row
+ * does not stand in the lock's way. A project pinned to the sprite
+ * does: every new card of it would need a machine that cannot lock.
  */
-test("network lockdown is refused when a live sandbox would use a driver that cannot lock the network", async () => {
+test("network lockdown applies to new cards, so a live sprite does not block it but a pinned project does", async () => {
   const signup = await jsonPost("/api/auth/sign-up/email", {
     email: "sprite-lock@bento.test",
     password: "correct-horse-battery",
@@ -3070,7 +3071,7 @@ test("network lockdown is refused when a live sandbox would use a driver that ca
   try {
     const headers = { authorization: `Bearer ${token}` };
     const open = (await (await app.request("/api/team/policy", { headers })).json()) as { supported: boolean };
-    assert.equal(open.supported, true, "the default driver can honour the lock when no live row needs another");
+    assert.equal(open.supported, true, "the default driver can honour the lock");
 
     const [owner] = await ctx.db.select({ id: user.id }).from(user).where(eq(user.email, "sprite-lock@bento.test"));
     const [project] = await ctx.db
@@ -3085,43 +3086,37 @@ test("network lockdown is refused when a live sandbox would use a driver that ca
       .insert(features)
       .values({ projectId: project!.id, pipelineId: pipeline!.id, title: "Sprite card", status: "active" })
       .returning();
-    const [sandbox] = await ctx.db
-      .insert(sandboxes)
-      .values({
-        projectId: project!.id,
-        featureId: feature!.id,
-        provider: "sprite",
-        externalId: `policy-sprite-${feature!.id}`,
-        status: "ready",
-        workdir: "/workspace",
-      })
-      .returning();
+    await ctx.db.insert(sandboxes).values({
+      projectId: project!.id,
+      featureId: feature!.id,
+      provider: "sprite",
+      externalId: `policy-sprite-${feature!.id}`,
+      status: "ready",
+      workdir: "/workspace",
+    });
 
-    const blocked = (await (await app.request("/api/team/policy", { headers })).json()) as { supported: boolean };
-    assert.equal(blocked.supported, false, "a live sprite row would provision a driver that cannot lock the network");
-
-    const refused = await app.request("/api/team/policy", {
+    const withLive = (await (await app.request("/api/team/policy", { headers })).json()) as { supported: boolean };
+    assert.equal(withLive.supported, true, "a card that already has a sprite keeps it; the lock is for new cards");
+    const locked = await app.request("/api/team/policy", {
       method: "PATCH",
       headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
       body: JSON.stringify({ restrictNetwork: true }),
     });
-    assert.equal(refused.status, 409);
-    const refusedBody = (await refused.json()) as { error: string };
-    assert.match(refusedBody.error, /cannot lock down/);
-    assert.doesNotMatch(refusedBody.error, /BENTO_SANDBOX_RESTRICTED_NETWORK/);
+    assert.equal(locked.status, 200);
     const [policy] = await ctx.db
       .select({ restrictNetwork: organizationPolicies.restrictNetwork })
       .from(organizationPolicies)
       .where(eq(organizationPolicies.organizationId, org.id));
-    assert.notEqual(policy?.restrictNetwork, true, "the lock was not stored");
-
-    await ctx.db.update(sandboxes).set({ status: "destroyed" }).where(eq(sandboxes.id, sandbox!.id));
-    const after = (await (await app.request("/api/team/policy", { headers })).json()) as { supported: boolean };
-    assert.equal(after.supported, true, "a destroyed row is not provisioned again");
+    assert.equal(policy?.restrictNetwork, true, "the lock was stored");
+    await app.request("/api/team/policy", {
+      method: "PATCH",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({ restrictNetwork: false }),
+    });
 
     await ctx.db.update(projects).set({ sandboxProvider: "sprite" }).where(eq(projects.id, project!.id));
     const projectBlocked = (await (await app.request("/api/team/policy", { headers })).json()) as { supported: boolean };
-    assert.equal(projectBlocked.supported, false, "a project set to sprite would provision a driver that cannot lock the network");
+    assert.equal(projectBlocked.supported, false, "a project pinned to sprite would provision a driver that cannot lock the network");
     const projectRefused = await app.request("/api/team/policy", {
       method: "PATCH",
       headers: { "content-type": "application/json", authorization: `Bearer ${token}` },

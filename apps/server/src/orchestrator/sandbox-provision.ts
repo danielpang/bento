@@ -151,11 +151,14 @@ export interface ProvisionedWorkspace {
   driver: SandboxDriver;
 }
 
-/** A provider's name as a transcript line says it. */
-function providerLabel(provider: string): string {
-  if (provider === "sprite") return "Fly Sprites";
-  if (provider === "modal") return "Modal";
-  return provider;
+/** The sandbox rows this workspace owns, whichever board it is on. */
+function ownerWhere(owner: { featureId: string } | { swarmId: string; swarmTaskId?: string | null }) {
+  return "featureId" in owner
+    ? eq(sandboxes.featureId, owner.featureId)
+    : and(
+        eq(sandboxes.swarmId, owner.swarmId),
+        owner.swarmTaskId ? eq(sandboxes.swarmTaskId, owner.swarmTaskId) : isNull(sandboxes.swarmTaskId),
+      );
 }
 
 export async function provisionWorkspace(
@@ -259,17 +262,31 @@ export async function provisionWorkspace(
 
   /**
    * An organization that locked its agents down gets a sandbox with no
-   * route out, or no sandbox at all. Falling back to open egress would
-   * turn a security setting into a decoration, so a driver that cannot
-   * honor it is not asked, and when none of them can this fails with
-   * the reason instead. On "auto" that is what puts a locked team's
-   * runs straight on Modal: a sprite has no restricted network.
+   * route out, or no sandbox at all: a driver that cannot honor the
+   * lock is not asked, and when none of them can this fails with the
+   * reason instead. On "auto" that is what puts a locked team's new
+   * cards straight on Modal: a sprite has no restricted network.
+   *
+   * The lock applies to new cards. A card that already has a machine
+   * keeps it, and when that machine cannot lock its network it keeps
+   * the network it was made with: the team turned the lock on after
+   * this card started, and the machine holds the card's work. The
+   * transcript says so, so nobody reads a locked team's old card as
+   * locked.
    */
-  const usable = input.restrictNetwork ? candidates.filter((d) => d.supportsRestrictedNetwork) : candidates;
+  const lockable = candidates.filter((d) => d.supportsRestrictedNetwork);
+  const keepsOpenNetwork = input.restrictNetwork && lockable.length === 0 && input.selection === "existing";
+  const restrictNetwork = input.restrictNetwork && !keepsOpenNetwork;
+  const usable = restrictNetwork ? lockable : candidates;
   if (usable.length === 0) {
     throw new Error(
       "This organization requires agents to run without network access, and this deployment has no restricted network configured. Set BENTO_SANDBOX_RESTRICTED_NETWORK, or turn the setting off under Team.",
     );
+  }
+  if (keepsOpenNetwork) {
+    await input.say(
+      "This card's sandbox was made before the team locked its network, so it keeps the network it started with. New cards run locked down.",
+    ).catch(() => {});
   }
 
   const provisionWith = async (candidate: SandboxDriver): Promise<SandboxHandle> => {
@@ -280,7 +297,7 @@ export async function provisionWorkspace(
       ...(input.organizationId ? { organizationId: input.organizationId } : {}),
       ...(restore?.imageRef ? { imageRef: restore.imageRef } : {}),
       ...(restore?.missingSnapshot ? { missingSnapshot: true } : {}),
-      ...(input.restrictNetwork ? { network: "restricted" as const } : {}),
+      ...(restrictNetwork ? { network: "restricted" as const } : {}),
       ...(input.allowedHosts ? { allowedHosts: input.allowedHosts } : {}),
       hostWorkspacePath: ctx.worktrees.workspacePath(workspaceKey),
       // Drivers with no host filesystem clone these instead of mounting.
@@ -304,15 +321,19 @@ export async function provisionWorkspace(
    * First driver that answers wins. A driver that throws is cleaned up
    * after (a machine it created and is now walking away from is
    * destroyed), and the next one is asked; the last one's error is
-   * the run's. The move is said in the transcript and counted in
-   * error tracking, because a sprite that keeps failing is something
-   * to look at even while every run still lands on Modal. The
-   * transcript line is best effort: a run that cannot write a message
-   * still gets its machine.
+   * the run's, with the earlier ones recorded on it. Every failure is
+   * logged and counted in error tracking with its provider, because
+   * a sprite that keeps failing is something to look at even while
+   * every run still lands on Modal. The transcript only says that the
+   * sandbox failed and is being retried: which provider is behind a
+   * card is Bento's business, not the card's. The transcript line is
+   * best effort: a run that cannot write a message still gets its
+   * machine.
    */
   let provisioned: { handle: SandboxHandle; driver: SandboxDriver } | undefined;
   let fellBackFrom: string | null = null;
   let attempts = 0;
+  const earlierFailures: { provider: string; reason: unknown }[] = [];
   for (const candidate of usable) {
     attempts += 1;
     const next = usable[attempts];
@@ -321,9 +342,10 @@ export async function provisionWorkspace(
       break;
     } catch (err) {
       await cleanupFailedAttempt(ctx, candidate, err, input.owner, workspaceKey, next !== undefined);
-      if (!next) throw err;
-      fellBackFrom ??= candidate.provider;
       const reason = provisionFailureCause(err);
+      if (!next) throw withEarlierFailures(err, earlierFailures);
+      fellBackFrom ??= candidate.provider;
+      earlierFailures.push({ provider: candidate.provider, reason });
       console.warn(
         `${candidate.provider} could not provision a sandbox for ${workspaceKey}; trying ${next.provider}:`,
         reason,
@@ -337,13 +359,9 @@ export async function provisionWorkspace(
           ? { feature_id: input.owner.featureId }
           : { swarm_id: input.owner.swarmId, swarm_task_id: input.owner.swarmTaskId ?? null }),
       });
-      try {
-        await input.say(
-          `${providerLabel(candidate.provider)} could not provide a sandbox (${reasonSentence(reason)}). Trying ${providerLabel(next.provider)}.`,
-        );
-      } catch (sayErr) {
-        console.warn(`could not note the sandbox fallback for ${workspaceKey} in the transcript:`, sayErr);
-      }
+      await input.say("The sandbox failed to create. Retrying.").catch((sayErr) => {
+        console.warn(`could not note the sandbox retry for ${workspaceKey} in the transcript:`, sayErr);
+      });
     }
   }
   if (!provisioned) throw new Error("no sandbox driver provisioned a machine");
@@ -432,11 +450,29 @@ export function provisionFailureCause(err: unknown): unknown {
   return err instanceof ModalProvisionLeak ? (err.cause ?? err) : err;
 }
 
-/** The error a transcript line can carry: its sentence, on one line. */
-function reasonSentence(err: unknown): string {
-  const text = err instanceof Error ? err.message : String(err);
-  const line = text.split("\n").find((l) => l.trim() !== "")?.trim() ?? "unknown error";
-  return line.length > 200 ? `${line.slice(0, 197)}...` : line;
+/**
+ * The last driver's error, carrying what the drivers before it said.
+ *
+ * The run record shows the error it is handed, and when every driver
+ * failed the last one's reason is rarely the whole story: the sprite
+ * failing on clone auth and Modal failing on quota are two different
+ * problems, and the person reading the card should see both. The
+ * earlier failures are appended to the message by provider, and kept
+ * on the error for anything that reads it as data.
+ */
+export function withEarlierFailures(
+  err: unknown,
+  earlier: { provider: string; reason: unknown }[],
+): unknown {
+  if (earlier.length === 0 || !(err instanceof Error)) return err;
+  const lines = earlier.map(({ provider, reason }) => {
+    const text = reason instanceof Error ? reason.message : String(reason);
+    return `Before that, ${provider} failed: ${text.split("\n")[0]?.trim() ?? "unknown error"}`;
+  });
+  const combined = new Error(`${err.message}\n${lines.join("\n")}`, { cause: err });
+  combined.name = err.name;
+  (combined as Error & { earlierFailures?: typeof earlier }).earlierFailures = earlier;
+  return combined;
 }
 
 /**
@@ -457,7 +493,9 @@ function reasonSentence(err: unknown): string {
  * moving on to another driver, no later run will come looking for it
  * (the row will say the other provider), so it is destroyed by name
  * now rather than left running and billing with nothing that can
- * find it. A name that is not there is not an error.
+ * find it. Not awaited: the destroy retries against a control plane
+ * that may be the very thing that is down, and the next driver should
+ * not wait on it. A name that is not there is not an error.
  */
 async function cleanupFailedAttempt(
   ctx: AppContext,
@@ -470,23 +508,16 @@ async function cleanupFailedAttempt(
   if (driver.provider === "sprite") {
     if (!movingOn) return;
     const name = spriteName(workspaceKey);
-    await driver.destroy({ externalId: name, provider: "sprite", workdir: "/workspace" }).catch((destroyErr) => {
+    void driver.destroy({ externalId: name, provider: "sprite", workdir: "/workspace" }).catch((destroyErr) => {
       console.warn(`could not destroy sprite ${name} after a failed provision:`, destroyErr);
     });
     return;
   }
   if (!(err instanceof ModalProvisionLeak)) return;
-  const ownerWhere =
-    "featureId" in owner
-      ? eq(sandboxes.featureId, owner.featureId)
-      : and(
-          eq(sandboxes.swarmId, owner.swarmId),
-          owner.swarmTaskId ? eq(sandboxes.swarmTaskId, owner.swarmTaskId) : isNull(sandboxes.swarmTaskId),
-        );
   await ctx.db
     .update(sandboxes)
     .set({ status: "destroyed" })
-    .where(and(ownerWhere, eq(sandboxes.status, "hibernated")))
+    .where(and(ownerWhere(owner), eq(sandboxes.status, "hibernated")))
     .catch(() => {});
   await driver
     .destroy({
@@ -547,14 +578,7 @@ async function hibernatedRestore(
   ctx: AppContext,
   owner: { featureId: string } | { swarmId: string; swarmTaskId?: string | null },
 ): Promise<{ imageRef?: string; missingSnapshot: boolean }> {
-  const where =
-    "featureId" in owner
-      ? and(eq(sandboxes.featureId, owner.featureId), eq(sandboxes.status, "hibernated"))
-      : and(
-          eq(sandboxes.swarmId, owner.swarmId),
-          owner.swarmTaskId ? eq(sandboxes.swarmTaskId, owner.swarmTaskId) : isNull(sandboxes.swarmTaskId),
-          eq(sandboxes.status, "hibernated"),
-        );
+  const where = and(ownerWhere(owner), eq(sandboxes.status, "hibernated"));
   const [row] = await ctx.db.select({ imageRef: sandboxes.imageRef }).from(sandboxes).where(where).limit(1);
   if (!row) return { missingSnapshot: false };
   if (row.imageRef) return { imageRef: row.imageRef, missingSnapshot: false };

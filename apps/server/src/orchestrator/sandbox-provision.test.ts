@@ -189,7 +189,8 @@ test("auto falls back to Modal when the sprite cannot be provisioned", async () 
   assert.equal(row?.provider, "modal");
   assert.equal(row?.size, "modal-small");
   assert.equal(row?.status, "busy");
-  assert.deepEqual(said, ["Fly Sprites could not provide a sandbox (sprites API returned 503). Trying Modal."]);
+  // The transcript never names a provider; the log and error tracking do.
+  assert.deepEqual(said, ["The sandbox failed to create. Retrying."]);
 
   const events = provisionEvents().slice(before);
   assert.equal(events.length, 1);
@@ -235,10 +236,17 @@ test("when every driver fails, the last error is the run's and the first is stil
   const before = provisionEvents().length;
   const exceptionsBefore = analytics.exceptions.length;
 
-  await assert.rejects(provisionOn(featureId, sprite, [modal], said), /modal failed/);
+  // The run's error is the last driver's, carrying the first's, so a
+  // card that failed twice for two reasons shows both.
+  await assert.rejects(provisionOn(featureId, sprite, [modal], said), (err: unknown) => {
+    assert.ok(err instanceof Error);
+    assert.match(err.message, /^modal failed\nBefore that, sprite failed: sprite failed$/);
+    assert.equal((err.cause as Error).message, "modal failed");
+    return true;
+  });
 
   assert.deepEqual(asked, ["sprite", "modal"]);
-  assert.deepEqual(said, ["Fly Sprites could not provide a sandbox (sprite failed). Trying Modal."]);
+  assert.deepEqual(said, ["The sandbox failed to create. Retrying."]);
   assert.equal(provisionEvents().length, before);
   const fallbackErrors = analytics.exceptions.slice(exceptionsBefore);
   assert.equal(fallbackErrors.length, 1);
@@ -262,6 +270,45 @@ test("a locked network never asks the sprite and goes straight to Modal", async 
   assert.equal(events[0]?.properties?.provider, "modal");
   assert.equal(events[0]?.properties?.fell_back_from, null);
   assert.equal(events[0]?.properties?.attempts, 1);
+});
+
+test("a card whose machine predates the lock keeps its open network, and says so", async () => {
+  const featureId = await seedFeature("Locked after the fact");
+  const asked: string[] = [];
+  const said: string[] = [];
+  const networks: (string | undefined)[] = [];
+  const sprite = {
+    ...stubDriver("sprite", asked),
+    async provision(spec: ProvisionSpec): Promise<SandboxHandle> {
+      asked.push("sprite");
+      networks.push(spec.network);
+      return { externalId: `sprite-${spec.workspaceKey}`, provider: "sprite", workdir: "/workspace" };
+    },
+  } as SandboxDriver;
+
+  const result = await provisionWorkspace(ctx, {
+    driver: sprite,
+    fallbackDrivers: [],
+    selection: "existing",
+    projectId,
+    organizationId: null,
+    workspaceKey: featureId,
+    branch: `bento/${featureId}`,
+    repoRows: [],
+    authMounts: [],
+    restrictNetwork: true,
+    owner: { featureId },
+    say: async (text) => {
+      said.push(text);
+    },
+  });
+
+  assert.equal(result.driver, sprite);
+  assert.deepEqual(asked, ["sprite"]);
+  assert.deepEqual(networks, [undefined]);
+  assert.deepEqual(said, [
+    "This card's sandbox was made before the team locked its network, so it keeps the network it started with. New cards run locked down.",
+  ]);
 });
 
 test("a locked network with no driver that honors it refuses before asking any", async () => {
@@ -292,7 +339,7 @@ test("a sprite that failed is destroyed by name when the loop moves on to Modal,
   assert.deepEqual(asked, ["sprite", "modal"]);
   assert.deepEqual(destroyed, [spriteName(featureId)]);
   assert.equal(destroyed[0], `bento-${featureId}`);
-  assert.deepEqual(said, ["Fly Sprites could not provide a sandbox (tool install failed). Trying Modal."]);
+  assert.deepEqual(said, ["The sandbox failed to create. Retrying."]);
   const [row] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.featureId, featureId));
   assert.equal(row?.provider, "modal");
 });

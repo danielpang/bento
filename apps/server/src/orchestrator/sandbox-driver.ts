@@ -93,8 +93,13 @@ export function autoDrivers(drivers: SandboxDrivers): SandboxDriver[] {
  * creation, and the Team route that asks whether a network lock can
  * be honored all read the same answer.
  */
+/** The deployment default, chosen by nothing in particular. */
+function defaultChoice(drivers: SandboxDrivers): ProvisionDrivers {
+  return { driver: drivers.default, fallbacks: [], selection: "default" };
+}
+
 export function candidateDrivers(drivers: SandboxDrivers, setting: string | null): ProvisionDrivers {
-  const byDefault: ProvisionDrivers = { driver: drivers.default, fallbacks: [], selection: "default" };
+  const byDefault = defaultChoice(drivers);
   if (!setting) return byDefault;
   if (setting === drivers.default.provider) return { ...byDefault, selection: "project" };
   if (setting === "auto") {
@@ -160,7 +165,7 @@ export async function driversForProvision(
   featureId: string,
   actingUserId: string | null,
 ): Promise<ProvisionDrivers> {
-  const byDefault: ProvisionDrivers = { driver: ctx.drivers.default, fallbacks: [], selection: "default" };
+  const byDefault = defaultChoice(ctx.drivers);
   const [row] = await db
     .select({ provider: sandboxes.provider })
     .from(sandboxes)
@@ -213,7 +218,7 @@ export async function driversForSwarmProvision(
   task: { id: string } | null,
   actingUserId: string | null,
 ): Promise<ProvisionDrivers> {
-  const byDefault: ProvisionDrivers = { driver: ctx.drivers.default, fallbacks: [], selection: "default" };
+  const byDefault = defaultChoice(ctx.drivers);
   if (task) {
     const [row] = await db
       .select({ provider: sandboxes.provider })
