@@ -189,8 +189,16 @@ Every provision emits `sandbox provisioned` to PostHog with the
 `fell_back_from` when Fly did not; a sprite failure that Modal covered
 also goes to error tracking as `sandbox_provision_fallback`. A new
 place that provisions must go through `provisionWorkspace` so it is
-counted. The whole path, from a run asking for a machine to an agent
-starting in one, is drawn in `docs/images/auto-sandbox-flow.png`.
+counted. The executor then emits `sandbox ready` once the agent is
+spawned in the machine: `duration_ms` runs from the card entering the
+stage (the run's `queued_at`) to that spawn, with `queue_wait_ms` and
+`provision_ms` as the slices the queue and the driver took, and
+`sandbox_origin` says whether the machine was made (`new`, a card's
+first stage) or reopened (`reused`, every stage after, which keeps the
+card's sandbox row). Report it from the spawn, not from the driver's
+answer, so the number is the wait a person saw. The whole path, from
+a run asking for a machine to an agent starting in one, is drawn in
+`docs/images/auto-sandbox-flow.png`.
 
 ## Starting a run goes through startRunIfIdle, never a bare insert
 
