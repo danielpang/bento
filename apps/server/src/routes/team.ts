@@ -208,7 +208,7 @@ export function teamRoutes(ctx: AppContext) {
 }
 
 const DEPLOYMENT_LOCK_ERROR =
-  "This deployment has no restricted network configured, so agents cannot be locked down yet. Set BENTO_SANDBOX_RESTRICTED_NETWORK on the server first.";
+  "This deployment has no sandbox that can be locked down, so agents cannot be locked down yet. Give the server Modal credentials, or set BENTO_SANDBOX_RESTRICTED_NETWORK for Docker, first.";
 const SANDBOX_LOCK_ERROR =
   "This team has a sandbox this deployment cannot lock down, so the lock cannot be turned on.";
 const PROJECT_LOCK_ERROR =
@@ -218,21 +218,24 @@ const PROJECT_LOCK_ERROR =
  * Why this organization cannot turn a restricted network on, or null
  * when every driver it would use can lock one.
  *
- * The deployment default, each live sandbox row, and each project's
- * stored provider. A null project setting means the default. A card
- * that already has a machine stays on that machine, so a lock the
- * default can honour does not hold when that machine's driver cannot.
- * An unconfigured sandbox provider cannot either. Destroyed rows are
- * not provisioned again, so they do not count. A project's setting
- * means what candidateDrivers says it means, the same answer the run
- * executor gets: "auto" is honored when one driver in its order can
- * lock the network, since the others are never asked, and a driver
- * that is not built here falls through to the default, which was
- * already checked. This does not open egress: a run whose driver
- * cannot lock the network still fails.
+ * What a new project would provision with, each live sandbox row, and
+ * each project's stored provider. A card that already has a machine
+ * stays on that machine, so a lock the deployment can honour does not
+ * hold when that machine's driver cannot. An unconfigured sandbox
+ * provider cannot either. Destroyed rows are not provisioned again,
+ * so they do not count. A project's setting means what
+ * candidateDrivers says it means, the same answer the run executor
+ * gets: "auto" is honored when one driver in its order can lock the
+ * network, since the others are never asked. That is what makes a
+ * locked team on a sprite deployment a Modal team: the sprite cannot
+ * lock, so every run of theirs goes straight to Modal, and the lock
+ * is offered as long as Modal is there to take them. A team with no
+ * lock keeps the ordinary auto order. This does not open egress: a
+ * run whose driver cannot lock the network still fails.
  */
 async function restrictedNetworkRefusal(ctx: AppContext, handle: Db, organizationId: string): Promise<string | null> {
-  if (ctx.drivers.default.supportsRestrictedNetwork !== true) return DEPLOYMENT_LOCK_ERROR;
+  const newProject = allCandidates(candidateDrivers(ctx.drivers, "auto"));
+  if (!newProject.some((driver) => driver.supportsRestrictedNetwork === true)) return DEPLOYMENT_LOCK_ERROR;
   const rows = await handle
     .select({ provider: sandboxes.provider })
     .from(sandboxes)

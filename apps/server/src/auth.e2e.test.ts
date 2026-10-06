@@ -2979,6 +2979,68 @@ test("network lockdown is refused when the deployment cannot honour it", async (
 });
 
 /**
+ * A sprite cannot lock its network, but a locked team on a sprite
+ * deployment never gets a sprite: auto skips it and goes to Modal. So
+ * the lock is offered whenever Modal is there to take those runs, and
+ * refused on a sprite deployment that has nothing else.
+ */
+test("network lockdown on a sprite deployment is offered when Modal can take the runs", async () => {
+  const signup = await jsonPost("/api/auth/sign-up/email", {
+    email: "sprite-modal-lock@bento.test",
+    password: "correct-horse-battery",
+    name: "Sprite Modal Lock",
+  });
+  const token = signup.headers.get("set-auth-token")!;
+  const org = (await (
+    await jsonPost("/api/auth/organization/create", { name: "Sprite Modal Lock Co", slug: "sprite-modal-lock-co" }, token)
+  ).json()) as { id: string };
+  await jsonPost("/api/auth/organization/set-active", { organizationId: org.id }, token);
+  const headers = { "content-type": "application/json", authorization: `Bearer ${token}` };
+
+  const previous = ctx.drivers;
+  try {
+    ctx.drivers = createDrivers(
+      loadEnv({ BENTO_MODE: "multi", DATABASE_URL: testUrl, BENTO_SANDBOX_DRIVER: "sprite", SPRITES_TOKEN: "test-token" } as NodeJS.ProcessEnv),
+    );
+    const spriteOnly = (await (await app.request("/api/team/policy", { headers })).json()) as { supported: boolean };
+    assert.equal(spriteOnly.supported, false, "a sprite deployment with nothing behind the sprite cannot lock");
+    const refused = await app.request("/api/team/policy", {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ restrictNetwork: true }),
+    });
+    assert.equal(refused.status, 409);
+    assert.match(((await refused.json()) as { error: string }).error, /Modal credentials/);
+
+    ctx.drivers = createDrivers(
+      loadEnv({
+        BENTO_MODE: "multi",
+        DATABASE_URL: testUrl,
+        BENTO_SANDBOX_DRIVER: "sprite",
+        SPRITES_TOKEN: "test-token",
+        MODAL_TOKEN_ID: "id",
+        MODAL_TOKEN_SECRET: "secret",
+      } as NodeJS.ProcessEnv),
+    );
+    const withModal = (await (await app.request("/api/team/policy", { headers })).json()) as { supported: boolean };
+    assert.equal(withModal.supported, true, "auto on this deployment can land on Modal, which locks");
+    const locked = await app.request("/api/team/policy", {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ restrictNetwork: true }),
+    });
+    assert.equal(locked.status, 200);
+    const [policy] = await ctx.db
+      .select({ restrictNetwork: organizationPolicies.restrictNetwork })
+      .from(organizationPolicies)
+      .where(eq(organizationPolicies.organizationId, org.id));
+    assert.equal(policy?.restrictNetwork, true, "the lock was stored");
+  } finally {
+    ctx.drivers = previous;
+  }
+});
+
+/**
  * The default driver can lock its network, and so can a card with no
  * machine yet. A live sprite row is provisioned on sprite, which
  * cannot, so the lock must not say it can be honoured.

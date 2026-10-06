@@ -149,7 +149,11 @@ all read it, so do not re-derive it.
 one that made the machine, and the executor uses that driver from then
 on. An existing sandbox row keeps its driver with no fallback, so a
 hibernated Modal machine resumes on Modal and a swarm never splits
-across providers. A pinned row is honored for every organization,
+across providers. A team with the network lock on is a Modal team: a
+sprite cannot restrict egress, so `provisionWorkspace` never asks it
+for a locked run and goes straight to Modal, and the Team route
+offers the lock whenever Modal is there to take those runs. A team
+without the lock keeps the ordinary auto order. A pinned row is honored for every organization,
 beta or not: a pin ignored for some of them would be no use in the
 emergency it exists for. When the loop walks away from a driver that
 failed, it destroys what that driver may have left running, because
