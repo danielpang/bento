@@ -5,8 +5,8 @@ import { mkdtemp, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { eq } from "drizzle-orm";
-import { createDb, createPool, features, pipelines, projects, runMigrations, sandboxes } from "@bento/db";
-import { WorktreeManager, spriteName, type ProvisionSpec, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
+import { createDb, createPool, features, pipelines, projects, repositories, runMigrations, sandboxes } from "@bento/db";
+import { ProvisionFailure, WorktreeManager, spriteName, type ProvisionSpec, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
 import pg from "pg";
 import { ensureLocalUser, type AppContext } from "../context.js";
 import { loadEnv } from "../env.js";
@@ -309,6 +309,110 @@ test("a card whose machine predates the lock keeps its open network, and says so
   assert.deepEqual(said, [
     "This card's sandbox was made before the team locked its network, so it keeps the network it started with. New cards run locked down.",
   ]);
+});
+
+test("a failure the driver blames on the project ends the run and keeps the sprite, instead of trying Modal", async () => {
+  const featureId = await seedFeature("Bad clone, project's fault");
+  const asked: string[] = [];
+  const said: string[] = [];
+  const destroyed: string[] = [];
+  const refused = new ProvisionFailure(
+    "sprite",
+    "checkout",
+    "project",
+    Object.assign(new Error("provisioning script failed with exit code 128"), { stderr: "fatal: repository not found" }),
+  );
+  const sprite = stubDriver("sprite", asked, { fail: refused, destroyed });
+  const modal = stubDriver("modal", asked, { restricted: true });
+
+  await assert.rejects(provisionOn(featureId, sprite, [modal], said), (err: unknown) => err === refused);
+  assert.deepEqual(asked, ["sprite"], "Modal would refuse the same clone, so it is not asked");
+  assert.deepEqual(destroyed, [], "the sprite stays for the retry to reuse by name");
+  assert.deepEqual(said, []);
+});
+
+test("a failure the driver blames on the provider moves on to Modal, with its phase recorded", async () => {
+  const featureId = await seedFeature("Control plane down, Fly's fault");
+  const asked: string[] = [];
+  const said: string[] = [];
+  const destroyed: string[] = [];
+  const exceptionsBefore = analytics.exceptions.length;
+  const down = new ProvisionFailure("sprite", "acquire", "provider", new Error("Network error: fetch failed"));
+  const sprite = stubDriver("sprite", asked, { fail: down, destroyed });
+  const modal = stubDriver("modal", asked, { restricted: true });
+
+  const result = await provisionOn(featureId, sprite, [modal], said);
+
+  assert.equal(result.driver, modal);
+  assert.deepEqual(asked, ["sprite", "modal"]);
+  assert.deepEqual(destroyed, [spriteName(featureId)]);
+  assert.deepEqual(said, ["The sandbox failed to create. Retrying."]);
+  const recorded = analytics.exceptions.slice(exceptionsBefore);
+  assert.equal(recorded.length, 1);
+  assert.equal(recorded[0]?.error.message, "Network error: fetch failed", "error tracking gets the cause, not the wrapper");
+  assert.equal(recorded[0]?.properties?.phase, "acquire");
+  assert.equal(recorded[0]?.properties?.blame, "provider");
+});
+
+test("a clone URL the server cannot reach fails the run before any provider is asked", async () => {
+  const featureId = await seedFeature("Unreachable remote");
+  const asked: string[] = [];
+  const said: string[] = [];
+  const [row] = await ctx.db
+    .insert(repositories)
+    .values({ projectId, name: "ghost", localPath: "/nowhere/ghost", repoUrl: "file:///nonexistent/ghost.git", defaultBranch: "main", position: 0 })
+    .returning();
+  const sprite = stubDriver("sprite", asked);
+  const modal = stubDriver("modal", asked, { restricted: true });
+
+  await assert.rejects(
+    provisionWorkspace(ctx, {
+      driver: sprite,
+      fallbackDrivers: [modal],
+      selection: "auto",
+      projectId,
+      organizationId: null,
+      workspaceKey: featureId,
+      branch: `bento/${featureId}`,
+      repoRows: [row!],
+      authMounts: [],
+      restrictNetwork: false,
+      owner: { featureId },
+      say: async (text) => {
+        said.push(text);
+      },
+    }),
+    /Repository ghost cannot be reached at file:\/\/\/nonexistent\/ghost\.git/,
+  );
+  assert.deepEqual(asked, [], "no machine is made for a repository nobody can reach");
+  assert.deepEqual(said, []);
+});
+
+test("a clone URL the server can reach passes the check and the drivers are asked", async () => {
+  const featureId = await seedFeature("Reachable remote");
+  const asked: string[] = [];
+  const [row] = await ctx.db
+    .insert(repositories)
+    .values({ projectId, name: "self", localPath: "/home/user/bento", repoUrl: `file://${process.cwd().replace(/\/apps\/server$/, "")}`, defaultBranch: "main", position: 1 })
+    .returning();
+  const sprite = stubDriver("sprite", asked);
+
+  const result = await provisionWorkspace(ctx, {
+    driver: sprite,
+    fallbackDrivers: [],
+    selection: "auto",
+    projectId,
+    organizationId: null,
+    workspaceKey: featureId,
+    branch: `bento/${featureId}`,
+    repoRows: [row!],
+    authMounts: [],
+    restrictNetwork: false,
+    owner: { featureId },
+    say: async () => {},
+  });
+  assert.equal(result.driver, sprite);
+  assert.deepEqual(asked, ["sprite"]);
 });
 
 test("a locked network with no driver that honors it refuses before asking any", async () => {

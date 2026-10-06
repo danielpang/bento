@@ -19,6 +19,9 @@ import {
   type RepositoryImportOutcome,
   type SandboxDriver,
   type SandboxHandle,
+  ProvisionFailure,
+  type ProvisionBlame,
+  type ProvisionPhase,
 } from "./driver.js";
 import { holdSpriteAwake } from "./keep-awake.js";
 
@@ -267,6 +270,39 @@ export interface SpriteDriverOptions {
 }
 
 /**
+ * Whose fault a sprite provision failure is, by the phase it died in.
+ *
+ * Getting the machine, installing the CLIs and sweeping old checkouts
+ * only talk to Fly and to installers, so a failure there is the
+ * provider's. A checkout is where the project's own facts enter (its
+ * clone URL, its branch, its access), so a checkout that git refused
+ * is the project's, which another provider would refuse the same way.
+ * A checkout that died because the sandbox stopped answering, or
+ * because the sandbox could not reach the remote at all, is still
+ * Fly's: the control plane, the exec socket and the machine's network
+ * are its, and git's "could not resolve host" says the machine, not
+ * the repository.
+ */
+export function spriteBlame(phase: ProvisionPhase, err: unknown): ProvisionBlame {
+  if (phase !== "checkout") return "provider";
+  if (err instanceof APIError || err instanceof FilesystemError) return "provider";
+  if (!(err instanceof Error)) return "project";
+  if (execHandshakeIsRetriable(err)) return "provider";
+  if (
+    /Network error|fetch failed|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up|aborted due to timeout|exec connection failed|did not finish within|temporarily unavailable/i.test(
+      err.message,
+    )
+  ) {
+    return "provider";
+  }
+  const stderr = (err as Error & { stderr?: unknown }).stderr;
+  if (typeof stderr === "string" && /Could not resolve host|Connection timed out|Failed to connect to|Network is unreachable/i.test(stderr)) {
+    return "provider";
+  }
+  return "project";
+}
+
+/**
  * Runs agents in Fly Sprites: persistent Linux machines that hibernate
  * when idle and wake on demand.
  *
@@ -315,7 +351,24 @@ export class SpriteDriver implements SandboxDriver {
       await spec.onProgress?.(message);
     };
 
-    const { sprite, created } = await this.acquireSprite(name, say);
+    /**
+     * Every failure out of here says which phase it died in and whose
+     * fault it was. Getting the machine, installing the CLIs and
+     * sweeping old checkouts are Fly's business; a checkout that git
+     * itself refused is the project's, unless the sandbox stopped
+     * answering in the middle of it. The caller asks another provider
+     * only for Fly's failures: the project's would fail there too.
+     */
+    const phase = async <T>(name: ProvisionPhase, work: () => Promise<T>): Promise<T> => {
+      try {
+        return await work();
+      } catch (err) {
+        if (err instanceof ProvisionFailure) throw err;
+        throw new ProvisionFailure("sprite", name, spriteBlame(name, err), err);
+      }
+    };
+
+    const { sprite, created } = await phase("acquire", () => this.acquireSprite(name, say));
     await say(created ? `Created cloud sandbox ${name}.` : `Reusing this card's cloud sandbox (${name}).`);
 
     /**
@@ -325,6 +378,7 @@ export class SpriteDriver implements SandboxDriver {
      */
     const binaries = spec.agentBinaries ?? AGENT_BINARIES;
 
+    await phase("install", async () => {
     // One round trip prepares the workspace and answers whether those
     // CLIs are already there, so the wait that follows can be named
     // before it happens rather than discovered after.
@@ -376,6 +430,7 @@ export class SpriteDriver implements SandboxDriver {
         `Could not install ${missing.join(", ")} in this sandbox. Cards that use those agents will fail to start until an install succeeds, which the next run tries again.`,
       );
     }
+    });
 
     // Repositories live inside the sprite, so clone what is missing and
     // fetch what is already there.
@@ -385,6 +440,7 @@ export class SpriteDriver implements SandboxDriver {
       mentionedFilesystemRetry = true;
       await say("The sandbox filesystem is temporarily unavailable. Retrying.");
     };
+    await phase("checkout", async () => {
     for (const repo of spec.repositories ?? []) {
       /*
        * A repository with neither a remote nor a seed has nothing to
@@ -504,7 +560,9 @@ export class SpriteDriver implements SandboxDriver {
       }
       await say(`Repository ${repo.name} is ready on branch ${branch}.`);
     }
+    });
 
+    await phase("cleanup", async () => {
     // A Sprite persists for the life of a feature. Removing a repository
     // from the project must remove its old checkout too, otherwise every
     // later agent can still read and modify it. The artifacts directory
@@ -570,6 +628,7 @@ export class SpriteDriver implements SandboxDriver {
         sayFilesystemRetry,
       );
     }
+    });
 
     return { externalId: name, provider: "sprite", workdir: this.workdir };
   }

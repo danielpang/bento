@@ -145,9 +145,16 @@ deploy. What a setting means lives in one place, `candidateDrivers` in
 `{ driver, fallbacks, selection }`; the executor, project creation,
 and the Team route that decides whether a network lock can be honored
 all read it, so do not re-derive it.
-`provisionWorkspace` asks the drivers in that order and returns the
-one that made the machine, and the executor uses that driver from then
-on. An existing sandbox row keeps its driver with no fallback, so a
+`provisionWorkspace` checks the project first (every clone URL
+without a seed bundle is asked for its HEAD from the server, so a
+URL that does not resolve fails the run before a machine is made),
+then asks the drivers in that order and returns the one that made
+the machine, and the executor uses that driver from then on. Only
+the provider's own failure moves on to the next driver: the sprite
+driver tags every failure with its phase and its blame
+(`ProvisionFailure`), and a checkout that git refused is the
+project's, which Modal would refuse the same way, so it ends the run
+and keeps the sprite for the retry. An existing sandbox row keeps its driver with no fallback, so a
 hibernated Modal machine resumes on Modal and a swarm never splits
 across providers. A team with the network lock on is a Modal team: a
 sprite cannot restrict egress, so `provisionWorkspace` never asks it

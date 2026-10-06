@@ -1,8 +1,12 @@
 import { and, eq, isNull, sql } from "drizzle-orm";
 import { repositories, sandboxes } from "@bento/db";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import {
   ModalProvisionLeak,
+  ProvisionFailure,
   persistedSandboxProvider,
+  provisionBlame,
   spriteName,
   type PreparedRepository,
   type SandboxDriver,
@@ -261,6 +265,18 @@ export async function provisionWorkspace(
   }
 
   /**
+   * The project is checked before any machine is made. A clone URL the
+   * server cannot reach is the project's problem, and no provider
+   * would do better with it; finding that out after a sprite was
+   * created and its tools installed cost minutes and a machine. A
+   * repository with a seed bundle was just read from GitHub to make
+   * it, so it is proven already; the rest are asked for their HEAD.
+   */
+  if (driver.workspace === "clone") {
+    await verifyCloneUrls(repoRows.filter((r) => r.repoUrl && !seedBundles.has(r.id)));
+  }
+
+  /**
    * An organization that locked its agents down gets a sandbox with no
    * route out, or no sandbox at all: a driver that cannot honor the
    * lock is not asked, and when none of them can this fails with the
@@ -341,9 +357,19 @@ export async function provisionWorkspace(
       provisioned = { handle: await provisionWith(candidate), driver: candidate };
       break;
     } catch (err) {
-      await cleanupFailedAttempt(ctx, candidate, err, input.owner, workspaceKey, next !== undefined);
+      /**
+       * Another provider is asked only for the provider's own failure.
+       * A failure the driver blamed on the project (a clone git
+       * refused) would repeat there, so it ends the run now, and the
+       * sprite stays for the retry to reuse. A failure no driver
+       * tagged is treated as the provider's: the only driver asked
+       * first is the sprite, and everything it throws is tagged.
+       */
+      const blame = provisionBlame(err);
+      const movingOn = next !== undefined && blame !== "project";
+      await cleanupFailedAttempt(ctx, candidate, err, input.owner, workspaceKey, movingOn);
       const reason = provisionFailureCause(err);
-      if (!next) throw withEarlierFailures(err, earlierFailures);
+      if (!movingOn) throw withEarlierFailures(err, earlierFailures);
       fellBackFrom ??= candidate.provider;
       earlierFailures.push({ provider: candidate.provider, reason });
       console.warn(
@@ -354,6 +380,7 @@ export async function provisionWorkspace(
         source: "sandbox_provision_fallback",
         provider: candidate.provider,
         next_provider: next.provider,
+        ...(err instanceof ProvisionFailure ? { phase: err.phase, blame: err.blame } : {}),
         project_id: input.projectId,
         ...("featureId" in input.owner
           ? { feature_id: input.owner.featureId }
@@ -447,7 +474,37 @@ export async function provisionWorkspace(
  * reason, not the wrapper.
  */
 export function provisionFailureCause(err: unknown): unknown {
-  return err instanceof ModalProvisionLeak ? (err.cause ?? err) : err;
+  if (err instanceof ModalProvisionLeak || err instanceof ProvisionFailure) return err.cause ?? err;
+  return err;
+}
+
+const execFileAsync = promisify(execFile);
+
+/** How long one remote may take to answer a HEAD lookup before it counts as unreachable. */
+const CLONE_URL_CHECK_TIMEOUT_MS = 30_000;
+
+/**
+ * Asks each remote for its HEAD from this server, with no credential
+ * and no prompt, which is what a clone driver's machine does with the
+ * URL. A remote that does not answer fails the run here with a
+ * sentence naming the repository, before any provider is asked.
+ */
+export async function verifyCloneUrls(repoRows: { name: string; repoUrl: string | null }[]): Promise<void> {
+  for (const row of repoRows) {
+    if (!row.repoUrl) continue;
+    try {
+      await execFileAsync("git", ["ls-remote", "--exit-code", row.repoUrl, "HEAD"], {
+        env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+        timeout: CLONE_URL_CHECK_TIMEOUT_MS,
+      });
+    } catch (err) {
+      const detail = (err as { stderr?: unknown }).stderr;
+      const reason = typeof detail === "string" && detail.trim() ? detail.trim().split("\n").at(-1) : "no answer";
+      throw new Error(
+        `Repository ${row.name} cannot be reached at ${row.repoUrl} (${reason}). Check the URL and its access under Settings, Repositories, then run again.`,
+      );
+    }
+  }
 }
 
 /**
