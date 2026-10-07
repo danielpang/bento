@@ -4,8 +4,9 @@ import { ONBOARDING_REENABLE_NOTE } from "../onboarding.js";
 import { useToast } from "./Toasts.js";
 
 /**
- * The first thing a brand new account sees: the board's empty state,
- * fading in from black, and a choice. Skipping turns the walkthrough off
+ * What an account with no projects yet sees first while its walkthrough
+ * is on, once per browser: the board's empty state fading in from black,
+ * and a choice. Skipping turns the walkthrough off
  * and leaves the defaults to arrive with the first project, exactly as
  * Skip inside the walkthrough does. Starting opens the walkthrough on
  * top of this screen, which stays behind it as its backdrop until the

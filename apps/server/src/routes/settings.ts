@@ -36,6 +36,20 @@ const patchSettings = z.object({
  * tenant's sandbox, so the whole surface is absent rather than merely
  * ineffective.
  */
+/**
+ * Whether a request reached this server by a loopback name.
+ *
+ * The folder dialog opens on this machine's screen, so it is only for
+ * the person sitting at it. A browser on another machine reaching a
+ * server that listens on the network is not that person, and neither
+ * is a page that points its own domain name at 127.0.0.1 (DNS
+ * rebinding): both arrive with a Host that is not a loopback name.
+ */
+export function isLoopbackHost(url: string): boolean {
+  const host = new URL(url).hostname.replace(/^\[|\]$/g, "");
+  return host === "localhost" || host === "::1" || /^127(\.\d{1,3}){3}$/.test(host);
+}
+
 export function settingsRoutes(
   ctx: AppContext,
   picker: {
@@ -123,7 +137,7 @@ export function settingsRoutes(
      * where the server and the person share a machine and a screen.
      */
     .get("/folder-picker", async (c) => {
-      if (!localOnly || (await inContainer())) return c.json({ available: false });
+      if (!localOnly || !isLoopbackHost(c.req.url) || (await inContainer())) return c.json({ available: false });
       return c.json({ available: (await pickerCommand()) !== null });
     })
     /**
@@ -131,7 +145,7 @@ export function settingsRoutes(
      * null path when it was cancelled.
      */
     .post("/folder-picker", async (c) => {
-      if (!localOnly || (await inContainer())) return c.json({ error: "not found" }, 404);
+      if (!localOnly || !isLoopbackHost(c.req.url) || (await inContainer())) return c.json({ error: "not found" }, 404);
       // Checked by hand: the JSON validator reads a form post as an
       // empty object and lets it through. A cross-origin page can send
       // a form without asking; it cannot send JSON without a preflight

@@ -598,8 +598,11 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
     }
   }, [onboardingReviewed]);
   /**
-   * The intro, once per browser, for an account with no projects yet:
-   * that is a first sign in. It waits on a choice, skip or start, and
+   * The intro, once per browser, for an account with no projects yet
+   * whose walkthrough is on. Usually that is a first sign in, but it is
+   * also someone who never made a project and turned the walkthrough
+   * back on, which is fine: they are at the same starting point. It
+   * waits on a choice, skip or start, and
    * the walkthrough only opens when somebody starts it. "started" keeps
    * the intro behind the walkthrough until that is put away or a step
    * opens a panel, and from then on it counts as played.

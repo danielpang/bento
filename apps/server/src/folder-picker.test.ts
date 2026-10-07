@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { AppContext } from "./context.js";
-import { cleanPickedPath, folderPickerCommand } from "./folder-picker.js";
-import { settingsRoutes } from "./routes/settings.js";
+import { cleanPickedPath, folderPickerCommand, isPickerCancel } from "./folder-picker.js";
+import { isLoopbackHost, settingsRoutes } from "./routes/settings.js";
 
 const local = { env: { BENTO_MODE: "local" } } as AppContext;
 const fakeCommand = async () => ({ command: "dialog", args: [] });
@@ -78,4 +78,39 @@ test("a second Browse while a dialog is open is refused rather than stacked", as
   assert.equal((await post(routes)).status, 409);
   release();
   assert.equal((await first).status, 200);
+});
+
+test("only a recognised cancel counts as one; any other exit 1 is a failure", () => {
+  assert.equal(isPickerCancel(1, ""), true, "zenity, kdialog and PowerShell cancel silently");
+  assert.equal(isPickerCancel(1, "execution error: User canceled. (-128)\n"), true, "osascript");
+  assert.equal(isPickerCancel(1, "execution error: Not authorized to send Apple events. (-1743)"), false);
+  assert.equal(isPickerCancel(1, "Exception calling ShowDialog"), false);
+  assert.equal(isPickerCancel(2, ""), false);
+  assert.equal(isPickerCancel("ENOENT", ""), false, "a missing binary is not a cancel");
+});
+
+test("the dialog is only for a browser on this machine", async () => {
+  assert.equal(isLoopbackHost("http://localhost:4400/x"), true);
+  assert.equal(isLoopbackHost("http://127.0.0.1:4400/x"), true);
+  assert.equal(isLoopbackHost("http://[::1]:4400/x"), true);
+  assert.equal(isLoopbackHost("http://192.168.1.20:4400/x"), false, "another machine on the network");
+  assert.equal(isLoopbackHost("http://rebind.example.com:4400/x"), false, "DNS rebinding");
+
+  let opened = 0;
+  const routes = settingsRoutes(local, {
+    command: fakeCommand,
+    inContainer: async () => false,
+    run: async () => {
+      opened++;
+      return { stdout: "/x", cancelled: false };
+    },
+  });
+  assert.deepEqual(await (await routes.request("http://192.168.1.20:4400/folder-picker")).json(), { available: false });
+  const remote = await routes.request("http://rebind.example.com/folder-picker", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{}",
+  });
+  assert.equal(remote.status, 404);
+  assert.equal(opened, 0);
 });

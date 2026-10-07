@@ -69,18 +69,28 @@ async function binaryOnPath(binary: string): Promise<boolean> {
 }
 
 /**
- * Every dialog reports a cancel as a non-zero exit (osascript says
- * "User canceled", zenity and kdialog exit 1), which is an answer
- * rather than a failure. Anything that wrote to stderr without a
- * cancel is a real failure, and is thrown so the console can say so.
+ * Whether a dialog that exited non-zero was cancelled rather than broken.
+ *
+ * Every dialog exits 1 on a cancel, which is an answer rather than a
+ * failure: zenity, kdialog and the PowerShell script say nothing, and
+ * osascript prints "User canceled. (-128)". A failure can exit 1 too
+ * (osascript does for any script error), so the exit code alone is not
+ * enough: exit 1 is a cancel only when stderr is empty or names one.
+ * Anything else is thrown so the console can say what went wrong.
  */
+export function isPickerCancel(code: unknown, stderr: string): boolean {
+  if (code !== 1) return false;
+  const text = stderr.trim();
+  return text === "" || /-128\b|user cancel/i.test(text);
+}
+
 export const runPicker: PickRunner = (cmd) =>
   new Promise((resolve, reject) => {
     // Generous: the person is browsing, not the machine.
     execFile(cmd.command, cmd.args, { timeout: 10 * 60_000 }, (error, stdout, stderr) => {
       if (!error) return resolve({ stdout, cancelled: false });
       const text = `${stderr}`;
-      if ((error as { code?: unknown }).code === 1 || /cancel/i.test(text) || /-128/.test(text)) {
+      if (isPickerCancel((error as { code?: unknown }).code, text)) {
         return resolve({ stdout: "", cancelled: true });
       }
       reject(new Error(text.trim() || error.message));

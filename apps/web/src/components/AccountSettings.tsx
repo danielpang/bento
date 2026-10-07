@@ -74,14 +74,16 @@ function ownedAccountMessage(names: string[]): string {
 }
 
 /**
- * Leaving.
+ * The person's own account: the onboarding walkthrough switch, and the
+ * way out.
  *
- * Both actions here are irreversible and neither is urgent, so they sit
- * on their own tab rather than beside the controls people use daily,
- * and each says what it takes with it before it is confirmed. Deleting
- * an account is confirmed a second time by email; deleting an
- * organization takes its boards with it and happens at once, so it is
- * the one that has to be spelled out hardest.
+ * The two deletions are irreversible and neither is urgent, so they sit
+ * on this tab rather than beside the controls people use daily, and
+ * each says what it takes with it before it is confirmed. Deleting an
+ * account is confirmed a second time by email; deleting an organization
+ * takes its boards with it and happens at once, so it is the one that
+ * has to be spelled out hardest. Local mode has no sign in and no
+ * organizations, so there the tab is only the walkthrough switch.
  */
 export function AccountSettings({ client, mode }: { client: BentoClient; mode: "local" | "multi" }) {
   const toast = useToast();

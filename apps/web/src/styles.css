@@ -10319,8 +10319,8 @@ a.swarm-plan-source-name:hover {
   margin: 4px 0 0;
 }
 
-/* Onboarding walkthrough: a step list beside the step it is on, which
-   folds into a row above it on a phone. */
+/* Onboarding walkthrough: the steps as a row of four tiles above the
+   step that is open, folding to two by two on a phone. */
 .onboarding-steps {
   list-style: none;
   margin: 4px 0 0;
