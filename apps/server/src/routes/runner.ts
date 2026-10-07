@@ -1,5 +1,5 @@
 import { zValidator } from "@hono/zod-validator";
-import { and, asc, eq, inArray, isNull, max } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, max, sql } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
 import { agentEvent, forgetsBetweenRuns, trustedCostUsd, withTrustedCost } from "@bento/core";
@@ -16,6 +16,7 @@ import { captureRunFinished, deliverQueuedMessage, runnerReportedError } from ".
 import { runOutputPreview } from "../orchestrator/run-executor.js";
 import { queueRunFinishedSlack } from "../orchestrator/slack-notify.js";
 import { ACTIVE_RUN_STATUSES } from "../orchestrator/start-run.js";
+import { reportSandboxReady, sandboxOrigin } from "../orchestrator/sandbox-metrics.js";
 import { asPipelineRun, isPipelineRun } from "../orchestrator/pipeline-run.js";
 import { branchForRun, cardBranch } from "../orchestrator/branch-rotation.js";
 import { githubConnectionFor } from "../github.js";
@@ -29,6 +30,19 @@ const eventsInput = z.object({
   /** Must match the runner that claimed the run. */
   runnerId: z.string().min(1).max(128),
   events: z.array(agentEvent).max(500),
+  /**
+   * What the runner's sandbox was, sent with its first batch, so the
+   * server can count the wait the way it counts its own runs. An
+   * older runner sends nothing, and the event says so by leaving
+   * `provision_ms` out.
+   */
+  sandbox: z
+    .object({
+      provider: z.string().min(1).max(32),
+      createdSandbox: z.boolean().optional(),
+      provisionMs: z.number().nonnegative().optional(),
+    })
+    .optional(),
 });
 
 const completeInput = z.object({
@@ -127,7 +141,11 @@ export function runnerRoutes(ctx: AppContext) {
       // same row updates zero rows and simply polls again.
       const claimed = await db(c, ctx)
         .update(agentRuns)
-        .set({ status: "starting", claimedBy: runnerId, claimedAt: new Date(), startedAt: new Date() })
+        // Stamped by the database's clock, because the first report
+        // measures the sandbox wait from this stamp against the
+        // database's queued_at and now(), and a stamp from this host
+        // would put the two hosts' clock skew into the number.
+        .set({ status: "starting", claimedBy: runnerId, claimedAt: sql`now()`, startedAt: sql`now()` })
         .where(and(eq(agentRuns.id, candidate.run.id), isNull(agentRuns.claimedBy)))
         .returning();
       if (claimed.length === 0) return c.json({ run: null });
@@ -289,7 +307,39 @@ export function runnerRoutes(ctx: AppContext) {
         .where(eq(features.id, run.featureId));
 
       if (run.status === "starting") {
-        await db(c, ctx).update(agentRuns).set({ status: "running" }).where(eq(agentRuns.id, runId));
+        /**
+         * The runner's first word is its agent coming up, which is
+         * where the server's own executor reports the sandbox wait.
+         * Both slices are the database's arithmetic on its own
+         * stamps, so the runner's clock never enters them. The
+         * machine itself is the runner's, so the provider and whether
+         * it made one are whatever the runner said.
+         */
+        const [timing] = await db(c, ctx)
+          .update(agentRuns)
+          .set({ status: "running" })
+          .where(eq(agentRuns.id, runId))
+          .returning({
+            queueWaitMs: sql<number>`(extract(epoch from (${agentRuns.startedAt} - ${agentRuns.queuedAt})) * 1000)::float8`,
+            sinceClaimMs: sql<number>`(extract(epoch from (now() - ${agentRuns.startedAt})) * 1000)::float8`,
+          });
+        const sandbox = c.req.valid("json").sandbox;
+        if (timing && owner) {
+          reportSandboxReady(ctx.analytics, {
+            runId,
+            role: run.role,
+            provider: sandbox?.provider ?? "runner",
+            origin: sandboxOrigin({ createdSandbox: sandbox?.createdSandbox }),
+            queueWaitMs: timing.queueWaitMs,
+            sinceClaimMs: timing.sinceClaimMs,
+            ...(sandbox?.provisionMs !== undefined ? { provisionMs: sandbox.provisionMs } : {}),
+            projectId: owner.projectId,
+            organizationId: run.organizationId,
+            userId: run.startedBy,
+            owner: { featureId: run.featureId },
+            stageId: run.stageId,
+          });
+        }
       }
 
       /**

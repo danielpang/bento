@@ -630,7 +630,7 @@ export class SpriteDriver implements SandboxDriver {
     }
     });
 
-    return { externalId: name, provider: "sprite", workdir: this.workdir };
+    return { externalId: name, provider: "sprite", workdir: this.workdir, createdSandbox: created };
   }
 
   /**

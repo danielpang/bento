@@ -152,6 +152,8 @@ test("auto lands on the sprite when Fly answers, and says so in the metric", asy
   assert.deepEqual(asked, ["sprite"]);
   assert.equal(result.driver, sprite);
   assert.equal(result.handle.provider, "sprite");
+  // The stub says it made the machine, and the card had no row: a cold start.
+  assert.equal(result.origin, "new");
   assert.equal(result.sandboxRow?.provider, "sprite");
   assert.equal(result.sandboxRow?.size, "sprite-standard");
   assert.deepEqual(said, []);

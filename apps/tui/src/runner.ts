@@ -169,6 +169,11 @@ export class LocalRunner {
 
     let handle: SandboxHandle;
     let workdir: string;
+    // How long the driver alone took, told to the server with the
+    // first batch of events so this run's sandbox wait is counted
+    // like a server-executed one.
+    let provisionStarted = performance.now();
+    let provisionMs = 0;
     try {
       if (repositories.length === 0) throw new Error("the project has no repositories");
       const duplicate = duplicateRepositoryLocation(
@@ -205,6 +210,7 @@ export class LocalRunner {
         branch,
         { branchChanged: feature.startFromBase === true },
       );
+      provisionStarted = performance.now();
       handle = await this.driver.provision({
         projectId: "runner",
         workspaceKey: feature.id,
@@ -229,6 +235,7 @@ export class LocalRunner {
             : [],
         ...(this.options.sandboxImage ? { image: this.options.sandboxImage } : {}),
       });
+      provisionMs = performance.now() - provisionStarted;
       workdir =
         repositories.length === 1 ? repositoryPathIn(handle.workdir, repositories[0]!.name) : handle.workdir;
     } catch (err) {
@@ -304,16 +311,30 @@ export class LocalRunner {
     const env: Record<string, string> = { ...(adapter.env?.(commandInput) ?? {}), ...credentials, ...(claimed.customProvider?.env ?? {}) };
 
     let pending: AgentEvent[] = [];
+    // The sandbox travels with the first batch only: the server reads
+    // it when the run turns from starting to running, which is once.
+    let sandboxReported = false;
 
     const flush = async () => {
       if (pending.length === 0) return;
       const batch = pending;
       pending = [];
+      const sandbox = sandboxReported
+        ? {}
+        : {
+            sandbox: {
+              provider: handle.provider,
+              ...(handle.createdSandbox !== undefined ? { createdSandbox: handle.createdSandbox } : {}),
+              provisionMs,
+            },
+          };
+      sandboxReported = true;
       // Losing transcript events silently would leave the board showing
       // a run that never spoke, so failures are retried and then logged.
       await this.postWithRetry(`/api/runner/runs/${run.id}/events`, {
         runnerId: this.options.runnerId,
         events: batch,
+        ...sandbox,
       });
     };
 

@@ -26,8 +26,12 @@ export interface SandboxHandle {
    */
   recordedImageRef?: string | null;
   /**
-   * This provision created the sandbox. A failure after that has to
-   * destroy the machine, or a hibernated row hides it from the sweep.
+   * Whether this provision made the machine (true) or found one
+   * already there and reopened it (false). A failure after creating
+   * one has to destroy it, or a hibernated row hides it from the
+   * sweep; and the sandbox metrics count a made machine as a cold
+   * start. Absent when the driver has no machine to speak of
+   * (local-process), and the caller falls back to the sandbox row.
    */
   createdSandbox?: boolean;
 }
