@@ -1,11 +1,9 @@
 import { useEffect, useState } from "react";
 import type { BentoClient } from "@bento/api-client";
+import { ONBOARDING_REENABLE_NOTE } from "../onboarding.js";
 import { Modal } from "./Modal.js";
 import { useToast } from "./Toasts.js";
 
-/** Where the walkthrough can be brought back from, said whenever it is put away. */
-export const ONBOARDING_REENABLE_NOTE =
-  "You can bring this walkthrough back any time from Settings, Account.";
 
 export type OnboardingStep = "repository" | "github" | "agents" | "pipeline";
 

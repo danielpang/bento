@@ -10377,8 +10377,8 @@ a.swarm-plan-source-name:hover {
 .onboarding-badge-defaults { border-color: var(--line-bright); color: var(--text-dim); }
 
 /* The first run intro: the empty state on black, in the dark palette
-   whatever theme is set, fading in under the walkthrough. Below the
-   modal backdrop (40) so the walkthrough opens on top of it. */
+   whatever theme is set, fading in with a choice to skip or start.
+   Below the modal backdrop (40) so the walkthrough opens on top. */
 .onboarding-intro {
   --bg: #0e0d0b;
   --panel: #161411;
@@ -10393,7 +10393,6 @@ a.swarm-plan-source-name:hover {
   padding: 24px 16px;
   background: #000;
   color: var(--text-dim);
-  cursor: pointer;
 }
 .onboarding-intro-hero {
   display: flex;
@@ -10413,6 +10412,10 @@ a.swarm-plan-source-name:hover {
   text-wrap: balance;
 }
 .onboarding-intro-hero p { max-width: 430px; margin: 0; font-size: 14px; line-height: 1.7; }
+.onboarding-intro-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; margin-top: 8px; }
+.onboarding-intro .btn-primary { background: #ff8a3d; border-color: #ff8a3d; color: #0e0d0b; }
+.onboarding-intro-skip { background: transparent; border-color: #3d392f; color: #ededed; }
+.onboarding-intro-skip:hover:not(:disabled) { background: #1d1b17; }
 @keyframes onboarding-intro-hero {
   from { opacity: 0; transform: translateY(6px); }
   to { opacity: 1; transform: none; }
