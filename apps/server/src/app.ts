@@ -31,6 +31,8 @@ import { mcpEndpointRoutes } from "./routes/mcp-endpoint.js";
 import { mcpOAuthConsentRoutes, mcpOAuthPublicRoutes } from "./routes/mcp-oauth.js";
 import { mcpWellKnownRoutes } from "./routes/mcp-well-known.js";
 import { contactRoutes } from "./routes/contact.js";
+import { setupRoutes } from "./routes/setup.js";
+import { accountRoutes } from "./routes/account.js";
 import { flagRoutes } from "./routes/flags.js";
 import { posthogApiKey } from "./env.js";
 import { accountDeletionBlockedReason } from "./auth.js";
@@ -353,6 +355,8 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
     .route("/mcp-connections", mcpConnectionRoutes(ctx))
     .route("/mcp-oauth", mcpOAuthConsentRoutes(ctx))
     .route("/team", teamRoutes(ctx))
+    .route("/setup", setupRoutes(ctx))
+    .route("/account", accountRoutes(ctx))
     .route("/contact", contactRoutes(ctx))
     .route("/settings", settingsRoutes(ctx));
 

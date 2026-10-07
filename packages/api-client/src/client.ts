@@ -6,7 +6,7 @@ import type {
   PlanState,
   TeamPolicy,
 } from "./settings.js";
-import { SseParser, type AgentDelta, type AgentEvent, type CustomProviderProtocol, type GateCriteria } from "@bento/core";
+import { SseParser, type AgentDelta, type AgentEvent, type CustomProviderProtocol, type GateCriteria, type PipelineSeed } from "@bento/core";
 import { BUILD_HEADER } from "@bento/core";
 import type {
   AgentProfile,
@@ -1477,6 +1477,38 @@ export class BentoClient {
 
   listProfiles() {
     return this.request<AgentProfile[]>("/api/profiles");
+  }
+
+  /**
+   * Whether this organization still needs the first-run pipeline and
+   * agent walkthrough. `needed` is only true for an owner or admin of a
+   * team that has no projects, no agents, and has not skipped.
+   */
+  getSetup() {
+    return this.request<{ needed: boolean; canEdit: boolean }>("/api/setup");
+  }
+
+  /**
+   * Records the pipeline this organization will seed onto new projects,
+   * and creates the agents now so the Agents panel is not empty.
+   */
+  /** Whether the console should open the onboarding walkthrough for this person. */
+  getOnboarding() {
+    return this.request<{ walkthrough: boolean }>("/api/account/onboarding");
+  }
+
+  /** Off once skipped or finished; on again from Settings, Account. */
+  setOnboarding(walkthrough: boolean) {
+    return this.request<{ walkthrough: boolean }>("/api/account/onboarding", {
+      method: "PATCH",
+      body: JSON.stringify({ walkthrough }),
+    });
+  }
+
+  completeSetup(
+    input: { mode: "skip" } | { mode: "defaults" } | ({ mode: "custom" } & PipelineSeed),
+  ) {
+    return this.request<{ ok: boolean }>("/api/setup", { method: "POST", body: JSON.stringify(input) });
   }
 
   createProfile(input: { name: string; cli: string; model: string; skill?: string }) {

@@ -1016,6 +1016,8 @@ test("every entity route refuses a foreign tenant", async () => {
     ["GET", "/api/team/policy"],
     ["GET", "/api/team/hours"],
     ["PATCH", "/api/team/policy", { body: JSON.stringify({ restrictNetwork: false }) }],
+    ["GET", "/api/setup"],
+    ["POST", "/api/setup", { body: JSON.stringify({ mode: "skip" }) }],
     ["POST", `/api/features/${feature.id}/link-pr`, { body: JSON.stringify({ prNumber: 1 }) }],
     ["GET", `/api/features/${feature.id}/merge-status`],
     ["GET", `/api/features/${feature.id}/check-status`],
@@ -2976,6 +2978,149 @@ test("network lockdown is refused when the deployment cannot honour it", async (
   });
   assert.equal(refused.status, 409, "turning it on without a network to use is refused");
   assert.match(((await refused.json()) as { error: string }).error, /BENTO_SANDBOX_RESTRICTED_NETWORK/);
+});
+
+test("the onboarding walkthrough is on for a new account until it is skipped", async () => {
+  const signup = await jsonPost("/api/auth/sign-up/email", {
+    email: "onboarding@bento.test",
+    password: "correct-horse-battery",
+    name: "Onboarding",
+  });
+  const token = signup.headers.get("set-auth-token")!;
+  const read = async () =>
+    (await (
+      await app.request("/api/account/onboarding", { headers: { authorization: `Bearer ${token}` } })
+    ).json()) as { walkthrough: boolean };
+  const write = (walkthrough: boolean) =>
+    app.request("/api/account/onboarding", {
+      method: "PATCH",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({ walkthrough }),
+    });
+
+  assert.equal((await read()).walkthrough, true, "a new account starts with the walkthrough on");
+  assert.equal((await write(false)).status, 200);
+  assert.equal((await read()).walkthrough, false, "skipping is remembered");
+  assert.equal((await write(true)).status, 200);
+  assert.equal((await read()).walkthrough, true, "Settings, Account turns it back on");
+
+  const other = await jsonPost("/api/auth/sign-up/email", {
+    email: "onboarding-other@bento.test",
+    password: "correct-horse-battery",
+    name: "Onboarding Other",
+  });
+  const otherToken = other.headers.get("set-auth-token")!;
+  await app.request("/api/account/onboarding", {
+    method: "PATCH",
+    headers: { "content-type": "application/json", authorization: `Bearer ${otherToken}` },
+    body: JSON.stringify({ walkthrough: false }),
+  });
+  assert.equal((await read()).walkthrough, true, "one person's choice does not reach another's");
+  assert.equal((await app.request("/api/account/onboarding")).status, 401);
+});
+
+test("a new organization is offered pipeline setup", async () => {
+  const signup = await jsonPost("/api/auth/sign-up/email", {
+    email: "setup-defaults@bento.test",
+    password: "correct-horse-battery",
+    name: "Setup Defaults",
+  });
+  const token = signup.headers.get("set-auth-token")!;
+  const org = (await (
+    await jsonPost("/api/auth/organization/create", { name: "Setup Defaults", slug: "setup-defaults" }, token)
+  ).json()) as { id: string };
+  await jsonPost("/api/auth/organization/set-active", { organizationId: org.id }, token);
+
+  const before = await (
+    await app.request("/api/setup", { headers: { authorization: `Bearer ${token}` } })
+  ).json() as { needed: boolean; canEdit: boolean };
+  assert.equal(before.needed, true, "a fresh team has not chosen a pipeline yet");
+  assert.equal(before.canEdit, true);
+
+  const saved = await jsonPost("/api/setup", { mode: "defaults" }, token);
+  assert.equal(saved.status, 200);
+
+  const after = await (
+    await app.request("/api/setup", { headers: { authorization: `Bearer ${token}` } })
+  ).json() as { needed: boolean };
+  assert.equal(after.needed, false, "taking the defaults closes the walkthrough");
+
+  const profiles = (await (
+    await app.request("/api/profiles", { headers: { authorization: `Bearer ${token}` } })
+  ).json()) as { name: string }[];
+  assert.equal(profiles.length, 6, "the default agents exist before any project does");
+});
+
+test("a custom setup is the pipeline later projects get", async () => {
+  const signup = await jsonPost("/api/auth/sign-up/email", {
+    email: "setup-custom@bento.test",
+    password: "correct-horse-battery",
+    name: "Setup Custom",
+  });
+  const token = signup.headers.get("set-auth-token")!;
+  const org = (await (
+    await jsonPost("/api/auth/organization/create", { name: "Setup Custom", slug: "setup-custom" }, token)
+  ).json()) as { id: string };
+  await jsonPost("/api/auth/organization/set-active", { organizationId: org.id }, token);
+
+  const saved = await jsonPost(
+    "/api/setup",
+    {
+      mode: "custom",
+      stages: [
+        { name: "Build", slug: "build", description: "Ship it", gateType: "manual" },
+        { name: "Review", slug: "review", description: "Look", gateType: "auto" },
+      ],
+      agents: [
+        { name: "Builder", stageSlug: "build", skill: "Build it.", cli: "claude-code", model: "claude-sonnet-5" },
+        { name: "Reviewer", stageSlug: "review", skill: "Review it.", cli: "claude-code", model: "claude-sonnet-5" },
+      ],
+    },
+    token,
+  );
+  assert.equal(saved.status, 200, await saved.text());
+
+  const project = (await (
+    await jsonPost("/api/projects", { name: "Board", localPath: "/tmp" }, token)
+  ).json()) as { id: string };
+  const pipeline = (await (
+    await app.request(`/api/projects/${project.id}/pipeline`, { headers: { authorization: `Bearer ${token}` } })
+  ).json()) as { stages: { name: string; slug: string; gateType: string }[] };
+  assert.equal(pipeline.stages.length, 2);
+  assert.equal(pipeline.stages[0]?.name, "Build");
+  assert.equal(pipeline.stages[1]?.gateType, "auto");
+});
+
+test("skipping setup still seeds the catalog defaults on the first project", async () => {
+  const signup = await jsonPost("/api/auth/sign-up/email", {
+    email: "setup-skip@bento.test",
+    password: "correct-horse-battery",
+    name: "Setup Skip",
+  });
+  const token = signup.headers.get("set-auth-token")!;
+  const org = (await (
+    await jsonPost("/api/auth/organization/create", { name: "Setup Skip", slug: "setup-skip" }, token)
+  ).json()) as { id: string };
+  await jsonPost("/api/auth/organization/set-active", { organizationId: org.id }, token);
+
+  assert.equal((await jsonPost("/api/setup", { mode: "skip" }, token)).status, 200);
+  const after = await (
+    await app.request("/api/setup", { headers: { authorization: `Bearer ${token}` } })
+  ).json() as { needed: boolean };
+  assert.equal(after.needed, false);
+
+  const profiles = (await (
+    await app.request("/api/profiles", { headers: { authorization: `Bearer ${token}` } })
+  ).json()) as unknown[];
+  assert.equal(profiles.length, 0, "skipping does not invent agents ahead of a project");
+
+  const project = (await (
+    await jsonPost("/api/projects", { name: "Board", localPath: "/tmp" }, token)
+  ).json()) as { id: string };
+  const pipeline = (await (
+    await app.request(`/api/projects/${project.id}/pipeline`, { headers: { authorization: `Bearer ${token}` } })
+  ).json()) as { stages: { slug: string }[] };
+  assert.equal(pipeline.stages.length, 6);
 });
 
 /**

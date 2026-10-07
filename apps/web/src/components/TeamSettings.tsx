@@ -187,7 +187,7 @@ export function TeamSettings({ client }: { client: BentoClient }) {
           )}
 
           <h4 className="field-heading">New organization</h4>
-          <p className="muted">Starts an empty board that you own, with no agents or credentials yet.</p>
+          <p className="muted">Starts a board that you own. You will set up the pipeline and agents next.</p>
           <div className="actions">
             <input
               className="input"
@@ -214,6 +214,7 @@ export function TeamSettings({ client }: { client: BentoClient }) {
                   }
                   if (!created.error && created.data) {
                     await authClient.organization.setActive({ organizationId: created.data.id });
+                    window.location.assign("/");
                   }
                   setNewOrgName("");
                   return created;

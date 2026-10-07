@@ -71,7 +71,7 @@ Under **Settings**, save a provider API key. Or under **Agents**, paste a Claude
 
 ### 3. Check the existing agents
 
-A new project starts with six default stages and an agent on each. Open the **Agents** tab to see them.
+A new team chooses its pipeline and agents after you name it: take Bento's defaults or change them. A new project then starts with those stages and an agent on each. Open the **Agents** tab to see them.
 
 An agent is a harness, model, and a **skill**. The skill is its standing instructions, sent with every agent start. Use it to say what the stage's write-up must contain and what outcome or actions the agent must produce. The defaults are short on purpose so that you can start immediately, but over time you will want to fine tune the skills for your own process.
 

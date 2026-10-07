@@ -85,6 +85,8 @@ test("CLI sharing enables the next run and settings can disable it across a rest
       gitAuthorName: "Test Author",
       gitAuthorEmail: "test@example.com",
       includeStageNotesInPr: true,
+      setupCompleted: false,
+      pipelineSeed: null,
     };
     await writeSettings(ctx, original);
     await applyInitialAgentAuthSharing(ctx, undefined);

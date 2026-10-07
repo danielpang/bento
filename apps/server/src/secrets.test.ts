@@ -90,7 +90,7 @@ test("sharing agent logins is a stored setting the next run honours", async () =
     assert.equal(await shouldShareAgentAuth(local), false);
     assert.deepEqual(await agentAuthMounts(local, adapter), []);
 
-    await writeSettings(local, { shareAgentAuth: true });
+    await writeSettings(local, { ...(await readSettings(local)), shareAgentAuth: true });
     assert.equal(await shouldShareAgentAuth(local), true, "the stored setting decides with no env var");
 
     // An explicit environment variable still wins, so the launch flag

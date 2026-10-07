@@ -53,6 +53,7 @@ import { useToast } from "./components/Toasts.js";
 import { identifyUser, resetUser, sessionIdentityChange } from "./posthog.js";
 import { desktop } from "./desktop.js";
 import { readProjectSelection, rememberProjectSelection } from "./project-selection.js";
+import type { OnboardingStep } from "./components/OnboardingWalkthrough.js";
 import { REPOSITORY_SETUP_ACTION, REPOSITORY_SETUP_MESSAGE } from "./repository-setup.js";
 
 /*
@@ -73,6 +74,8 @@ const AgentsPanel = lazy(() => import("./components/AgentsPanel.js").then((m) =>
 const ChangelogPage = lazy(() => import("./components/ChangelogPage.js").then((m) => ({ default: m.ChangelogPage })));
 const ContactDialog = lazy(() => import("./components/ContactDialog.js").then((m) => ({ default: m.ContactDialog })));
 const CreateTeam = lazy(() => import("./components/CreateTeam.js").then((m) => ({ default: m.CreateTeam })));
+const OnboardingWalkthrough = lazy(() => import("./components/OnboardingWalkthrough.js").then((m) => ({ default: m.OnboardingWalkthrough })));
+const OrgSetup = lazy(() => import("./components/OrgSetup.js").then((m) => ({ default: m.OrgSetup })));
 const DeviceApproval = lazy(() => import("./components/DeviceApproval.js").then((m) => ({ default: m.DeviceApproval })));
 const McpAuthorize = lazy(() => import("./components/McpAuthorize.js").then((m) => ({ default: m.McpAuthorize })));
 const FeatureDrawer = lazy(() => import("./components/FeatureDrawer.js").then((m) => ({ default: m.FeatureDrawer })));
@@ -334,6 +337,7 @@ function FirstTeam({ userName, onCreated }: { userName: string; onCreated: () =>
     // Warm the CreateTeam chunk while the invitations load, so the
     // common no-invitations answer does not then wait on a download.
     void import("./components/CreateTeam.js").catch(() => undefined);
+    void import("./components/OrgSetup.js").catch(() => undefined);
     setLookupFailed(false);
     void fetch("/api/team/invitations", { credentials: "include" })
       .then(async (res) => {
@@ -555,6 +559,41 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
   const [repoCount, setRepoCount] = useState<number | null>(null);
   /** The project the current count belongs to. A panel change is not a new project. */
   const repoCountFor = useRef<string | null>(null);
+  /**
+   * Whether this team still needs the pipeline and agent walkthrough.
+   *
+   * Asked on its own rather than inferred from an empty project list:
+   * a failed projects fetch used to look like "no projects", and the
+   * same mistake here would show setup to a team that already has a
+   * board. "failed" falls through to the board.
+   */
+  const [setup, setSetup] = useState<{ needed: boolean } | "loading" | "failed">("loading");
+  /**
+   * Whether to open the onboarding walkthrough, from the person's own
+   * flag. Starts closed, and a failed read leaves it closed: an
+   * unwanted dialog over the board is worse than a missed one, which
+   * Settings, Account can still bring back.
+   */
+  const [onboardingOpen, setOnboardingOpen] = useState(false);
+  /**
+   * Kept for the tab, because the GitHub step leaves for Settings with a
+   * full page load and coming back should land on the step it left.
+   */
+  const [onboardingStep, setOnboardingStep] = useState<OnboardingStep>(() => {
+    try {
+      const saved = sessionStorage.getItem("bento.onboarding-step");
+      return saved === "github" || saved === "agents" || saved === "pipeline" ? saved : "repository";
+    } catch {
+      return "repository";
+    }
+  });
+  useEffect(() => {
+    try {
+      sessionStorage.setItem("bento.onboarding-step", onboardingStep);
+    } catch {
+      // Private browsing can refuse storage; the step is a convenience.
+    }
+  }, [onboardingStep]);
   const toast = useToast();
   /**
    * Where focus goes once a deleted card has left the board, and which
@@ -669,6 +708,18 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
   useEffect(() => {
     loadProjectList();
   }, [loadProjectList]);
+
+  useEffect(() => {
+    void client
+      .getSetup()
+      .then((row) => setSetup(row))
+      .catch(() => setSetup("failed"));
+    void client
+      .getOnboarding()
+      .then((row) => setOnboardingOpen(row.walkthrough))
+      .catch(() => setOnboardingOpen(false));
+  }, []);
+
 
   useEffect(() => {
     if (!projectId) {
@@ -952,6 +1003,34 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
       {dialog === "project" && (
         <NewProjectDialog client={client} onClose={() => setDialog("none")} onSubmit={addProject} />
       )}
+      {/* Steps aside while the panel or dialog one of its steps opened
+          is up, and comes back on the same step when that closes. */}
+      {onboardingOpen && projects !== null && panel === "none" && dialog === "none" && !contactOpen && (
+        <Suspense fallback={null}>
+          <OnboardingWalkthrough
+            client={client}
+            step={onboardingStep}
+            onStep={setOnboardingStep}
+            mode={mode}
+            state={{
+              hasProjects: projects.length > 0,
+              repoCount,
+              agentCount: profiles.length,
+              stageCount: stages.length,
+              stagesWithAgents: stages.filter((stage) => stage.defaultAgentProfileId).length,
+            }}
+            onNewProject={() => setDialog("project")}
+            onOpenRepositories={() => setPanel("repos")}
+            onOpenAgents={() => {
+              setAgentsIntent(null);
+              setPanel("agents");
+            }}
+            onOpenPipeline={() => setPanel("pipeline")}
+            onDismiss={() => setOnboardingOpen(false)}
+            onDone={() => setOnboardingOpen(false)}
+          />
+        </Suspense>
+      )}
     </>
   );
 
@@ -1110,6 +1189,19 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
       </Suspense>
     </>
   );
+
+  if (setup === "loading") return <CenteredPanelSkeleton />;
+  if (setup !== "failed" && setup.needed) {
+    return (
+      <OrgSetup
+        client={client}
+        onDone={() => {
+          setSetup({ needed: false });
+          void refresh();
+        }}
+      />
+    );
+  }
 
   if (projects === null) {
     return (
