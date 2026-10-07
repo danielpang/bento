@@ -5,8 +5,6 @@ name: Modal sandbox e2e
 # Not part of CI. It costs a machine and several minutes. It runs when
 # it earns its cost:
 #
-#   nightly       a Modal API change, or an installer that moved, is
-#                 found here rather than on somebody's card
 #   driver PR     a change to the Modal driver or the toolchain script
 #   by hand       after an outage, to confirm it is over
 #
@@ -14,8 +12,6 @@ name: Modal sandbox e2e
 # says so and stops, rather than passing on a test that never ran.
 
 on:
-  schedule:
-    - cron: "0 8 * * *"
   pull_request:
     paths:
       - packages/sandbox/src/modal.ts
