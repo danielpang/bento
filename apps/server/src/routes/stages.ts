@@ -2,7 +2,7 @@ import { zValidator } from "@hono/zod-validator";
 import { and, eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
-import { gateCriteria, gateType, stageSlugFromName } from "@bento/core";
+import { gateCriteria, gateType } from "@bento/core";
 import { agentProfiles, features, pipelines, stages } from "@bento/db";
 import type { AppContext } from "../context.js";
 import { tenantDb as db } from "../middleware/tenant.js";
@@ -12,6 +12,17 @@ const createStage = z.object({
   pipelineId: z.string().uuid(),
   name: z.string().min(1).max(80),
 });
+
+/** stages_pipeline_slug_idx wants uniqueness; the name drives the slug. */
+function stageSlug(name: string): string {
+  return (
+    name
+      .toLowerCase()
+      .replaceAll(/[^a-z0-9]+/g, "-")
+      .replaceAll(/^-+|-+$/g, "")
+      .slice(0, 40) || "stage"
+  );
+}
 
 /**
  * Stage configuration is where the user answers the two core questions:
@@ -46,7 +57,7 @@ export function stageRoutes(ctx: AppContext) {
         .select({ max: sql<number>`coalesce(max(position), -1)` })
         .from(stages)
         .where(eq(stages.pipelineId, pipeline.id));
-      const slugBase = stageSlugFromName(body.name);
+      const slugBase = stageSlug(body.name);
       const existing = await db(c, ctx)
         .select({ slug: stages.slug })
         .from(stages)

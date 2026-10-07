@@ -20,6 +20,23 @@ export interface OnboardingState {
   agentCount: number;
   stageCount: number;
   stagesWithAgents: number;
+  /**
+   * Steps whose panel was opened from the walkthrough. Agents and the
+   * pipeline arrive filled in with Bento's defaults, so they only count
+   * as the person's own once they have looked.
+   */
+  reviewed: { agents: boolean; pipeline: boolean };
+}
+
+/**
+ * True is done, "defaults" is done by Bento's seeding but not yet
+ * looked at, null is still being read.
+ */
+type StepDone = boolean | "defaults" | null;
+
+function reviewedOr(ready: boolean, reviewed: boolean): StepDone {
+  if (!ready) return false;
+  return reviewed ? true : "defaults";
 }
 
 /**
@@ -103,7 +120,7 @@ export function OnboardingWalkthrough({
   const steps: {
     id: OnboardingStep;
     title: string;
-    done: boolean | null;
+    done: StepDone;
     body: string;
     action: { label: string; run: () => void } | null;
     hint?: string;
@@ -136,15 +153,18 @@ export function OnboardingWalkthrough({
     {
       id: "agents",
       title: "Set up your agents",
-      done: state.agentCount > 0,
-      body: "An agent is a coding tool paired with a model, plus a skill: the instructions sent with every prompt it runs. New projects come with one per stage. Edit their skills to say what each write up must contain, and add your provider keys so they can run.",
+      done: reviewedOr(state.agentCount > 0, state.reviewed.agents),
+      body: "Agents are a coding harness paired with a model and skill. Each stage in the pipeline has an agent and will repeat their actions for every card that enters their stage.",
       action: { label: "Open agents", run: onOpenAgents },
     },
     {
       id: "pipeline",
       title: "Shape your pipeline",
-      done: state.stageCount > 0 ? state.stagesWithAgents === state.stageCount : false,
-      body: "Cards move left to right through the stages. Each stage has an agent that works it and a rule for when a card may leave: manual waits for you, automatic moves on once its requirements pass. Every stage starts manual, so nothing runs away before you have looked at it.",
+      done: reviewedOr(
+        state.stageCount > 0 && state.stagesWithAgents === state.stageCount,
+        state.reviewed.pipeline,
+      ),
+      body: "Pipeline defines your software development cycle. Define how your team ships features (i.e. product investigation, code spec, implementation, code review, QA).",
       action: state.hasProjects ? { label: "Open pipeline", run: onOpenPipeline } : null,
       hint: state.hasProjects ? undefined : "Create a project first. Its pipeline arrives with it.",
     },
@@ -202,11 +222,15 @@ export function OnboardingWalkthrough({
               aria-current={entry.id === step ? "step" : undefined}
               onClick={() => onStep(entry.id)}
             >
-              <span className={`onboarding-step-mark${entry.done ? " onboarding-step-done" : ""}`} aria-hidden="true">
+              <span
+                className={`onboarding-step-mark${entry.done === true ? " onboarding-step-done" : entry.done === "defaults" ? " onboarding-step-defaults" : ""}`}
+                aria-hidden="true"
+              >
                 {entry.done ? "✓" : i + 1}
               </span>
               <span>{entry.title}</span>
-              {entry.done && <span className="visually-hidden"> (done)</span>}
+              {entry.done === true && <span className="visually-hidden"> (done)</span>}
+              {entry.done === "defaults" && <span className="visually-hidden"> (using Bento's defaults)</span>}
             </button>
           </li>
         ))}
@@ -215,12 +239,15 @@ export function OnboardingWalkthrough({
       <section className="onboarding-body" aria-live="polite">
         <h3 className="onboarding-title">
           {current.title}
-          {current.done && <span className="onboarding-badge">Done</span>}
+          {current.done === true && <span className="onboarding-badge">Done</span>}
+          {current.done === "defaults" && (
+            <span className="onboarding-badge onboarding-badge-defaults">Using defaults</span>
+          )}
         </h3>
         <p className="muted">{current.body}</p>
         {current.action && (
           <div className="actions">
-            <button type="button" className={current.done ? "btn" : "btn btn-primary"} onClick={current.action.run}>
+            <button type="button" className={current.done === true ? "btn" : "btn btn-primary"} onClick={current.action.run}>
               {current.action.label}
             </button>
           </div>

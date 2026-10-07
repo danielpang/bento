@@ -10319,124 +10319,6 @@ a.swarm-plan-source-name:hover {
   margin: 4px 0 0;
 }
 
-/*
- * Organization setup sits on the same entrance page as naming a team,
- * but it has a list to show, so the card is allowed to be wider than a
- * login form. Vertical alignment starts at the top: six stage editors
- * centred in the viewport would hide the heading above the fold.
- */
-.center:has(.card-panel-setup),
-.center:has(.card-panel-setup-wide) {
-  align-items: start;
-  justify-items: center;
-  padding-top: 40px;
-}
-
-.card-panel-setup {
-  max-width: 420px;
-}
-
-.card-panel-setup-wide {
-  max-width: 560px;
-}
-
-.onboard-preview {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.onboard-preview li {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.onboard-preview-name {
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.onboard-actions {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.onboard-stages,
-.onboard-agents {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.onboard-stage,
-.onboard-agent {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding-bottom: 12px;
-  border-bottom: 1px solid var(--line);
-}
-
-.onboard-stage:last-child,
-.onboard-agent:last-child {
-  border-bottom: none;
-  padding-bottom: 0;
-}
-
-.onboard-stage-row,
-.onboard-agent-row,
-.onboard-add,
-.onboard-nav {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
-
-.onboard-stage-row .input,
-.onboard-add .input {
-  flex: 1;
-  min-width: 0;
-}
-
-.onboard-stage-row .select {
-  flex: 0 0 8.5rem;
-}
-
-.onboard-agent-row .field {
-  flex: 1;
-  min-width: 0;
-}
-
-.onboard-stage-tools {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-
-.onboard-agent-stage {
-  margin: 0;
-  font-size: 11px;
-  font-family: var(--mono);
-  color: var(--text-faint);
-}
-
-.onboard-nav {
-  justify-content: space-between;
-  padding-top: 8px;
-}
-
-.onboard-add {
-  padding-top: 4px;
-}
-
 /* Onboarding walkthrough: a step list beside the step it is on, which
    folds into a row above it on a phone. */
 .onboarding-steps {
@@ -10490,4 +10372,53 @@ a.swarm-plan-source-name:hover {
 .onboarding-spacer { flex: 1; }
 @media (max-width: 640px) {
   .onboarding-steps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+.onboarding-step-defaults { background: var(--line-bright); border-color: var(--line-bright); color: var(--text); }
+.onboarding-badge-defaults { border-color: var(--line-bright); color: var(--text-dim); }
+
+/* The first run intro: the empty state on black, in the dark palette
+   whatever theme is set, fading in and out before the walkthrough. */
+.onboarding-intro {
+  --bg: #0e0d0b;
+  --panel: #161411;
+  --line-bright: #3d392f;
+  --text-dim: #a8a49b;
+  --brand: #ff8a3d;
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: 24px 16px;
+  background: #000;
+  color: var(--text-dim);
+  cursor: pointer;
+  animation: onboarding-intro-out 700ms ease 3600ms forwards;
+}
+.onboarding-intro-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+  text-align: center;
+  opacity: 0;
+  animation: onboarding-intro-hero 3400ms ease 200ms forwards;
+}
+.onboarding-intro-hero h1 {
+  margin: 8px 0 0;
+  color: #ededed;
+  font-size: clamp(26px, 4vw, 38px);
+  font-weight: 600;
+  letter-spacing: -0.04em;
+  text-wrap: balance;
+}
+.onboarding-intro-hero p { max-width: 430px; margin: 0; font-size: 14px; line-height: 1.7; }
+@keyframes onboarding-intro-hero {
+  0% { opacity: 0; transform: translateY(6px); }
+  30% { opacity: 1; transform: none; }
+  75% { opacity: 1; }
+  100% { opacity: 0; }
+}
+@keyframes onboarding-intro-out {
+  to { opacity: 0; }
 }

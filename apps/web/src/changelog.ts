@@ -30,7 +30,7 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
-    id: "org-setup",
+    id: "onboarding-walkthrough",
     date: "2026-10-06",
     title: "A walkthrough for your first board",
     items: [
@@ -41,14 +41,6 @@ export const CHANGELOG: ChangelogEntry[] = [
       {
         title: "Skip it, and bring it back",
         body: "Skip or finish and it stays away on every device, the Mac app included. Turn it back on from Settings, Account whenever you want to go through it again.",
-      },
-      {
-        title: "A walkthrough after you name the team",
-        body: "A new organization used to land on an empty board, with six stages and six agents seeded in silence the first time you created a project. Creating a team now asks whether you want Bento's defaults or want to shape the pipeline and agents first.",
-      },
-      {
-        title: "Defaults you can still edit",
-        body: "The recommended path is the same six stages as before, all waiting for you, with Claude Code on the cheaper model. Customize to drop a stage, add one, or point an agent at a different tool. Later projects in the team inherit that choice.",
       },
     ],
   },

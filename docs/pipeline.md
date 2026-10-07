@@ -1,6 +1,6 @@
 <h1 align="center">Pipelines</h1>
 
-A pipeline is an ordered set of stages. Each stage has an agent and requirements for advancement. Configure under **Pipeline**. Creating a team asks whether to start from Bento's six default stages or to shape the pipeline first. Later projects in that team inherit the choice.
+A pipeline is an ordered set of stages. Each stage has an agent and requirements for advancement. Configure under **Pipeline**.
 
 ## Stages
 
@@ -11,7 +11,7 @@ Per stage: name, agent, advance mode, requirements, pull request flag.
 | Manual | A user approves or rejects |
 | Automatic | All requirements pass. With none listed, advance when the agent finishes successfully |
 
-New projects default to manual approval on every stage.
+New projects default to manual approval on all six stages.
 
 A stage with an assigned agent starts when a card arrives. Sending a card back stops the agent and waits for user input.
 

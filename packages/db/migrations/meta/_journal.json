@@ -335,14 +335,7 @@
       "idx": 47,
       "version": "7",
       "when": 1791100000000,
-      "tag": "0047_organization_setup",
-      "breakpoints": true
-    },
-    {
-      "idx": 48,
-      "version": "7",
-      "when": 1791200000000,
-      "tag": "0048_user_onboarding_walkthrough",
+      "tag": "0047_user_onboarding_walkthrough",
       "breakpoints": true
     }
   ]
