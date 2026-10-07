@@ -175,7 +175,10 @@ test("auto falls back to Modal when the sprite cannot be provisioned", async () 
   const featureId = await seedFeature("Fly is down");
   const asked: string[] = [];
   const said: string[] = [];
-  const sprite = stubDriver("sprite", asked, { fail: new Error("sprites API returned 503\nmore detail") });
+  // Fly's concurrent sprite limit, as the SDK reports it without an
+  // error code: the one failure an operator wants an alert on.
+  const outOfSprites = new Error('Failed to create sprite (status 429): {"error":"concurrent_sprite_limit_exceeded"}\nmore detail');
+  const sprite = stubDriver("sprite", asked, { fail: outOfSprites });
   const modal = stubDriver("modal", asked, { restricted: true });
   const before = provisionEvents().length;
   const exceptionsBefore = analytics.exceptions.length;
@@ -207,10 +210,11 @@ test("auto falls back to Modal when the sprite cannot be provisioned", async () 
   });
   const fallbackErrors = analytics.exceptions.slice(exceptionsBefore);
   assert.equal(fallbackErrors.length, 1);
-  assert.equal(fallbackErrors[0]?.error.message, "sprites API returned 503\nmore detail");
+  assert.equal(fallbackErrors[0]?.error, outOfSprites);
   assert.equal(fallbackErrors[0]?.properties?.source, "sandbox_provision_fallback");
   assert.equal(fallbackErrors[0]?.properties?.provider, "sprite");
   assert.equal(fallbackErrors[0]?.properties?.next_provider, "modal");
+  assert.equal(fallbackErrors[0]?.properties?.error_kind, "capacity");
 });
 
 test("a project that named its provider fails plainly instead of moving", async () => {
@@ -265,6 +269,7 @@ test("when every driver fails, the last error is the run's and the first is stil
   const fallbackErrors = analytics.exceptions.slice(exceptionsBefore);
   assert.equal(fallbackErrors.length, 1);
   assert.equal(fallbackErrors[0]?.error.message, "sprite failed");
+  assert.equal(fallbackErrors[0]?.properties?.error_kind, "other");
 });
 
 test("a locked network never asks the sprite and goes straight to Modal", async () => {
