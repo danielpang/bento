@@ -1,4 +1,5 @@
 import type { CSSProperties } from "react";
+import { rememberedStageCount, skeletonStageCount, type StorageWindow } from "../board-shape.js";
 import { BrandLockup } from "./BrandLockup.js";
 import { TabScroll } from "./TabScroll.js";
 
@@ -57,23 +58,48 @@ function SkeletonCard({ title = "72%" }: { title?: string }) {
  *
  * Stage names are data. Printing "Product investigation" here would be
  * another claim about a pipeline that has not arrived, and a custom
- * pipeline would then swap the labels. Five columns is the seeded
- * shape (backlog, three stages, done); the real board replaces this
- * wholesale once it knows.
+ * pipeline would then swap the labels. How many stage columns is data
+ * too: this draws as many as the project's board last loaded with
+ * (board-shape.ts), and the seeded pipeline's length for a project
+ * this browser has not loaded or whose pipeline is longer than the
+ * five columns a skeleton draws at most. The project is a required prop so no
+ * caller can forget it; pass null where there is none to read. Backlog
+ * and done frame every board, so they are always here; the real board
+ * replaces this wholesale once it knows.
  */
-const SKELETON_LANES = [
-  { title: "4.6rem", cards: [ "78%", "54%" ] },
-  { title: "7.2rem", cards: [ "66%" ] },
-  { title: "5.4rem", cards: [ "71%", "48%" ] },
-  { title: "6.8rem", cards: [ "63%" ] },
-  { title: "3.2rem", cards: [] as string[] },
+const BACKLOG_LANE = { title: "4.6rem", cards: ["78%", "54%"] };
+const DONE_LANE = { title: "3.2rem", cards: [] as string[] };
+/** Stage columns cycle through these, so no two neighbours look stamped. */
+const STAGE_LANES = [
+  { title: "7.2rem", cards: ["66%"] },
+  { title: "5.4rem", cards: ["71%", "48%"] },
+  { title: "6.8rem", cards: ["63%"] },
+  { title: "8.1rem", cards: ["62%"] },
+  { title: "6.0rem", cards: ["74%", "58%"] },
 ];
 
-export function BoardSkeleton() {
+export function skeletonLanes(stages: number) {
+  const count = skeletonStageCount(stages);
+  return [
+    BACKLOG_LANE,
+    ...Array.from({ length: count }, (_, i) => STAGE_LANES[i % STAGE_LANES.length]!),
+    DONE_LANE,
+  ];
+}
+
+export function BoardSkeleton({
+  projectId,
+  browser,
+}: {
+  projectId: string | null;
+  /** Tests only: the storage to read instead of the window's. */
+  browser?: StorageWindow | null;
+}) {
+  const stages = browser === undefined ? rememberedStageCount(projectId) : rememberedStageCount(projectId, browser);
   return (
     <div className="board" aria-busy="true" aria-label="Loading board">
       <LoadingStatus label="Loading board" />
-      {SKELETON_LANES.map((lane, i) => (
+      {skeletonLanes(stages).map((lane, i) => (
         <section key={i} className="lane" data-kind="stage" style={{ "--skeleton-i": i } as CSSProperties}>
           <header className="lane-head">
             <div className="lane-title">

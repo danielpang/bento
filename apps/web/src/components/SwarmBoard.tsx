@@ -330,7 +330,8 @@ export function SwarmBoard({
       .finally(() => setBusy(false));
   }
 
-  if (swarms === null) return <BoardSkeleton />;
+  // Swarm lanes are not the project's stages: the seeded shape.
+  if (swarms === null) return <BoardSkeleton projectId={null} />;
 
   const task = taskId ? detail?.tasks.find((row) => row.id === taskId) ?? null : null;
   const layoutNode = taskId ? model.byId.get(taskId) ?? null : null;
@@ -418,7 +419,7 @@ export function SwarmBoard({
           }}
         />
       ) : (
-        <BoardSkeleton />
+        <BoardSkeleton projectId={null} />
       )}
 
       {task && layoutNode && (

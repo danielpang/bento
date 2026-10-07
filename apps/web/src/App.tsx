@@ -53,6 +53,7 @@ import { useToast } from "./components/Toasts.js";
 import { identifyUser, resetUser, sessionIdentityChange } from "./posthog.js";
 import { desktop } from "./desktop.js";
 import { readProjectSelection, rememberProjectSelection } from "./project-selection.js";
+import { loadBoardPipeline } from "./board-shape.js";
 import type { OnboardingStep } from "./components/OnboardingWalkthrough.js";
 import { REPOSITORY_SETUP_ACTION, REPOSITORY_SETUP_MESSAGE } from "./repository-setup.js";
 
@@ -148,7 +149,7 @@ function RouteFallback() {
           <Skeleton className="skeleton-btn" />
         </div>
       </div>
-      <BoardSkeleton />
+      <BoardSkeleton projectId={readProjectSelection(Boolean(desktop))} />
     </div>
   );
 }
@@ -686,7 +687,8 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
         return;
       }
       const [pipeline, featureRows, snapshot, conversations] = await Promise.all([
-        client.getPipeline(forProject),
+        // Remembers the stage count, so this project's next skeleton is its width.
+        loadBoardPipeline(client, forProject),
         client.listFeatures(forProject),
         // The run status behind every card's face. Seeding it here
         // rather than only from live board events: a run that started
@@ -1275,7 +1277,7 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
         ) : screen === "spend" ? (
           <SpendPageSkeleton />
         ) : (
-          <BoardSkeleton />
+          <BoardSkeleton projectId={projectId} />
         )}
         {panels}
         {dialogs}
@@ -1397,8 +1399,9 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
         </Suspense>
       ) : swarming && projectId ? (
         /* A second board of the same project. Its own boundary, like
-           the panels: the chunk arrives without blanking the chrome. */
-        <Suspense fallback={<BoardSkeleton />}>
+           the panels: the chunk arrives without blanking the chrome. Its
+           lanes are not stages, so the skeleton takes the seeded shape. */
+        <Suspense fallback={<BoardSkeleton projectId={null} />}>
           <SwarmBoard
             projectId={projectId}
             client={client}
@@ -1408,7 +1411,7 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
           />
         </Suspense>
       ) : boardPending ? (
-        <BoardSkeleton />
+        <BoardSkeleton projectId={projectId} />
       ) : (
       <Board
         key={projectId}

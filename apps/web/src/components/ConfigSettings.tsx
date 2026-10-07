@@ -3,6 +3,7 @@ import type { BentoClient, Project } from "@bento/api-client";
 import { ListRowsSkeleton } from "./Skeleton.js";
 import { useToast } from "./Toasts.js";
 import { YamlFileActions, downloadYaml, pipelineImportSummary } from "./YamlFileActions.js";
+import { importBoardPipeline } from "../board-shape.js";
 
 /**
  * Import and export the YAML files that describe agents and a
@@ -74,7 +75,7 @@ export function ConfigSettings({ client }: { client: BentoClient }) {
     setPipelineImported("");
     const ok = await act(async () => {
       if (!projectId) return;
-      setPipelineImported(pipelineImportSummary(await client.importPipeline(projectId, await file.text())));
+      setPipelineImported(pipelineImportSummary(await importBoardPipeline(client, projectId, await file.text())));
     });
     if (!ok) setPipelineImported("");
   }
