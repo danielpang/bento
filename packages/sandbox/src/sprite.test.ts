@@ -16,6 +16,7 @@ import {
   SPRITE_ACQUIRE_RETRY_DELAYS_MS,
   SPRITE_DESTROY_RETRY_DELAYS_MS,
   SPRITE_LOOKUP_RETRY_DELAYS_MS,
+  sandboxErrorKind,
   spriteExistsWithRetry,
   spriteName,
 } from "./sprite.js";
@@ -3514,4 +3515,25 @@ test("Sprite exec reports a lookup that mixed a missing sprite with a blinking A
   assert.match(result.message, /upstream is unwell/);
   assert.equal(calls, 5);
   assert.deepEqual(noted, [{ name: "bento-feature", retries: 5, outcome: "failed", reason: "mixed" }]);
+});
+
+test("sandboxErrorKind tells the concurrent sprite limit apart from the creation rate limit", () => {
+  // Both are 429s. Only the error code says which one will clear on its own.
+  assert.equal(
+    sandboxErrorKind(new APIError("too many sprites", { statusCode: 429, errorCode: "concurrent_sprite_limit_exceeded" })),
+    "capacity",
+  );
+  assert.equal(
+    sandboxErrorKind(new APIError("slow down", { statusCode: 429, errorCode: "sprite_creation_rate_limited" })),
+    "rate_limited",
+  );
+  assert.equal(
+    sandboxErrorKind(new Error('Failed to create sprite (status 429): {"error":"concurrent_sprite_limit_exceeded"}')),
+    "capacity",
+  );
+  assert.equal(sandboxErrorKind(new Error("Failed to create sprite (status 429): busy")), "rate_limited");
+  assert.equal(sandboxErrorKind(new APIError("upstream is unwell", { statusCode: 503 })), "control_plane");
+  assert.equal(sandboxErrorKind(new Error("Network error: fetch failed")), "control_plane");
+  assert.equal(sandboxErrorKind(new APIError("forbidden", { statusCode: 403 })), "other");
+  assert.equal(sandboxErrorKind(new Error("Command failed with exit code 1")), "other");
 });

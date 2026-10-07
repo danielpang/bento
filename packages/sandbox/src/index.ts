@@ -1,7 +1,14 @@
 export * from "./driver.js";
 export { DockerDriver } from "./docker.js";
 export { LocalProcessDriver } from "./local-process.js";
-export { SpriteDriver, spriteName, type SpriteDriverOptions, type SpriteLookupRetry } from "./sprite.js";
+export {
+  SpriteDriver,
+  sandboxErrorKind,
+  spriteName,
+  type SandboxErrorKind,
+  type SpriteDriverOptions,
+  type SpriteLookupRetry,
+} from "./sprite.js";
 export {
   ModalDriver,
   ModalProvisionLeak,

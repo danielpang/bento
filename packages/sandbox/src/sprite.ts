@@ -174,6 +174,31 @@ function isSpriteRateLimit(err: unknown): boolean {
 }
 
 /**
+ * Why a provision failed, in words an alert can filter on.
+ *
+ * `capacity` is the account's concurrent sprite limit: every machine
+ * the plan allows is running, and nothing clears it but a sprite being
+ * reaped or the plan being raised. It arrives as a 429 like the
+ * creation rate limit, so the error code is what tells them apart.
+ * `rate_limited` is the ten creates a minute, which clears on its own.
+ * `control_plane` is Fly failing to answer (5xx, 408, a dropped
+ * connection). `other` is everything else, including failures inside
+ * a machine that was acquired.
+ */
+export type SandboxErrorKind = "capacity" | "rate_limited" | "control_plane" | "other";
+
+export function sandboxErrorKind(err: unknown): SandboxErrorKind {
+  if (err instanceof APIError) {
+    if (err.isConcurrentLimitExceeded()) return "capacity";
+    if (err.isRateLimitError()) return "rate_limited";
+  }
+  if (err instanceof Error && /\(status 429\)/.test(err.message)) {
+    return /concurrent_sprite_limit_exceeded/.test(err.message) ? "capacity" : "rate_limited";
+  }
+  return spriteControlIsRetriable(err) ? "control_plane" : "other";
+}
+
+/**
  * How long to wait before the next try, or undefined when there is
  * none left. A rate limit draws on its own budget and waits as long
  * as the API asked, so the short waits a 500 spent earlier do not

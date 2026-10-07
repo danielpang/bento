@@ -41,7 +41,16 @@ import {
   swarmTasks,
   swarms,
 } from "@bento/db";
-import { collectExec, isExecTimeout, LineChannel, repositoryPathIn, type PreparedRepository, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
+import {
+  collectExec,
+  isExecTimeout,
+  LineChannel,
+  repositoryPathIn,
+  sandboxErrorKind,
+  type PreparedRepository,
+  type SandboxDriver,
+  type SandboxHandle,
+} from "@bento/sandbox";
 import { captureJobErrors } from "../analytics.js";
 import type { AppContext } from "../context.js";
 import { unbilledReason } from "../unbilled-reasons.js";
@@ -475,6 +484,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       run_id: runId,
       ...runOwnerProperties(subject.sandboxOwner),
       source: "sandbox_provision",
+      error_kind: sandboxErrorKind(reported),
       ...(err instanceof SandboxProvisionError ? { blame: err.blame, attempts } : {}),
     });
     const shown =

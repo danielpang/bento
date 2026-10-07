@@ -7,6 +7,7 @@ import {
   ProvisionFailure,
   persistedSandboxProvider,
   provisionBlame,
+  sandboxErrorKind,
   spriteName,
   type PreparedRepository,
   type ProvisionBlame,
@@ -405,6 +406,7 @@ export async function provisionWorkspace(
         source: "sandbox_provision_fallback",
         provider: candidate.provider,
         next_provider: next.provider,
+        error_kind: sandboxErrorKind(reason),
         ...(err instanceof ProvisionFailure ? { phase: err.phase, blame: err.blame } : {}),
         project_id: input.projectId,
         ...("featureId" in input.owner
