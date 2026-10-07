@@ -428,7 +428,7 @@ export function NewProjectDialog({
                 spellCheck={false}
                 aria-label={`Repository path ${index + 1}`}
               />
-              <RepositoryBrowse disabled={busy} onChoose={(path) => setPath(index, path)} />
+              <RepositoryBrowse client={client} disabled={busy} onChoose={(path) => setPath(index, path)} />
               <input
                 className="input repo-branch-input"
                 value={branches[index] ?? ""}

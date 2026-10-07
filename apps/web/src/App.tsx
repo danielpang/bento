@@ -600,23 +600,28 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
   /**
    * The intro plays once per browser, for an account with no projects
    * yet: that is a first sign in, and anybody with a board has seen the
-   * empty state it shows already.
+   * empty state it shows already. "shown" is the fade finished and the
+   * walkthrough open on top of it; it is remembered as played once the
+   * walkthrough is put away or a step opens a panel.
    */
-  const [introPlayed, setIntroPlayed] = useState(() => {
+  const [intro, setIntro] = useState<"pending" | "shown" | "played">(() => {
     try {
-      return localStorage.getItem("bento.onboarding-intro") === "played";
+      return localStorage.getItem("bento.onboarding-intro") === "played" ? "played" : "pending";
     } catch {
-      return false;
+      return "pending";
     }
   });
-  const finishIntro = useCallback(() => {
-    setIntroPlayed(true);
+  const showIntro = useCallback(() => setIntro((current) => (current === "pending" ? "shown" : current)), []);
+  useEffect(() => {
+    if (intro !== "shown") return;
+    if (onboardingOpen && panel === "none" && dialog === "none" && !contactOpen) return;
+    setIntro("played");
     try {
       localStorage.setItem("bento.onboarding-intro", "played");
     } catch {
       // Without storage it plays again next time, which is harmless.
     }
-  }, []);
+  }, [intro, onboardingOpen, panel, dialog, contactOpen]);
   useEffect(() => {
     try {
       sessionStorage.setItem("bento.onboarding-step", onboardingStep);
@@ -1031,12 +1036,12 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
       )}
       {/* Steps aside while the panel or dialog one of its steps opened
           is up, and comes back on the same step when that closes. */}
-      {onboardingOpen && projects !== null && projects.length === 0 && !introPlayed && (
+      {onboardingOpen && projects !== null && projects.length === 0 && intro !== "played" && (
         <Suspense fallback={null}>
-          <OnboardingIntro onDone={finishIntro} />
+          <OnboardingIntro onShown={showIntro} />
         </Suspense>
       )}
-      {onboardingOpen && projects !== null && (introPlayed || projects.length > 0) && panel === "none" && dialog === "none" && !contactOpen && (
+      {onboardingOpen && projects !== null && (intro !== "pending" || projects.length > 0) && panel === "none" && dialog === "none" && !contactOpen && (
         <Suspense fallback={null}>
           <OnboardingWalkthrough
             client={client}

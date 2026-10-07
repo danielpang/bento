@@ -288,7 +288,7 @@ export function RepositoriesPanel({
                   aria-label="Repository path"
                   title="A full path, or one starting with ~ for the home of the machine the server runs on"
                 />
-                <RepositoryBrowse disabled={busy} onChoose={setNewRepo} />
+                <RepositoryBrowse client={client} disabled={busy} onChoose={setNewRepo} />
                 <BaseBranchInput value={newBranch} onChange={setNewBranch} />
                 <button
                   className="btn btn-primary"

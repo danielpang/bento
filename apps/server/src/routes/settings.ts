@@ -11,6 +11,13 @@ import { agentCli } from "@bento/core";
 import type { AppContext } from "../context.js";
 import { readSettings, writeSettings, shouldShareAgentAuth } from "../settings.js";
 import { gitIdentityEnv, localAgentAuthEnv } from "../orchestrator/agent-auth.js";
+import {
+  cleanPickedPath,
+  folderPickerCommand,
+  runPicker,
+  type PickerCommand,
+  type PickRunner,
+} from "../folder-picker.js";
 
 const run = promisify(execFile);
 
@@ -29,8 +36,20 @@ const patchSettings = z.object({
  * tenant's sandbox, so the whole surface is absent rather than merely
  * ineffective.
  */
-export function settingsRoutes(ctx: AppContext) {
+export function settingsRoutes(
+  ctx: AppContext,
+  picker: {
+    command?: () => Promise<PickerCommand | null>;
+    run?: PickRunner;
+    inContainer?: () => Promise<boolean>;
+  } = {},
+) {
   const localOnly = ctx.env.BENTO_MODE !== "multi";
+  const pickerCommand = picker.command ?? (() => folderPickerCommand());
+  const pick = picker.run ?? runPicker;
+  const inContainer = picker.inContainer ?? runsInContainer;
+  /** One dialog at a time: a second would stack behind the first. */
+  let picking = false;
 
   return new Hono()
     /**
@@ -98,6 +117,40 @@ export function settingsRoutes(ctx: AppContext) {
       };
       await writeSettings(ctx, next);
       return c.json({ ...next, shareAgentAuth: await shouldShareAgentAuth(ctx) });
+    })
+    /**
+     * Whether Browse can open a folder dialog here. Only local mode,
+     * where the server and the person share a machine and a screen.
+     */
+    .get("/folder-picker", async (c) => {
+      if (!localOnly || (await inContainer())) return c.json({ available: false });
+      return c.json({ available: (await pickerCommand()) !== null });
+    })
+    /**
+     * Opens the OS folder dialog and answers with what was chosen, or a
+     * null path when it was cancelled.
+     */
+    .post("/folder-picker", async (c) => {
+      if (!localOnly || (await inContainer())) return c.json({ error: "not found" }, 404);
+      // Checked by hand: the JSON validator reads a form post as an
+      // empty object and lets it through. A cross-origin page can send
+      // a form without asking; it cannot send JSON without a preflight
+      // this server never approves.
+      if (!/^application\/json\b/i.test(c.req.header("content-type") ?? "")) {
+        return c.json({ error: "send JSON" }, 415);
+      }
+      const command = await pickerCommand();
+      if (!command) return c.json({ error: "this machine has no folder dialog to open" }, 404);
+      if (picking) return c.json({ error: "a folder dialog is already open" }, 409);
+      picking = true;
+      try {
+        const result = await pick(command);
+        return c.json({ path: result.cancelled ? null : cleanPickedPath(result.stdout) });
+      } catch (err) {
+        return c.json({ error: `Could not open the folder dialog: ${err instanceof Error ? err.message : String(err)}` }, 500);
+      } finally {
+        picking = false;
+      }
     });
 }
 
