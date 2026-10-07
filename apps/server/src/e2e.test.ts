@@ -495,7 +495,7 @@ test("a run's artifacts are captured, listed, and served safely", { timeout: 90_
   assert.deepEqual(leftBehind, [], "captured files are removed from the artifacts directory");
 });
 
-test("a card's sandbox wait is measured from the stage move, new first and reused after", { timeout: 90_000 }, async () => {
+test("a card's sandbox wait is measured from queueing, new first and reused after", { timeout: 90_000 }, async () => {
   const { project, stages } = await setupProject("Sandbox wait");
   const feature = await createFeature(project.id, "Timed card");
   const firstStage = stages[0]!;
@@ -516,43 +516,41 @@ test("a card's sandbox wait is measured from the stage move, new first and reuse
   const before = readyEvents().length;
   const first = await startRun();
   assert.equal(await waitForRun(first.id), "succeeded");
-  const [firstRow] = await ctx.db
-    .select({ queuedAt: agentRuns.queuedAt, startedAt: agentRuns.startedAt })
-    .from(agentRuns)
-    .where(eq(agentRuns.id, first.id));
 
   const firstEvents = readyEvents().slice(before);
-  assert.equal(firstEvents.length, 1, "one sandbox ready event per run that reached its agent");
+  assert.equal(firstEvents.length, 1, "one sandbox ready event per run whose agent came up");
   const made = firstEvents[0]!;
   assert.equal(made.userId, ctx.userId);
   assert.equal(made.properties?.run_id, first.id);
+  assert.equal(made.properties?.role, "stage");
   assert.equal(made.properties?.feature_id, feature.id);
   assert.equal(made.properties?.stage_id, firstStage.id);
   assert.equal(made.properties?.project_id, project.id);
   assert.equal(made.properties?.provider, "local-process");
   assert.equal(made.properties?.sandbox_origin, "new");
-  assert.equal(made.properties?.sandbox_reused, false);
+  assert.equal("sandbox_reused" in (made.properties ?? {}), false, "one property says what the machine was");
   const duration = made.properties?.duration_ms as number;
   const queueWait = made.properties?.queue_wait_ms as number;
   const provision = made.properties?.provision_ms as number;
-  assert.ok(Number.isInteger(duration) && duration >= 0, `duration_ms is a whole number of milliseconds, got ${duration}`);
+  assert.ok(Number.isInteger(duration) && duration >= 0, `duration_ms is whole milliseconds, got ${duration}`);
+  assert.ok(Number.isInteger(queueWait) && queueWait >= 0, `queue_wait_ms is whole milliseconds, got ${queueWait}`);
   assert.ok(Number.isInteger(provision) && provision >= 0, `provision_ms is whole milliseconds, got ${provision}`);
-  assert.ok(provision <= duration, "the driver's share is inside the whole wait");
+  // The whole wait is the queue's share plus everything after the
+  // claim, and the driver's share is inside the latter. Every term is
+  // a database interval or a monotonic one, so this holds whatever
+  // the wall clock did meanwhile.
   assert.ok(queueWait <= duration, "the queue's share is inside the whole wait");
-  // The wait starts when the run was queued, which the stage move wrote.
-  assert.equal(queueWait, firstRow!.startedAt!.getTime() - firstRow!.queuedAt.getTime());
-  // The agent spawned no earlier than the run was queued, and before the run ended.
-  assert.ok(duration <= Date.now() - firstRow!.queuedAt.getTime());
+  assert.ok(provision <= duration - queueWait, "the driver's share is inside the time since the claim");
 
-  // The same card again. Its sandbox row is still there, so the
-  // machine is reopened rather than made.
+  // The same card again. Its sandbox row is still there and the
+  // local driver has no machine to speak of, so the row answers:
+  // the workspace is reopened rather than made.
   const second = await startRun();
   assert.equal(await waitForRun(second.id), "succeeded");
   const secondEvents = readyEvents().slice(before + 1);
   assert.equal(secondEvents.length, 1);
   assert.equal(secondEvents[0]!.properties?.run_id, second.id);
   assert.equal(secondEvents[0]!.properties?.sandbox_origin, "reused");
-  assert.equal(secondEvents[0]!.properties?.sandbox_reused, true);
   assert.equal(secondEvents[0]!.properties?.selection, "existing");
 });
 

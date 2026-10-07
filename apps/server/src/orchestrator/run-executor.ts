@@ -54,7 +54,7 @@ import { recoverAncestryPublishFailures } from "./rebase-run.js";
 import { runRepositorySetup } from "./repo-setup.js";
 import { captureRunArtifacts } from "./capture-artifacts.js";
 import { SandboxProvisionError, provisionFailureCause, provisionWorkspace } from "./sandbox-provision.js";
-import { reportSandboxReady } from "./sandbox-metrics.js";
+import { reportSandboxReady, runOwnerProperties, type SandboxOrigin } from "./sandbox-metrics.js";
 export { sandboxProvisionConflict } from "./sandbox-provision.js";
 import { allCandidates, driversForRun, driverForSandbox, SandboxDriverUnavailable, type ProvisionDrivers } from "./sandbox-driver.js";
 import { evaluateFeatureGate } from "./gate-evaluator.js";
@@ -177,15 +177,20 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
    * both think they picked the run up. The compare-and-set makes
    * exactly one of them run the agent.
    */
-  // Held here as well as written, because the sandbox metric below
-  // measures from it and the row is not read again.
-  const claimedAt = new Date();
+  // The queue wait comes back with the claim, computed by the database
+  // from its own queued_at and its own now(), so the number never
+  // mixes this host's clock with the database's. Everything the
+  // sandbox metric adds after this is a monotonic interval from here.
   const [claimed] = await ctx.db
     .update(agentRuns)
-    .set({ status: "starting", startedAt: claimedAt })
+    .set({ status: "starting", startedAt: new Date() })
     .where(and(eq(agentRuns.id, runId), eq(agentRuns.status, "queued")))
-    .returning({ id: agentRuns.id });
+    .returning({
+      id: agentRuns.id,
+      queueWaitMs: sql<number>`(extract(epoch from (now() - ${agentRuns.queuedAt})) * 1000)::float8`,
+    });
   if (!claimed) return; // a duplicate job claimed it first
+  const claimedTick = performance.now();
   emitBoard("starting");
 
   // A live sandbox keeps the driver that created it. A card or swarm
@@ -302,11 +307,13 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   let handle: SandboxHandle;
   let prepared: PreparedRepository[] = [];
   /**
-   * How long the driver alone took, for the sandbox metric. Timed
-   * around provisionWorkspace rather than read off any row, because
-   * no row records when the machine came up.
+   * How long the driver alone took, and what it did, for the sandbox
+   * metric. Timed around the provisionWorkspace call itself, after
+   * its input is built: the input's own queries and bundling are not
+   * the driver's to answer for.
    */
   let provisionMs = 0;
+  let sandboxOrigin: SandboxOrigin = "new";
   const publisher = await githubConnectionFor(ctx, subject.organizationId);
   /**
    * Named out here because publishing needs it again once the run ends.
@@ -356,8 +363,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     // The workspace, from the function both boards provision through.
     // Modal restore, the restricted-host list, and the sandboxes row
     // live in that function, so a swarm and a card take the same path.
-    const provisionStarted = performance.now();
-    const workspace = await provisionWorkspace(ctx, {
+    const provisionInput: Parameters<typeof provisionWorkspace>[1] = {
       driver,
       fallbackDrivers: chosenDrivers.fallbacks,
       selection: chosenDrivers.selection,
@@ -429,8 +435,11 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
         ? { startFromBundles: await swarmBranchBundles(ctx, subject.swarm, repoRows) }
         : {}),
       say: saySystem,
-    });
+    };
+    const provisionStarted = performance.now();
+    const workspace = await provisionWorkspace(ctx, provisionInput);
     provisionMs = performance.now() - provisionStarted;
+    sandboxOrigin = workspace.origin;
     handle = workspace.handle;
     prepared = workspace.prepared;
     // The driver that made the machine, which on "auto" is the fallback
@@ -464,7 +473,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     console.error(`sandbox provisioning failed for run ${runId}:`, reported, ...(attempts.length > 0 ? [attempts] : []));
     ctx.analytics?.captureException(reported, run.startedBy, subject.organizationId, {
       run_id: runId,
-      ...(subject.kind === "pipeline" ? { feature_id: subject.feature.id } : { swarm_id: subject.swarm.id }),
+      ...runOwnerProperties(subject.sandboxOwner),
       source: "sandbox_provision",
       ...(err instanceof SandboxProvisionError ? { blame: err.blame, attempts } : {}),
     });
@@ -712,27 +721,31 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   // exit, so they skip the second line.
   await saySystem(`Starting ${profile.cli} in the sandbox.`);
   /**
-   * The sandbox is up and the agent is being spawned: this is the end
-   * of the wait the metric measures, from the card entering the stage
-   * to an agent working in a machine. Reported here rather than when
-   * the driver answered, because a machine with no agent in it yet is
-   * not what the person was waiting for.
+   * The end of the wait the sandbox metric measures: an agent working
+   * in a machine. For a streamed CLI that is its first event, so a
+   * CLI that never comes up reports nothing. A text-mode CLI says
+   * nothing until it exits, so its spawn is the nearest moment there
+   * is. Reported from the spawn and not from the driver's answer,
+   * because a machine with no agent in it yet is not what the person
+   * was waiting for.
    */
-  reportSandboxReady(ctx.analytics, {
-    runId,
-    provider: handle.provider,
-    selection: chosenDrivers.selection,
-    queuedAt: run.queuedAt,
-    claimedAt,
-    agentStartedAt: new Date(),
-    provisionMs,
-    projectId: project.id,
-    organizationId: subject.organizationId,
-    userId: run.startedBy,
-    ...(subject.kind === "pipeline"
-      ? { featureId: subject.feature.id, stageId: subject.stage.id }
-      : { swarmId: subject.swarm.id, swarmTaskId: subject.task?.id ?? null }),
-  });
+  const reportAgentUp = () =>
+    reportSandboxReady(ctx.analytics, {
+      runId,
+      role: run.role,
+      provider: handle.provider,
+      selection: chosenDrivers.selection,
+      origin: sandboxOrigin,
+      queueWaitMs: claimed.queueWaitMs,
+      sinceClaimMs: performance.now() - claimedTick,
+      provisionMs,
+      projectId: project.id,
+      organizationId: subject.organizationId,
+      userId: run.startedBy,
+      owner: subject.sandboxOwner,
+      ...(subject.kind === "pipeline" ? { stageId: subject.stage.id } : {}),
+    });
+  if (!announcesLaunchOnFirstEvent(adapter)) reportAgentUp();
   let agentReported = false;
   let sessionRecorded = false;
   try {
@@ -757,6 +770,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
         if (!agentReported) {
           agentReported = true;
           if (announcesLaunchOnFirstEvent(adapter)) {
+            reportAgentUp();
             await saySystem(`${profile.cli} started and is working on the task.`);
           }
         }

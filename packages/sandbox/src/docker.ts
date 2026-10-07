@@ -62,7 +62,7 @@ export class DockerDriver implements SandboxDriver {
       const hasGatewayHost = (info.HostConfig?.ExtraHosts ?? []).includes(HOST_GATEWAY_ALIAS);
       if (hasGatewayHost && sameBinds(info.HostConfig?.Binds ?? [], binds)) {
         if (!info.State.Running) await existing.start();
-        return { externalId: info.Id, provider: "docker", workdir: "/workspace" };
+        return { externalId: info.Id, provider: "docker", workdir: "/workspace", createdSandbox: false };
       }
       // Built for mounts that are no longer the truth: a data directory
       // move, a credential-sharing change. Reusing it would put the
@@ -108,7 +108,7 @@ export class DockerDriver implements SandboxDriver {
     });
     await container.start();
     const info = await container.inspect();
-    return { externalId: info.Id, provider: "docker", workdir: "/workspace" };
+    return { externalId: info.Id, provider: "docker", workdir: "/workspace", createdSandbox: true };
   }
 
   async *exec(handle: SandboxHandle, argv: string[], opts?: ExecOptions): AsyncIterable<ExecChunk> {

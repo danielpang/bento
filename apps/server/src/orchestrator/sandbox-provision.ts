@@ -1,4 +1,4 @@
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, isNull, ne, sql } from "drizzle-orm";
 import { repositories, sandboxes } from "@bento/db";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -19,7 +19,7 @@ import type { AgentBinary } from "@bento/sandbox";
 import { githubConnectionFor } from "../github.js";
 import { duplicateRepositoryLocation } from "../repository-identity.js";
 import { createRepositorySeed } from "./publish.js";
-import { reportSandboxProvisioned, type SandboxSelection } from "./sandbox-metrics.js";
+import { reportSandboxProvisioned, sandboxOrigin, type SandboxOrigin, type SandboxSelection } from "./sandbox-metrics.js";
 import { isolationRefusal, type WorkerIsolation } from "./swarm/sandbox.js";
 
 /**
@@ -155,6 +155,13 @@ export interface ProvisionedWorkspace {
    * the driver that owns the handle.
    */
   driver: SandboxDriver;
+  /**
+   * What this provision did: made a machine for a card that had none,
+   * reopened one already running, or made one again for a card whose
+   * machine was not running. From the driver's `createdSandbox`,
+   * with the sandbox row standing in for a driver that has none.
+   */
+  origin: SandboxOrigin;
 }
 
 /** The sandbox rows this workspace owns, whichever board it is on. */
@@ -336,6 +343,17 @@ export async function provisionWorkspace(
   };
 
   /**
+   * Whether this owner already had a machine, asked before any driver
+   * is, for the metric: a driver that makes a machine for a card that
+   * had one is a restore (or a sprite that went missing), and a
+   * driver with no machine to speak of leaves this to answer alone.
+   * The owner's own row, not the driver selection, because a swarm
+   * worker follows the planner's row to a provider and still gets a
+   * machine of its own.
+   */
+  const hadMachine = await ownerHasMachine(ctx, input.owner);
+
+  /**
    * First driver that answers wins. A driver that throws is cleaned up
    * after (a machine it created and is now walking away from is
    * destroyed), and the next one is asked; the last one's error is
@@ -449,12 +467,16 @@ export async function provisionWorkspace(
       projectId: input.projectId,
       organizationId: input.organizationId,
       userId: input.startedBy ?? null,
-      ...("featureId" in input.owner
-        ? { featureId: input.owner.featureId }
-        : { swarmId: input.owner.swarmId, swarmTaskId: input.owner.swarmTaskId ?? null }),
+      owner: input.owner,
     });
 
-    return { handle, prepared, sandboxRow, driver: driverUsed };
+    return {
+      handle,
+      prepared,
+      sandboxRow,
+      driver: driverUsed,
+      origin: sandboxOrigin({ createdSandbox: handle.createdSandbox, hadMachine }),
+    };
   } catch (err) {
     // A machine this attempt created, and then failed to record, would
     // bill with nobody looking.
@@ -660,6 +682,19 @@ export function sandboxProvisionConflict(input: {
         ? input.recordedImageRef
         : sql`CASE WHEN ${sandboxes.status} = 'destroyed' THEN NULL ELSE ${sandboxes.imageRef} END`,
   };
+}
+
+/** Whether the owner has a sandbox row that is not destroyed: a machine, awake or hibernated. */
+async function ownerHasMachine(
+  ctx: AppContext,
+  owner: { featureId: string } | { swarmId: string; swarmTaskId?: string | null },
+): Promise<boolean> {
+  const [row] = await ctx.db
+    .select({ id: sandboxes.id })
+    .from(sandboxes)
+    .where(and(ownerWhere(owner), ne(sandboxes.status, "destroyed")))
+    .limit(1);
+  return row !== undefined;
 }
 
 /**

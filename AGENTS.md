@@ -189,16 +189,29 @@ Every provision emits `sandbox provisioned` to PostHog with the
 `fell_back_from` when Fly did not; a sprite failure that Modal covered
 also goes to error tracking as `sandbox_provision_fallback`. A new
 place that provisions must go through `provisionWorkspace` so it is
-counted. The executor then emits `sandbox ready` once the agent is
-spawned in the machine: `duration_ms` runs from the card entering the
-stage (the run's `queued_at`) to that spawn, with `queue_wait_ms` and
-`provision_ms` as the slices the queue and the driver took, and
-`sandbox_origin` says whether the machine was made (`new`, a card's
-first stage) or reopened (`reused`, every stage after, which keeps the
-card's sandbox row). Report it from the spawn, not from the driver's
-answer, so the number is the wait a person saw. The whole path, from
-a run asking for a machine to an agent starting in one, is drawn in
-`docs/images/auto-sandbox-flow.png`.
+counted. The executor then emits `sandbox ready` once the agent has
+come up in the machine (its first event for a streamed CLI, its spawn
+for a text-mode one): `duration_ms` runs from the run being queued to
+that moment, which for a stage with an assigned agent is the card's
+move into the stage, since the move and the run's insert are one
+transaction; a run started by hand, a judge, or a rebase is timed
+from its own queueing, and `role` tells them apart. `queue_wait_ms`
+and `provision_ms` are the slices the queue and the driver took, and
+`sandbox_origin` is what the machine was: `new` (the card had none),
+`reused` (a running machine reopened, every stage after the first),
+or `restored` (the card had a machine that was not running, so one
+was made again: a hibernated Modal snapshot, or a sprite that
+disappeared). The driver's `createdSandbox` decides, with the owner's
+own sandbox row (not the driver selection, which a swarm worker
+borrows from the planner) saying whether it had a machine before, so
+a worker's first machine and a Modal restore count as the cold
+starts they are. Keep every term on one clock: the queue wait is the
+database's arithmetic on its own stamps, the rest a monotonic
+interval, and nothing subtracts a database timestamp from this
+host's. A run on a runner executor reports the same event from the
+runner route, with what the runner said about its sandbox. The whole
+path, from a run asking for a machine to an agent starting in one,
+is drawn in `docs/images/auto-sandbox-flow.png`.
 
 ## Starting a run goes through startRunIfIdle, never a bare insert
 
