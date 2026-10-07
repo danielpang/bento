@@ -322,8 +322,8 @@ the feature did not work:
 
 The sandbox toolchain now has a test that provisions a real Fly Sprite
 and installs the real CLIs: `packages/sandbox/src/sprite.e2e.test.ts`,
-run by `.github/workflows/sandbox-e2e.yml` nightly and on any change to
-`agent-toolchain.ts`. It is deliberately outside `pnpm test`, because it
+run by `.github/workflows/sandbox-e2e.yml` on any change to
+`agent-toolchain.ts` or the driver. It is deliberately outside `pnpm test`, because it
 costs a machine and several minutes. Bumping `TOOLCHAIN_VERSION` makes
 every warm sprite reinstall at once, which is when an installer is most
 likely to be throttled, so wait for that workflow before merging a bump.

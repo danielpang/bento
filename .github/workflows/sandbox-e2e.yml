@@ -6,8 +6,6 @@ name: Sandbox e2e
 # depends on four vendors' installers being up, which is not a reason to
 # block an unrelated pull request. It runs when it earns its cost:
 #
-#   nightly       an installer that changed, moved, or went away is found
-#                 by us rather than by somebody's card the next morning
 #   toolchain PR  any change to the script that installs the CLIs, which
 #                 is also every bump of TOOLCHAIN_VERSION. A bump makes
 #                 every warm sprite reinstall at once, so it is the
@@ -29,8 +27,6 @@ name: Sandbox e2e
 # rather than passing on a test that never ran.
 
 on:
-  schedule:
-    - cron: "0 7 * * *"
   pull_request:
     paths:
       - packages/sandbox/src/agent-toolchain.ts
