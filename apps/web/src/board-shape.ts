@@ -13,11 +13,13 @@ import { DEFAULT_STAGES } from "@bento/core";
 const key = (projectId: string) => `bento:board-stages:${projectId}`;
 
 /**
- * The most lanes a skeleton draws. A longer pipeline is stored as this
- * many rather than skipped, so its count never goes stale, and a
- * placeholder never renders hundreds of columns.
+ * The most stage lanes a skeleton draws. Past about six, the rest of a
+ * board is off screen while it loads anyway, so a longer pipeline is
+ * drawn as six: wide enough to fill the page, never a wall of
+ * placeholder columns. Counts above it are stored and read as this,
+ * never skipped, so a growing pipeline's count cannot go stale.
  */
-export const MAX_SKELETON_STAGES = 200;
+export const MAX_SKELETON_STAGES = 6;
 
 export type StorageWindow = Pick<Window, "localStorage">;
 
@@ -31,7 +33,7 @@ export function rememberedStageCount(projectId: string | null, browser: StorageW
       const saved = browser.localStorage.getItem(key(projectId));
       // Digits only: Number("") is 0, and an emptied key is not a board.
       const count = saved !== null && /^\d{1,3}$/.test(saved) ? Number(saved) : NaN;
-      if (count <= MAX_SKELETON_STAGES) return count;
+      if (!Number.isNaN(count)) return Math.min(count, MAX_SKELETON_STAGES);
     } catch { /* Storage can be unavailable. The seeded shape is the guess. */ }
   }
   return DEFAULT_STAGES.length;

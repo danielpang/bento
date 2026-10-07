@@ -45,7 +45,7 @@ test("each project keeps the count its board last loaded with", () => {
 
 test("a value this app did not write is ignored", () => {
   const b = browser();
-  for (const junk of ["", "three", "2.5", "-1", "9999", String(MAX_SKELETON_STAGES + 1)]) {
+  for (const junk of ["", "three", "2.5", "-1", "9999"]) {
     b.values.set("bento:board-stages:p", junk);
     assert.equal(rememberedStageCount("p", b), DEFAULT_STAGES.length, `stored ${JSON.stringify(junk)}`);
   }
@@ -56,17 +56,21 @@ test("a value this app did not write is ignored", () => {
 });
 
 /**
- * A longer pipeline used to be skipped, which left the last count
- * standing: a project that grew past the limit kept drawing its old
- * width. It is capped instead, so the stored count always moves.
+ * Past six stages the rest of the board is off screen while it loads,
+ * so the skeleton stops at six. A longer pipeline used to be skipped,
+ * which left the last count standing: a project that grew past the
+ * limit kept drawing its old width. It is capped instead.
  */
-test("a pipeline longer than the cap is stored as the cap, not skipped", () => {
+test("a pipeline longer than six stages is drawn as six, not skipped", () => {
+  assert.equal(MAX_SKELETON_STAGES, 6);
   const b = browser();
   rememberStageCount("long", 3, b);
-  rememberStageCount("long", MAX_SKELETON_STAGES + 51, b);
-  assert.equal(rememberedStageCount("long", b), MAX_SKELETON_STAGES);
-  rememberStageCount("long", 51, b);
-  assert.equal(rememberedStageCount("long", b), 51, "and an ordinary count past the old limit of 50 is kept");
+  rememberStageCount("long", 11, b);
+  assert.equal(rememberedStageCount("long", b), 6, "a growing pipeline moves the count");
+  b.values.set("bento:board-stages:old", "40");
+  assert.equal(rememberedStageCount("old", b), 6, "a larger stored count reads as the cap, not the default");
+  rememberStageCount("long", 5, b);
+  assert.equal(rememberedStageCount("long", b), 5, "and a shorter one is kept as is");
 });
 
 test("storage that throws reads as unknown and writes nothing", () => {
@@ -82,7 +86,8 @@ test("the skeleton draws backlog, one lane per stage, and done", async () => {
   assert.equal(skeletonLanes(3).length, 5);
   assert.equal(skeletonLanes(6).length, 8, "a six stage project loads as eight lanes");
   assert.equal(skeletonLanes(0).length, 2, "no stages still frames the board");
-  assert.equal(skeletonLanes(12).length, 14, "more stages than bone shapes still draws every lane");
+  assert.equal(skeletonLanes(5).length, 7, "more stages than bone shapes still draws every lane");
+  assert.equal(skeletonLanes(12).length, 8, "past six stages the skeleton stops at six");
   assert.equal(skeletonLanes(Number.NaN).length, DEFAULT_STAGES.length + 2);
 });
 
@@ -127,9 +132,11 @@ test("importing a pipeline file remembers the imported stage count", async () =>
 test("the board skeleton draws the stored count for its project", () => {
   const b = browser();
   rememberStageCount("six", 6, b);
+  rememberStageCount("eleven", 11, b);
   const lanes = (projectId: string | null) =>
     renderToStaticMarkup(createElement(BoardSkeleton, { projectId, browser: b })).match(/<section class="lane"/g)?.length ?? 0;
   assert.equal(lanes("six"), 8, "backlog, six stages, done");
+  assert.equal(lanes("eleven"), 8, "eleven stages still draw six");
   assert.equal(lanes("unseen"), DEFAULT_STAGES.length + 2);
   assert.equal(lanes(null), DEFAULT_STAGES.length + 2);
 });

@@ -1,6 +1,6 @@
 import type { CSSProperties } from "react";
 import { DEFAULT_STAGES } from "@bento/core";
-import { rememberedStageCount, type StorageWindow } from "../board-shape.js";
+import { MAX_SKELETON_STAGES, rememberedStageCount, type StorageWindow } from "../board-shape.js";
 import { BrandLockup } from "./BrandLockup.js";
 import { TabScroll } from "./TabScroll.js";
 
@@ -79,7 +79,7 @@ const STAGE_LANES = [
 ];
 
 export function skeletonLanes(stages: number) {
-  const count = Number.isInteger(stages) && stages >= 0 ? stages : DEFAULT_STAGES.length;
+  const count = Number.isInteger(stages) && stages >= 0 ? Math.min(stages, MAX_SKELETON_STAGES) : DEFAULT_STAGES.length;
   return [
     BACKLOG_LANE,
     ...Array.from({ length: count }, (_, i) => STAGE_LANES[i % STAGE_LANES.length]!),
