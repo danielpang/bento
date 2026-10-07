@@ -53,6 +53,7 @@ import { useToast } from "./components/Toasts.js";
 import { identifyUser, resetUser, sessionIdentityChange } from "./posthog.js";
 import { desktop } from "./desktop.js";
 import { readProjectSelection, rememberProjectSelection } from "./project-selection.js";
+import { rememberedStageCount, rememberStageCount } from "./board-shape.js";
 import type { OnboardingStep } from "./components/OnboardingWalkthrough.js";
 import { REPOSITORY_SETUP_ACTION, REPOSITORY_SETUP_MESSAGE } from "./repository-setup.js";
 
@@ -148,7 +149,7 @@ function RouteFallback() {
           <Skeleton className="skeleton-btn" />
         </div>
       </div>
-      <BoardSkeleton />
+      <BoardSkeleton stages={rememberedStageCount(readProjectSelection(Boolean(desktop)))} />
     </div>
   );
 }
@@ -698,6 +699,8 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
       ]);
       if (seq !== refreshSeq.current) return;
       setStages(pipeline.stages);
+      // The next time this board loads, its skeleton draws this many lanes.
+      rememberStageCount(forProject, pipeline.stages.length);
       setPipelineId(pipeline.id);
       setFeatures(featureRows);
       setSessions(conversations?.sessions ?? []);
@@ -1275,7 +1278,7 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
         ) : screen === "spend" ? (
           <SpendPageSkeleton />
         ) : (
-          <BoardSkeleton />
+          <BoardSkeleton stages={rememberedStageCount(projectId)} />
         )}
         {panels}
         {dialogs}
@@ -1408,7 +1411,7 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
           />
         </Suspense>
       ) : boardPending ? (
-        <BoardSkeleton />
+        <BoardSkeleton stages={rememberedStageCount(projectId)} />
       ) : (
       <Board
         key={projectId}
