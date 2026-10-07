@@ -8,6 +8,7 @@ import type { GateCriterion } from "@bento/core";
 import { ProviderMark } from "./ProviderMark.js";
 import { PREVIEW_TOOLS } from "./ui.js";
 import { YamlFileActions, downloadYaml, pipelineImportSummary } from "./YamlFileActions.js";
+import { importBoardPipeline } from "../board-shape.js";
 
 /**
  * The pipeline as a list of stage cards, each edited in its own modal.
@@ -127,7 +128,7 @@ export function StageConfig({
     setImported("");
     const ok = await act(async () => {
       if (!projectId) return;
-      setImported(pipelineImportSummary(await client.importPipeline(projectId, await file.text())));
+      setImported(pipelineImportSummary(await importBoardPipeline(client, projectId, await file.text())));
     });
     if (!ok) setImported("");
   }

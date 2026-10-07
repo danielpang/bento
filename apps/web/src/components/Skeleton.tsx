@@ -1,5 +1,6 @@
 import type { CSSProperties } from "react";
 import { DEFAULT_STAGES } from "@bento/core";
+import { rememberedStageCount, type StorageWindow } from "../board-shape.js";
 import { BrandLockup } from "./BrandLockup.js";
 import { TabScroll } from "./TabScroll.js";
 
@@ -59,10 +60,12 @@ function SkeletonCard({ title = "72%" }: { title?: string }) {
  * Stage names are data. Printing "Product investigation" here would be
  * another claim about a pipeline that has not arrived, and a custom
  * pipeline would then swap the labels. How many stage columns is data
- * too: the caller passes the count this project's board last loaded
- * with (board-shape.ts), and without one this draws the seeded
- * pipeline's length. Backlog and done frame every board, so they are
- * always here; the real board replaces this wholesale once it knows.
+ * too: this draws as many as the project's board last loaded with
+ * (board-shape.ts), and the seeded pipeline's length for a project
+ * this browser has not loaded. The project is a required prop so no
+ * caller can forget it; pass null where there is none to read. Backlog
+ * and done frame every board, so they are always here; the real board
+ * replaces this wholesale once it knows.
  */
 const BACKLOG_LANE = { title: "4.6rem", cards: ["78%", "54%"] };
 const DONE_LANE = { title: "3.2rem", cards: [] as string[] };
@@ -84,7 +87,15 @@ export function skeletonLanes(stages: number) {
   ];
 }
 
-export function BoardSkeleton({ stages = DEFAULT_STAGES.length }: { stages?: number }) {
+export function BoardSkeleton({
+  projectId,
+  browser,
+}: {
+  projectId: string | null;
+  /** Tests only: the storage to read instead of the window's. */
+  browser?: StorageWindow | null;
+}) {
+  const stages = browser === undefined ? rememberedStageCount(projectId) : rememberedStageCount(projectId, browser);
   return (
     <div className="board" aria-busy="true" aria-label="Loading board">
       <LoadingStatus label="Loading board" />

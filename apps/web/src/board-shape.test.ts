@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { DEFAULT_STAGES } from "@bento/core";
-import { rememberedStageCount, rememberStageCount } from "./board-shape.js";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import {
+  MAX_SKELETON_STAGES,
+  importBoardPipeline,
+  loadBoardPipeline,
+  rememberedStageCount,
+  rememberStageCount,
+} from "./board-shape.js";
+import { BoardSkeleton } from "./components/Skeleton.js";
 
 function browser() {
   const values = new Map<string, string>();
@@ -36,13 +45,28 @@ test("each project keeps the count its board last loaded with", () => {
 
 test("a value this app did not write is ignored", () => {
   const b = browser();
-  for (const junk of ["", "three", "2.5", "-1", "9999"]) {
+  for (const junk of ["", "three", "2.5", "-1", "9999", String(MAX_SKELETON_STAGES + 1)]) {
     b.values.set("bento:board-stages:p", junk);
     assert.equal(rememberedStageCount("p", b), DEFAULT_STAGES.length, `stored ${JSON.stringify(junk)}`);
   }
   rememberStageCount("q", -3, b);
   rememberStageCount("q", Number.NaN, b);
+  rememberStageCount("q", 2.5, b);
   assert.equal(b.values.has("bento:board-stages:q"), false, "nonsense is never written");
+});
+
+/**
+ * A longer pipeline used to be skipped, which left the last count
+ * standing: a project that grew past the limit kept drawing its old
+ * width. It is capped instead, so the stored count always moves.
+ */
+test("a pipeline longer than the cap is stored as the cap, not skipped", () => {
+  const b = browser();
+  rememberStageCount("long", 3, b);
+  rememberStageCount("long", MAX_SKELETON_STAGES + 51, b);
+  assert.equal(rememberedStageCount("long", b), MAX_SKELETON_STAGES);
+  rememberStageCount("long", 51, b);
+  assert.equal(rememberedStageCount("long", b), 51, "and an ordinary count past the old limit of 50 is kept");
 });
 
 test("storage that throws reads as unknown and writes nothing", () => {
@@ -60,4 +84,52 @@ test("the skeleton draws backlog, one lane per stage, and done", async () => {
   assert.equal(skeletonLanes(0).length, 2, "no stages still frames the board");
   assert.equal(skeletonLanes(12).length, 14, "more stages than bone shapes still draws every lane");
   assert.equal(skeletonLanes(Number.NaN).length, DEFAULT_STAGES.length + 2);
+});
+
+test("loading a board's pipeline remembers its stage count, and a failed load remembers nothing", async () => {
+  const b = browser();
+  const pipeline = { id: "pipe", stages: [{}, {}, {}, {}, {}, {}] };
+  const loaded = await loadBoardPipeline({ getPipeline: async (id: string) => (assert.equal(id, "six"), pipeline) }, "six", b);
+  assert.equal(loaded, pipeline, "the pipeline comes back untouched");
+  assert.equal(rememberedStageCount("six", b), 6);
+
+  await assert.rejects(
+    loadBoardPipeline({ getPipeline: async () => { throw new Error("offline"); } }, "down", b),
+    /offline/,
+  );
+  assert.equal(b.values.has("bento:board-stages:down"), false);
+});
+
+/**
+ * The Settings page imports a pipeline without refreshing a board, so
+ * the import itself has to leave the new count behind.
+ */
+test("importing a pipeline file remembers the imported stage count", async () => {
+  const b = browser();
+  rememberStageCount("p", 3, b);
+  const result = { stages: 6, agents: 2, removedStages: [], skippedRepositories: [] };
+  const returned = await importBoardPipeline(
+    { importPipeline: async (id: string, yaml: string) => (assert.equal(id, "p"), assert.equal(yaml, "version: 1"), result) },
+    "p",
+    "version: 1",
+    b,
+  );
+  assert.equal(returned, result);
+  assert.equal(rememberedStageCount("p", b), 6);
+
+  await assert.rejects(
+    importBoardPipeline({ importPipeline: async () => { throw new Error("bad file"); } }, "p", "nope", b),
+    /bad file/,
+  );
+  assert.equal(rememberedStageCount("p", b), 6, "a refused import leaves the count alone");
+});
+
+test("the board skeleton draws the stored count for its project", () => {
+  const b = browser();
+  rememberStageCount("six", 6, b);
+  const lanes = (projectId: string | null) =>
+    renderToStaticMarkup(createElement(BoardSkeleton, { projectId, browser: b })).match(/<section class="lane"/g)?.length ?? 0;
+  assert.equal(lanes("six"), 8, "backlog, six stages, done");
+  assert.equal(lanes("unseen"), DEFAULT_STAGES.length + 2);
+  assert.equal(lanes(null), DEFAULT_STAGES.length + 2);
 });
