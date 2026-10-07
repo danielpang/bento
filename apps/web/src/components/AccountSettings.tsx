@@ -86,6 +86,16 @@ function ownedAccountMessage(names: string[]): string {
  * organizations, so there the tab is only the walkthrough switch.
  */
 export function AccountSettings({ client, mode }: { client: BentoClient; mode: "local" | "multi" }) {
+  // Local mode has one trusted user and no sign in, so the only thing
+  // on this tab there is the walkthrough switch. Split rather than
+  // returned early below: the sign in and organization hooks there ask
+  // /api/auth, which local mode does not mount, and a hook cannot be
+  // skipped once called.
+  if (mode === "local") return <OnboardingCard client={client} />;
+  return <MultiAccountSettings client={client} />;
+}
+
+function MultiAccountSettings({ client }: { client: BentoClient }) {
   const toast = useToast();
   const { data: session } = useSession();
   const { data: active } = useActiveOrganization();
@@ -116,10 +126,6 @@ export function AccountSettings({ client, mode }: { client: BentoClient; mode: "
       setBusy(false);
     }
   }
-
-  // Local mode has one trusted user and no sign in, so the only thing
-  // on this tab there is the walkthrough switch.
-  if (mode === "local") return <OnboardingCard client={client} />;
 
   return (
     <>
