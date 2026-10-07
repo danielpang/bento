@@ -418,40 +418,49 @@ export function NewProjectDialog({
         ) : (
         <div className="field">
           <span className="label">{paths.length === 1 ? "Repository path" : "Repository paths"}</span>
+          {/* One block per repository, so its path, Browse and base branch
+              read as a unit. Laid out as one wrapping row, a second
+              repository's fields ran into the first one's. The heading
+              and the frame only appear once there is more than one. */}
           {paths.map((value, index) => (
-            <div key={index} className="actions">
+            <div key={index} className={paths.length > 1 ? "repo-entry repo-entry-framed" : "repo-entry"}>
+              {paths.length > 1 && (
+                <div className="repo-entry-head">
+                  <span className="repo-entry-title">Repository {index + 1}</span>
+                  <button
+                    type="button"
+                    className="btn btn-ghost repo-entry-remove"
+                    disabled={busy}
+                    onClick={() => {
+                      setPaths((current) => current.filter((_, i) => i !== index));
+                      setBranches((current) => current.filter((_, i) => i !== index));
+                    }}
+                    aria-label={`Remove repository ${index + 1}`}
+                  >
+                    Remove
+                  </button>
+                </div>
+              )}
+              <div className="repo-entry-row">
+                <input
+                  className="input"
+                  value={value}
+                  placeholder={index === 0 ? "/Users/you/code/checkout" : "/Users/you/code/another"}
+                  onChange={(e) => setPath(index, e.target.value)}
+                  spellCheck={false}
+                  aria-label={`Repository path ${index + 1}`}
+                />
+                <RepositoryBrowse client={client} disabled={busy} onChoose={(path) => setPath(index, path)} />
+              </div>
               <input
-                className="input"
-                value={value}
-                placeholder={index === 0 ? "/Users/you/code/checkout" : "/Users/you/code/another"}
-                onChange={(e) => setPath(index, e.target.value)}
-                spellCheck={false}
-                aria-label={`Repository path ${index + 1}`}
-              />
-              <RepositoryBrowse client={client} disabled={busy} onChoose={(path) => setPath(index, path)} />
-              <input
-                className="input repo-branch-input"
+                className="input repo-entry-branch"
                 value={branches[index] ?? ""}
-                placeholder="Base branch"
+                placeholder="Base branch (blank uses the default)"
                 onChange={(e) => setBranch(index, e.target.value)}
                 spellCheck={false}
                 aria-label={`Base branch ${index + 1}`}
                 title="The branch cards start from and open pull requests against. Leave blank to use the repository's default."
               />
-              {paths.length > 1 && (
-                <button
-                  type="button"
-                  className="btn btn-ghost"
-                  disabled={busy}
-                  onClick={() => {
-                    setPaths((current) => current.filter((_, i) => i !== index));
-                    setBranches((current) => current.filter((_, i) => i !== index));
-                  }}
-                  aria-label={`Remove repository path ${index + 1}`}
-                >
-                  Remove
-                </button>
-              )}
             </div>
           ))}
           <div className="actions">
@@ -464,7 +473,7 @@ export function NewProjectDialog({
                 setBranches((current) => [...current, ""]);
               }}
             >
-              Add another repository
+              + Add another repository
             </button>
           </div>
           {/* The order is the workspace order, and the first is where a

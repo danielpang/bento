@@ -10423,3 +10423,22 @@ a.swarm-plan-source-name:hover {
 @media (prefers-reduced-motion: reduce) {
   .onboarding-intro-hero { animation: none; opacity: 1; }
 }
+
+/* A repository in the New project dialog: path and Browse on one row,
+   its base branch under them. Framed with a heading once there are
+   several, so each one's fields read as a unit. */
+.repo-entry { display: grid; gap: 8px; }
+.repo-entry + .repo-entry { margin-top: 10px; }
+.repo-entry-framed {
+  padding: 10px 12px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-raised);
+}
+.repo-entry-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.repo-entry-title { font-size: 12px; font-weight: 600; color: var(--text-dim); }
+.repo-entry-row { display: flex; gap: 8px; align-items: center; }
+.repo-entry-row .input { flex: 1; min-width: 0; }
+.repo-entry-row .btn { flex: none; }
+.repo-entry-branch { font-family: var(--mono); font-size: 12px; }
+.repo-entry-remove { padding: 2px 8px; min-height: 0; font-size: 12px; }
