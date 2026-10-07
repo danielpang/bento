@@ -126,6 +126,93 @@ So when touching this: an adapter with `sessionRecovery` must give
 before it reads the stream, not after. The test is "a restart recovers
 what the agent said while no server was attached" in `e2e.test.ts`.
 
+## Every project is on "auto", and only "auto" ever falls back
+
+`projects.sandbox_provider` is `auto` on every row: a Fly sprite
+first, then a Modal sandbox when the sprite cannot be provisioned,
+among whichever of those two the process has credentials for. It
+engages only on a deployment whose default driver is itself one of
+those remote providers; a docker or local-process deployment that
+merely holds a Fly token keeps its configured driver, so a local
+developer never gets a paid machine by surprise. Nothing in the
+product sets the column to anything else: the settings card and the
+API that once let a beta tester pin a project are gone, and migration
+0046 moved every pinned row to `auto`. The column and its other
+values (null for the deployment default, a provider name to pin) are
+kept for an operator to set by hand in an emergency, without a
+deploy. What a setting means lives in one place, `candidateDrivers` in
+`apps/server/src/orchestrator/sandbox-driver.ts`, which answers
+`{ driver, fallbacks, selection }`; the executor, project creation,
+and the Team route that decides whether a network lock can be honored
+all read it, so do not re-derive it.
+`provisionWorkspace` checks the project first (every clone URL
+without a seed bundle is asked for its HEAD from the server, so a
+URL that does not resolve fails the run before a machine is made),
+then asks the drivers in that order and returns the one that made
+the machine, and the executor uses that driver from then on. Only
+the provider's own failure moves on to the next driver: the sprite
+driver tags every failure with its phase and its blame
+(`ProvisionFailure`), and a checkout that git refused is the
+project's, which Modal would refuse the same way, so it ends the run
+and keeps the sprite for the retry. An existing sandbox row keeps its driver with no fallback, so a
+hibernated Modal machine resumes on Modal and a swarm never splits
+across providers. A team with the network lock on is a Modal team: a
+sprite cannot restrict egress, so `provisionWorkspace` never asks it
+for a locked run and goes straight to Modal, and the Team route
+offers the lock whenever Modal is there to take those runs. The lock
+applies to new cards: a card that already has a machine keeps it,
+and a machine that cannot lock keeps the network it was made with,
+which the card's transcript says. A team without the lock keeps the
+ordinary auto order. A pinned row is honored for every organization,
+beta or not: a pin ignored for some of them would be no use in the
+emergency it exists for. When the loop walks away from a driver that
+failed, it destroys what that driver may have left running, because
+the row will name the other provider and nothing would ever find it:
+a sprite by its workspace name (`spriteName`), whatever the failure
+and without waiting for the destroy, and a Modal machine the driver
+reports through `ModalProvisionLeak`. A sprite that was the last
+driver tried is kept for the next run to reuse by name. The
+transcript never names a provider: a fallback reads "Failed to
+provision sandbox, retrying.", and when every provider failed the run
+record says only "Sandbox failed to provision, we're investigating
+the issue. Please try again later." (`SANDBOX_UNAVAILABLE_MESSAGE`,
+which the unbilled-reason rules match). The providers, phases and
+reasons go to the log and to error tracking on
+`SandboxProvisionError`. A failure that is the project's (git
+refused the checkout) is shown in git's words, because that is what
+the person has to fix. Every swarm run that has a task, the final check's
+judge included, gets a machine of its own, so two runs never
+provision one sprite at once.
+
+Every provision emits `sandbox provisioned` to PostHog with the
+`provider` that answered, the `selection` that chose it, and
+`fell_back_from` when Fly did not; a sprite failure that Modal covered
+also goes to error tracking as `sandbox_provision_fallback`. A new
+place that provisions must go through `provisionWorkspace` so it is
+counted. The executor then emits `sandbox ready` once the agent has
+come up in the machine (its first event for a streamed CLI, its spawn
+for a text-mode one): `duration_ms` runs from the run being queued to
+that moment, which for a stage with an assigned agent is the card's
+move into the stage, since the move and the run's insert are one
+transaction; a run started by hand, a judge, or a rebase is timed
+from its own queueing, and `role` tells them apart. `queue_wait_ms`
+and `provision_ms` are the slices the queue and the driver took, and
+`sandbox_origin` is what the machine was: `new` (the card had none),
+`reused` (a running machine reopened, every stage after the first),
+or `restored` (the card had a machine that was not running, so one
+was made again: a hibernated Modal snapshot, or a sprite that
+disappeared). The driver's `createdSandbox` decides, with the owner's
+own sandbox row (not the driver selection, which a swarm worker
+borrows from the planner) saying whether it had a machine before, so
+a worker's first machine and a Modal restore count as the cold
+starts they are. Keep every term on one clock: the queue wait is the
+database's arithmetic on its own stamps, the rest a monotonic
+interval, and nothing subtracts a database timestamp from this
+host's. A run on a runner executor reports the same event from the
+runner route, with what the runner said about its sandbox. The whole
+path, from a run asking for a machine to an agent starting in one,
+is drawn in `docs/images/auto-sandbox-flow.png`.
+
 ## Starting a run goes through startRunIfIdle, never a bare insert
 
 One card, one agent. Every door that starts a run (the runs route,
@@ -210,7 +297,9 @@ always on.
   ready. The card tools on the MCP gateway (`create_card`,
   `set_pull_request`, `add_pull_request_comment`) are rolled out to
   every run; only the board's group view of split cards is still on
-  the flag.
+  the flag. The sandbox provider is not a product setting at all: every
+  project is on `auto`, beta or not, and nothing in the console or the
+  API changes it.
 
 Do not mint a second flag for "show this to testers". This is that flag.
 

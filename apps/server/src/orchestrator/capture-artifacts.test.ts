@@ -26,7 +26,13 @@ test("artifacts are classified by extension, and only into safe viewers", () => 
 });
 
 test("storage keys are org-prefixed and never contain agent-chosen names", () => {
-  const key = artifactStorageKey("org-a", "feat-1", "run-1", "art-1");
+  const key = artifactStorageKey("org-a", { featureId: "feat-1" }, "run-1", "art-1");
   assert.equal(key, "org/org-a/feature/feat-1/run/run-1/art-1");
-  assert.equal(artifactStorageKey(null, "f", "r", "a"), "org/local/feature/f/run/r/a");
+  assert.equal(artifactStorageKey(null, { featureId: "f" }, "r", "a"), "org/local/feature/f/run/r/a");
+  // A swarm's artifacts are keyed by the swarm, so the two boards do
+  // not share a prefix and nothing has to guess which one a key names.
+  assert.equal(
+    artifactStorageKey("org-a", { swarmId: "sw-1" }, "run-1", "art-1"),
+    "org/org-a/swarm/sw-1/run/run-1/art-1",
+  );
 });

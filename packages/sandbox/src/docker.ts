@@ -1,7 +1,8 @@
 import type Docker from "dockerode";
 import { randomUUID } from "node:crypto";
 import { createDockerClient } from "./docker-client.js";
-import { execTimeoutMessage, type ExecChunk, type ExecOptions, type ProvisionSpec, type SandboxDriver, type SandboxHandle } from "./driver.js";
+import { collectExec, execTimeoutMessage, type ExecChunk, type ExecOptions, type ProvisionSpec, type SandboxDriver, type SandboxHandle } from "./driver.js";
+import { DURABLE_DIR, DURABLE_READER, DURABLE_RUNNER, SANDBOX_NODE, parseDurableRecord } from "./docker-durable.js";
 
 const DEFAULT_IMAGE = "bento-sandbox:dev";
 
@@ -23,6 +24,7 @@ export class DockerDriver implements SandboxDriver {
    */
   private restrictedNetwork: string | undefined;
   provider = "docker" as const;
+  readonly workspace = "host" as const;
   supportsStdin = true;
   private docker: Docker;
 
@@ -36,12 +38,12 @@ export class DockerDriver implements SandboxDriver {
     return Boolean(this.restrictedNetwork);
   }
 
-  containerName(featureId: string): string {
-    return `bento-sbx-${featureId}`;
+  containerName(workspaceKey: string): string {
+    return `bento-sbx-${workspaceKey}`;
   }
 
   async provision(spec: ProvisionSpec): Promise<SandboxHandle> {
-    const name = this.containerName(spec.featureId);
+    const name = this.containerName(spec.workspaceKey);
     const image = spec.image ?? DEFAULT_IMAGE;
     const binds = [
       `${spec.hostWorkspacePath}:/workspace`,
@@ -60,7 +62,7 @@ export class DockerDriver implements SandboxDriver {
       const hasGatewayHost = (info.HostConfig?.ExtraHosts ?? []).includes(HOST_GATEWAY_ALIAS);
       if (hasGatewayHost && sameBinds(info.HostConfig?.Binds ?? [], binds)) {
         if (!info.State.Running) await existing.start();
-        return { externalId: info.Id, provider: "docker", workdir: "/workspace" };
+        return { externalId: info.Id, provider: "docker", workdir: "/workspace", createdSandbox: false };
       }
       // Built for mounts that are no longer the truth: a data directory
       // move, a credential-sharing change. Reusing it would put the
@@ -78,7 +80,7 @@ export class DockerDriver implements SandboxDriver {
       Cmd: ["sleep", "infinity"],
       Labels: {
         "dev.bento.project": spec.projectId,
-        "dev.bento.feature": spec.featureId,
+        "dev.bento.workspace": spec.workspaceKey,
       },
       Env: Object.entries(spec.env ?? {}).map(([k, v]) => `${k}=${v}`),
       WorkingDir: "/workspace",
@@ -106,10 +108,14 @@ export class DockerDriver implements SandboxDriver {
     });
     await container.start();
     const info = await container.inspect();
-    return { externalId: info.Id, provider: "docker", workdir: "/workspace" };
+    return { externalId: info.Id, provider: "docker", workdir: "/workspace", createdSandbox: true };
   }
 
   async *exec(handle: SandboxHandle, argv: string[], opts?: ExecOptions): AsyncIterable<ExecChunk> {
+    if (opts?.sessionKey) {
+      yield* this.execDurable(handle, argv, opts);
+      return;
+    }
     if (opts?.signal?.aborted) {
       yield { kind: "stderr", data: "cancelled" };
       yield { kind: "exit", exitCode: -1 };
@@ -239,6 +245,129 @@ export class DockerDriver implements SandboxDriver {
     }
   }
 
+  private async *execDurable(handle: SandboxHandle, argv: string[], opts: ExecOptions): AsyncIterable<ExecChunk> {
+    if (opts.signal?.aborted) {
+      yield { kind: "stderr", data: "cancelled" };
+      yield { kind: "exit", exitCode: -1 };
+      return;
+    }
+    const key = durableKey(opts.sessionKey);
+    const container = this.docker.getContainer(handle.externalId);
+    const execution = await container.exec({
+      Cmd: [SANDBOX_NODE, "-e", DURABLE_RUNNER, JSON.stringify({
+        key, argv, cwd: opts.cwd ?? handle.workdir, stdin: Boolean(opts.stdin),
+      })],
+      WorkingDir: opts.cwd ?? handle.workdir,
+      Env: ["IS_SANDBOX=1", `BENTO_EXEC_ID=${key}`, ...Object.entries(opts.env ?? {}).map(([k, v]) => `${k}=${v}`)],
+    });
+    const detached = await execution.start({ Detach: true });
+    detached.resume();
+    if (!(await this.waitForDurableRun(handle, key))) throw new Error("sandbox run did not start");
+    yield* this.durableStream(handle, key, opts);
+  }
+
+  async attach(
+    handle: SandboxHandle,
+    _argv: string[],
+    opts?: ExecOptions,
+  ): Promise<AsyncIterable<ExecChunk> | null> {
+    const key = durableKey(opts?.sessionKey);
+    if (!(await this.waitForDurableRun(handle, key))) return null;
+    return this.durableStream(handle, key, opts);
+  }
+
+  private async waitForDurableRun(handle: SandboxHandle, key: string): Promise<boolean> {
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const check = await collectExec(this.exec(handle, ["test", "-f", `${DURABLE_DIR}/${key}/ready`], {
+        timeoutMs: 5000,
+      }));
+      if (check.exitCode === 0) return true;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return false;
+  }
+
+  private async *durableStream(handle: SandboxHandle, key: string, opts?: ExecOptions): AsyncIterable<ExecChunk> {
+    const container = this.docker.getContainer(handle.externalId);
+    let finished = false;
+    let stopping: Promise<void> | undefined;
+    const stop = (reason: string) => {
+      if (finished || stopping) return;
+      stopping = (async () => {
+        try {
+          await stopDockerExec(container, key);
+        } finally {
+          const payload = JSON.stringify({ kind: "stderr", data: Buffer.from(reason).toString("base64"), seq: 0 }) + "\n"
+            + JSON.stringify({ kind: "exit", exitCode: -1, seq: 0 }) + "\n";
+          await collectExec(this.exec(handle, [SANDBOX_NODE, "-e",
+            "require('node:fs').appendFileSync(process.argv[1], Buffer.from(process.argv[2], 'base64'))",
+            `${DURABLE_DIR}/${key}/events`, Buffer.from(payload).toString("base64")], { timeoutMs: 5000 }));
+        }
+      })();
+    };
+    const onAbort = () => stop("cancelled");
+    opts?.signal?.addEventListener("abort", onAbort, { once: true });
+    if (opts?.signal?.aborted) onAbort();
+    const timeout = opts?.timeoutMs
+      ? setTimeout(() => stop(`exec timeout: the command reached its ${opts.timeoutMs! / 1000} second limit`), opts.timeoutMs)
+      : null;
+
+    if (opts?.stdin) {
+      void (async () => {
+        try {
+          for await (const line of opts.stdin!) {
+            if (finished || stopping) break;
+            const data = Buffer.from(line.endsWith("\n") ? line : `${line}\n`).toString("base64");
+            await collectExec(this.exec(handle, [SANDBOX_NODE, "-e",
+              "require('node:fs').appendFileSync(process.argv[1], JSON.stringify({kind:'line',data:process.argv[2]})+'\\n')",
+              `${DURABLE_DIR}/${key}/input`, data], { timeoutMs: 5000 }));
+          }
+          if (!finished && !stopping) {
+            await collectExec(this.exec(handle, [SANDBOX_NODE, "-e",
+              "require('node:fs').appendFileSync(process.argv[1], JSON.stringify({kind:'end'})+'\\n')",
+              `${DURABLE_DIR}/${key}/input`], { timeoutMs: 5000 }));
+          }
+        } catch {
+          // A closed server loses its writer; the sandbox process and
+          // input record remain for the successor's writer.
+        }
+      })();
+    }
+
+    let pending = "";
+    try {
+      for await (const chunk of this.exec(handle, [SANDBOX_NODE, "-e", DURABLE_READER, key, String(opts?.afterCursor ?? 0)])) {
+        if (chunk.kind === "exit") {
+          if (!finished) throw new Error(`durable output reader exited with ${chunk.exitCode}`);
+          break;
+        }
+        if (chunk.kind === "stderr") {
+          yield chunk;
+          continue;
+        }
+        pending += chunk.data;
+        let newline;
+        while ((newline = pending.indexOf("\n")) !== -1) {
+          const line = pending.slice(0, newline);
+          pending = pending.slice(newline + 1);
+          const record = parseDurableRecord(line);
+          if (record.kind === "exit") {
+            finished = true;
+            yield { kind: "exit", exitCode: record.exitCode, cursor: record.seq };
+            return;
+          }
+          if (record.seq > (opts?.afterCursor ?? 0)) {
+            yield { kind: record.kind, data: record.data, cursor: record.seq };
+          }
+        }
+      }
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      opts?.signal?.removeEventListener("abort", onAbort);
+      await stopping;
+    }
+  }
+
   /**
    * Runs `command -v` for each tool in a throwaway container built from
    * the sandbox image, which is where agents actually run: what the
@@ -336,4 +465,9 @@ class CollectingStream extends Writable {
     this.onData(chunk.toString("utf8"));
     cb();
   }
+}
+
+function durableKey(key: string | undefined): string {
+  if (!key || !/^[A-Za-z0-9_-]+$/.test(key)) throw new Error("invalid durable sandbox run key");
+  return key;
 }

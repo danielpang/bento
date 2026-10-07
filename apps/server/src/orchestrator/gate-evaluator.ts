@@ -7,12 +7,13 @@ import { parseRepoUrl } from "@bento/github";
 import type { AppContext } from "../context.js";
 import { githubConnectionFor } from "../github.js";
 import { featurePullRequestTargets } from "../feature-prs.js";
-import { ACTIVE_RUN_STATUSES, startRunIfIdle } from "./start-run.js";
+import { ACTIVE_RUN_STATUSES, NO_REPOSITORIES, projectHasRepositories, startRunIfIdle } from "./start-run.js";
 import { enqueueRun } from "./queue.js";
 import { queueLinearOutbound } from "./linear-sync.js";
 import { gatedReasonJob, queueSlackNotify } from "./slack-notify.js";
 import { queueSandboxReap } from "./reap-sandbox.js";
 import { captureStageSpend } from "./stage-spend.js";
+import { driverForSandbox, SandboxDriverUnavailable } from "./sandbox-driver.js";
 import { startAssignedStageAgent, stopRunsOutsideStage } from "./stage-agent.js";
 
 type Feature = typeof features.$inferSelect;
@@ -68,7 +69,7 @@ export async function evaluateFeatureGate(ctx: AppContext, featureId: string): P
       and(
         eq(agentRuns.featureId, feature.id),
         eq(agentRuns.stageId, stage.id),
-        ne(agentRuns.kind, "rebase"),
+        ne(agentRuns.role, "rebase"),
       ),
     )
     .orderBy(desc(agentRuns.queuedAt))
@@ -134,6 +135,11 @@ export async function evaluateFeatureGate(ctx: AppContext, featureId: string): P
     gateCtx.judge = (criterion) => judgeStageWork(ctx, feature, stage, criterion, project?.executor ?? "server");
   }
 
+  // Set when the command's sandbox names a driver this process does
+  // not have. The evaluation still runs, and that criterion is
+  // recorded failed: an uncaught throw here leaves the card active
+  // with no check, and nothing schedules the gate again.
+  let unconfiguredSandbox: string | null = null;
   if (criteria.some((c) => c.type === "command")) {
     const [sandbox] = await ctx.db
       .select()
@@ -143,17 +149,25 @@ export async function evaluateFeatureGate(ctx: AppContext, featureId: string): P
       .limit(1);
     if (sandbox && sandbox.status !== "destroyed") {
       // Match the agent's working directory so "pnpm test" means the
-      // same thing in a gate as it does in a run.
-      const repoRows = await ctx.db.select().from(repositories).where(eq(repositories.projectId, feature.projectId));
-      const workdir = repoRows.length === 1 ? `${sandbox.workdir}/${repoRows[0]!.name}` : sandbox.workdir;
-      gateCtx.sandbox = {
-        handle: {
-          externalId: sandbox.externalId,
-          provider: sandbox.provider === "sprite" ? "sprite" : ctx.driver.provider,
-          workdir,
-        },
-        exec: (handle, argv, opts) => ctx.driver.exec(handle, argv, opts),
-      };
+      // same thing in a gate as it does in a run. The row picks the
+      // driver; an unconfigured provider fails the evaluation rather
+      // than running the command on a different machine.
+      try {
+        const driver = driverForSandbox(ctx.drivers, sandbox);
+        const repoRows = await ctx.db.select().from(repositories).where(eq(repositories.projectId, feature.projectId));
+        const workdir = repoRows.length === 1 ? `${sandbox.workdir}/${repoRows[0]!.name}` : sandbox.workdir;
+        gateCtx.sandbox = {
+          handle: {
+            externalId: sandbox.externalId,
+            provider: driver.provider,
+            workdir,
+          },
+          exec: (handle, argv, opts) => driver.exec(handle, argv, opts),
+        };
+      } catch (err) {
+        if (!(err instanceof SandboxDriverUnavailable)) throw err;
+        unconfiguredSandbox = err.message;
+      }
     }
   }
 
@@ -169,6 +183,13 @@ export async function evaluateFeatureGate(ctx: AppContext, featureId: string): P
   );
 
   const outcome = await evaluateGate(criteria, gateCtx);
+  if (unconfiguredSandbox) {
+    for (const item of outcome.outcomes) {
+      if (item.criterion.type !== "command") continue;
+      item.result = { status: "failed", detail: unconfiguredSandbox };
+    }
+    outcome.passed = outcome.outcomes.length > 0 && outcome.outcomes.every((item) => item.result.status === "passed");
+  }
 
   const checkRows = outcome.outcomes.map((o) => ({
     featureId: feature.id,
@@ -1110,12 +1131,12 @@ async function judgeStageWork(
     .where(and(eq(agentRuns.featureId, feature.id), eq(agentRuns.stageId, stage.id)))
     .orderBy(desc(agentRuns.queuedAt));
   const isJudgeRun = (run: (typeof runs)[number]) =>
-    run.agentProfileId === criterion.agentProfileId && run.kind === "judge";
+    run.agentProfileId === criterion.agentProfileId && run.role === "judge";
   const latestJudge = runs.find(isJudgeRun);
   // A rebase run is maintenance on the pull request, not new stage
   // work: counting it here made a completed verdict look stale and
   // spawned a fresh paid judge run over unchanged work.
-  const latestWork = runs.find((run) => !isJudgeRun(run) && run.kind !== "rebase");
+  const latestWork = runs.find((run) => !isJudgeRun(run) && run.role !== "rebase");
 
   // The stage's own agent has not run yet and is coming: let the work
   // happen before anyone judges it.
@@ -1164,12 +1185,17 @@ async function judgeStageWork(
     return { status: "failed", detail: "The judge agent no longer exists. Pick another in the stage settings." };
   }
 
+  if (!(await projectHasRepositories(ctx.db, feature.projectId))) {
+    return { status: "pending", detail: NO_REPOSITORIES };
+  }
+
   const run = await startRunIfIdle(ctx.db, {
+    type: "pipeline" as const,
     featureId: feature.id,
     stageId: stage.id,
     agentProfileId: judgeProfile.id,
     prompt: buildJudgePrompt(stage, judgeProfile),
-    kind: "judge",
+    role: "judge",
     executor: executor === "runner" ? "runner" : "server",
   }, ctx.entitlements, ctx.analytics);
   if (run === "busy") {

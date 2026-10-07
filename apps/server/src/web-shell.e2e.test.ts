@@ -4,8 +4,10 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createDb, createPool } from "@bento/db";
+import type { SandboxDriver } from "@bento/sandbox";
 import { createApp } from "./app.js";
 import type { AppContext } from "./context.js";
+import { singleDriver } from "./orchestrator/sandbox-driver.js";
 import { loadEnv } from "./env.js";
 
 /**
@@ -33,7 +35,7 @@ function contextFor(webDir: string): AppContext {
   return {
     env: loadEnv({ BENTO_MODE: "local", DATABASE_URL: databaseUrl, BENTO_WEB_DIR: webDir } as NodeJS.ProcessEnv),
     db: createDb(pool),
-    driver: { provider: "local-process" },
+    drivers: singleDriver({ provider: "local-process", workspace: "host" } as SandboxDriver),
   } as unknown as AppContext;
 }
 

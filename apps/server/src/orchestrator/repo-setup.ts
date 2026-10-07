@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { resolveRepositoryCommands } from "@bento/core";
 import { sandboxes } from "@bento/db";
-import { collectExec, type SandboxHandle } from "@bento/sandbox";
+import { collectExec, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
 
 /**
@@ -49,6 +49,7 @@ export function setupFingerprint(repositories: SetupRepository[]): string | null
 export async function runRepositorySetup(
   ctx: AppContext,
   args: {
+    driver: SandboxDriver;
     handle: SandboxHandle;
     repositories: SetupRepository[];
     signal?: AbortSignal | undefined;
@@ -85,7 +86,7 @@ export async function runRepositorySetup(
     let result;
     try {
       result = await collectExec(
-        ctx.driver.exec(args.handle, ["sh", "-lc", command], {
+        args.driver.exec(args.handle, ["sh", "-lc", command], {
           cwd: repo.cwd,
           timeoutMs: SETUP_TIMEOUT_MS,
           ...(args.signal ? { signal: args.signal } : {}),

@@ -20,8 +20,10 @@ import {
   runMigrations,
   sandboxes,
   stages,
+  swarms,
 } from "@bento/db";
-import { WorktreeManager } from "@bento/sandbox";
+import { WorktreeManager, type SandboxDriver } from "@bento/sandbox";
+import { singleDriver } from "./sandbox-driver.js";
 import pg from "pg";
 import { DiskArtifactStore } from "../artifact-store.js";
 import { artifactStorageKey } from "./capture-artifacts.js";
@@ -29,7 +31,8 @@ import { ensureLocalUser, type AppContext } from "../context.js";
 import { loadEnv } from "../env.js";
 import { SecretBox } from "../secrets.js";
 import { EventBus } from "../events.js";
-import { reapFinishedSandboxes, reapSandbox } from "./reap-sandbox.js";
+import { reapFinishedSandboxes, reapSandbox, reapSwarmSandbox } from "./reap-sandbox.js";
+import { swarmWorkspaceKey } from "./swarm/sandbox.js";
 
 const run = promisify(execFile);
 
@@ -81,15 +84,16 @@ before(async () => {
     pool,
     boss: { send: async () => "job" } as AppContext["boss"],
     bus: new EventBus(),
-    driver: {
+    drivers: singleDriver({
       provider: "docker",
+      workspace: "host",
       async destroy(handle: { externalId: string }) {
         destroyed.push(handle.externalId);
       },
       async exists() {
         return false;
       },
-    } as unknown as AppContext["driver"],
+    } as unknown as SandboxDriver),
     worktrees: new WorktreeManager(dataDir),
     secretBox: new SecretBox("test-encryption-key-at-least-32-chars"),
     artifacts: new DiskArtifactStore(dataDir),
@@ -175,6 +179,7 @@ async function seedSucceededRun(featureId: string, stageId: string) {
   const [row] = await ctx.db
     .insert(agentRuns)
     .values({
+      type: "pipeline",
       featureId,
       stageId,
       agentProfileId: profile!.id,
@@ -183,6 +188,61 @@ async function seedSucceededRun(featureId: string, stageId: string) {
     })
     .returning();
   return row!;
+}
+
+/**
+ * A swarm and the machine it works in, which is not a card's.
+ *
+ * `featureId` is null on it, which is the whole reason the sweep used
+ * to miss every one of them, and `swarmTaskId` is null because this is
+ * the swarm's own machine rather than a leaf's worker.
+ */
+async function seedSwarm(opts: {
+  title: string;
+  status: (typeof swarms.$inferSelect)["status"];
+  run?: "running" | "succeeded";
+}): Promise<{ swarmId: string; sandboxId: string; externalId: string }> {
+  const [project] = await ctx.db
+    .insert(projects)
+    .values({ ownerId: ctx.userId, name: opts.title, localPath: repoDir })
+    .returning();
+  const [swarm] = await ctx.db
+    .insert(swarms)
+    .values({
+      workerIsolation: "worktree",
+      projectId: project!.id,
+      slug: `s-${randomUUID().slice(0, 8)}`,
+      title: opts.title,
+      status: opts.status,
+    })
+    .returning();
+  const externalId = `swarm-box-${swarm!.id}`;
+  const [sandbox] = await ctx.db
+    .insert(sandboxes)
+    .values({
+      projectId: project!.id,
+      swarmId: swarm!.id,
+      provider: "docker",
+      externalId,
+      status: "ready",
+      workdir: "/workspace",
+    })
+    .returning();
+  if (opts.run) {
+    const [profile] = await ctx.db
+      .insert(agentProfiles)
+      .values({ ownerId: ctx.userId, name: `planner-${swarm!.id}`, cli: "fake", model: "fake-1" })
+      .returning();
+    await ctx.db.insert(agentRuns).values({
+      type: "swarm",
+      swarmId: swarm!.id,
+      role: "planner",
+      agentProfileId: profile!.id,
+      prompt: "plan it",
+      status: opts.run,
+    });
+  }
+  return { swarmId: swarm!.id, sandboxId: sandbox!.id, externalId };
 }
 
 /**
@@ -201,6 +261,7 @@ test("reaping a finished card destroys its machine and workspace, and leaves art
   const [textArt] = await ctx.db
     .insert(runArtifacts)
     .values({
+      type: "pipeline",
       runId: runRow.id,
       featureId,
       stageSlug: "implementation",
@@ -212,9 +273,10 @@ test("reaping a finished card destroys its machine and workspace, and leaves art
       content: "# write-up\n",
     })
     .returning();
-  const storageKey = artifactStorageKey(null, featureId, runRow.id, "shot");
+  const storageKey = artifactStorageKey(null, { featureId }, runRow.id, "shot");
   await ctx.artifacts!.put(storageKey, Buffer.from("png-bytes"), "image/png");
   await ctx.db.insert(runArtifacts).values({
+    type: "pipeline",
     runId: runRow.id,
     featureId,
     stageSlug: "implementation",
@@ -263,6 +325,7 @@ test("an active run refuses the reap and leaves the workspace", async () => {
     })
     .returning();
   await ctx.db.insert(agentRuns).values({
+    type: "pipeline",
     featureId,
     stageId,
     agentProfileId: profile!.id,
@@ -317,6 +380,22 @@ test("the boot sweep reclaims leftover workspaces of finished and deleted cards"
   await mkdir(junk, { recursive: true });
   await writeFile(path.join(junk, "keep.txt"), "leave me\n");
 
+  /**
+   * A swarm's workspace shares this folder and is not a card.
+   *
+   * The sweep deletes a directory whose row it cannot find, and a
+   * swarm has no row in features, so a pattern that accepted
+   * `swarm-<id>` would delete the workspace of a swarm that is still
+   * working. The prefix is what keeps it out, and this is what says so.
+   */
+  const swarmWorkspace = path.join(
+    ctx.env.BENTO_DATA_DIR,
+    "worktrees",
+    swarmWorkspaceKey("2f1c9d1e-3b7a-4c55-9f0e-6d2a8b4c1e77"),
+  );
+  await mkdir(swarmWorkspace, { recursive: true });
+  await writeFile(path.join(swarmWorkspace, "leaf.txt"), "still working\n");
+
   await reapFinishedSandboxes(ctx);
 
   await assert.rejects(() => stat(ctx.worktrees.workspacePath(done.featureId)), { code: "ENOENT" });
@@ -324,4 +403,77 @@ test("the boot sweep reclaims leftover workspaces of finished and deleted cards"
   await assert.rejects(() => stat(ctx.worktrees.workspacePath(deleted.featureId)), { code: "ENOENT" });
   await stat(ctx.worktrees.workspacePath(active.featureId));
   await stat(path.join(junk, "keep.txt"));
+  await stat(path.join(swarmWorkspace, "leaf.txt"));
+});
+
+/**
+ * A swarm's own machine costs money the same way a card's does.
+ *
+ * It is the longest lived machine in the product: provisioned before
+ * the plan exists, still there when the last leaf lands. The sweep
+ * reached it through a join on features, and a swarm machine has no
+ * feature, so an inner join matched none of them: every swarm anybody
+ * ever finished or stopped left its sprite running and billing, and
+ * only deleting the swarm outright took it.
+ */
+test("the boot sweep reclaims the machine of a swarm that is over, and leaves a live one", async () => {
+  const stopped = await seedSwarm({ title: "Swarm stopped", status: "cancelled" });
+  const finished = await seedSwarm({ title: "Swarm done", status: "done" });
+  const live = await seedSwarm({ title: "Swarm running", status: "running" });
+
+  await reapFinishedSandboxes(ctx);
+
+  for (const over of [stopped, finished]) {
+    assert.ok(destroyed.includes(over.externalId), `the driver was asked to destroy ${over.externalId}`);
+    const [row] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, over.sandboxId));
+    assert.equal(row?.status, "destroyed", "and the row says the machine is gone");
+  }
+  assert.equal(destroyed.includes(live.externalId), false, "a swarm still working keeps its machine");
+  const [running] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, live.sandboxId));
+  assert.equal(running?.status, "ready");
+});
+
+test("a swarm's machine is not taken out from under an agent still working in it", async () => {
+  const swarm = await seedSwarm({ title: "Swarm with an agent", status: "cancelled", run: "running" });
+  await assert.rejects(() => reapSwarmSandbox(ctx, swarm.swarmId), /still working/);
+  const [row] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, swarm.sandboxId));
+  assert.equal(row?.status, "ready", "the row still points at a machine that is there");
+});
+
+/**
+ * One card can hold two machines when the driver was switched or a
+ * rebuild left the older container. A row this process cannot drive
+ * must not abort the rest, and must not be marked destroyed.
+ */
+test("an unconfigured sandbox row does not skip the other machine or the workspace", async () => {
+  const { featureId, projectId } = await seedCard({ title: "Mixed machines", sandbox: false });
+  await ctx.db.insert(sandboxes).values([
+    {
+      projectId,
+      featureId,
+      provider: "sprite",
+      externalId: `sprite-${featureId}`,
+      status: "ready",
+      workdir: "/workspace",
+    },
+    {
+      projectId,
+      featureId,
+      provider: "docker",
+      externalId: `docker-${featureId}`,
+      status: "ready",
+      workdir: "/workspace",
+    },
+  ]);
+
+  await reapSandbox(ctx, featureId);
+
+  const rows = await ctx.db.select().from(sandboxes).where(eq(sandboxes.featureId, featureId));
+  const sprite = rows.find((row) => row.provider === "sprite");
+  const docker = rows.find((row) => row.provider === "docker");
+  assert.equal(sprite?.status, "ready", "a machine this process cannot delete stays");
+  assert.equal(docker?.status, "destroyed");
+  assert.equal(destroyed.includes(`docker-${featureId}`), true, "the docker machine was destroyed");
+  assert.equal(destroyed.includes(`sprite-${featureId}`), false, "the sprite was not asked");
+  await assert.rejects(() => stat(ctx.worktrees.workspacePath(featureId)), { code: "ENOENT" });
 });

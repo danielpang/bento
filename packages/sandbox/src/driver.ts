@@ -3,14 +3,94 @@ import type { AgentBinary } from "./agent-toolchain.js";
 export interface SandboxHandle {
   /** Driver-specific identifier: container id, sprite name, or process tag. */
   externalId: string;
-  provider: "docker" | "sprite" | "local-process";
+  provider: "docker" | "sprite" | "local-process" | "modal";
   /** Working directory inside the sandbox where the repo is checked out. */
   workdir: string;
+  /**
+   * Hibernation snapshot image id, when the row has one. Modal destroy
+   * deletes it. Other drivers ignore it.
+   */
+  imageRef?: string;
+  /**
+   * Restricted network to apply if restore has to boot a machine.
+   * The same hosts provision would have used. Restricted with no
+   * usable host refuses, rather than opening the network.
+   */
+  network?: "open" | "restricted";
+  allowedHosts?: string[];
+  /**
+   * Set by a Modal provision. Null drops a hibernation image this
+   * start did not use. A string is the image the sandbox actually
+   * restored. Absent leaves the stored id alone, except a destroyed
+   * row, which drops it.
+   */
+  recordedImageRef?: string | null;
+  /**
+   * Whether this provision made the machine (true) or found one
+   * already there and reopened it (false). A failure after creating
+   * one has to destroy it, or a hibernated row hides it from the
+   * sweep; and the sandbox metrics count a made machine as a cold
+   * start. Absent when the driver has no machine to speak of
+   * (local-process), and the caller falls back to the sandbox row.
+   */
+  createdSandbox?: boolean;
+}
+
+/** Where a provision died: getting the machine, installing the agent CLIs, making the checkouts, or sweeping old ones. */
+export type ProvisionPhase = "acquire" | "install" | "checkout" | "cleanup";
+
+/**
+ * Whose fault a provision failure is. "provider" is the sandbox
+ * provider's: its control plane, its machine, its network. "project"
+ * is the project's: a clone URL that does not resolve, a branch that
+ * is not there, a credential that was refused. Only the first is a
+ * reason to try another provider; the second would fail there too.
+ */
+export type ProvisionBlame = "provider" | "project";
+
+/**
+ * A provision failure that says which phase it died in and whose
+ * fault it is, for the caller deciding whether another provider is
+ * worth asking. The message is the cause's, and the cause's stdout
+ * and stderr ride along, so a run record reads the same as before.
+ */
+export class ProvisionFailure extends Error {
+  readonly provider: SandboxHandle["provider"];
+  readonly phase: ProvisionPhase;
+  readonly blame: ProvisionBlame;
+  readonly stdout?: string;
+  readonly stderr?: string;
+
+  constructor(provider: SandboxHandle["provider"], phase: ProvisionPhase, blame: ProvisionBlame, cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = "ProvisionFailure";
+    this.provider = provider;
+    this.phase = phase;
+    this.blame = blame;
+    const output = cause as { stdout?: unknown; stderr?: unknown } | null;
+    if (typeof output?.stdout === "string") this.stdout = output.stdout;
+    if (typeof output?.stderr === "string") this.stderr = output.stderr;
+  }
+}
+
+/** Whose fault a provision failure was, or null for an error no driver tagged. */
+export function provisionBlame(err: unknown): ProvisionBlame | null {
+  return err instanceof ProvisionFailure ? err.blame : null;
 }
 
 export interface ProvisionSpec {
   projectId: string;
-  featureId: string;
+  /**
+   * What this workspace is called: the stem of the container or sprite
+   * name, and the directory the worktrees live in.
+   *
+   * A card passes its feature id, which is what every machine already
+   * provisioned is named after. A swarm passes a key of its own. A
+   * driver only ever uses it as a name, so it is a key rather than an
+   * id of any one table: naming it after one board's rows would say
+   * the other board's machines belong to a card that does not exist.
+   */
+  workspaceKey: string;
   /** Host path of the git worktree to expose at workdir (docker/local). */
   hostWorkspacePath: string;
   /**
@@ -24,6 +104,24 @@ export interface ProvisionSpec {
     baseBranch?: string | undefined;
     /** Trusted server-created bundle used when credentials cannot enter the sandbox. */
     seedBundle?: Buffer | undefined;
+    /**
+     * A branch the remote does not have, and the commits that make it.
+     *
+     * A swarm's branch lives nowhere but the machine holding it: the
+     * merge queue lands onto it and nothing pushes until the swarm is
+     * finished. So a worker on a driver that clones from the remote
+     * cannot reach it, and a branch cut from the remote's default
+     * branch would have none of what the leaves before it landed: its
+     * agent writes against code the swarm has already moved past, and
+     * its branch conflicts with every one of them at the queue.
+     *
+     * This is that branch, exported from the machine that has it and
+     * carried in. It is an incremental bundle whose prerequisite is a
+     * commit on the base branch, so the seed above has to be fetched
+     * first, and `branch` is the name to give it here. `branch` on
+     * this repository is then cut from it rather than from the base.
+     */
+    startBundle?: { branch: string; data: Buffer } | undefined;
   }[];
   /**
    * Whether this sandbox may reach the network.
@@ -61,6 +159,29 @@ export interface ProvisionSpec {
   agentBinaries?: readonly AgentBinary[];
   env?: Record<string, string>;
   /**
+   * Owning organization, stamped onto a Modal sandbox as a tag so the
+   * nightly sweep can tell one tenant's machines from another's.
+   */
+  organizationId?: string;
+  /**
+   * Hibernation image to start from. Set when the card's sandbox row
+   * is hibernated. Absent means a toolchain image, or an exit snapshot
+   * this process still holds.
+   */
+  imageRef?: string;
+  /**
+   * The row was hibernated and no image id survived. The next start
+   * says it is a fresh clone when no exit snapshot can be read.
+   */
+  missingSnapshot?: boolean;
+  /**
+   * Hosts a restricted sandbox may open: the gateway, clone remotes,
+   * and model provider base URLs. The driver turns them into an
+   * allowlist. A restricted run with none, or with one that cannot be
+   * named, fails instead of opening the network.
+   */
+  allowedHosts?: string[];
+  /**
    * Called with a human readable line as provisioning advances: sandbox
    * created, tools installed, repository cloned. Provisioning a cold
    * sandbox takes minutes, and without these lines the run just reads
@@ -72,9 +193,9 @@ export interface ProvisionSpec {
 }
 
 export type ExecChunk =
-  | { kind: "stdout"; data: string }
-  | { kind: "stderr"; data: string }
-  | { kind: "exit"; exitCode: number };
+  | { kind: "stdout"; data: string; cursor?: number }
+  | { kind: "stderr"; data: string; cursor?: number }
+  | { kind: "exit"; exitCode: number; cursor?: number };
 
 /**
  * What every driver writes to stderr when it stops an exec at
@@ -104,6 +225,10 @@ export interface ExecOptions {
    * drivers that report supportsStdin honor this.
    */
   stdin?: AsyncIterable<string>;
+  /** A stable run id enables Docker's durable output and reattachment. */
+  sessionKey?: string;
+  /** Last output record committed to the transcript. Only used by attach. */
+  afterCursor?: number;
 }
 
 /**
@@ -156,6 +281,26 @@ export interface RepositoryBundle {
   data: Buffer;
 }
 
+export interface RepositoryExportOptions {
+  /**
+   * Include every object reachable from HEAD rather than only the
+   * objects newer than baseSha. The merge queue uses this when its
+   * trusted checkout cannot read the sandbox's object store.
+   */
+  selfContained?: boolean;
+}
+
+export interface RepositoryImportOptions {
+  /** Branch that must be checked out and is allowed to move. */
+  branch: string;
+  /** Compare-and-swap precondition for moving branch. */
+  expectedHeadSha: string;
+}
+
+export type RepositoryImportOutcome =
+  | { ok: true; headSha: string }
+  | { ok: false; reason: "moved" | "error"; detail: string };
+
 /**
  * One sandbox per feature. The sandbox is the security boundary: agents run
  * inside it with permission checks disabled, so drivers must never expose
@@ -163,6 +308,11 @@ export interface RepositoryBundle {
  */
 export interface SandboxDriver {
   provider: SandboxHandle["provider"];
+  /**
+   * Host drivers mount a worktree the server prepared. Clone drivers
+   * have no host filesystem and clone from cloneUrl or seedBundle.
+   */
+  readonly workspace: "host" | "clone";
   /**
    * What this driver's sandboxes cost, as a name rather than a number.
    *
@@ -190,13 +340,13 @@ export interface SandboxDriver {
   /**
    * Picks up a command a previous process started with exec and left
    * running in the sandbox, so a server restart does not have to end
-   * the runs it was carrying. Only argv's first word is used, to find
-   * the running session; cwd and env in opts are ignored because the
-   * live process already carries them. Resolves null when the sandbox
-   * answers but no such command runs, which is conclusive: the process
-   * ended while nobody was attached. A rejection means the question
-   * could not be answered and may be retried. Only drivers whose
-   * sandboxes outlive the server process implement this.
+   * the runs it was carrying. Sprite finds the running session by
+   * argv's first word. Docker finds its durable record by sessionKey.
+   * cwd and env in opts are ignored because the live process already
+   * carries them. Resolves null when the sandbox answers but cannot
+   * find that session or record. A rejection means the question could
+   * not be answered and may be retried. Only drivers whose sandboxes
+   * outlive the server process implement this.
    */
   attach?(
     handle: SandboxHandle,
@@ -240,7 +390,19 @@ export interface SandboxDriver {
     handle: SandboxHandle,
     repositoryName: string,
     baseBranch: string,
+    options?: RepositoryExportOptions,
   ): Promise<RepositoryBundle | null>;
+  /**
+   * Fast-forwards a repository inside the sandbox from a trusted
+   * server-created bundle. Implementations must compare HEAD with
+   * expectedHeadSha and must never force the branch.
+   */
+  importRepository?(
+    handle: SandboxHandle,
+    repositoryName: string,
+    bundle: RepositoryBundle,
+    options: RepositoryImportOptions,
+  ): Promise<RepositoryImportOutcome>;
 }
 
 /** Collects an exec stream into buffered output. Convenience for tests and gates. */

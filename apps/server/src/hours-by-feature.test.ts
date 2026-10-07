@@ -69,6 +69,13 @@ test("hours by feature sums runs on the same card and drops empty ones", () => {
         endedAt: new Date("2026-09-12T00:30:00.000Z"),
       },
       {
+        featureId: "b",
+        title: "Login polish",
+        startedAt: new Date("2026-09-12T01:00:00.000Z"),
+        endedAt: new Date("2026-09-12T06:00:00.000Z"),
+        billable: false,
+      },
+      {
         featureId: "c",
         title: "Idle",
         startedAt: new Date("2026-08-01T00:00:00.000Z"),

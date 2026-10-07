@@ -30,11 +30,12 @@ import {
   stages,
   user,
 } from "@bento/db";
-import type { SandboxHandle } from "@bento/sandbox";
+import type { SandboxDriver, SandboxHandle } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
 import { deferAfterCommit, tenantDb as db } from "../middleware/tenant.js";
 import { actor } from "../middleware/actor.js";
 import { canAccessProject, getAccessibleFeature } from "../access.js";
+import { driverForSandbox, SandboxDriverUnavailable } from "../orchestrator/sandbox-driver.js";
 import { childCount, parentRefusal, relatedGroup } from "../feature-tree.js";
 import { getBetaTester } from "../feature-flags.js";
 import {
@@ -48,7 +49,7 @@ import {
   reopenFeature,
   activationRefusal,
 } from "../orchestrator/gate-evaluator.js";
-import { ACTIVE_RUN_STATUSES, CARD_BUSY, CARD_BUSY_DELETE, startRunIfIdle } from "../orchestrator/start-run.js";
+import { ACTIVE_RUN_STATUSES, CARD_BUSY, CARD_BUSY_DELETE, NO_REPOSITORIES, projectHasRepositories, startRunIfIdle } from "../orchestrator/start-run.js";
 import { enqueueRun } from "../orchestrator/queue.js";
 import { queueLinearIssueCreate } from "../orchestrator/linear-sync.js";
 import {
@@ -58,6 +59,7 @@ import {
   requeueMessages,
 } from "../orchestrator/messages.js";
 import { latestConversationRun, resolveFollowUpRun } from "../orchestrator/stage-agent.js";
+import { asPipelineRun } from "../orchestrator/pipeline-run.js";
 import { buildCiFixPrompt, buildConflictResolutionPrompt, buildRebaseForPublishPrompt } from "../orchestrator/prompt.js";
 import { publishFeatureBranches, type PublishableRepository } from "../orchestrator/publish.js";
 import { applyPendingPullRequestUpdates } from "../orchestrator/pull-request-updates.js";
@@ -346,7 +348,15 @@ async function boundedRead<T>(work: Promise<T>): Promise<T> {
  * with it: a card whose row is gone while its machine keeps running is
  * a billed sandbox no query in this product can find again.
  */
-class SandboxDestroyFailed extends Error {}
+class SandboxDestroyFailed extends Error {
+  /** A missing driver will fail the same way on every retry. */
+  readonly permanent: boolean;
+
+  constructor(message: string, permanent = false) {
+    super(message);
+    this.permanent = permanent;
+  }
+}
 
 export function featureRoutes(ctx: AppContext) {
   return new Hono()
@@ -523,14 +533,22 @@ export function featureRoutes(ctx: AppContext) {
            */
           const owned = await tx.select().from(sandboxes).where(eq(sandboxes.featureId, feature.id));
           for (const sandbox of owned.filter((s) => s.status !== "destroyed")) {
-            const handle: SandboxHandle = {
-              externalId: sandbox.externalId,
-              provider: sandbox.provider === "sprite" ? "sprite" : ctx.driver.provider,
-              workdir: sandbox.workdir,
-            };
             try {
-              await ctx.driver.destroy(handle);
+              const driver = driverForSandbox(ctx.drivers, sandbox);
+              const handle: SandboxHandle = {
+                externalId: sandbox.externalId,
+                provider: driver.provider,
+                workdir: sandbox.workdir,
+                ...(sandbox.imageRef ? { imageRef: sandbox.imageRef } : {}),
+              };
+              await driver.destroy(handle);
             } catch (err) {
+              if (err instanceof SandboxDriverUnavailable) {
+                throw new SandboxDestroyFailed(
+                  `No ${err.provider} driver is configured on this server, so the sandbox cannot be destroyed from here. The card was not deleted.`,
+                  true,
+                );
+              }
               throw new SandboxDestroyFailed(err instanceof Error ? err.message : String(err));
             }
           }
@@ -580,6 +598,7 @@ export function featureRoutes(ctx: AppContext) {
         });
 
       if (outcome instanceof SandboxDestroyFailed) {
+        if (outcome.permanent) return c.json({ error: outcome.message }, 409);
         return c.json(
           { error: `the sandbox could not be destroyed (${outcome.message}). The card was not deleted; try again` },
           502,
@@ -678,14 +697,22 @@ export function featureRoutes(ctx: AppContext) {
       let text = body.text.trim();
       if (!text && !body.attachments?.length) return c.json({ error: "Enter a message or attach a file." }, 400);
       if (body.attachments?.length && !(await getBetaTester(ctx, c))) return c.json({ error: "not found" }, 404);
-      const [latest] = await db(c, ctx)
+      const [newest] = await db(c, ctx)
         .select()
         .from(agentRuns)
-        .where(eq(agentRuns.featureId, feature.id))
+        .where(and(eq(agentRuns.featureId, feature.id), eq(agentRuns.type, "pipeline")))
         .orderBy(desc(agentRuns.queuedAt))
         .limit(1);
-      if (!latest) {
+      if (!newest) {
         return c.json({ error: "no agent has run on this card yet; start one first" }, 400);
+      }
+      const latest = asPipelineRun(newest);
+      const working =
+        latest.status === "queued" || latest.status === "starting" || latest.status === "running";
+      // A live run already has a workspace. An idle card would start a
+      // new one, which cannot happen until the project has a checkout.
+      if (!working && !(await projectHasRepositories(db(c, ctx), feature.projectId))) {
+        return c.json({ error: NO_REPOSITORIES }, 409);
       }
 
       if (body.attachments?.length) {
@@ -693,11 +720,16 @@ export function featureRoutes(ctx: AppContext) {
           .where(and(eq(sandboxes.featureId, feature.id), ne(sandboxes.status, "destroyed")))
           .orderBy(desc(sandboxes.createdAt)).limit(1);
         if (!sandbox) return c.json({ error: "This card has no available agent workspace. Start an agent before attaching files." }, 409);
-        if (sandbox.provider !== ctx.driver.provider && !(sandbox.provider === "docker" && ctx.driver.provider === "local-process")) return c.json({ error: "This workspace cannot receive attachments from this server." }, 409);
         try {
-          const files = await writeMessageAttachments(ctx.driver, { externalId: sandbox.externalId, provider: ctx.driver.provider, workdir: sandbox.workdir }, body.attachments);
+          const driver = driverForSandbox(ctx.drivers, sandbox);
+          const files = await writeMessageAttachments(driver, { externalId: sandbox.externalId, provider: driver.provider, workdir: sandbox.workdir }, body.attachments);
           text = `${text || "Please review the attached files."}\n\nAttached files in your workspace (use your file or image-reading tools to inspect them):\n${files.map(file => JSON.stringify(file)).join("\n")}`;
         } catch (error) {
+          // A missing driver will not succeed on a retry. 503 is the
+          // transfer failure, which might.
+          if (error instanceof SandboxDriverUnavailable) {
+            return c.json({ error: "This workspace cannot receive attachments from this server." }, 409);
+          }
           return c.json({ error: error instanceof Error ? error.message : "Could not attach files." }, 503);
         }
       }
@@ -751,6 +783,7 @@ export function featureRoutes(ctx: AppContext) {
         return c.json({ queued: true as const });
       }
       const run = await startRunIfIdle(db(c, ctx), {
+        type: "pipeline" as const,
         featureId: feature.id,
         stageId: resumeFrom.stageId,
         agentProfileId: resumeFrom.agentProfileId,
@@ -1129,24 +1162,32 @@ export function featureRoutes(ctx: AppContext) {
         ctx.env.BENTO_MODE === "multi" ? selected : await linkGitHubRemotes(db(c, ctx), selected);
       const includeStageNotes = await shouldIncludeStageNotes(ctx, feature.organizationId);
 
-      const exportRepository = ctx.driver.exportRepository?.bind(ctx.driver);
+      // The row picks the driver. A clone driver exports bundles from
+      // the sandbox; a host driver reads the worktrees it mounted.
+      const [sandbox] = await db(c, ctx)
+        .select()
+        .from(sandboxes)
+        .where(and(eq(sandboxes.featureId, feature.id), ne(sandboxes.status, "destroyed")))
+        .orderBy(desc(sandboxes.createdAt))
+        .limit(1);
+      let publishDriver: SandboxDriver;
+      try {
+        publishDriver = sandbox ? driverForSandbox(ctx.drivers, sandbox) : ctx.drivers.default;
+      } catch (err) {
+        return c.json({ error: err instanceof Error ? err.message : "no driver configured on this server" }, 409);
+      }
+      const exportRepository = publishDriver.exportRepository?.bind(publishDriver);
       let publishable: PublishableRepository[];
       if (exportRepository) {
         // The card's sandbox holds the checkouts. It outlives the run
         // that made it, so the latest row that was not destroyed is the
         // one to read; a card with none has never run anywhere.
-        const [sandbox] = await db(c, ctx)
-          .select()
-          .from(sandboxes)
-          .where(and(eq(sandboxes.featureId, feature.id), ne(sandboxes.status, "destroyed")))
-          .orderBy(desc(sandboxes.createdAt))
-          .limit(1);
         if (!sandbox) {
           return c.json({ error: "this card has no sandbox yet; run an agent on it first, then publish" }, 409);
         }
         const handle: SandboxHandle = {
           externalId: sandbox.externalId,
-          provider: sandbox.provider === "sprite" ? "sprite" : ctx.driver.provider,
+          provider: publishDriver.provider,
           workdir: sandbox.workdir,
         };
         publishable = repoRows.map((row) => {
@@ -1340,7 +1381,7 @@ export function featureRoutes(ctx: AppContext) {
         feature,
         buildCiFixPrompt(failing),
         actor(c),
-        "task",
+        "stage",
         (task) => deferAfterCommit(c, async () => task()),
       );
       if (!result.ok) {
@@ -1472,6 +1513,9 @@ export function featureRoutes(ctx: AppContext) {
       if (feature.status === "done" || feature.status === "cancelled") {
         return c.json({ error: `feature is ${feature.status}; reopen it first` }, 409);
       }
+      if (!(await projectHasRepositories(db(c, ctx), feature.projectId))) {
+        return c.json({ error: NO_REPOSITORIES }, 409);
+      }
 
       /**
        * The stage's assigned agent comes first: asking to "run
@@ -1512,6 +1556,7 @@ export function featureRoutes(ctx: AppContext) {
       const executor = project?.executor ?? "server";
 
       const run = await startRunIfIdle(db(c, ctx), {
+        type: "pipeline" as const,
         featureId: feature.id,
         stageId: feature.currentStageId,
         agentProfileId: profile.id,

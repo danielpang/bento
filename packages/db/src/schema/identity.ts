@@ -18,6 +18,13 @@ export const user = identity.table("user", {
   email: text("email").notNull().unique(),
   emailVerified: boolean("email_verified").notNull().default(false),
   image: text("image"),
+  /**
+   * Whether the console opens the onboarding walkthrough for this
+   * person. Skipping or finishing it turns this off; Settings, Account
+   * turns it back on. Ours, not better-auth's: the adapter never writes
+   * it, so the column default is what a new account starts with.
+   */
+  onboardingWalkthrough: boolean("onboarding_walkthrough").notNull().default(true),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });

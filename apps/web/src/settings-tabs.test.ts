@@ -40,3 +40,8 @@ test("a hosted team keeps Slack, in its place between Linear and MCP", () => {
     "mcp",
   ]);
 });
+
+test("local mode has Account, for the onboarding walkthrough switch", () => {
+  const sections = settingsSections("local", { hasBilling: false, requested: "account" });
+  assert.equal(resolveSettingsTab(sections, "account"), "account");
+});

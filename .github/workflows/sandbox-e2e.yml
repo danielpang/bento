@@ -17,6 +17,12 @@ name: Sandbox e2e
 #                 failures that live there (a socket that drops, a
 #                 machine that pauses under a quiet command) are ones a
 #                 stub agrees with and only a real machine disputes
+#   swarm seed PR any change to how a swarm's branch travels into a
+#                 worker's machine and its work travels back out. It
+#                 exists in one place until the swarm finishes, so it
+#                 goes in as a bundle and comes out as one, and every
+#                 failure in that path is git talking to git inside a
+#                 real machine
 #   by hand       after an installer outage, to confirm it is over
 #
 # Needs the SPRITES_TOKEN secret. Without it the job says so and stops,
@@ -32,6 +38,10 @@ on:
       - packages/sandbox/src/keep-awake.ts
       - packages/sandbox/src/sprite.e2e.test.ts
       - packages/agents/src/adapter.ts
+      # The server side of the same seam: what builds the bundle a
+      # worker is seeded from, and what reads its work back out.
+      - apps/server/src/orchestrator/swarm/sandbox.ts
+      - apps/server/src/orchestrator/sandbox-provision.ts
       - .github/workflows/sandbox-e2e.yml
   workflow_dispatch:
 
@@ -83,6 +93,15 @@ jobs:
           echo "SPRITES_TOKEN is not set, so no sprite can be provisioned." >&2
           echo "Add it under Settings, Secrets and variables, Actions." >&2
           exit 1
+
+      # git, because the swarm seed subtest builds the bundles a worker
+      # is provisioned from on this side and reads the worker's work
+      # back out onto a branch here. The runner image has it; naming it
+      # is how a runner that stops having it fails with a sentence
+      # rather than with a bundle that was never created.
+      - name: Check that git is here
+        if: ${{ env.SPRITES_TOKEN != '' }}
+        run: git --version
 
       - name: Provision a sprite and install the agent CLIs
         if: ${{ env.SPRITES_TOKEN != '' }}

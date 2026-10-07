@@ -20,7 +20,7 @@ import { pathToFileURL } from "node:url";
 import { and, eq } from "drizzle-orm";
 import { member, user } from "@bento/db";
 import {
-  createDriver,
+  createDrivers,
   createGitHubApp,
   ensureLocalUser,
   reportSpriteLookupRetry,
@@ -209,7 +209,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
       pool,
       boss,
       bus: new EventBus(),
-      driver: createDriver(env, {
+      drivers: createDrivers(env, {
         onSpriteLookupRetry: (info) => reportSpriteLookupRetry(analytics, info),
       }),
       worktrees: new WorktreeManager(env.BENTO_DATA_DIR),

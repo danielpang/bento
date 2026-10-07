@@ -1,4 +1,4 @@
-import type { AgentCli, FeatureStatus, GateCriteria, RunStatus } from "@bento/core";
+import type { AgentCli, FeatureStatus, GateCriteria, RunStatus, SandboxProvider } from "@bento/core";
 
 export interface Project {
   id: string;
@@ -8,6 +8,12 @@ export interface Project {
   defaultBranch: string;
   /** Whether an issue arriving from Linear starts this project's pipeline. */
   autoStartPipeline: boolean;
+  /**
+   * Where new cards run. Always "auto" (a Fly sprite, then Modal, on
+   * a hosted deployment): nothing in the product sets anything else,
+   * and the row carries it only because the column does.
+   */
+  sandboxProvider: SandboxProvider | null;
   /** Whether a card created in this project files an issue in Linear. */
   linearCreateIssues: boolean;
   /**
@@ -184,11 +190,12 @@ export interface AgentRun {
   agentProfileId: string;
   status: RunStatus;
   /**
-   * "judge" is the gate evaluator talking to itself; "rebase" is a
+   * What this run is. "stage" is a card being walked through a stage,
+   * "judge" is the gate evaluator talking to itself, and "rebase" is a
    * resolve-conflicts run. Omitted on older payloads and treated as
    * work. Spend rollups skip judges.
    */
-  kind?: "task" | "judge" | "rebase";
+  role?: "stage" | "judge" | "rebase";
   cliSessionId: string | null;
   costUsd: string | null;
   error: string | null;
@@ -214,6 +221,34 @@ export interface ProjectUsage {
   }[];
   /** Every card, including ones that have never run. */
   byFeature: FeatureSpend[];
+  /**
+   * Every swarm, as a swarm.
+   *
+   * A swarm's runs belong to no card, so they are absent from
+   * `byFeature` entirely: without this a swarm that cost forty dollars
+   * would be nowhere on the page. Optional, because a server older
+   * than swarms does not send it.
+   */
+  bySwarm?: SwarmSpendRow[];
+}
+
+/**
+ * One swarm's spend, split the way it is recorded.
+ *
+ * Measured is what tools printed, estimated is priced from reported
+ * tokens, and notional is a subscription list price. The assumed field
+ * remains for wire compatibility and is zero for current data.
+ */
+export interface SwarmSpendRow {
+  swarmId: string;
+  title: string;
+  status: string;
+  runs: number;
+  runsWithoutCost: number;
+  measuredUsd: number;
+  estimatedUsd: number;
+  assumedUsd: number;
+  notionalUsd: number;
 }
 
 /**
@@ -349,4 +384,109 @@ export interface FeatureEvent {
   runId: string | null;
   detail: { failedCriteria?: string[] } | null;
   at: string;
+}
+
+/**
+ * A swarm, as the API sends one.
+ *
+ * The table's own names, because the swarm routes answer with their
+ * rows and a second vocabulary between the server and a terminal is
+ * one more place for the two to disagree. Numerics arrive as strings,
+ * which is what Postgres numeric is: a figure nobody has rounded.
+ */
+export interface SwarmRow {
+  id: string;
+  projectId: string;
+  slug: string;
+  title: string;
+  goal: string;
+  status:
+    | "draft"
+    | "planning"
+    | "running"
+    | "paused"
+    | "blocked"
+    | "done"
+    | "failed"
+    | "cancelled"
+    | "budget_exhausted"
+    | "timed_out";
+  pausedReason: "manual" | "budget" | "time_limit" | "attention" | "plan_limit" | "error" | null;
+  branchName: string | null;
+  deliverable?: "code" | "document";
+  startBranch?: string | null;
+  reopenCount?: number;
+  /** Where the plan came from: the planner wrote it, or a person handed one over. */
+  planMode?: "goal" | "existing";
+  budgetUsd: string | null;
+  maxWorkers: number;
+  timeLimitMin: number | null;
+  spentMeasuredUsd: string;
+  spentEstimatedUsd: string;
+  spentAssumedUsd: string;
+  spentNotionalUsd?: string;
+  archivedAt: string | null;
+  createdAt: string;
+}
+
+/** A row of the swarm list, with the counts the strip draws. */
+export interface SwarmSummaryRow extends SwarmRow {
+  counts: { tasks: number; done: number; attention: number };
+}
+
+/** One node of a swarm's plan. The tree travels flat, each naming its parent. */
+export interface SwarmTaskRow {
+  id: string;
+  parentId: string | null;
+  position: number;
+  nodeType: "plan" | "leaf";
+  title: string;
+  description: string;
+  status: "open" | "assigned" | "working" | "landed" | "done" | "blocked" | "failed" | "cancelled";
+  attention: string | null;
+  weight: number;
+  branchName: string | null;
+  /** What a reopen asked for, on the node that holds its work. */
+  followUpInstruction?: string | null;
+  costMeasuredUsd: string;
+  costEstimatedUsd: string;
+  costAssumedUsd: string;
+  costNotionalUsd?: string;
+  startedAt: string | null;
+  endedAt: string | null;
+}
+
+/** One source of the plan a person handed a swarm, without its text. */
+export interface SwarmPlanSourceRow {
+  id: string;
+  position: number;
+  kind: "file" | "website";
+  name: string;
+  url: string | null;
+  mime: string;
+  /** What it is read as: text, a PDF, or an image. */
+  media: "text" | "pdf" | "image";
+  /** Characters of text. Zero for an image or a scanned PDF. */
+  size: number;
+  hasText: boolean;
+  /** Bytes in the store, for a PDF or an image. */
+  byteSize: number | null;
+}
+
+/** One swarm with its plan, as the detail route answers. */
+export interface SwarmDetailResponse {
+  swarm: SwarmRow;
+  tasks: SwarmTaskRow[];
+  /** What the person handed the planner, when they handed over anything. */
+  planSources?: SwarmPlanSourceRow[];
+  activeRuns: { id: string; role: string | null; status: string; swarmTaskId: string | null }[];
+  landings?: {
+    id: string;
+    taskId: string;
+    branchName: string | null;
+    status: "queued" | "landing" | "landed" | "conflicted" | "failed" | "cancelled";
+    attempt: number;
+    error: string | null;
+  }[];
+  pullRequests?: { id: string; repoUrl: string; number: number; url: string; headSha: string | null }[];
 }

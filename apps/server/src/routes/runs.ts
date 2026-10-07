@@ -8,10 +8,14 @@ import { agentProfiles, agentRuns, features, projects, runEvents, sandboxes, sta
 import type { AppContext } from "../context.js";
 import { deferAfterCommit, tenantDb as db } from "../middleware/tenant.js";
 import { actor } from "../middleware/actor.js";
-import { markCancelled } from "../orchestrator/run-executor.js";
-import { CARD_BUSY, startRunIfIdle } from "../orchestrator/start-run.js";
+import { markCancelled, modalNetworkForProject } from "../orchestrator/run-executor.js";
+import { armModalHibernation } from "../orchestrator/hibernate-sandbox.js";
+import { CARD_BUSY, NO_REPOSITORIES, projectHasRepositories, startRunIfIdle } from "../orchestrator/start-run.js";
 import { enqueueRun } from "../orchestrator/queue.js";
-import { canAccessProject, getAccessibleFeature, getAccessibleRun } from "../access.js";
+import type { SandboxDriver } from "@bento/sandbox";
+import { driverForSandbox, SandboxDriverUnavailable } from "../orchestrator/sandbox-driver.js";
+import { canAccessProject, getAccessibleFeature, getAccessibleRun, getAccessibleRunOutput } from "../access.js";
+import { requireSwarms } from "../orchestrator/swarm/gate.js";
 
 const createRun = z.object({
   featureId: z.string().uuid(),
@@ -39,6 +43,9 @@ export function runRoutes(ctx: AppContext) {
       if (feature.status === "done" || feature.status === "cancelled") {
         return c.json({ error: `feature is ${feature.status}; reopen it first` }, 409);
       }
+      if (!(await projectHasRepositories(db(c, ctx), feature.projectId))) {
+        return c.json({ error: NO_REPOSITORIES }, 409);
+      }
       const [[stage], [profile]] = await Promise.all([
         db(c, ctx).select().from(stages).where(eq(stages.id, stageId)).limit(1),
         db(c, ctx).select().from(agentProfiles).where(eq(agentProfiles.id, body.agentProfileId)).limit(1),
@@ -50,6 +57,7 @@ export function runRoutes(ctx: AppContext) {
       const executor = project?.executor ?? "server";
 
       const run = await startRunIfIdle(db(c, ctx), {
+        type: "pipeline" as const,
         featureId: feature.id,
         stageId,
         agentProfileId: body.agentProfileId,
@@ -89,8 +97,12 @@ export function runRoutes(ctx: AppContext) {
       if (owner && (owner.status === "done" || owner.status === "cancelled")) {
         return c.json({ error: `feature is ${owner.status}; reopen it first` }, 409);
       }
+      if (owner && !(await projectHasRepositories(db(c, ctx), owner.projectId))) {
+        return c.json({ error: NO_REPOSITORIES }, 409);
+      }
 
       const run = await startRunIfIdle(db(c, ctx), {
+        type: "pipeline" as const,
         featureId: previous.featureId,
         stageId: previous.stageId,
         agentProfileId: previous.agentProfileId,
@@ -145,9 +157,6 @@ export function runRoutes(ctx: AppContext) {
       const run = found.run;
       if (!TERMINAL.has(run.status)) return c.json({ error: "wait for the run to finish first" }, 409);
       if (!run.checkpointId) return c.json({ error: "this run has no snapshot to roll back to" }, 400);
-      if (!ctx.driver.restore) {
-        return c.json({ error: `${ctx.driver.provider} sandboxes do not support rollback` }, 501);
-      }
 
       const [sandbox] = await db(c, ctx)
         .select()
@@ -158,11 +167,61 @@ export function runRoutes(ctx: AppContext) {
       const externalId = sandbox?.externalId ?? (feature ? `bento-${feature.id}` : "");
       if (!externalId) return c.json({ error: "no sandbox to roll back" }, 409);
 
+      let driver: SandboxDriver;
       try {
-        await ctx.driver.restore(
-          { externalId, provider: ctx.driver.provider, workdir: sandbox?.workdir ?? "/workspace" },
+        driver = sandbox ? driverForSandbox(ctx.drivers, sandbox) : ctx.drivers.default;
+      } catch (err) {
+        if (!(err instanceof SandboxDriverUnavailable)) throw err;
+        // The driver was never asked to restore. "Does not support
+        // rollback" would name a capability the missing driver might
+        // have had. Name the provider that was asked.
+        return c.json({ error: err.message }, 501);
+      }
+      if (!driver.restore) {
+        return c.json({ error: `${driver.provider} sandboxes do not support rollback` }, 501);
+      }
+
+      try {
+        const network = driver.provider === "modal"
+          ? await (async () => {
+              const [profile] = await db(c, ctx)
+                .select({ cli: agentProfiles.cli, model: agentProfiles.model })
+                .from(agentProfiles)
+                .where(eq(agentProfiles.id, run.agentProfileId))
+                .limit(1);
+              if (!profile || !feature) {
+                throw new Error("no sandbox to roll back");
+              }
+              return modalNetworkForProject(
+                ctx,
+                feature.projectId,
+                feature.organizationId,
+                profile.cli,
+                profile.model,
+              );
+            })()
+          : {};
+        await driver.restore(
+          {
+            externalId,
+            provider: driver.provider,
+            workdir: sandbox?.workdir ?? "/workspace",
+            ...network,
+          },
           run.checkpointId,
         );
+        // A stopped Modal machine is booted again here. The row was
+        // still hibernated, which neither the hibernate job nor the
+        // sweep will touch, so the new machine would run until the
+        // 24 hour cap. Ready plus a later job puts it back on the
+        // same path as a run that just finished.
+        if (driver.provider === "modal" && sandbox) {
+          await db(c, ctx)
+            .update(sandboxes)
+            .set({ status: "ready", lastUsedAt: new Date() })
+            .where(and(eq(sandboxes.id, sandbox.id), eq(sandboxes.status, "hibernated")));
+          await armModalHibernation(ctx, sandbox.id);
+        }
       } catch (err) {
         ctx.analytics?.captureException(err, actor(c), run.organizationId, {
           run_id: run.id,
@@ -186,8 +245,9 @@ export function runRoutes(ctx: AppContext) {
     .get("/:id/transcript", async (c) => {
       const runId = c.req.param("id");
       const since = Number(c.req.query("since") ?? 0);
-      const found = await getAccessibleRun(ctx, c, runId);
+      const found = await getAccessibleRunOutput(ctx, c, runId);
       if (!found) return c.text("cursor|0|not_found", 404);
+      if (found.swarm && await requireSwarms(ctx, c, found.swarm.organizationId)) return c.text("cursor|0|not_found", 404);
       const run = found.run;
 
       const rows = await db(c, ctx)
@@ -251,7 +311,8 @@ export function runRoutes(ctx: AppContext) {
         Number.isFinite(sinceParam) ? sinceParam : 0,
         Number.isFinite(lastEventId) ? lastEventId : 0,
       );
-      if (!(await getAccessibleRun(ctx, c, runId))) return c.json({ error: "not found" }, 404);
+      const found = await getAccessibleRunOutput(ctx, c, runId);
+      if (!found || (found.swarm && await requireSwarms(ctx, c, found.swarm.organizationId))) return c.json({ error: "not found" }, 404);
 
       return streamSSE(c, async (stream) => {
         let lastSeq = since;

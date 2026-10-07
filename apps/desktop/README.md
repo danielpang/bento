@@ -26,6 +26,7 @@ Everything else (keys, agents, pipelines, repos, team, integrations) is the same
 - Local mode: native folder picker on repository forms.
 - Pop-outs and external/OAuth links: system browser. Downloads: native save dialog. Integrations: connect in the browser (same org on shared servers), then return; the app refreshes status.
 - Native menus (edit, zoom, fullscreen, windows). Web shortcuts still work.
+- **File → New Window** (`Cmd+Shift+N`) opens another window. In the project picker, **Open project in new window** opens any project alongside the current one. Each window keeps its own selected project across reloads and navigation, and the native Window menu identifies windows by project name. All windows share the current connection and local server; changing the connection affects every window.
 - Traffic lights in the header (also the drag region). Theme follows console Light / Dark / Dark blue.
 - Close window: local server keeps running. **Quit Bento**: stops local server gracefully. Remote agents are unaffected.
 - **Updates:** unsigned builds → **Check for Updates** opens a newer stable DMG in the browser; replace `Bento.app` manually after quitting. Signed releases → background check every 6h; **Restart to Update** when ready (local server stops on restart; **Later** keeps it up).

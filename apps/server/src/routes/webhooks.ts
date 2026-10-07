@@ -137,20 +137,8 @@ export function webhookRoutes(ctx: AppContext) {
         await ctx.db.delete(slackConnections).where(eq(slackConnections.slackTeamId, payload.team_id));
         return c.json({ ok: true });
       }
-      if (payload.type === "event_callback" && payload.event?.type === "app_mention") {
-        const event = payload.event;
-        if (event.user && event.channel && event.ts && payload.team_id) {
-          await ctx.boss.send("slack.inbound", {
-            kind: "mention",
-            teamId: payload.team_id,
-            channelId: event.channel,
-            userId: event.user,
-            text: event.text ?? "",
-            ts: event.ts,
-            threadTs: event.thread_ts ?? event.ts,
-          } satisfies SlackInboundJob);
-        }
-      }
+      const inbound = slackInboundMessage(payload);
+      if (inbound) await ctx.boss.send("slack.inbound", inbound);
       return c.json({ ok: true });
     })
     /**
@@ -296,6 +284,40 @@ interface SlackEventPayload {
     ts?: string;
     thread_ts?: string;
     channel?: string;
+    channel_type?: string;
+    bot_id?: string;
+    subtype?: string;
+  };
+}
+
+/**
+ * The human messages Bento handles from Slack.
+ *
+ * Channel conversations arrive as app_mention. Swarm threads begin in
+ * a direct App Home conversation, and Slack explicitly does not emit
+ * app_mention there, so those replies arrive as message.im instead.
+ * Bot and subtype events are ignored to keep Bento's own notification
+ * from feeding back into the inbound queue.
+ */
+export function slackInboundMessage(payload: SlackEventPayload): SlackInboundJob | null {
+  if (payload.type !== "event_callback" || !payload.team_id) return null;
+  const event = payload.event;
+  if (!event?.user || !event.channel || !event.ts) return null;
+  const mention = event.type === "app_mention";
+  const direct =
+    event.type === "message"
+    && event.channel_type === "im"
+    && !event.bot_id
+    && !event.subtype;
+  if (!mention && !direct) return null;
+  return {
+    kind: "mention",
+    teamId: payload.team_id,
+    channelId: event.channel,
+    userId: event.user,
+    text: event.text ?? "",
+    ts: event.ts,
+    threadTs: event.thread_ts ?? event.ts,
   };
 }
 

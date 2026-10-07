@@ -30,6 +30,25 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    id: "onboarding-walkthrough",
+    date: "2026-10-06",
+    title: "A walkthrough for your first board",
+    items: [
+      {
+        title: "Four steps from an idea to a pull request",
+        body: "The board now opens a short walkthrough: connect a repository, connect GitHub so agents can open pull requests and comment on code, set up your agents, and shape the pipeline. Each step opens the place that does the job and says when it is done.",
+      },
+      {
+        title: "Browse for a repository",
+        body: "On a Bento running on your own machine, Browse next to a repository path now opens your system's folder picker in the browser too, not only in the Mac app.",
+      },
+      {
+        title: "Skip it, and bring it back",
+        body: "Skip or finish and it stays away on every device, the Mac app included. Turn it back on from Settings, Account whenever you want to go through it again.",
+      },
+    ],
+  },
+  {
     id: "finish-early",
     date: "2026-08-17",
     title: "Move a card to Done from anywhere",

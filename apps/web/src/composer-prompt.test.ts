@@ -177,3 +177,30 @@ test("AgentSession still describes a running resumable tool as continuing", () =
     assert.doesNotMatch(html, /as a new run/);
   });
 });
+
+test("AgentSession disables the composer when the project has no repositories", () => {
+  withStorage(() => {
+    const html = renderToStaticMarkup(
+      createElement(AgentSession, {
+        client,
+        featureId: "f1",
+        runs: [run("succeeded")],
+        profiles: [profile("claude-code")],
+        finished: false,
+        onChanged() {},
+        blocked: {
+          message:
+            "This project has no repositories, so agents cannot run. Open Repositories in the top bar and add one.",
+          action: "Add a repository",
+          onFix() {},
+        },
+      }),
+    );
+    assert.match(html, /Open Repositories in the top bar and add one/);
+    assert.match(html, />Add a repository</);
+    assert.match(html, /placeholder="Add a repository before sending"/);
+    assert.match(html, /disabled=""/);
+    assert.doesNotMatch(html, /placeholder="Send a message\.\.\."/);
+    assert.doesNotMatch(html, /Your message starts a new run/);
+  });
+});

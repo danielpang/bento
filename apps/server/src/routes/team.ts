@@ -2,8 +2,9 @@ import { and, asc, eq, gt, isNotNull, isNull, lt, or } from "drizzle-orm";
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { z } from "zod";
-import { agentRuns, features, invitation, member, organization, organizationPolicies, user } from "@bento/db";
+import { agentRuns, features, invitation, member, organization, organizationPolicies, projects, user, type Db } from "@bento/db";
 import type { AppContext } from "../context.js";
+import { allCandidates, candidateDrivers } from "../orchestrator/sandbox-driver.js";
 import { tenantDb as db } from "../middleware/tenant.js";
 import { actor, activeOrg } from "../middleware/actor.js";
 import { getActiveOrganizationMembership } from "../access.js";
@@ -42,9 +43,10 @@ export function teamRoutes(ctx: AppContext) {
       return c.json({
         restrictNetwork: row?.restrictNetwork === true,
         canEdit: membership.role === "owner" || membership.role === "admin",
-        // Whether the deployment can honour it at all, so the control
-        // can say why it would refuse rather than failing at run time.
-        supported: ctx.driver.supportsRestrictedNetwork === true,
+        // Whether every driver a sandbox in this organization would
+        // run on can honour a restricted network, so the control can
+        // say why it would refuse rather than failing at run time.
+        supported: (await restrictedNetworkRefusal(ctx, db(c, ctx), membership.organizationId)) === null,
       });
     })
     .patch("/policy", zValidator("json", z.object({ restrictNetwork: z.boolean() })), async (c) => {
@@ -54,14 +56,9 @@ export function teamRoutes(ctx: AppContext) {
         return c.json({ error: "only organization owners and admins can change this" }, 403);
       }
       const { restrictNetwork } = c.req.valid("json");
-      if (restrictNetwork && !ctx.driver.supportsRestrictedNetwork) {
-        return c.json(
-          {
-            error:
-              "This deployment has no restricted network configured, so agents cannot be locked down yet. Set BENTO_SANDBOX_RESTRICTED_NETWORK on the server first.",
-          },
-          409,
-        );
+      if (restrictNetwork) {
+        const error = await restrictedNetworkRefusal(ctx, db(c, ctx), membership.organizationId);
+        if (error) return c.json({ error }, 409);
       }
       await db(c, ctx)
         .insert(organizationPolicies)
@@ -105,12 +102,14 @@ export function teamRoutes(ctx: AppContext) {
           title: features.title,
           startedAt: agentRuns.startedAt,
           endedAt: agentRuns.endedAt,
+          billable: agentRuns.billable,
         })
         .from(agentRuns)
         .innerJoin(features, eq(features.id, agentRuns.featureId))
         .where(
           and(
             eq(features.organizationId, membership.organizationId),
+            eq(agentRuns.billable, true),
             isNotNull(agentRuns.startedAt),
             lt(agentRuns.startedAt, to),
             or(isNull(agentRuns.endedAt), gt(agentRuns.endedAt, from)),
@@ -205,4 +204,56 @@ export function teamRoutes(ctx: AppContext) {
 
     return c.text(lines.join("\n"));
   });
+}
+
+/**
+ * What this deployment would need before a lock could be honored.
+ * A hosted deployment runs sprites, which cannot lock, and reaches
+ * Modal through "auto"; a docker deployment never uses Modal and
+ * locks through its own restricted network.
+ */
+function deploymentLockError(ctx: AppContext): string {
+  const remedy =
+    ctx.drivers.default.provider === "sprite"
+      ? "Give the server Modal credentials first."
+      : "Set BENTO_SANDBOX_RESTRICTED_NETWORK on the server first.";
+  return `This deployment has no sandbox that can be locked down, so agents cannot be locked down yet. ${remedy}`;
+}
+const PROJECT_LOCK_ERROR =
+  "This team has a project pinned to a sandbox provider that cannot lock its network, so the lock cannot be turned on. Ask your Bento operator to put the project back on automatic provider selection.";
+
+/**
+ * Why this organization cannot turn a restricted network on, or null
+ * when every machine it would make from here on can lock its network.
+ *
+ * What a new card would provision with, and each project's stored
+ * provider. The lock applies to new cards: a card that already has a
+ * machine keeps it, and a machine that cannot lock keeps the network
+ * it was made with (the executor says so in that card's transcript),
+ * so live sandbox rows are not consulted here. A project's setting
+ * means what candidateDrivers says it means, the same answer the run
+ * executor gets: "auto" is honored when one driver in its order can
+ * lock the network, since the others are never asked. That is what
+ * makes a locked team on a sprite deployment a Modal team: the
+ * sprite cannot lock, so every new card of theirs goes straight to
+ * Modal, and the lock is offered as long as Modal is there to take
+ * them. A team with no lock keeps the ordinary auto order.
+ */
+async function restrictedNetworkRefusal(ctx: AppContext, handle: Db, organizationId: string): Promise<string | null> {
+  const newProject = allCandidates(candidateDrivers(ctx.drivers, "auto"));
+  if (!newProject.some((driver) => driver.supportsRestrictedNetwork === true)) return deploymentLockError(ctx);
+
+  const settings = await handle
+    .select({ sandboxProvider: projects.sandboxProvider })
+    .from(projects)
+    .where(eq(projects.organizationId, organizationId));
+  const seenProviders = new Set<string | null>();
+  for (const row of settings) {
+    const wanted = row.sandboxProvider;
+    if (seenProviders.has(wanted)) continue;
+    seenProviders.add(wanted);
+    const could = allCandidates(candidateDrivers(ctx.drivers, wanted));
+    if (!could.some((driver) => driver.supportsRestrictedNetwork === true)) return PROJECT_LOCK_ERROR;
+  }
+  return null;
 }

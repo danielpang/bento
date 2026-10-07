@@ -8,7 +8,7 @@ test("local driver streams stdout and exit code", async () => {
   const driver = new LocalProcessDriver();
   const handle = await driver.provision({
     projectId: "p1",
-    featureId: "f1",
+    workspaceKey: "f1",
     hostWorkspacePath: tmpdir(),
   });
   const result = await collectExec(driver.exec(handle, ["sh", "-c", "echo hello; echo err >&2; exit 3"]));
@@ -21,7 +21,7 @@ test("local driver reports missing binary as exit 127", async () => {
   const driver = new LocalProcessDriver();
   const handle = await driver.provision({
     projectId: "p1",
-    featureId: "f2",
+    workspaceKey: "f2",
     hostWorkspacePath: tmpdir(),
   });
   const result = await collectExec(driver.exec(handle, ["definitely-not-a-real-binary-xyz"]));
@@ -37,7 +37,7 @@ test("local driver names a timeout in the stream it kills", async () => {
   const driver = new LocalProcessDriver();
   const handle = await driver.provision({
     projectId: "p1",
-    featureId: "f3",
+    workspaceKey: "f3",
     hostWorkspacePath: tmpdir(),
   });
   const result = await collectExec(driver.exec(handle, ["sleep", "5"], { timeoutMs: 100 }));

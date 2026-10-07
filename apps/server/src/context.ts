@@ -4,6 +4,7 @@ import { GitHubApp } from "@bento/github";
 import {
   DockerDriver,
   LocalProcessDriver,
+  ModalDriver,
   SpriteDriver,
   WorktreeManager,
   type SandboxDriver,
@@ -65,6 +66,16 @@ export interface Entitlements {
    */
   canStartRun?(organizationId: string, featureId?: string): Promise<EntitlementRefusal | null>;
   /**
+   * Asked before a swarm is created or started, and before the console
+   * offers the mode at all.
+   *
+   * Optional like the rest of the newer checks: a deployment that has
+   * not heard of swarms answers nothing and the feature is simply
+   * available, which is what an open source install and local mode
+   * are. Absent here is "no plan to enforce", never "refuse".
+   */
+  canUseSwarms?(organizationId: string): Promise<EntitlementRefusal | null>;
+  /**
    * Told once a run reached a terminal state, so a deployment that
    * meters compute can record what it cost.
    *
@@ -72,6 +83,7 @@ export interface Entitlements {
    * the run is over either way, and a metering error must not turn a
    * finished run into a failed one.
    */
+  /** Called exactly once for a billable run. Pre-agent provider failures are excluded. */
   onRunFinished?(runId: string): Promise<void>;
   /**
    * Told after the headcount changed: a member joined or left, or an
@@ -93,7 +105,12 @@ export interface AppContext {
   pool: pg.Pool;
   boss: PgBoss;
   bus: EventBus;
-  driver: SandboxDriver;
+  /**
+   * Every sandbox driver this process built. `default` is what
+   * BENTO_SANDBOX_DRIVER selected, and it is what every project uses
+   * until a project can name its own.
+   */
+  drivers: SandboxDrivers;
   worktrees: WorktreeManager;
   /** Server-owned GitHub App; an installation is selected per organization. */
   githubApp?: GitHubApp;
@@ -181,26 +198,76 @@ export function reportSpriteLookupRetry(analytics: Analytics | null | undefined,
   }
 }
 
-export function createDriver(
+/**
+ * The drivers this process can run a sandbox with.
+ *
+ * `default` is today's switch on BENTO_SANDBOX_DRIVER. `get` returns a
+ * driver only when this server actually built one. `selectable` is the
+ * remote providers this server runs beside the default: sprite when
+ * that driver was built, modal when both Modal token vars are set.
+ * Reported on /api/health for an operator reading a deployment;
+ * nothing in the product offers them as a choice. Docker and
+ * local-process are how a process runs, not providers.
+ */
+export interface SandboxDrivers {
+  readonly default: SandboxDriver;
+  get(provider: string): SandboxDriver | undefined;
+  selectable(): readonly string[];
+}
+
+export function createDrivers(
   env: Env,
   hooks?: { onSpriteLookupRetry?: (info: SpriteLookupRetry) => void },
-): SandboxDriver {
-  switch (env.BENTO_SANDBOX_DRIVER) {
-    case "sprite": {
-      if (!env.SPRITES_TOKEN) {
-        throw new Error("BENTO_SANDBOX_DRIVER=sprite needs SPRITES_TOKEN");
-      }
-      return new SpriteDriver({
+): SandboxDrivers {
+  // Built whenever the credentials are set, even when the default is
+  // something else, so an existing row can still be reaped and
+  // reattached on a server that also runs another driver.
+  const sprite = env.SPRITES_TOKEN
+    ? new SpriteDriver({
         token: env.SPRITES_TOKEN,
         ...(env.SPRITES_REGION ? { region: env.SPRITES_REGION } : {}),
         ...(hooks?.onSpriteLookupRetry ? { onLookupRetry: hooks.onSpriteLookupRetry } : {}),
-      });
+      })
+    : undefined;
+  const modal =
+    env.MODAL_TOKEN_ID && env.MODAL_TOKEN_SECRET
+      ? new ModalDriver({
+          tokenId: env.MODAL_TOKEN_ID,
+          tokenSecret: env.MODAL_TOKEN_SECRET,
+          ...(env.MODAL_ENVIRONMENT ? { environment: env.MODAL_ENVIRONMENT } : {}),
+          cpu: env.MODAL_SANDBOX_CPU,
+          memoryMiB: env.MODAL_SANDBOX_MEMORY_MIB,
+        })
+      : undefined;
+
+  let fallback: SandboxDriver;
+  switch (env.BENTO_SANDBOX_DRIVER) {
+    case "sprite": {
+      if (!sprite) throw new Error("BENTO_SANDBOX_DRIVER=sprite needs SPRITES_TOKEN");
+      fallback = sprite;
+      break;
     }
     case "local-process":
-      return new LocalProcessDriver();
+      fallback = new LocalProcessDriver();
+      break;
     default:
-      return new DockerDriver(undefined, env.BENTO_SANDBOX_RESTRICTED_NETWORK);
+      fallback = new DockerDriver(undefined, env.BENTO_SANDBOX_RESTRICTED_NETWORK);
   }
+
+  const registered = new Map<string, SandboxDriver>();
+  registered.set(fallback.provider, fallback);
+  if (sprite) registered.set(sprite.provider, sprite);
+  if (modal) registered.set(modal.provider, modal);
+
+  const selectable: string[] = [];
+  if (sprite) selectable.push("sprite");
+  if (modal) selectable.push("modal");
+
+  return {
+    default: fallback,
+    get: (provider) => registered.get(provider),
+    selectable: () => selectable,
+  };
 }
 
 /**

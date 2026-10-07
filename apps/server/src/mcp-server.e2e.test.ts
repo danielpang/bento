@@ -16,6 +16,7 @@ import {
 import { sweepExpiredOAuth } from "./mcp/oauth-sweep.js";
 import { clearBetaCache } from "./mcp/connections.js";
 import { LocalProcessDriver, WorktreeManager } from "@bento/sandbox";
+import { singleDriver } from "./orchestrator/sandbox-driver.js";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -77,7 +78,7 @@ before(async () => {
     pool,
     boss,
     bus: new EventBus(),
-    driver: new LocalProcessDriver(),
+    drivers: singleDriver(new LocalProcessDriver()),
     worktrees: new WorktreeManager(dataDir),
     secretBox: new SecretBox("test-encryption-key-at-least-32-chars"),
     artifacts: new DiskArtifactStore(dataDir),

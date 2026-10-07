@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import type { BentoClient } from "@bento/api-client";
 import { ConfirmDialog } from "./PromptDialog.js";
 import { Modal } from "./Modal.js";
 import {
@@ -73,16 +74,28 @@ function ownedAccountMessage(names: string[]): string {
 }
 
 /**
- * Leaving.
+ * The person's own account: the onboarding walkthrough switch, and the
+ * way out.
  *
- * Both actions here are irreversible and neither is urgent, so they sit
- * on their own tab rather than beside the controls people use daily,
- * and each says what it takes with it before it is confirmed. Deleting
- * an account is confirmed a second time by email; deleting an
- * organization takes its boards with it and happens at once, so it is
- * the one that has to be spelled out hardest.
+ * The two deletions are irreversible and neither is urgent, so they sit
+ * on this tab rather than beside the controls people use daily, and
+ * each says what it takes with it before it is confirmed. Deleting an
+ * account is confirmed a second time by email; deleting an organization
+ * takes its boards with it and happens at once, so it is the one that
+ * has to be spelled out hardest. Local mode has no sign in and no
+ * organizations, so there the tab is only the walkthrough switch.
  */
-export function AccountSettings() {
+export function AccountSettings({ client, mode }: { client: BentoClient; mode: "local" | "multi" }) {
+  // Local mode has one trusted user and no sign in, so the only thing
+  // on this tab there is the walkthrough switch. Split rather than
+  // returned early below: the sign in and organization hooks there ask
+  // /api/auth, which local mode does not mount, and a hook cannot be
+  // skipped once called.
+  if (mode === "local") return <OnboardingCard client={client} />;
+  return <MultiAccountSettings client={client} />;
+}
+
+function MultiAccountSettings({ client }: { client: BentoClient }) {
   const toast = useToast();
   const { data: session } = useSession();
   const { data: active } = useActiveOrganization();
@@ -116,7 +129,9 @@ export function AccountSettings() {
 
   return (
     <>
-      <p className="muted">Your sign in, and the door out. Both actions below are permanent.</p>
+      <p className="muted">Your sign in, and the door out. Both deletions below are permanent.</p>
+
+      <OnboardingCard client={client} />
 
       <section className="section settings-card">
         <h3 className="settings-title">Signed in as</h3>
@@ -204,6 +219,72 @@ export function AccountSettings() {
         />
       )}
     </>
+  );
+}
+
+/**
+ * The way back into the onboarding walkthrough.
+ *
+ * Skipping it turns the person's flag off so it stays away on every
+ * device. This turns it on again; the board opens it on the next visit.
+ */
+function OnboardingCard({ client }: { client: BentoClient }) {
+  const toast = useToast();
+  const [walkthrough, setWalkthrough] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void client
+      .getOnboarding()
+      .then((row) => {
+        if (!cancelled) setWalkthrough(row.walkthrough);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) toast.fail(err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [client, toast]);
+
+  async function change(next: boolean) {
+    setBusy(true);
+    try {
+      const row = await client.setOnboarding(next);
+      setWalkthrough(row.walkthrough);
+      if (row.walkthrough) toast.note("The walkthrough opens the next time you visit the board.");
+    } catch (err) {
+      toast.fail(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="section settings-card">
+      <h3 className="settings-title">Onboarding walkthrough</h3>
+      <p className="muted">
+        A short guide on the board through connecting a repository, connecting GitHub so agents can
+        open pull requests and comment on code, and setting up your agents and pipeline.
+      </p>
+      <label className="gate-check">
+        <input
+          type="checkbox"
+          checked={walkthrough === true}
+          disabled={busy || walkthrough === null}
+          onChange={(e) => void change(e.target.checked)}
+        />
+        <span className="gate-check-text">Show the onboarding walkthrough on the board</span>
+      </label>
+      {walkthrough === true && (
+        <div className="actions">
+          <a className="btn" href="/">
+            Open it on the board
+          </a>
+        </div>
+      )}
+    </section>
   );
 }
 

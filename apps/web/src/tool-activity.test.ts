@@ -28,6 +28,17 @@ function calls(events: AgentEvent[], run = "run", running = false) {
   );
 }
 
+test("Poolside thoughts appear in an agent bubble while Bento notices remain notes", () => {
+  const items = toChatItems([
+    { type: "message", role: "system", text: "Checking the repo", raw: { type: "thought" } },
+    { type: "message", role: "system", text: "Starting pool in the sandbox." },
+  ], "Swarm Planner", "run");
+  assert.deepEqual(items.map((item) => item.kind === "message" ? [item.role, item.speaker] : []), [
+    ["assistant", "Swarm Planner thinking"],
+    ["system", "bento"],
+  ]);
+});
+
 test("recorded Cursor tools describe files, searches, edits and commands", () => {
   for (const [name, args, expected] of [
     ["readToolCall", { path: "src/app.tsx", startLine: 10, endLine: 25 }, "Read src/app.tsx (line 10 to 25)"],

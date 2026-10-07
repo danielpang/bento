@@ -15,6 +15,7 @@ import { customProviderRoutes } from "./routes/custom-providers.js";
 import { settingsRoutes } from "./routes/settings.js";
 import { teamRoutes } from "./routes/team.js";
 import { stageRoutes } from "./routes/stages.js";
+import { swarmRoutes } from "./routes/swarms.js";
 import { webhookRoutes } from "./routes/webhooks.js";
 import { catalogRoutes } from "./routes/catalog.js";
 import { and, eq } from "drizzle-orm";
@@ -30,6 +31,7 @@ import { mcpEndpointRoutes } from "./routes/mcp-endpoint.js";
 import { mcpOAuthConsentRoutes, mcpOAuthPublicRoutes } from "./routes/mcp-oauth.js";
 import { mcpWellKnownRoutes } from "./routes/mcp-well-known.js";
 import { contactRoutes } from "./routes/contact.js";
+import { accountRoutes } from "./routes/account.js";
 import { flagRoutes } from "./routes/flags.js";
 import { posthogApiKey } from "./env.js";
 import { accountDeletionBlockedReason } from "./auth.js";
@@ -116,7 +118,8 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
       return c.json({
         ok: true,
         mode: ctx.env.BENTO_MODE,
-        driver: ctx.driver.provider,
+        driver: ctx.drivers.default.provider,
+        selectableSandboxProviders: ctx.drivers.selectable(),
         build: shell?.build ?? undefined,
         // Which social logins are actually configured, so the sign-in
         // page offers real buttons rather than ones that can only 404.
@@ -339,6 +342,7 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
     .route("/artifacts", artifactRoutes(ctx))
     .route("/profiles", profileRoutes(ctx))
     .route("/stages", stageRoutes(ctx))
+    .route("/swarms", swarmRoutes(ctx))
     .route("/runs", runRoutes(ctx))
     .route("/runner", runnerRoutes(ctx))
     .route("/secrets", secretRoutes(ctx))
@@ -350,6 +354,7 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
     .route("/mcp-connections", mcpConnectionRoutes(ctx))
     .route("/mcp-oauth", mcpOAuthConsentRoutes(ctx))
     .route("/team", teamRoutes(ctx))
+    .route("/account", accountRoutes(ctx))
     .route("/contact", contactRoutes(ctx))
     .route("/settings", settingsRoutes(ctx));
 

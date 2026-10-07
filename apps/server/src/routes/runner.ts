@@ -1,5 +1,5 @@
 import { zValidator } from "@hono/zod-validator";
-import { and, asc, eq, inArray, isNull, max } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, max, sql } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
 import { agentEvent, forgetsBetweenRuns, trustedCostUsd, withTrustedCost } from "@bento/core";
@@ -16,6 +16,8 @@ import { captureRunFinished, deliverQueuedMessage, runnerReportedError } from ".
 import { runOutputPreview } from "../orchestrator/run-executor.js";
 import { queueRunFinishedSlack } from "../orchestrator/slack-notify.js";
 import { ACTIVE_RUN_STATUSES } from "../orchestrator/start-run.js";
+import { reportSandboxReady, sandboxOrigin } from "../orchestrator/sandbox-metrics.js";
+import { asPipelineRun, isPipelineRun } from "../orchestrator/pipeline-run.js";
 import { branchForRun, cardBranch } from "../orchestrator/branch-rotation.js";
 import { githubConnectionFor } from "../github.js";
 
@@ -28,6 +30,19 @@ const eventsInput = z.object({
   /** Must match the runner that claimed the run. */
   runnerId: z.string().min(1).max(128),
   events: z.array(agentEvent).max(500),
+  /**
+   * What the runner's sandbox was, sent with its first batch, so the
+   * server can count the wait the way it counts its own runs. An
+   * older runner sends nothing, and the event says so by leaving
+   * `provision_ms` out.
+   */
+  sandbox: z
+    .object({
+      provider: z.string().min(1).max(32),
+      createdSandbox: z.boolean().optional(),
+      provisionMs: z.number().nonnegative().optional(),
+    })
+    .optional(),
 });
 
 const completeInput = z.object({
@@ -68,7 +83,9 @@ async function authorizeReport(
   runnerId: string,
 ) {
   const [run] = await db(c, ctx).select().from(agentRuns).where(eq(agentRuns.id, runId));
-  if (!run) return { error: "not found" as const, status: 404 as const };
+  // Runners execute the pipeline's runs. A run of the other board is
+  // refused as not found, like any other id that is not the caller's.
+  if (!run || !isPipelineRun(run)) return { error: "not found" as const, status: 404 as const };
 
   const [feature] = await db(c, ctx).select().from(features).where(eq(features.id, run.featureId));
   if (!feature) return { error: "not found" as const, status: 404 as const };
@@ -105,6 +122,7 @@ export function runnerRoutes(ctx: AppContext) {
         .where(
           and(
             eq(agentRuns.status, "queued"),
+            eq(agentRuns.type, "pipeline"),
             eq(agentRuns.executor, "runner"),
             isNull(agentRuns.claimedBy),
             inArray(features.projectId, projectIds),
@@ -113,14 +131,21 @@ export function runnerRoutes(ctx: AppContext) {
         .orderBy(asc(agentRuns.queuedAt))
         .limit(1);
 
-      const candidate = candidates[0];
-      if (!candidate) return c.json({ run: null });
+      const found = candidates[0];
+      if (!found) return c.json({ run: null });
+      // The query already asked for the pipeline's; this is where that
+      // becomes the type everything below is handed.
+      const candidate = { ...found, run: asPipelineRun(found.run) };
 
       // Conditional update is the lock: a second runner racing for the
       // same row updates zero rows and simply polls again.
       const claimed = await db(c, ctx)
         .update(agentRuns)
-        .set({ status: "starting", claimedBy: runnerId, claimedAt: new Date(), startedAt: new Date() })
+        // Stamped by the database's clock, because the first report
+        // measures the sandbox wait from this stamp against the
+        // database's queued_at and now(), and a stamp from this host
+        // would put the two hosts' clock skew into the number.
+        .set({ status: "starting", claimedBy: runnerId, claimedAt: sql`now()`, startedAt: sql`now()` })
         .where(and(eq(agentRuns.id, candidate.run.id), isNull(agentRuns.claimedBy)))
         .returning();
       if (claimed.length === 0) return c.json({ run: null });
@@ -168,7 +193,7 @@ export function runnerRoutes(ctx: AppContext) {
        * on.
        */
       const { branch, replaced } =
-        candidate.run.kind === "task"
+        candidate.run.role === "stage"
           ? await branchForRun(
               db(c, ctx),
               await githubConnectionFor(ctx, candidate.feature.organizationId, db(c, ctx)),
@@ -194,10 +219,29 @@ export function runnerRoutes(ctx: AppContext) {
       }
 
       const resume = Boolean(candidate.run.cliSessionId) && !forgetsBetweenRuns(profile.cli);
-      // Same gate as the server executor: judge and rebase prompts are
-      // complete on their own and never take a compacted history.
+      /**
+       * What this run's role is given, decided from the run row.
+       *
+       * A stage prompt is what a stage run is told to do. A judge or a
+       * rebase run carries a complete instruction of its own, and
+       * putting the stage's in front of it tells the agent to do the
+       * stage's work again.
+       *
+       * That decision used to travel as `role` and be made again by the
+       * runner. A runner that does not read the field makes it wrongly
+       * and cannot know: the field was renamed from `kind` in this
+       * repository, so a machine still running the older build sends
+       * nothing on it and every judge it claimed was handed the stage's
+       * instructions. The server holds the run row, so it resolves the
+       * role itself and simply does not send what must not be
+       * prepended. `role` still travels, because a runner that does
+       * read it has more to say with it than this.
+       */
+      const takesStagePrompt = candidate.run.role === "stage";
+      // Same gate, for the same reason: judge and rebase prompts never
+      // take a compacted history either.
       const compacted =
-        candidate.run.prompt && candidate.run.kind === "task" && !resume
+        candidate.run.prompt && takesStagePrompt && !resume
           ? await compactedConversation(db(c, ctx), candidate.feature.id, candidate.run.id)
           : "";
 
@@ -208,7 +252,7 @@ export function runnerRoutes(ctx: AppContext) {
           stageId: stage.id,
           prompt: candidate.run.prompt,
           resumeSessionId: candidate.run.cliSessionId,
-          kind: candidate.run.kind,
+          role: candidate.run.role,
         },
         feature: {
           id: candidate.feature.id,
@@ -228,8 +272,13 @@ export function runnerRoutes(ctx: AppContext) {
           localPath: r.localPath,
           defaultBranch: r.defaultBranch,
         })),
-        /** Used when the run carries no explicit prompt. */
-        stagePrompt: buildStagePrompt(candidate.feature, stage, allStages, [], { name: profile.name, skill: profile.skill }),
+        /**
+         * Used when the run carries no explicit prompt. Empty for a
+         * role that does not take one: see takesStagePrompt above.
+         */
+        stagePrompt: takesStagePrompt
+          ? buildStagePrompt(candidate.feature, stage, allStages, [], { name: profile.name, skill: profile.skill })
+          : "",
         /**
          * Prior turns, compacted, for a follow-up that cannot resume a
          * CLI session. Empty when the run resumes or there is nothing
@@ -258,7 +307,39 @@ export function runnerRoutes(ctx: AppContext) {
         .where(eq(features.id, run.featureId));
 
       if (run.status === "starting") {
-        await db(c, ctx).update(agentRuns).set({ status: "running" }).where(eq(agentRuns.id, runId));
+        /**
+         * The runner's first word is its agent coming up, which is
+         * where the server's own executor reports the sandbox wait.
+         * Both slices are the database's arithmetic on its own
+         * stamps, so the runner's clock never enters them. The
+         * machine itself is the runner's, so the provider and whether
+         * it made one are whatever the runner said.
+         */
+        const [timing] = await db(c, ctx)
+          .update(agentRuns)
+          .set({ status: "running" })
+          .where(eq(agentRuns.id, runId))
+          .returning({
+            queueWaitMs: sql<number>`(extract(epoch from (${agentRuns.startedAt} - ${agentRuns.queuedAt})) * 1000)::float8`,
+            sinceClaimMs: sql<number>`(extract(epoch from (now() - ${agentRuns.startedAt})) * 1000)::float8`,
+          });
+        const sandbox = c.req.valid("json").sandbox;
+        if (timing && owner) {
+          reportSandboxReady(ctx.analytics, {
+            runId,
+            role: run.role,
+            provider: sandbox?.provider ?? "runner",
+            origin: sandboxOrigin({ createdSandbox: sandbox?.createdSandbox }),
+            queueWaitMs: timing.queueWaitMs,
+            sinceClaimMs: timing.sinceClaimMs,
+            ...(sandbox?.provisionMs !== undefined ? { provisionMs: sandbox.provisionMs } : {}),
+            projectId: owner.projectId,
+            organizationId: run.organizationId,
+            userId: run.startedBy,
+            owner: { featureId: run.featureId },
+            stageId: run.stageId,
+          });
+        }
       }
 
       /**

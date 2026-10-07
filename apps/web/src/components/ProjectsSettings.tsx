@@ -1,17 +1,17 @@
 import { useEffect, useState } from "react";
 import type { BentoClient, Project } from "@bento/api-client";
-import { RenameButton } from "./IconButtons.js";
+import { desktop } from "../desktop.js";
+import { rememberProjectSelection } from "../project-selection.js";
 import { Modal } from "./Modal.js";
 import { ProjectSettings } from "./ProjectSettings.js";
-import { PromptDialog } from "./PromptDialog.js";
-import { ListRowsSkeleton } from "./Skeleton.js";
+import { ProjectsSettingsList, projectsSettingsHref } from "./ProjectsSettingsList.js";
+import { NewProjectDialog, PromptDialog } from "./PromptDialog.js";
 import { useToast } from "./Toasts.js";
 
 /**
  * The projects list, and each project's own settings behind it.
- * Creating one stays on the board, which is where you are when you want
- * another; none of this is board work, and removing takes every card
- * with it.
+ * Creating one lives here as well as on the board: this is where
+ * projects are managed, and removing takes every card with it.
  *
  * The server scopes the list per request, so in multi mode this is the
  * active organization's projects and nothing else.
@@ -21,6 +21,7 @@ export function ProjectsSettings({ client }: { client: BentoClient }) {
   const [projects, setProjects] = useState<Project[] | null>(null);
   /** Distinct from an empty list: "no projects yet" on a failed request is a lie. */
   const [failed, setFailed] = useState(false);
+  const [creating, setCreating] = useState(false);
   const [renaming, setRenaming] = useState<Project | null>(null);
   const [removing, setRemoving] = useState<Project | null>(null);
   const [busy, setBusy] = useState(false);
@@ -52,7 +53,19 @@ export function ProjectsSettings({ client }: { client: BentoClient }) {
     setOpenId(id);
     // The address mirrors the open project so a reload or a shared
     // link lands on the same settings.
-    history.replaceState(null, "", id ? `/settings?tab=projects&project=${id}` : "/settings?tab=projects");
+    history.replaceState(null, "", projectsSettingsHref(id));
+  }
+
+  async function addProject(
+    name: string,
+    repositories: { localPath?: string; githubRepoId?: string; repoUrl?: string; name?: string; defaultBranch?: string }[],
+  ) {
+    const created = await client.createProject({ name, repositories });
+    // Same as creating from the board: the new project becomes the one
+    // that is selected when they go back.
+    rememberProjectSelection(created.id, Boolean(desktop));
+    await load();
+    show(created.id);
   }
 
   // A stale id (an organization switch, a removed project) simply falls
@@ -70,44 +83,19 @@ export function ProjectsSettings({ client }: { client: BentoClient }) {
   }
 
   return (
-    <section className="section settings-card">
-      <h3 className="settings-title">Projects</h3>
+    <>
+      <ProjectsSettingsList
+        projects={projects}
+        failed={failed}
+        busy={busy}
+        onNew={() => setCreating(true)}
+        onRename={setRenaming}
+        onRemove={setRemoving}
+        onOpen={show}
+      />
 
-      {failed ? (
-        <p className="error">Could not load the projects. Retry once the server is reachable.</p>
-      ) : projects === null ? (
-        <ListRowsSkeleton rows={3} />
-      ) : projects.length === 0 ? (
-        <p className="muted">No projects yet. Create one from the board.</p>
-      ) : (
-        projects.map((project) => (
-          <div key={project.id} className="gate-check">
-            <span className="gate-check-text">
-              <span className="gate-check-name">{project.name}</span>
-              <RenameButton
-                label={`Rename ${project.name}`}
-                disabled={busy}
-                onClick={() => setRenaming(project)}
-              />
-              {/* A project can exist before its code does, so this is often absent. */}
-              {project.localPath && (
-                <>
-                  <br />
-                  {project.localPath}
-                </>
-              )}
-            </span>
-            {/* One slot for both, so they stay together as a path wraps. */}
-            <span className="member-action">
-              <button className="btn btn-ghost" disabled={busy} onClick={() => show(project.id)}>
-                Settings
-              </button>
-              <button className="btn btn-ghost" disabled={busy} onClick={() => setRemoving(project)}>
-                Remove
-              </button>
-            </span>
-          </div>
-        ))
+      {creating && (
+        <NewProjectDialog client={client} onClose={() => setCreating(false)} onSubmit={addProject} />
       )}
 
       {renaming && (
@@ -141,7 +129,7 @@ export function ProjectsSettings({ client }: { client: BentoClient }) {
           onRemoved={() => void load()}
         />
       )}
-    </section>
+    </>
   );
 }
 

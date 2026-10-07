@@ -33,6 +33,16 @@ import { useGitHubOutcome } from "./components/GitHubIdentity.js";
 import { SignOutButton } from "./components/IconButtons.js";
 import { CHANGELOG_URL } from "./changelog.js";
 import { BetaTestersProvider, useBetaTesters } from "./beta.js";
+import { BoardModeToggle } from "./components/BoardModeToggle.js";
+import { useSwarmPlan } from "./swarm/plan.js";
+import { isSwarmEvent } from "./swarm/events.js";
+import {
+  boardHref,
+  browserStorage,
+  readBoardMode,
+  rememberBoardMode,
+  type BoardMode,
+} from "./swarm/view-state.js";
 import { NavMenu, ConfigureMenu, type NavAction } from "./components/NavMenu.js";
 import { CommandMenu } from "./components/CommandMenu.js";
 import { OutOfCompute } from "./components/OutOfCompute.js";
@@ -41,6 +51,10 @@ import { NewFeatureDialog, NewProjectDialog, PromptDialog } from "./components/P
 import { ProjectPicker } from "./components/ProjectPicker.js";
 import { useToast } from "./components/Toasts.js";
 import { identifyUser, resetUser, sessionIdentityChange } from "./posthog.js";
+import { desktop } from "./desktop.js";
+import { readProjectSelection, rememberProjectSelection } from "./project-selection.js";
+import type { OnboardingStep } from "./components/OnboardingWalkthrough.js";
+import { REPOSITORY_SETUP_ACTION, REPOSITORY_SETUP_MESSAGE } from "./repository-setup.js";
 
 /*
  * Everything below here is fetched when it is first needed.
@@ -60,6 +74,8 @@ const AgentsPanel = lazy(() => import("./components/AgentsPanel.js").then((m) =>
 const ChangelogPage = lazy(() => import("./components/ChangelogPage.js").then((m) => ({ default: m.ChangelogPage })));
 const ContactDialog = lazy(() => import("./components/ContactDialog.js").then((m) => ({ default: m.ContactDialog })));
 const CreateTeam = lazy(() => import("./components/CreateTeam.js").then((m) => ({ default: m.CreateTeam })));
+const OnboardingIntro = lazy(() => import("./components/OnboardingIntro.js").then((m) => ({ default: m.OnboardingIntro })));
+const OnboardingWalkthrough = lazy(() => import("./components/OnboardingWalkthrough.js").then((m) => ({ default: m.OnboardingWalkthrough })));
 const DeviceApproval = lazy(() => import("./components/DeviceApproval.js").then((m) => ({ default: m.DeviceApproval })));
 const McpAuthorize = lazy(() => import("./components/McpAuthorize.js").then((m) => ({ default: m.McpAuthorize })));
 const FeatureDrawer = lazy(() => import("./components/FeatureDrawer.js").then((m) => ({ default: m.FeatureDrawer })));
@@ -71,6 +87,10 @@ const SessionsPage = lazy(() => import("./components/SessionsPage.js").then((m) 
 const SettingsPage = lazy(() => import("./components/SettingsPage.js").then((m) => ({ default: m.SettingsPage })));
 const SpendPage = lazy(() => import("./components/SpendPage.js").then((m) => ({ default: m.SpendPage })));
 const StageConfig = lazy(() => import("./components/StageConfig.js").then((m) => ({ default: m.StageConfig })));
+/* The swarm board is a second board, and most people open the first
+ * one: its tree, its outline and its dialog stay out of the bundle
+ * until somebody picks Swarms. */
+const SwarmBoard = lazy(() => import("./components/SwarmBoard.js").then((m) => ({ default: m.SwarmBoard })));
 
 /**
  * What a route shows while its code arrives.
@@ -113,8 +133,10 @@ function RouteFallback() {
   return (
     <div className="app" aria-busy="true">
       <header className="topbar workspace-nav">
-        <BrandLockup />
-        <div className="workspace-project" aria-hidden="true"><Skeleton className="skeleton-picker" /></div>
+        <div className="workspace-identity">
+          <BrandLockup />
+          <div className="workspace-project" aria-hidden="true"><Skeleton className="skeleton-picker" /></div>
+        </div>
         <span className="topbar-spacer" />
       </header>
       <div className="workspace-toolbar" aria-hidden="true">
@@ -136,8 +158,6 @@ const client = new BentoClient({
   baseUrl: window.location.origin,
   onBuild: buildWatch.note,
 });
-
-const PROJECT_KEY = "bento:projectId";
 
 export function App() {
   const { data: session, isPending } = useSession();
@@ -242,7 +262,7 @@ function Console() {
   if (mode === "multi" && session) {
     return <FirstTeamGate userName={session.user.name ?? ""} />;
   }
-  return <BoardScreen showSignOut={false} />;
+  return <BoardScreen showSignOut={false} mode="local" />;
 }
 
 /**
@@ -278,7 +298,7 @@ function FirstTeamGate({ userName }: { userName: string }) {
   if (!created && Array.isArray(organizations) && organizations.length === 0) {
     return <FirstTeam userName={userName} onCreated={() => setCreated(true)} />;
   }
-  return <BoardScreen showSignOut />;
+  return <BoardScreen showSignOut mode="multi" />;
 }
 
 /** What /api/team/invitations answers with: only offers accept would honour. */
@@ -398,7 +418,7 @@ function FirstTeam({ userName, onCreated }: { userName: string; onCreated: () =>
   );
 }
 
-function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
+function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local" | "multi" }) {
   const beta = useBetaTesters();
   const [commandsOpen, setCommandsOpen] = useState(false);
   const [focusedReview, setFocusedReview] = useState(false);
@@ -429,18 +449,34 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
    * every reload, then swapped in the board.
    */
   const [projects, setProjects] = useState<{ id: string; name: string }[] | null>(null);
-  // Remembered across reloads: which board a user was last looking at.
+  // Desktop windows remember their own board across reloads and native menu
+  // navigation. New windows start with the last used project.
   // The list effect below still re-checks the stored id against the
   // rows the current tenant can see, so a stale value from before an
   // organization switch falls back to the first visible project
   // rather than landing on one this session cannot open.
-  const [projectId, setProjectId] = useState<string | null>(() => {
-    try {
-      return localStorage.getItem(PROJECT_KEY) ?? null;
-    } catch {
-      return null;
-    }
-  });
+  const [projectId, setProjectId] = useState<string | null>(() => readProjectSelection(Boolean(desktop)));
+  /**
+   * Pipeline or Swarms: which board of this project you are looking
+   * at. Beside the picker rather than in the address bar's path,
+   * because the project is chosen once and the mode decides which
+   * board of it you see.
+   *
+   * Remembered per browser and written into the address, so a reload
+   * lands where you were and a link opens the board it was copied
+   * from. Pipeline is the default, and stays it for anybody who never
+   * touches the toggle.
+   */
+  const swarmStorage = useMemo(() => browserStorage(), []);
+  const [boardMode, setBoardMode] = useState<BoardMode>(() =>
+    readBoardMode(window.location.search, swarmStorage),
+  );
+  const { access: swarmAccess, surfaces: swarmSurfaces } = useSwarmPlan(mode);
+  const betaTester = useBetaTesters();
+  /** Swarms only render for a tester on a plan that includes them. */
+  const swarmsOpen = betaTester && swarmAccess.included;
+  const swarming = boardMode === "swarms" && swarmsOpen && screen === "board";
+
   const [stages, setStages] = useState<Stage[]>([]);
   const [pipelineId, setPipelineId] = useState<string | null>(null);
   const [features, setFeatures] = useState<Feature[]>([]);
@@ -514,6 +550,90 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
   }, [usage]);
   /** A board-level load or action failure, shown under the topbar. */
   const [loadError, setLoadError] = useState("");
+  /**
+   * Null until this project's repositories have been read. Zero is the
+   * warning: agents have nowhere to work, and the prompt opens the
+   * panel that adds one.
+   */
+  const [repoCount, setRepoCount] = useState<number | null>(null);
+  /** The project the current count belongs to. A panel change is not a new project. */
+  const repoCountFor = useRef<string | null>(null);
+  /**
+   * Whether to open the onboarding walkthrough, from the person's own
+   * flag. Starts closed, and a failed read leaves it closed: an
+   * unwanted dialog over the board is worse than a missed one, which
+   * Settings, Account can still bring back.
+   */
+  const [onboardingOpen, setOnboardingOpen] = useState(false);
+  /**
+   * Kept for the tab, because the GitHub step leaves for Settings with a
+   * full page load and coming back should land on the step it left.
+   */
+  const [onboardingStep, setOnboardingStep] = useState<OnboardingStep>(() => {
+    try {
+      const saved = sessionStorage.getItem("bento.onboarding-step");
+      return saved === "github" || saved === "agents" || saved === "pipeline" ? saved : "repository";
+    } catch {
+      return "repository";
+    }
+  });
+  /**
+   * Whether the person opened Agents or Pipeline from the walkthrough.
+   * Both arrive filled with Bento's defaults, so their checks stay grey
+   * until somebody has looked. Kept for the tab, like the step.
+   */
+  const [onboardingReviewed, setOnboardingReviewed] = useState<{ agents: boolean; pipeline: boolean }>(() => {
+    try {
+      const saved = JSON.parse(sessionStorage.getItem("bento.onboarding-reviewed") ?? "{}") as Record<string, unknown>;
+      return { agents: saved.agents === true, pipeline: saved.pipeline === true };
+    } catch {
+      return { agents: false, pipeline: false };
+    }
+  });
+  useEffect(() => {
+    try {
+      sessionStorage.setItem("bento.onboarding-reviewed", JSON.stringify(onboardingReviewed));
+    } catch {
+      // Best effort, like the step.
+    }
+  }, [onboardingReviewed]);
+  /**
+   * The intro, once per browser, for an account with no projects yet
+   * whose walkthrough is on. Usually that is a first sign in, but it is
+   * also someone who never made a project and turned the walkthrough
+   * back on, which is fine: they are at the same starting point. It
+   * waits on a choice, skip or start, and
+   * the walkthrough only opens when somebody starts it. "started" keeps
+   * the intro behind the walkthrough until that is put away or a step
+   * opens a panel, and from then on it counts as played.
+   */
+  const [intro, setIntro] = useState<"waiting" | "started" | "played">(() => {
+    try {
+      return localStorage.getItem("bento.onboarding-intro") === "played" ? "played" : "waiting";
+    } catch {
+      return "waiting";
+    }
+  });
+  const introPlayed = useCallback(() => {
+    setIntro("played");
+    try {
+      localStorage.setItem("bento.onboarding-intro", "played");
+    } catch {
+      // Without storage it shows again next time, which is harmless.
+    }
+  }, []);
+  useEffect(() => {
+    if (intro !== "started") return;
+    if (onboardingOpen && panel === "none" && dialog === "none" && !contactOpen) return;
+    introPlayed();
+  }, [intro, onboardingOpen, panel, dialog, contactOpen, introPlayed]);
+  useEffect(() => {
+    try {
+      sessionStorage.setItem("bento.onboarding-step", onboardingStep);
+    } catch {
+      // Private browsing can refuse storage; the step is a convenience.
+    }
+  }, [onboardingStep]);
   const toast = useToast();
   /**
    * Where focus goes once a deleted card has left the board, and which
@@ -630,21 +750,62 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
   }, [loadProjectList]);
 
   useEffect(() => {
+    void client
+      .getOnboarding()
+      .then((row) => setOnboardingOpen(row.walkthrough))
+      .catch(() => setOnboardingOpen(false));
+  }, []);
+
+
+  useEffect(() => {
+    if (!projectId) {
+      repoCountFor.current = null;
+      setRepoCount(null);
+      return;
+    }
+    let cancelled = false;
+    // Only a different project forgets the count. Opening a panel used
+    // to clear it first, so the warning vanished and a board with no
+    // agents flashed "No coding agents yet" until the refetch returned.
+    if (repoCountFor.current !== projectId) {
+      repoCountFor.current = projectId;
+      setRepoCount(null);
+    }
+    void client
+      .listRepositories(projectId)
+      .then((rows) => {
+        if (!cancelled && repoCountFor.current === projectId) setRepoCount(rows.length);
+      })
+      .catch(() => {
+        // Keep the last count for this project. A failed read must not
+        // claim there are no repositories, and must not drop a warning
+        // that was already on screen. The start routes still refuse.
+      });
+    return () => {
+      cancelled = true;
+    };
+    // Closing the Repositories panel is when a repository just added
+    // should clear the warning. The count stays up while that refetch
+    // is in flight.
+  }, [projectId, panel]);
+
+  useEffect(() => {
     if (panel !== "agents") setAgentsIntent(null);
   }, [panel]);
 
-  // Persist the selection so a refresh lands on the same board. The
-  // list effect above has already rejected ids this tenant cannot see,
-  // so anything reaching here is one the session can open. Private
-  // browsing can refuse storage; the write is best effort.
+  // Wait until the list confirms this tenant can see the selected project.
   useEffect(() => {
-    try {
-      if (projectId) localStorage.setItem(PROJECT_KEY, projectId);
-      else localStorage.removeItem(PROJECT_KEY);
-    } catch {
-      // ignore: storage unavailable
-    }
-  }, [projectId]);
+    if (projects === null || (projectId && !projects.some(project => project.id === projectId))) return;
+    rememberProjectSelection(projectId, Boolean(desktop));
+  }, [projectId, projects]);
+
+  useEffect(() => {
+    if (!desktop) return;
+    const name = projects?.find(project => project.id === projectId)?.name;
+    const section = screen === "sessions" ? "Sessions" : screen === "spend" ? "Spend" : null;
+    document.title = [name, section, "Bento"].filter(Boolean).join(" | ");
+    return () => { document.title = "Bento"; };
+  }, [projectId, projects, screen]);
 
   useEffect(() => {
     // Drop the previous project's cards immediately: leaving them up
@@ -703,6 +864,14 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
       projectId,
       (event) => {
         const e = event as { featureId?: string; status?: string; type?: string; text?: string };
+        /*
+         * The other board's, on the same channel. Ignored here rather
+         * than handled: nothing on this screen renders a swarm, and
+         * falling through to the refresh below re-fetched stages,
+         * features and usage several times a second for every viewer
+         * of the Pipeline while a swarm ran.
+         */
+        if (isSwarmEvent(event)) return;
         if (e.type === "run_updated" && e.featureId && e.status) {
           setRunStatus((prev) => ({ ...prev, [e.featureId!]: e.status }));
           // The drawer refetches its runs list on this tick, so a run
@@ -802,6 +971,13 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
    * hint why. Name the missing step and offer the panel that fixes it.
    */
   const setupNeeded = useMemo(() => {
+    if (repoCount === 0) {
+      return {
+        message: REPOSITORY_SETUP_MESSAGE,
+        action: REPOSITORY_SETUP_ACTION,
+        panel: "repos" as const,
+      };
+    }
     if (stages.length === 0) return null;
     if (profiles.length === 0) {
       return {
@@ -818,7 +994,7 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
       };
     }
     return null;
-  }, [profiles, stages]);
+  }, [profiles, stages, repoCount]);
 
   async function addFeature(title: string, description: string) {
     if (!projectId) return;
@@ -862,6 +1038,52 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
       )}
       {dialog === "project" && (
         <NewProjectDialog client={client} onClose={() => setDialog("none")} onSubmit={addProject} />
+      )}
+      {/* Steps aside while the panel or dialog one of its steps opened
+          is up, and comes back on the same step when that closes. */}
+      {onboardingOpen && projects !== null && projects.length === 0 && intro !== "played" && (
+        <Suspense fallback={null}>
+          <OnboardingIntro
+            client={client}
+            started={intro === "started"}
+            onStart={() => setIntro("started")}
+            onSkipped={() => {
+              setOnboardingOpen(false);
+              introPlayed();
+            }}
+          />
+        </Suspense>
+      )}
+      {onboardingOpen && projects !== null && (intro !== "waiting" || projects.length > 0) && panel === "none" && dialog === "none" && !contactOpen && (
+        <Suspense fallback={null}>
+          <OnboardingWalkthrough
+            client={client}
+            step={onboardingStep}
+            onStep={setOnboardingStep}
+            mode={mode}
+            state={{
+              hasProjects: projects.length > 0,
+              repoCount,
+              agentCount: profiles.length,
+              stageCount: stages.length,
+              stagesWithAgents: stages.filter((stage) => stage.defaultAgentProfileId).length,
+              reviewed: onboardingReviewed,
+            }}
+            onNewProject={() => setDialog("project")}
+            onOpenRepositories={() => setPanel("repos")}
+            onOpenAgents={() => {
+              setOnboardingReviewed((current) => ({ ...current, agents: true }));
+              setAgentsIntent(null);
+              setPanel("agents");
+            }}
+            onOpenPipeline={() => {
+              setOnboardingReviewed((current) => ({ ...current, pipeline: true }));
+              setPanel("pipeline");
+            }}
+            onDismiss={() => setOnboardingOpen(false)}
+            onDone={() => setOnboardingOpen(false)}
+          />
+        </Suspense>
       )}
     </>
   );
@@ -938,6 +1160,29 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
     </a>
   ) : null;
 
+  /*
+   * Rendered on the board screen only. Sessions and spend are not
+   * boards, and a toggle that changes something two screens away is
+   * a control that lies about what it does.
+   */
+  const boardToggle =
+    screen === "board" ? (
+      <BoardModeToggle
+        mode={boardMode}
+        access={swarmAccess}
+        hrefFor={(next) => boardHref(window.location.pathname, window.location.search, { mode: next })}
+        onSelect={(next) => {
+          setBoardMode(next);
+          rememberBoardMode(swarmStorage, next);
+          window.history.replaceState(
+            null,
+            "",
+            boardHref(window.location.pathname, window.location.search, { mode: next }),
+          );
+        }}
+      />
+    ) : undefined;
+
   const hasProjects = (projects?.length ?? 0) > 0;
   /**
    * The list has not answered, or this project's stages have not. Either
@@ -953,17 +1198,42 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
    * The order is the row's order, which is the order they were in
    * before the menu existed.
    */
-  const actions: NavAction[] = [
-    { id: "board", label: "Board", href: "/", current: screen === "board" },
-    { id: "sessions", label: "Sessions", href: "/sessions", current: screen === "sessions" },
-    { id: "agents", label: "Agents", onSelect: () => { setAgentsIntent(null); setPanel("agents"); } },
-    ...(hasProjects
-      ? [
-          { id: "pipeline", label: "Pipeline", onSelect: () => setPanel("pipeline") },
-          { id: "repos", label: "Repositories", onSelect: () => setPanel("repos") },
-        ]
-      : []),
-  ];
+  /*
+   * The swarm board's tools are not the card board's.
+   *
+   * Board, Sessions and Pipeline are all about cards: a swarm has no
+   * stage to configure, no session list of its own, and the board
+   * button would point at the board already open. So on the swarm
+   * board they are left out. A swarm's agents and how it is run are
+   * chosen in the New swarm dialog and changed in its own settings.
+   */
+  /*
+   * And only where the swarm board is the thing actually on screen.
+   *
+   * `swarming` is true from the moment the mode is remembered, but the
+   * swarm board renders under `swarming && projectId` and the two
+   * early returns below (no project list yet, no projects at all) draw
+   * the card board's skeleton without the board toggle. Keyed on
+   * `swarming` alone, somebody whose remembered mode is swarms and
+   * whose project list fails to load got a topbar with no Board, no
+   * Sessions and no toggle: nothing but the URL bar to get out with.
+   */
+  const onSwarmBoard = swarming && projectId !== null && hasProjects;
+  const actions: NavAction[] = onSwarmBoard
+    ? [
+        ...(hasProjects ? [{ id: "repos", label: "Repositories", onSelect: () => setPanel("repos") }] : []),
+      ]
+    : [
+        { id: "board", label: "Board", href: "/", current: screen === "board" },
+        { id: "sessions", label: "Sessions", href: "/sessions", current: screen === "sessions" },
+        { id: "agents", label: "Agents", onSelect: () => { setAgentsIntent(null); setPanel("agents"); } },
+        ...(hasProjects
+          ? [
+              { id: "pipeline", label: "Pipeline", onSelect: () => setPanel("pipeline") },
+              { id: "repos", label: "Repositories", onSelect: () => setPanel("repos") },
+            ]
+          : []),
+      ];
 
   const bottom = (
     <>
@@ -1050,6 +1320,7 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
       <TopBar
         showSignOut={showSignOut}
         actions={actions}
+        showSwarmSwitcher={onSwarmBoard}
         meta={spend}
         onContact={() => setContactOpen(true)}
         picker={
@@ -1058,11 +1329,13 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
             projectId={projectId}
             onSelect={setProjectId}
             onNewProject={() => setDialog("project")}
+            onOpenProject={desktop ? (id) => { window.open(`/?project=${encodeURIComponent(id)}`, "_blank", "noopener,noreferrer"); } : undefined}
           />
         }
+        boardToggle={boardToggle}
         search={
-          workScreen ? (
-          <BoardSearch
+          workScreen && !swarming ? (
+            <BoardSearch
               value={query}
               onChange={setQuery}
               matches={features.filter((f) => matchesQuery(f, query)).length}
@@ -1071,7 +1344,7 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
           ) : undefined
         }
         primary={
-          workScreen ? (
+          workScreen && !swarming ? (
             <button className="btn btn-primary" title={beta ? "New card (n)" : undefined} onClick={() => setDialog("feature")}>
               New card
             </button>
@@ -1083,7 +1356,9 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
           act on any advice below it either. The banner links to
           Settings, Billing, so a phone does not land on Appearance
           with that tab off the right edge of the strip. */}
-      <OutOfCompute />
+      {/* The swarm page carries its own, above its own header, so a
+          swarm does not stack two identical banners. */}
+      {!swarming && <OutOfCompute />}
 
       {!boardPending && setupNeeded && (
         <div className="setup-prompt">
@@ -1120,6 +1395,18 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
         <Suspense fallback={<SpendPageSkeleton />}>
           <SpendPage client={client} projectId={projectId} />
         </Suspense>
+      ) : swarming && projectId ? (
+        /* A second board of the same project. Its own boundary, like
+           the panels: the chunk arrives without blanking the chrome. */
+        <Suspense fallback={<BoardSkeleton />}>
+          <SwarmBoard
+            projectId={projectId}
+            client={client}
+            surfaces={swarmSurfaces}
+            repositoriesMissing={repoCount === 0}
+            onAddRepository={() => setPanel("repos")}
+          />
+        </Suspense>
       ) : boardPending ? (
         <BoardSkeleton />
       ) : (
@@ -1145,12 +1432,23 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
           // Optimistic: the card lands in the lane it was dropped on,
           // and the refetch settles the truth. Waiting for the server
           // makes a drop feel like it bounced.
+          const card = features.find((feature) => feature.id === featureId);
+          const fromIndex = card?.currentStageId
+            ? stages.findIndex((stage) => stage.id === card.currentStageId)
+            : -1;
+          const toIndex = stageId ? stages.findIndex((stage) => stage.id === stageId) : -1;
+          // Forward is the drop that would have started an agent. The
+          // move still happens; the note is why that agent did not.
+          const movingForward = toIndex > fromIndex;
           setFeatures((current) =>
             current.map((f) => (f.id === featureId ? { ...f, currentStageId: stageId, status: "active" } : f)),
           );
           void client
             .moveFeature(featureId, stageId)
-            .then(() => setLoadError(""))
+            .then(() => {
+              setLoadError("");
+              if (movingForward && repoCount === 0) toast.note(REPOSITORY_SETUP_MESSAGE);
+            })
             // The refetch will snap the card back; without a reason the
             // bounce reads as a glitch rather than a refusal.
             .catch((err: unknown) =>
@@ -1213,7 +1511,7 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
         </section>
       )}
       <Suspense fallback={null}>
-        {workScreen && selected && (
+        {workScreen && !swarming && selected && (
           <FeatureDrawer
             client={client}
             feature={selected}
@@ -1228,6 +1526,7 @@ function BoardScreen({ showSignOut }: { showSignOut: boolean }) {
             onDeleted={handleDeleted}
             onSelectFeature={setSelectedId}
             onEvent={recordEvent}
+            onOpenRepositories={() => setPanel("repos")}
           />
         )}
       </Suspense>
@@ -1265,20 +1564,22 @@ function GearMark() {
 /**
  * The console's chrome.
  *
- * Two renderings of one set of controls. Above 720px they are a row, as
- * they always were. Below it the row is a menu behind a hamburger, and
- * only the three things worth a tap without one stay out: the project
- * picker, the search field, and the primary action.
+ * Above 720px every control is one row. Below it the row is two lines
+ * on purpose, in the same order. The project picker takes the first
+ * line, so its name stays readable. The board switch, Spend, the gear,
+ * and Sign out share the second, so Sign out is not left on a line by
+ * itself. Letting the wide row wrap instead squeezed the project name
+ * down to its caret and dropped Sign out onto the line under it.
  *
- * The narrow layout was not a small version of the wide one, it was the
- * wide one wrapping. A picker, a search field, four ghost buttons, a
- * gear and Sign out came to three rows of scattered text stacked above
- * a board with no height left to show a card in.
+ * The board's other tools stay in the menu behind the hamburger. The
+ * search field and the primary action stay out, on the toolbar.
  */
 function TopBar({
   actions = [],
   primary,
   picker,
+  boardToggle,
+  showSwarmSwitcher = false,
   search,
   meta,
   onContact,
@@ -1289,6 +1590,10 @@ function TopBar({
   /** The one button that stays out of the menu at every width. */
   primary?: React.ReactNode;
   picker?: React.ReactNode;
+  /** Pipeline or Swarms. Beside the picker, never in the menu. */
+  boardToggle?: React.ReactNode;
+  /** The swarm board mounts its live switcher here, before Configure. */
+  showSwarmSwitcher?: boolean;
   search?: React.ReactNode;
   /** The spend chip. It stays out of the menu at every width. */
   meta?: React.ReactNode;
@@ -1319,17 +1624,24 @@ function TopBar({
   return (
     <>
     <header className="topbar workspace-nav">
-      <BrandLockup />
-      {picker && <div className="workspace-project">{picker}</div>}
+      <div className="workspace-identity">
+        <BrandLockup />
+        {picker && <div className="workspace-project">{picker}</div>}
+      </div>
+      {/* Beside the picker it qualifies: which project, then which of
+          its boards. The row's own gap separates them. */}
+      {boardToggle}
       <span className="topbar-spacer" />
       {meta}
-      <a className="btn btn-ghost settings-gear" aria-label="Settings" title="Settings" href="/settings">
-        <GearMark />
-      </a>
-      {showSignOut && <SignOutButton onClick={() => signOut()} />}
+      <div className="workspace-actions">
+        <a className="btn btn-ghost settings-gear" aria-label="Settings" title="Settings" href="/settings">
+          <GearMark />
+        </a>
+        {showSignOut && <SignOutButton onClick={() => signOut()} />}
+      </div>
     </header>
     <div className="workspace-toolbar">
-      <nav className="topbar-nav" aria-label="Board">
+      <nav className={showSwarmSwitcher ? "topbar-nav topbar-nav-swarms" : "topbar-nav"} aria-label="Board">
         {actions.filter((action) => !beta || action.href !== undefined).map((action) =>
           action.href === undefined ? (
             <button key={action.id} className="btn btn-ghost" onClick={action.onSelect}>
@@ -1348,6 +1660,7 @@ function TopBar({
             </a>
           ),
         )}
+        {showSwarmSwitcher && <div id="swarm-switcher-slot" className="workspace-swarm-switcher" />}
         {beta && actions.some((action) => action.href === undefined) && <ConfigureMenu actions={actions.filter((action) => action.href === undefined)} />}
       </nav>
       <NavMenu actions={entries} />

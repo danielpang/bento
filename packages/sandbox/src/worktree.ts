@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { mkdir, readdir, rm, stat } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, readdir, rename, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -14,7 +15,7 @@ const run = promisify(execFile);
 function isStaleRegistration(err: unknown): boolean {
   const text =
     err instanceof Error ? `${err.message}${"stderr" in err ? String(err.stderr) : ""}` : String(err);
-  return /missing but already registered worktree|already used by worktree/i.test(text);
+  return /missing but (?:already registered|locked) worktree|already used by worktree/i.test(text);
 }
 
 /**
@@ -85,35 +86,37 @@ export function repositoryPathIn(sandboxWorkdir: string, repoName: string): stri
 }
 
 /**
- * Manages per-feature git worktrees on the host.
+ * Manages per-workspace git worktrees on the host.
  *
- * A feature gets one workspace directory containing a worktree per
- * repository in its project:
+ * A workspace gets one directory containing a worktree per repository
+ * in its project:
  *
- *   <dataDir>/worktrees/<featureId>/<repoName>
+ *   <dataDir>/worktrees/<workspaceKey>/<repoName>
  *
  * The workspace directory is what gets mounted into the sandbox, so a
- * feature spanning several repositories sees /workspace/api and
+ * workspace spanning several repositories sees /workspace/api and
  * /workspace/web side by side. Single repository projects get the same
- * shape, which keeps prompts and paths uniform.
+ * shape, which keeps prompts and paths uniform. The key is a card's
+ * feature id on the pipeline and a swarm's own key on the other board:
+ * a name, not an id of any one table.
  */
 export class WorktreeManager {
   constructor(private dataDir: string) {}
 
   /** Host directory mounted into the sandbox as /workspace. */
-  workspacePath(featureId: string): string {
-    return path.join(this.dataDir, "worktrees", featureId);
+  workspacePath(workspaceKey: string): string {
+    return path.join(this.dataDir, "worktrees", workspaceKey);
   }
 
-  worktreePath(featureId: string, repoName: string): string {
-    return path.join(this.workspacePath(featureId), repoName);
+  worktreePath(workspaceKey: string, repoName: string): string {
+    return path.join(this.workspacePath(workspaceKey), repoName);
   }
 
   /**
    * Creates or reuses a worktree for every repository in the project.
    *
-   * `branchChanged` is the caller saying the card is not on the branch
-   * its workspace was built for, which today means its pull request
+   * `branchChanged` is the caller saying the workspace is not on the
+   * branch it was built for, which today means a card's pull request
    * merged and it has started another. Only then is an existing
    * worktree moved: a worktree is where an agent has been working, and
    * a run that found one on a branch of the agent's own making left it
@@ -122,16 +125,16 @@ export class WorktreeManager {
    */
   async ensureAll(
     repos: RepositorySpec[],
-    featureId: string,
+    workspaceKey: string,
     branch: string,
     options: { branchChanged?: boolean } = {},
   ): Promise<PreparedRepository[]> {
-    const workspace = this.workspacePath(featureId);
+    const workspace = this.workspacePath(workspaceKey);
     await mkdir(workspace, { recursive: true });
 
     const prepared: PreparedRepository[] = [];
     for (const repo of repos) {
-      const worktreePath = this.worktreePath(featureId, repo.name);
+      const worktreePath = this.worktreePath(workspaceKey, repo.name);
       await this.ensureOne(repo.localPath, worktreePath, branch, {
         startFromBranch: repo.startFromBranch,
         defaultBranch: repo.defaultBranch ?? "main",
@@ -146,7 +149,7 @@ export class WorktreeManager {
   /**
    * Drops worktrees for repositories the project no longer spans.
    *
-   * A workspace is built once and reused for the life of the feature,
+   * A workspace is built once and reused for as long as it exists,
    * so without this a repository stays mounted after it is removed from
    * the project, and every later agent can still read and write it.
    * Removing a repository has to actually take it away.
@@ -184,6 +187,10 @@ export class WorktreeManager {
       }
 
       try {
+        // Unlocked first: ensure locks every workspace it makes, and a
+        // single --force does not remove a locked worktree, so without
+        // this a repository dropped from the project stayed mounted.
+        await run("git", ["-C", mainRepo, "worktree", "unlock", candidate]).catch(() => {});
         await run("git", ["-C", mainRepo, "worktree", "remove", "--force", candidate]);
       } catch {
         // Not a worktree of that repository, so not one of ours to take.
@@ -202,9 +209,19 @@ export class WorktreeManager {
     // list`: git prints resolved paths (/private/var vs /var on macOS),
     // so string comparison misses live worktrees.
     if (await isDirectory(worktreePath)) {
-      await run("git", ["-C", worktreePath, "rev-parse", "--git-dir"]);
-      if (options.moveExisting) await this.switchBranch(worktreePath, branch, startFromBranch);
-      return;
+      try {
+        await run("git", ["-C", worktreePath, "rev-parse", "--git-dir"]);
+        if (options.moveExisting) await this.switchBranch(worktreePath, branch, startFromBranch);
+        await this.lock(repoPath, worktreePath);
+        return;
+      } catch (error) {
+        // Only repair a broken link, never a failed branch switch or a
+        // lock error. An orphan can contain uncommitted agent work, so
+        // move it aside intact instead of deleting or resetting it.
+        const stillValid = await run("git", ["-C", worktreePath, "rev-parse", "--git-dir"]).then(() => true, () => false);
+        if (stillValid || !(await this.isOrphanedWorktree(repoPath, worktreePath))) throw error;
+        await rename(worktreePath, `${worktreePath}.orphan-${randomUUID()}`);
+      }
     }
 
     // Said outright rather than left to git's "cannot change to"
@@ -227,9 +244,26 @@ export class WorktreeManager {
       // a fresh one is what a follow-up prompt wants, and is why the
       // add below is the -b form rather than a failure.
       const base = startFromBranch ?? options.defaultBranch;
+      /**
+       * A branch that is already here needs no remote at all.
+       *
+       * The refresh below exists for a base branch the remote owns, so
+       * a new card starts from what main is now rather than from what
+       * it was when this checkout was last fetched. A swarm's branch is
+       * the opposite kind of thing: the merge queue owns it, it lives
+       * only in this repository, and nothing pushes it until the swarm
+       * finishes. Asking origin for it fails with "couldn't find remote
+       * ref", which this turns into a sentence about remote access, and
+       * every worker of every swarm on a project with an origin died on
+       * it before its agent had started.
+       */
+      const { stdout: local } = await run("git", ["-C", repoPath, "branch", "--list", base]);
+      const needsRemote = local.trim() === "";
       // Refresh only when creating a branch, never for every stage or card read.
       // Fetch an explicit tracking ref even in repositories with narrow fetch refspecs.
-      const { stdout: remotes } = await run("git", ["-C", repoPath, "remote"]);
+      const { stdout: remotes } = needsRemote
+        ? await run("git", ["-C", repoPath, "remote"])
+        : { stdout: "" };
       if (remotes.split("\n").includes("origin")) {
         try {
           await run(
@@ -255,6 +289,30 @@ export class WorktreeManager {
       }
       const start = await startPointIn(repoPath, base);
       await this.add(repoPath, ["-b", branch, worktreePath, ...(start ? [start] : [])]);
+    }
+    await this.lock(repoPath, worktreePath);
+  }
+
+  private async isOrphanedWorktree(repoPath: string, worktreePath: string): Promise<boolean> {
+    const marker = await readFile(path.join(worktreePath, ".git"), "utf8").catch(() => "");
+    const gitdir = /^gitdir: (.+)\s*$/m.exec(marker)?.[1];
+    if (!gitdir) return false;
+    const source = await run("git", ["-C", repoPath, "rev-parse", "--absolute-git-dir"]).then((r) => r.stdout.trim(), () => "");
+    return Boolean(source) && path.resolve(gitdir).startsWith(`${path.resolve(source, "worktrees")}${path.sep}`);
+  }
+
+  /**
+   * A Docker workspace may live in OrbStack's Linux /var/tmp while its
+   * source .git lives on macOS. Git on macOS sees that worktree path as
+   * missing and can prune its metadata while the sandbox is working.
+   * Locking the registration keeps the two views of /var/tmp from
+   * invalidating an active checkout.
+   */
+  private async lock(repoPath: string, worktreePath: string): Promise<void> {
+    try {
+      await run("git", ["-C", repoPath, "worktree", "lock", "--reason", "Bento workspace", worktreePath]);
+    } catch (err) {
+      if (!/already locked/i.test(String(err))) throw err;
     }
   }
 
@@ -313,6 +371,13 @@ export class WorktreeManager {
       await run("git", ["-C", repoPath, "worktree", "add", ...args]);
     } catch (err) {
       if (!isStaleRegistration(err)) throw err;
+      const { stdout } = await run("git", ["-C", repoPath, "worktree", "list", "--porcelain"]);
+      for (const record of stdout.trim().split("\n\n")) {
+        const at = /^worktree (.+)$/m.exec(record)?.[1];
+        if (at && /^locked Bento workspace$/m.test(record) && !(await isDirectory(at))) {
+          await run("git", ["-C", repoPath, "worktree", "unlock", at]);
+        }
+      }
       await run("git", ["-C", repoPath, "worktree", "prune", "--expire=now"]);
       await run("git", ["-C", repoPath, "worktree", "add", ...args]);
     }
@@ -354,21 +419,23 @@ export class WorktreeManager {
         );
       }
     }
+    await run("git", ["-C", repoPath, "worktree", "unlock", stale]).catch(() => {});
     await run("git", ["-C", repoPath, "worktree", "remove", "--force", stale]).catch(async () => {
       // remove refuses paths it cannot stat; prune clears the record.
       await run("git", ["-C", repoPath, "worktree", "prune"]);
     });
   }
 
-  async remove(repoPath: string, featureId: string, repoName: string): Promise<void> {
+  async remove(repoPath: string, workspaceKey: string, repoName: string): Promise<void> {
     try {
+      await run("git", ["-C", repoPath, "worktree", "unlock", this.worktreePath(workspaceKey, repoName)]).catch(() => {});
       await run("git", [
         "-C",
         repoPath,
         "worktree",
         "remove",
         "--force",
-        this.worktreePath(featureId, repoName),
+        this.worktreePath(workspaceKey, repoName),
       ]);
     } catch {
       // Already gone or never created.
@@ -387,11 +454,11 @@ export class WorktreeManager {
    */
   async removeWorkspace(
     repos: { name: string; localPath: string }[],
-    featureId: string,
+    workspaceKey: string,
   ): Promise<void> {
     for (const repo of repos) {
-      await this.remove(repo.localPath, featureId, repo.name);
+      await this.remove(repo.localPath, workspaceKey, repo.name);
     }
-    await rm(this.workspacePath(featureId), { recursive: true, force: true });
+    await rm(this.workspacePath(workspaceKey), { recursive: true, force: true });
   }
 }

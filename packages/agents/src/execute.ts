@@ -5,6 +5,7 @@ export interface ExecChunk {
   kind: "stdout" | "stderr" | "exit";
   data?: string;
   exitCode?: number;
+  cursor?: number;
 }
 
 export interface RunAgentInput {
@@ -13,7 +14,9 @@ export interface RunAgentInput {
   /** Yields the process output, whichever sandbox it runs in. */
   exec: () => AsyncIterable<ExecChunk>;
   /** Called for each parsed event, for persistence or streaming. */
-  onEvent?: (event: AgentEvent) => void | Promise<void>;
+  onEvent?: (event: AgentEvent, cursor?: number) => void | Promise<void>;
+  /** Events already persisted before a durable sandbox stream was reattached. */
+  initialEvents?: AgentEvent[];
   /**
    * Called for each streaming fragment of the message being composed.
    * Fragments are display-only: they are never collected, persisted,
@@ -44,7 +47,7 @@ export interface RunAgentResult {
  */
 export async function runAgent(input: RunAgentInput): Promise<RunAgentResult> {
   const { adapter, exec, onEvent, onDelta } = input;
-  const events: AgentEvent[] = [];
+  const events: AgentEvent[] = [...(input.initialEvents ?? [])];
   let buffer = "";
   let exitCode = -1;
   const textOutput = createBoundedText(256 * 1024);
@@ -67,7 +70,8 @@ export async function runAgent(input: RunAgentInput): Promise<RunAgentResult> {
   // "[session started]" three times. extractOutcome already takes the
   // first init via events.find, so dropping the rest is safe for every
   // adapter.
-  let initialized = false;
+  let initialized = events.some((event) => event.type === "init");
+  let lastCursor: number | undefined;
 
   /**
    * Where each channel's current message stands, so every forwarded
@@ -77,7 +81,7 @@ export async function runAgent(input: RunAgentInput): Promise<RunAgentResult> {
    */
   const streamed = { text: 0, thinking: 0 };
 
-  const emit = async (line: string) => {
+  const emit = async (line: string, cursor?: number) => {
     /**
      * Deltas first, and unconditionally: a per token line is neither a
      * transcript event nor stray output, and before this check pi's
@@ -108,10 +112,11 @@ export async function runAgent(input: RunAgentInput): Promise<RunAgentResult> {
       streamed.thinking = 0;
     }
     events.push(event);
-    await onEvent?.(event);
+    await onEvent?.(event, cursor);
   };
 
   for await (const chunk of exec()) {
+    if (chunk.cursor !== undefined) lastCursor = chunk.cursor;
     if (chunk.kind === "exit") {
       exitCode = chunk.exitCode ?? -1;
       break;
@@ -131,17 +136,17 @@ export async function runAgent(input: RunAgentInput): Promise<RunAgentResult> {
     while (newline >= 0) {
       const line = buffer.slice(0, newline);
       buffer = buffer.slice(newline + 1);
-      await emit(line);
+      await emit(line, chunk.cursor);
       newline = buffer.indexOf("\n");
     }
   }
-  if (adapter.stdoutMode !== "text" && buffer.trim()) await emit(buffer);
+  if (adapter.stdoutMode !== "text" && buffer.trim()) await emit(buffer, lastCursor);
   if (adapter.stdoutMode === "text") {
     const text = textOutput.value().trim();
     if (text) {
       const event: AgentEvent = { type: "message", role: "assistant", text };
       events.push(event);
-      await onEvent?.(event);
+      await onEvent?.(event, lastCursor);
     }
   }
 

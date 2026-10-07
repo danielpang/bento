@@ -20,7 +20,8 @@
   "dependencies": {
     "@bento/core": "workspace:*",
     "@fly/sprites": "^0.1.0",
-    "dockerode": "^4.0.4"
+    "dockerode": "^4.0.4",
+    "modal": "0.10.1"
   },
   "devDependencies": {
     "@bento/agents": "workspace:*",

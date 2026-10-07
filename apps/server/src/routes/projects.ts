@@ -17,6 +17,7 @@ import {
   runEvents,
   seedDefaultPipeline,
   stages,
+  swarms,
 } from "@bento/db";
 import { parsePipelineFile, pipelineFile, writePipelineFile } from "../pipeline-file.js";
 import { upsertAgentsFromFile } from "../upsert-agents.js";
@@ -29,6 +30,8 @@ import {
   getActiveOrganizationMembership,
   visibleProjectFilter,
 } from "../access.js";
+import { getBetaTester } from "../feature-flags.js";
+import { candidateDrivers, driverForProject } from "../orchestrator/sandbox-driver.js";
 import { githubForOrganization } from "../github.js";
 import { branchExists, detectDefaultBranch, githubRemoteOf, linkGitHubRemotes } from "../orchestrator/repo-remote.js";
 import { ACTIVE_RUN_STATUSES } from "../orchestrator/start-run.js";
@@ -263,9 +266,13 @@ async function resolveRepositoryInput(
   c: Context,
   input: RepositoryInput,
   organizationId: string | null,
+  driver: { workspace: "host" | "clone" },
 ): Promise<RepositoryResolution> {
   if (!input.githubRepoId) {
-    if (ctx.driver.provider === "sprite") return { ok: false, error: UNAVAILABLE };
+    // A clone driver has no host filesystem to mount a path onto.
+    // The caller passes the project's driver when the project names
+    // one, and the deployment default otherwise.
+    if (driver.workspace === "clone") return { ok: false, error: UNAVAILABLE };
     // A hosted installation token must never be selected from a URL the
     // caller supplied. Runner/local paths carry no server credential.
     if (ctx.env.BENTO_MODE === "multi" && input.repoUrl) return { ok: false, error: UNAVAILABLE };
@@ -405,9 +412,21 @@ export function projectRoutes(ctx: AppContext) {
                 },
               ]
             : [];
+      // Checked against the driver this project's first run would use.
+      // A new row starts on "auto" (the column's default), and on a
+      // hosted deployment that is a clone driver, which cannot mount a
+      // path on this server; the add-repository route refuses the
+      // same input for the same reason, so create and add agree.
+      const newProjectDriver = candidateDrivers(ctx.drivers, "auto").driver;
       const repoInputs = [];
       for (const requested of requestedInputs) {
-        const resolved = await resolveRepositoryInput(ctx, c, requested, membership?.organizationId ?? null);
+        const resolved = await resolveRepositoryInput(
+          ctx,
+          c,
+          requested,
+          membership?.organizationId ?? null,
+          newProjectDriver,
+        );
         if (!resolved.ok) return c.json({ error: resolved.error }, 400);
         repoInputs.push(resolved.repo);
       }
@@ -510,7 +529,21 @@ export function projectRoutes(ctx: AppContext) {
         return c.json({ error: "not found" }, 404);
       }
       const requested = c.req.valid("json");
-      const resolved = await resolveRepositoryInput(ctx, c, requested, membership?.organizationId ?? null);
+      const [project] = await db(c, ctx)
+        .select({ sandboxProvider: projects.sandboxProvider, ownerId: projects.ownerId })
+        .from(projects)
+        .where(eq(projects.id, projectId))
+        .limit(1);
+      const driver = project
+        ? await driverForProject(ctx, project, actor(c))
+        : ctx.drivers.default;
+      const resolved = await resolveRepositoryInput(
+        ctx,
+        c,
+        requested,
+        membership?.organizationId ?? null,
+        driver,
+      );
       if (!resolved.ok) return c.json({ error: resolved.error }, 400);
       const body = resolved.repo;
 
@@ -652,7 +685,7 @@ export function projectRoutes(ctx: AppContext) {
       const projectId = c.req.param("id");
       if (!(await canAccessProject(ctx, c, projectId))) return c.json({ error: "not found" }, 404);
 
-      const conversationRuns = and(eq(features.projectId, projectId), ne(agentRuns.kind, "judge"));
+      const conversationRuns = and(eq(features.projectId, projectId), ne(agentRuns.role, "judge"));
       const [totals, latest] = await Promise.all([
         db(c, ctx)
           .select({
@@ -706,7 +739,7 @@ export function projectRoutes(ctx: AppContext) {
       const projectId = c.req.param("id");
       if (!(await canAccessProject(ctx, c, projectId))) return c.text("error|not found", 404);
 
-      const conversationRuns = and(eq(features.projectId, projectId), ne(agentRuns.kind, "judge"));
+      const conversationRuns = and(eq(features.projectId, projectId), ne(agentRuns.role, "judge"));
       const [totals, latest] = await Promise.all([
         db(c, ctx)
           .select({
@@ -777,6 +810,9 @@ export function projectRoutes(ctx: AppContext) {
         const projectId = c.req.param("id");
         if (!(await canAccessProject(ctx, c, projectId))) return c.json({ error: "not found" }, 404);
         const body = c.req.valid("json");
+        const [project] = await db(c, ctx).select().from(projects).where(eq(projects.id, projectId));
+        if (!project) return c.json({ error: "not found" }, 404);
+
         const patch: Partial<typeof projects.$inferInsert> = { updatedAt: new Date() };
         if (body.name !== undefined) patch.name = body.name;
         if (body.autoStartPipeline !== undefined) patch.autoStartPipeline = body.autoStartPipeline;
@@ -964,7 +1000,7 @@ export function projectRoutes(ctx: AppContext) {
     .get("/:id/usage", async (c) => {
       const projectId = c.req.param("id");
       if (!(await canAccessProject(ctx, c, projectId))) return c.json({ error: "not found" }, 404);
-      const spendRun = and(ne(agentRuns.kind, "judge"), inArray(agentRuns.status, [...TERMINAL_RUN_STATUSES]));
+      const spendRun = and(ne(agentRuns.role, "judge"), inArray(agentRuns.status, [...TERMINAL_RUN_STATUSES]));
       const rows = await db(c, ctx)
         .select({
           stageId: agentRuns.stageId,
@@ -1008,6 +1044,54 @@ export function projectRoutes(ctx: AppContext) {
         .where(eq(features.projectId, projectId))
         .groupBy(features.id, features.title);
 
+      /**
+       * The swarms, as swarms rather than as forty unrelated runs.
+       *
+       * A swarm's runs have no feature, so they are absent from the
+       * card rollup above and would be absent from this page
+       * altogether: the first thing a person would notice is that a
+       * swarm which cost forty dollars is nowhere on the spend page.
+       *
+       * Grouped by swarm and split by tier, because that is the only
+       * shape in which the figure means anything: a swarm's total is a
+       * measurement, an estimate, a stand in and a list price added
+       * together unless something keeps them apart, and this is the
+       * page where somebody is deciding whether the number is real.
+       */
+      /*
+       * And only for somebody who is allowed to know swarms exist.
+       *
+       * This route is not a swarm route, and the cards on it are not
+       * behind the flag, so it answers either way. The section does
+       * not: every swarm route refuses a non-tester with 404 rather
+       * than 402 precisely so the feature's existence stays unstated,
+       * and a table of swarm titles and dollar figures on the Spend
+       * page would state it, along with what the rest of the team had
+       * been spending.
+       */
+      const swarmRows = !(await getBetaTester(ctx, c))
+        ? []
+        : await db(c, ctx)
+            .select({
+              swarmId: swarms.id,
+              title: swarms.title,
+              status: swarms.status,
+              measuredUsd: swarms.spentMeasuredUsd,
+              estimatedUsd: swarms.spentEstimatedUsd,
+              assumedUsd: swarms.spentAssumedUsd,
+              notionalUsd: swarms.spentNotionalUsd,
+              runs: sql<number>`count(${agentRuns.id})`,
+              runsWithoutCost: sql<number>`count(${agentRuns.id}) filter (where ${agentRuns.costUsd} is null)`,
+            })
+            .from(swarms)
+            .leftJoin(
+              agentRuns,
+              and(eq(agentRuns.swarmId, swarms.id), inArray(agentRuns.status, [...TERMINAL_RUN_STATUSES])),
+            )
+            .where(eq(swarms.projectId, projectId))
+            .groupBy(swarms.id, swarms.title, swarms.status)
+            .orderBy(desc(swarms.createdAt));
+
       const totalUsd = rows.reduce((sum, row) => sum + Number(row.costUsd ?? 0), 0);
       return c.json({
         totalUsd,
@@ -1028,6 +1112,17 @@ export function projectRoutes(ctx: AppContext) {
           costUsd: row.costUsd === null ? null : Number(row.costUsd),
           runsWithoutCost: Number(row.runsWithoutCost),
         })),
+        bySwarm: swarmRows.map((row) => ({
+          swarmId: row.swarmId,
+          title: row.title,
+          status: row.status,
+          runs: Number(row.runs),
+          runsWithoutCost: Number(row.runsWithoutCost),
+          measuredUsd: Number(row.measuredUsd),
+          estimatedUsd: Number(row.estimatedUsd),
+          assumedUsd: Number(row.assumedUsd),
+          notionalUsd: Number(row.notionalUsd),
+        })),
       });
     })
     /**
@@ -1040,7 +1135,7 @@ export function projectRoutes(ctx: AppContext) {
     .get("/:id/usage/plain", async (c) => {
       const projectId = c.req.param("id");
       if (!(await canAccessProject(ctx, c, projectId))) return c.text("error|not found", 404);
-      const spendRun = and(ne(agentRuns.kind, "judge"), inArray(agentRuns.status, [...TERMINAL_RUN_STATUSES]));
+      const spendRun = and(ne(agentRuns.role, "judge"), inArray(agentRuns.status, [...TERMINAL_RUN_STATUSES]));
       const rows = await db(c, ctx)
         .select({
           stageId: agentRuns.stageId,
@@ -1319,6 +1414,7 @@ export function projectRoutes(ctx: AppContext) {
           .set({ setupCommand: entry.setup ?? null, testCommand: entry.test ?? null })
           .where(eq(repositories.id, target.id));
       }
+
 
       return c.json({
         stages: file.pipeline.stages.length,
