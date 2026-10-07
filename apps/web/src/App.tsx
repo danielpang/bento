@@ -484,7 +484,7 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
    * Which project's board has actually arrived. Undefined means still
    * in flight; null means there is no project to load. Distinct from
    * stages.length === 0, which is also the first paint of a board that
-   * has six stages on the way, and used to render as Backlog + Done.
+   * has its stages on the way, and used to render as Backlog + Done.
    */
   const [loadedFor, setLoadedFor] = useState<string | null | undefined>(undefined);
   const refreshSeq = useRef(0);

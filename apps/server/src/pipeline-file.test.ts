@@ -86,6 +86,6 @@ test("the optional parts default rather than being required", () => {
   const { data } = parsed as { data: ReturnType<typeof structuredClone<typeof sample>> };
   assert.equal(data.pipeline.stages[0]!.gate, "manual");
   assert.deepEqual(data.pipeline.stages[0]!.requirements, []);
-  assert.equal(data.pipeline.stages[0]!.createPr, false);
+  assert.equal(data.pipeline.stages[0]!.createPr, undefined, "omitted stays omitted, so an import can keep what a stage has");
   assert.deepEqual(data.agents, []);
 });

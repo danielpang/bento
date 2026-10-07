@@ -57,17 +57,14 @@ function SkeletonCard({ title = "72%" }: { title?: string }) {
  *
  * Stage names are data. Printing "Product investigation" here would be
  * another claim about a pipeline that has not arrived, and a custom
- * pipeline would then swap the labels. Eight columns is the seeded
- * shape (backlog, six stages, done); the real board replaces this
+ * pipeline would then swap the labels. Five columns is the seeded
+ * shape (backlog, three stages, done); the real board replaces this
  * wholesale once it knows.
  */
 const SKELETON_LANES = [
   { title: "4.6rem", cards: [ "78%", "54%" ] },
   { title: "7.2rem", cards: [ "66%" ] },
   { title: "5.4rem", cards: [ "71%", "48%" ] },
-  { title: "8.1rem", cards: [ "62%" ] },
-  { title: "6.0rem", cards: [ "74%" ] },
-  { title: "5.8rem", cards: [ "58%", "69%" ] },
   { title: "6.8rem", cards: [ "63%" ] },
   { title: "3.2rem", cards: [] as string[] },
 ];

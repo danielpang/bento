@@ -471,7 +471,7 @@ export function projectRoutes(ctx: AppContext) {
       }
 
       // With the owner, so the pipeline arrives with an agent on every
-      // stage: a board that cannot run anything until six agents are
+      // stage: a board that cannot run anything until its agents are
       // invented is not a starting point.
       await seedDefaultPipeline(db(c, ctx), project.id, {
         ownerId: actor(c),
@@ -1382,7 +1382,8 @@ export function projectRoutes(ctx: AppContext) {
           description: entry.description,
           gateType: entry.gate,
           gateCriteria: entry.requirements as unknown[],
-          createPr: entry.createPr,
+          // Only when the file says: see pipelineFile's createPr.
+          ...(entry.createPr !== undefined ? { createPr: entry.createPr } : {}),
           position,
           defaultAgentProfileId: entry.agent ? (agentIdByName.get(entry.agent) ?? null) : null,
         };

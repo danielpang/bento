@@ -8,12 +8,12 @@ const SEED_CLI = "claude-code" as const;
 const SEED_MODEL = MODEL_GUIDANCE.find((tool) => tool.cli === SEED_CLI)?.defaultModel ?? "claude-sonnet-5";
 
 /**
- * Creates the default six stage pipeline for a project, with an agent
- * on each stage.
+ * Creates the default pipeline for a project, with an agent on each
+ * stage.
  *
  * The stages alone were never enough to run anything: a new board had
- * six lanes and nothing assigned, so the first thing anybody did was
- * invent six job titles from scratch before they could watch a card
+ * lanes and nothing assigned, so the first thing anybody did was
+ * invent job titles from scratch before they could watch a card
  * move. Seeding the agents too means a fresh install can run its first
  * card immediately, and every part of it is editable afterwards.
  *
@@ -43,6 +43,7 @@ export async function seedDefaultPipeline(
       description: stage.description,
       gateType: stage.gateType,
       gateCriteria: stage.gateCriteria as unknown[],
+      createPr: stage.createPr,
       ...(agents.has(stage.slug) ? { defaultAgentProfileId: agents.get(stage.slug)! } : {}),
     })),
   );

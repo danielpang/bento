@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -199,4 +199,83 @@ test("draft publish opens a draft pull request", async () => {
   assert.deepEqual(failures, []);
   assert.equal(draft, true);
   assert.equal(published[0]?.draft, true);
+});
+
+/**
+ * A plan stage commits only its write-up. With write-ups kept out of
+ * the pull request, that branch is the base again, and pushing it would
+ * open a pull request with no files changed on every new card.
+ */
+test("a branch that only changed stage notes opens no pull request", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "bento-publish-notes-"));
+  await git(root, "init", "-b", "main");
+  await writeFile(path.join(root, "base.txt"), "base\n");
+  await git(root, "add", "base.txt");
+  await git(root, "commit", "-m", "base");
+
+  const branch = "feature/plan-only";
+  await git(root, "checkout", "-b", branch);
+  await mkdir(path.join(root, "docs", "bento"), { recursive: true });
+  await writeFile(path.join(root, "docs", "bento", "engineering-requirements.md"), "the plan\n");
+  await git(root, "add", "docs");
+  await git(root, "commit", "-m", "plan");
+
+  const bare = await mkdtemp(path.join(tmpdir(), "bento-publish-notes-bare-"));
+  await git(bare, "init", "--bare", "-b", "main");
+  await git(root, "remote", "add", "origin", bare);
+  await git(root, "push", "origin", "main");
+
+  let opened = 0;
+  const publisher = {
+    async pushToken() {
+      return "unused";
+    },
+    async ensurePullRequest() {
+      opened += 1;
+      return { prNumber: 4, url: "https://github.com/acme/app/pull/4" };
+    },
+    async getPullRequest() {
+      return { title: "Plan only", body: null, state: "open", merged: false };
+    },
+    async updatePullRequest() {},
+    async pullRequestHasComment() {
+      return false;
+    },
+    async createPullRequestComment() {},
+  };
+  const db = {
+    insert: () => ({ values: () => ({ onConflictDoUpdate: async () => {} }) }),
+    update: () => ({ set: () => ({ where: async () => {} }) }),
+    select: () => ({ from: () => ({ where: () => ({ limit: () => [] }) }) }),
+  } as never;
+  const plan = {
+    featureId: "feature-id",
+    featureTitle: "Plan only",
+    branch,
+    repositories: [
+      { id: null, name: "app", repoUrl: "https://github.com/acme/app", defaultBranch: "main", worktreePath: root },
+    ],
+  };
+
+  const notesOnly = await publishFeatureBranches(db, publisher, plan, { remoteUrl: () => bare });
+  assert.deepEqual(notesOnly.failures, []);
+  assert.deepEqual(notesOnly.published, []);
+  assert.deepEqual(notesOnly.notesOnly, ["app"]);
+  assert.equal(opened, 0, "no pull request is opened for a diff of nothing");
+  const { stdout: remoteBranch } = await git(bare, "branch", "--list", branch);
+  assert.equal(remoteBranch.trim(), "", "and nothing is pushed");
+
+  // With the notes in the pull request, they are the change, so it opens.
+  const withNotes = await publishFeatureBranches(db, publisher, plan, { remoteUrl: () => bare, includeStageNotes: true });
+  assert.equal(withNotes.published.length, 1);
+  assert.equal(opened, 1);
+
+  // And once a stage commits code, the stripped branch has a diff again.
+  await writeFile(path.join(root, "feature.txt"), "code\n");
+  await git(root, "add", "feature.txt");
+  await git(root, "commit", "-m", "code");
+  const withCode = await publishFeatureBranches(db, publisher, plan, { remoteUrl: () => bare });
+  assert.deepEqual(withCode.notesOnly, []);
+  assert.equal(withCode.published.length, 1);
+  assert.equal(opened, 2);
 });
