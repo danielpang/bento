@@ -53,6 +53,7 @@ import { useToast } from "./components/Toasts.js";
 import { identifyUser, resetUser, sessionIdentityChange } from "./posthog.js";
 import { desktop } from "./desktop.js";
 import { readProjectSelection, rememberProjectSelection } from "./project-selection.js";
+import type { OnboardingStep } from "./components/OnboardingWalkthrough.js";
 import { REPOSITORY_SETUP_ACTION, REPOSITORY_SETUP_MESSAGE } from "./repository-setup.js";
 
 /*
@@ -73,6 +74,8 @@ const AgentsPanel = lazy(() => import("./components/AgentsPanel.js").then((m) =>
 const ChangelogPage = lazy(() => import("./components/ChangelogPage.js").then((m) => ({ default: m.ChangelogPage })));
 const ContactDialog = lazy(() => import("./components/ContactDialog.js").then((m) => ({ default: m.ContactDialog })));
 const CreateTeam = lazy(() => import("./components/CreateTeam.js").then((m) => ({ default: m.CreateTeam })));
+const OnboardingIntro = lazy(() => import("./components/OnboardingIntro.js").then((m) => ({ default: m.OnboardingIntro })));
+const OnboardingWalkthrough = lazy(() => import("./components/OnboardingWalkthrough.js").then((m) => ({ default: m.OnboardingWalkthrough })));
 const DeviceApproval = lazy(() => import("./components/DeviceApproval.js").then((m) => ({ default: m.DeviceApproval })));
 const McpAuthorize = lazy(() => import("./components/McpAuthorize.js").then((m) => ({ default: m.McpAuthorize })));
 const FeatureDrawer = lazy(() => import("./components/FeatureDrawer.js").then((m) => ({ default: m.FeatureDrawer })));
@@ -555,6 +558,82 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
   const [repoCount, setRepoCount] = useState<number | null>(null);
   /** The project the current count belongs to. A panel change is not a new project. */
   const repoCountFor = useRef<string | null>(null);
+  /**
+   * Whether to open the onboarding walkthrough, from the person's own
+   * flag. Starts closed, and a failed read leaves it closed: an
+   * unwanted dialog over the board is worse than a missed one, which
+   * Settings, Account can still bring back.
+   */
+  const [onboardingOpen, setOnboardingOpen] = useState(false);
+  /**
+   * Kept for the tab, because the GitHub step leaves for Settings with a
+   * full page load and coming back should land on the step it left.
+   */
+  const [onboardingStep, setOnboardingStep] = useState<OnboardingStep>(() => {
+    try {
+      const saved = sessionStorage.getItem("bento.onboarding-step");
+      return saved === "github" || saved === "agents" || saved === "pipeline" ? saved : "repository";
+    } catch {
+      return "repository";
+    }
+  });
+  /**
+   * Whether the person opened Agents or Pipeline from the walkthrough.
+   * Both arrive filled with Bento's defaults, so their checks stay grey
+   * until somebody has looked. Kept for the tab, like the step.
+   */
+  const [onboardingReviewed, setOnboardingReviewed] = useState<{ agents: boolean; pipeline: boolean }>(() => {
+    try {
+      const saved = JSON.parse(sessionStorage.getItem("bento.onboarding-reviewed") ?? "{}") as Record<string, unknown>;
+      return { agents: saved.agents === true, pipeline: saved.pipeline === true };
+    } catch {
+      return { agents: false, pipeline: false };
+    }
+  });
+  useEffect(() => {
+    try {
+      sessionStorage.setItem("bento.onboarding-reviewed", JSON.stringify(onboardingReviewed));
+    } catch {
+      // Best effort, like the step.
+    }
+  }, [onboardingReviewed]);
+  /**
+   * The intro, once per browser, for an account with no projects yet
+   * whose walkthrough is on. Usually that is a first sign in, but it is
+   * also someone who never made a project and turned the walkthrough
+   * back on, which is fine: they are at the same starting point. It
+   * waits on a choice, skip or start, and
+   * the walkthrough only opens when somebody starts it. "started" keeps
+   * the intro behind the walkthrough until that is put away or a step
+   * opens a panel, and from then on it counts as played.
+   */
+  const [intro, setIntro] = useState<"waiting" | "started" | "played">(() => {
+    try {
+      return localStorage.getItem("bento.onboarding-intro") === "played" ? "played" : "waiting";
+    } catch {
+      return "waiting";
+    }
+  });
+  const introPlayed = useCallback(() => {
+    setIntro("played");
+    try {
+      localStorage.setItem("bento.onboarding-intro", "played");
+    } catch {
+      // Without storage it shows again next time, which is harmless.
+    }
+  }, []);
+  useEffect(() => {
+    if (intro !== "started") return;
+    if (onboardingOpen && panel === "none" && dialog === "none" && !contactOpen) return;
+    introPlayed();
+  }, [intro, onboardingOpen, panel, dialog, contactOpen, introPlayed]);
+  useEffect(() => {
+    try {
+      sessionStorage.setItem("bento.onboarding-step", onboardingStep);
+    } catch {
+      // Private browsing can refuse storage; the step is a convenience.
+    }
+  }, [onboardingStep]);
   const toast = useToast();
   /**
    * Where focus goes once a deleted card has left the board, and which
@@ -669,6 +748,14 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
   useEffect(() => {
     loadProjectList();
   }, [loadProjectList]);
+
+  useEffect(() => {
+    void client
+      .getOnboarding()
+      .then((row) => setOnboardingOpen(row.walkthrough))
+      .catch(() => setOnboardingOpen(false));
+  }, []);
+
 
   useEffect(() => {
     if (!projectId) {
@@ -951,6 +1038,52 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
       )}
       {dialog === "project" && (
         <NewProjectDialog client={client} onClose={() => setDialog("none")} onSubmit={addProject} />
+      )}
+      {/* Steps aside while the panel or dialog one of its steps opened
+          is up, and comes back on the same step when that closes. */}
+      {onboardingOpen && projects !== null && projects.length === 0 && intro !== "played" && (
+        <Suspense fallback={null}>
+          <OnboardingIntro
+            client={client}
+            started={intro === "started"}
+            onStart={() => setIntro("started")}
+            onSkipped={() => {
+              setOnboardingOpen(false);
+              introPlayed();
+            }}
+          />
+        </Suspense>
+      )}
+      {onboardingOpen && projects !== null && (intro !== "waiting" || projects.length > 0) && panel === "none" && dialog === "none" && !contactOpen && (
+        <Suspense fallback={null}>
+          <OnboardingWalkthrough
+            client={client}
+            step={onboardingStep}
+            onStep={setOnboardingStep}
+            mode={mode}
+            state={{
+              hasProjects: projects.length > 0,
+              repoCount,
+              agentCount: profiles.length,
+              stageCount: stages.length,
+              stagesWithAgents: stages.filter((stage) => stage.defaultAgentProfileId).length,
+              reviewed: onboardingReviewed,
+            }}
+            onNewProject={() => setDialog("project")}
+            onOpenRepositories={() => setPanel("repos")}
+            onOpenAgents={() => {
+              setOnboardingReviewed((current) => ({ ...current, agents: true }));
+              setAgentsIntent(null);
+              setPanel("agents");
+            }}
+            onOpenPipeline={() => {
+              setOnboardingReviewed((current) => ({ ...current, pipeline: true }));
+              setPanel("pipeline");
+            }}
+            onDismiss={() => setOnboardingOpen(false)}
+            onDone={() => setOnboardingOpen(false)}
+          />
+        </Suspense>
       )}
     </>
   );

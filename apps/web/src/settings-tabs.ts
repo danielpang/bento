@@ -55,7 +55,9 @@ export function settingsSections(
   // Filtered rather than appended, so a team-only section keeps its
   // place in the strip instead of being pushed to the end in multi.
   const base = ALWAYS.filter((entry) => mode === "multi" || !MULTI_ONLY.includes(entry.id));
-  if (mode === "local") return base;
+  // Account holds the onboarding walkthrough switch, which local mode
+  // has too; the sign in and deletion controls on it are multi only.
+  if (mode === "local") return [...base, { id: "account", label: "Account" }];
   return [
     ...base,
     { id: "team", label: "Team" },

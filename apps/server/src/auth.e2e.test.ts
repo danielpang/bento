@@ -3139,6 +3139,45 @@ test("network lockdown applies to new cards, so a live sprite does not block it 
   }
 });
 
+test("the onboarding walkthrough is on for a new account until it is skipped", async () => {
+  const signup = await jsonPost("/api/auth/sign-up/email", {
+    email: "onboarding@bento.test",
+    password: "correct-horse-battery",
+    name: "Onboarding",
+  });
+  const token = signup.headers.get("set-auth-token")!;
+  const read = async () =>
+    (await (
+      await app.request("/api/account/onboarding", { headers: { authorization: `Bearer ${token}` } })
+    ).json()) as { walkthrough: boolean };
+  const write = (walkthrough: boolean) =>
+    app.request("/api/account/onboarding", {
+      method: "PATCH",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({ walkthrough }),
+    });
+
+  assert.equal((await read()).walkthrough, true, "a new account starts with the walkthrough on");
+  assert.equal((await write(false)).status, 200);
+  assert.equal((await read()).walkthrough, false, "skipping is remembered");
+  assert.equal((await write(true)).status, 200);
+  assert.equal((await read()).walkthrough, true, "Settings, Account turns it back on");
+
+  const other = await jsonPost("/api/auth/sign-up/email", {
+    email: "onboarding-other@bento.test",
+    password: "correct-horse-battery",
+    name: "Onboarding Other",
+  });
+  const otherToken = other.headers.get("set-auth-token")!;
+  await app.request("/api/account/onboarding", {
+    method: "PATCH",
+    headers: { "content-type": "application/json", authorization: `Bearer ${otherToken}` },
+    body: JSON.stringify({ walkthrough: false }),
+  });
+  assert.equal((await read()).walkthrough, true, "one person's choice does not reach another's");
+  assert.equal((await app.request("/api/account/onboarding")).status, 401);
+});
+
 /**
  * Guessing a password has to get expensive fast. The limit is stored
  * in Postgres rather than memory so it holds across instances, which

@@ -1479,6 +1479,29 @@ export class BentoClient {
     return this.request<AgentProfile[]>("/api/profiles");
   }
 
+  /** Whether Browse can open the OS folder dialog through this server (local mode). */
+  folderPickerStatus() {
+    return this.request<{ available: boolean }>("/api/settings/folder-picker");
+  }
+
+  /** Opens the OS folder dialog on the server's machine. Null when cancelled. */
+  pickFolder() {
+    return this.request<{ path: string | null }>("/api/settings/folder-picker", { method: "POST", body: "{}" });
+  }
+
+  /** Whether the console should open the onboarding walkthrough for this person. */
+  getOnboarding() {
+    return this.request<{ walkthrough: boolean }>("/api/account/onboarding");
+  }
+
+  /** Off once skipped or finished; on again from Settings, Account. */
+  setOnboarding(walkthrough: boolean) {
+    return this.request<{ walkthrough: boolean }>("/api/account/onboarding", {
+      method: "PATCH",
+      body: JSON.stringify({ walkthrough }),
+    });
+  }
+
   createProfile(input: { name: string; cli: string; model: string; skill?: string }) {
     return this.request<AgentProfile>("/api/profiles", { method: "POST", body: JSON.stringify(input) });
   }

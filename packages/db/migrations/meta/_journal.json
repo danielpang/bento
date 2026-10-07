@@ -330,6 +330,13 @@
       "when": 1791000000000,
       "tag": "0046_project_sandbox_provider_always_auto",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1791100000000,
+      "tag": "0047_user_onboarding_walkthrough",
+      "breakpoints": true
     }
   ]
 }
