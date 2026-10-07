@@ -13,13 +13,31 @@ import { DEFAULT_STAGES } from "@bento/core";
 const key = (projectId: string) => `bento:board-stages:${projectId}`;
 
 /**
- * The most stage lanes a skeleton draws. Past about six, the rest of a
- * board is off screen while it loads anyway, so a longer pipeline is
- * drawn as six: wide enough to fill the page, never a wall of
- * placeholder columns. Counts above it are stored and read as this,
- * never skipped, so a growing pipeline's count cannot go stale.
+ * The most columns a board skeleton draws, backlog and done included:
+ * the default board's five. A placeholder only needs to fill the page
+ * while it loads, so a project with more stages than fit here loads as
+ * the default shape, and only a shorter pipeline draws fewer columns.
  */
-export const MAX_SKELETON_STAGES = 6;
+export const MAX_SKELETON_LANES = 5;
+
+/** Backlog and done frame every board; the rest are stage lanes. */
+export const MAX_SKELETON_STAGES = MAX_SKELETON_LANES - 2;
+
+/** What a project draws when its count is unknown or too long to draw. */
+export function defaultSkeletonStages(): number {
+  return Math.min(DEFAULT_STAGES.length, MAX_SKELETON_STAGES);
+}
+
+/**
+ * The stage lanes to draw for a count: the count itself when it fits,
+ * the default shape when it does not or is not a count at all.
+ */
+export function skeletonStageCount(count: number): number {
+  return Number.isInteger(count) && count >= 0 && count <= MAX_SKELETON_STAGES ? count : defaultSkeletonStages();
+}
+
+/** Stored counts are kept to three digits, so the read can refuse anything longer. */
+const MAX_STORED = 999;
 
 export type StorageWindow = Pick<Window, "localStorage">;
 
@@ -33,15 +51,17 @@ export function rememberedStageCount(projectId: string | null, browser: StorageW
       const saved = browser.localStorage.getItem(key(projectId));
       // Digits only: Number("") is 0, and an emptied key is not a board.
       const count = saved !== null && /^\d{1,3}$/.test(saved) ? Number(saved) : NaN;
-      if (!Number.isNaN(count)) return Math.min(count, MAX_SKELETON_STAGES);
+      return skeletonStageCount(count);
     } catch { /* Storage can be unavailable. The seeded shape is the guess. */ }
   }
-  return DEFAULT_STAGES.length;
+  return defaultSkeletonStages();
 }
 
 export function rememberStageCount(projectId: string, count: number, browser: StorageWindow | null = browserOrNull()): void {
   if (!browser || !Number.isInteger(count) || count < 0) return;
-  const stored = Math.min(count, MAX_SKELETON_STAGES);
+  // The real count, not the drawn one, so the cap can move without
+  // every stored value having been written under the old one.
+  const stored = Math.min(count, MAX_STORED);
   try { browser.localStorage.setItem(key(projectId), String(stored)); } catch { /* Best effort. */ }
 }
 

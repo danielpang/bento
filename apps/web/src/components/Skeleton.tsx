@@ -1,6 +1,5 @@
 import type { CSSProperties } from "react";
-import { DEFAULT_STAGES } from "@bento/core";
-import { MAX_SKELETON_STAGES, rememberedStageCount, type StorageWindow } from "../board-shape.js";
+import { rememberedStageCount, skeletonStageCount, type StorageWindow } from "../board-shape.js";
 import { BrandLockup } from "./BrandLockup.js";
 import { TabScroll } from "./TabScroll.js";
 
@@ -62,7 +61,8 @@ function SkeletonCard({ title = "72%" }: { title?: string }) {
  * pipeline would then swap the labels. How many stage columns is data
  * too: this draws as many as the project's board last loaded with
  * (board-shape.ts), and the seeded pipeline's length for a project
- * this browser has not loaded. The project is a required prop so no
+ * this browser has not loaded or whose pipeline is longer than the
+ * five columns a skeleton draws at most. The project is a required prop so no
  * caller can forget it; pass null where there is none to read. Backlog
  * and done frame every board, so they are always here; the real board
  * replaces this wholesale once it knows.
@@ -79,7 +79,7 @@ const STAGE_LANES = [
 ];
 
 export function skeletonLanes(stages: number) {
-  const count = Number.isInteger(stages) && stages >= 0 ? Math.min(stages, MAX_SKELETON_STAGES) : DEFAULT_STAGES.length;
+  const count = skeletonStageCount(stages);
   return [
     BACKLOG_LANE,
     ...Array.from({ length: count }, (_, i) => STAGE_LANES[i % STAGE_LANES.length]!),

@@ -4,7 +4,7 @@ import { DEFAULT_STAGES } from "@bento/core";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
-  MAX_SKELETON_STAGES,
+  MAX_SKELETON_LANES,
   importBoardPipeline,
   loadBoardPipeline,
   rememberedStageCount,
@@ -34,13 +34,13 @@ test("a project this browser has not loaded gets the seeded pipeline's length", 
 
 test("each project keeps the count its board last loaded with", () => {
   const b = browser();
-  rememberStageCount("six-stage", 6, b);
+  rememberStageCount("two-stage", 2, b);
   rememberStageCount("empty", 0, b);
-  assert.equal(rememberedStageCount("six-stage", b), 6);
+  assert.equal(rememberedStageCount("two-stage", b), 2);
   assert.equal(rememberedStageCount("empty", b), 0, "a pipeline with no stages is a real answer");
   assert.equal(rememberedStageCount("other", b), DEFAULT_STAGES.length);
-  rememberStageCount("six-stage", 4, b);
-  assert.equal(rememberedStageCount("six-stage", b), 4, "a later load replaces the count");
+  rememberStageCount("two-stage", 1, b);
+  assert.equal(rememberedStageCount("two-stage", b), 1, "a later load replaces the count");
 });
 
 test("a value this app did not write is ignored", () => {
@@ -56,21 +56,25 @@ test("a value this app did not write is ignored", () => {
 });
 
 /**
- * Past six stages the rest of the board is off screen while it loads,
- * so the skeleton stops at six. A longer pipeline used to be skipped,
- * which left the last count standing: a project that grew past the
- * limit kept drawing its old width. It is capped instead.
+ * A skeleton draws at most the default board's five columns. A
+ * pipeline with more stages than fit loads as the default shape; only
+ * a shorter one draws fewer. The real count is still stored, so a
+ * pipeline that shrinks back is drawn at its own width again.
  */
-test("a pipeline longer than six stages is drawn as six, not skipped", () => {
-  assert.equal(MAX_SKELETON_STAGES, 6);
+test("a pipeline too long for five columns loads as the default shape", () => {
+  assert.equal(MAX_SKELETON_LANES, 5);
   const b = browser();
-  rememberStageCount("long", 3, b);
+  rememberStageCount("long", 2, b);
   rememberStageCount("long", 11, b);
-  assert.equal(rememberedStageCount("long", b), 6, "a growing pipeline moves the count");
-  b.values.set("bento:board-stages:old", "40");
-  assert.equal(rememberedStageCount("old", b), 6, "a larger stored count reads as the cap, not the default");
-  rememberStageCount("long", 5, b);
-  assert.equal(rememberedStageCount("long", b), 5, "and a shorter one is kept as is");
+  assert.equal(b.values.get("bento:board-stages:long"), "11", "the real count is kept");
+  assert.equal(rememberedStageCount("long", b), DEFAULT_STAGES.length, "and drawn as the default");
+  rememberStageCount("long", 4, b);
+  assert.equal(rememberedStageCount("long", b), DEFAULT_STAGES.length, "one past the cap is the default too");
+  rememberStageCount("long", 1, b);
+  assert.equal(rememberedStageCount("long", b), 1, "a shorter pipeline still draws its own width");
+  rememberStageCount("huge", 5000, b);
+  assert.equal(b.values.get("bento:board-stages:huge"), "999", "stored within three digits");
+  assert.equal(rememberedStageCount("huge", b), DEFAULT_STAGES.length);
 });
 
 test("storage that throws reads as unknown and writes nothing", () => {
@@ -84,10 +88,10 @@ test("storage that throws reads as unknown and writes nothing", () => {
 test("the skeleton draws backlog, one lane per stage, and done", async () => {
   const { skeletonLanes } = await import("./components/Skeleton.js");
   assert.equal(skeletonLanes(3).length, 5);
-  assert.equal(skeletonLanes(6).length, 8, "a six stage project loads as eight lanes");
+  assert.equal(skeletonLanes(2).length, 4, "a two stage project loads as four lanes");
   assert.equal(skeletonLanes(0).length, 2, "no stages still frames the board");
-  assert.equal(skeletonLanes(5).length, 7, "more stages than bone shapes still draws every lane");
-  assert.equal(skeletonLanes(12).length, 8, "past six stages the skeleton stops at six");
+  assert.equal(skeletonLanes(6).length, 5, "more stages than fit draw the default five");
+  assert.equal(skeletonLanes(12).length, 5);
   assert.equal(skeletonLanes(Number.NaN).length, DEFAULT_STAGES.length + 2);
 });
 
@@ -96,7 +100,7 @@ test("loading a board's pipeline remembers its stage count, and a failed load re
   const pipeline = { id: "pipe", stages: [{}, {}, {}, {}, {}, {}] };
   const loaded = await loadBoardPipeline({ getPipeline: async (id: string) => (assert.equal(id, "six"), pipeline) }, "six", b);
   assert.equal(loaded, pipeline, "the pipeline comes back untouched");
-  assert.equal(rememberedStageCount("six", b), 6);
+  assert.equal(b.values.get("bento:board-stages:six"), "6");
 
   await assert.rejects(
     loadBoardPipeline({ getPipeline: async () => { throw new Error("offline"); } }, "down", b),
@@ -112,7 +116,7 @@ test("loading a board's pipeline remembers its stage count, and a failed load re
 test("importing a pipeline file remembers the imported stage count", async () => {
   const b = browser();
   rememberStageCount("p", 3, b);
-  const result = { stages: 6, agents: 2, removedStages: [], skippedRepositories: [] };
+  const result = { stages: 2, agents: 2, removedStages: [], skippedRepositories: [] };
   const returned = await importBoardPipeline(
     { importPipeline: async (id: string, yaml: string) => (assert.equal(id, "p"), assert.equal(yaml, "version: 1"), result) },
     "p",
@@ -120,23 +124,23 @@ test("importing a pipeline file remembers the imported stage count", async () =>
     b,
   );
   assert.equal(returned, result);
-  assert.equal(rememberedStageCount("p", b), 6);
+  assert.equal(rememberedStageCount("p", b), 2);
 
   await assert.rejects(
     importBoardPipeline({ importPipeline: async () => { throw new Error("bad file"); } }, "p", "nope", b),
     /bad file/,
   );
-  assert.equal(rememberedStageCount("p", b), 6, "a refused import leaves the count alone");
+  assert.equal(rememberedStageCount("p", b), 2, "a refused import leaves the count alone");
 });
 
 test("the board skeleton draws the stored count for its project", () => {
   const b = browser();
-  rememberStageCount("six", 6, b);
+  rememberStageCount("two", 2, b);
   rememberStageCount("eleven", 11, b);
   const lanes = (projectId: string | null) =>
     renderToStaticMarkup(createElement(BoardSkeleton, { projectId, browser: b })).match(/<section class="lane"/g)?.length ?? 0;
-  assert.equal(lanes("six"), 8, "backlog, six stages, done");
-  assert.equal(lanes("eleven"), 8, "eleven stages still draw six");
+  assert.equal(lanes("two"), 4, "backlog, two stages, done");
+  assert.equal(lanes("eleven"), 5, "eleven stages draw the default five");
   assert.equal(lanes("unseen"), DEFAULT_STAGES.length + 2);
   assert.equal(lanes(null), DEFAULT_STAGES.length + 2);
 });
