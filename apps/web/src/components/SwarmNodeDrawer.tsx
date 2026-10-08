@@ -98,12 +98,12 @@ export function SwarmNodeDrawer({
   const [confirming, setConfirming] = useState(false);
   const [tab, setTab] = useState("overview");
   const mergeQueueFailure = task.nodeType === "leaf" && typeof task.flags.landingError === "string";
-  const attention = isAttention(task.attention);
-  const note = task.nodeType === "plan" && task.status === "failed" ? null
-    : diagramAttentionWords(task.status, task.nodeType, task.attention);
-  const longNote = mergeQueueFailure ? null : task.nodeType === "plan" && task.status === "failed"
+  const attention = isAttention(node.attention);
+  const note = task.nodeType === "plan" && task.status === "failed" && !node.agentActive ? null
+    : diagramAttentionWords(task.status, task.nodeType, node.attention, node.agentActive);
+  const longNote = mergeQueueFailure ? null : task.nodeType === "plan" && task.status === "failed" && !node.agentActive
     ? "A task below this plan failed. Open it to fix or retry it."
-    : attentionNote(task.attention);
+    : attentionNote(node.attention);
   const retries = Number((task.flags as { retries?: unknown }).retries ?? 0);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(task.description);

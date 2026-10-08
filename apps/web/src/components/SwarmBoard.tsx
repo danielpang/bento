@@ -313,8 +313,14 @@ export function SwarmBoard({
       autoCollapseCompleted: detail?.swarm.status !== "done",
       now,
       // An empty list is an answer: nobody is in a sandbox. A fixture
-      // that omits the field keeps the run id on the task row.
-      ...(detail?.runningTaskIds ? { runningTaskIds: new Set(detail.runningTaskIds) } : {}),
+      // that omits the field keeps the run id on the task row. The
+      // check is presence, and an empty array is present.
+      ...(detail?.runningTaskIds
+        ? {
+            runningTaskIds: new Set(detail.runningTaskIds),
+            agentStartedAt: new Map(Object.entries(detail.agentStartedAt ?? {})),
+          }
+        : {}),
     }),
     [buildModel, detail, expanded, folded, now],
   );

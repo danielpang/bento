@@ -653,7 +653,20 @@ export interface WireDetail {
   swarm: WireSwarm;
   tasks: WireTask[];
   agentTimeMs?: number;
-  activeRuns: { id: string; role: string | null; status: string; swarmTaskId: string | null }[];
+  activeRuns: {
+    id: string;
+    role: string | null;
+    status: string;
+    swarmTaskId: string | null;
+    /**
+     * When a worker claimed the run. The long-run clock uses this
+     * only when `agentStartedAt` is missing, which is a run that was
+     * already in flight when that stamp was added.
+     */
+    startedAt?: string | null;
+    /** When the agent process started. Absent on a server from before that stamp. */
+    agentStartedAt?: string | null;
+  }[];
   plannerRun?: SwarmPlannerRun | null;
   /**
    * Optional, because a detail from a server that predates the merge
@@ -1115,10 +1128,45 @@ export function toDetail(detail: WireDetail): SwarmDetail {
     ledger: [],
     pullRequests: (detail.pullRequests ?? []).map(toPullRequest),
     planSources: (detail.planSources ?? []).map((row) => toPlanSource(row, detail.swarm.id)),
-    runningTaskIds: detail.activeRuns
-      .filter((run) => run.status === "running" && run.swarmTaskId !== null)
-      .map((run) => run.swarmTaskId as string),
+    ...agentsInSandbox(detail),
   };
+}
+
+/**
+ * Tasks whose agent process is in a sandbox, and when it started.
+ *
+ * Status `running` is that moment: the executor sets it as it execs
+ * the agent, after provisioning and setup. A queued or starting run
+ * is not in the list. A planner has no task of its own, so its run
+ * is said on the root, which is where the long-run clock says it.
+ *
+ * The clock is the agent start, and the claim time only when that
+ * stamp was never written. Two agents on one node keep the earlier
+ * of the two: the route lists newest-queued first, and the run that
+ * has been in the sandbox longer is the one the watchdog warns on.
+ */
+export function agentsInSandbox(detail: Pick<WireDetail, "tasks" | "activeRuns">): {
+  runningTaskIds: string[];
+  agentStartedAt: Record<string, string>;
+} {
+  const rootId = detail.tasks
+    .filter((task) => task.parentId === null)
+    .sort((a, b) => a.position - b.position)[0]?.id ?? null;
+  const runningTaskIds: string[] = [];
+  const agentStartedAt: Record<string, string> = {};
+  for (const run of detail.activeRuns) {
+    if (run.status !== "running") continue;
+    const taskId = run.swarmTaskId ?? rootId;
+    if (!taskId) continue;
+    if (!runningTaskIds.includes(taskId)) runningTaskIds.push(taskId);
+    const clock = run.agentStartedAt ?? run.startedAt ?? null;
+    if (!clock) continue;
+    const current = agentStartedAt[taskId];
+    const nextMs = Date.parse(clock);
+    const currentMs = current ? Date.parse(current) : Number.POSITIVE_INFINITY;
+    if (Number.isFinite(nextMs) && nextMs < currentMs) agentStartedAt[taskId] = clock;
+  }
+  return { runningTaskIds, agentStartedAt };
 }
 
 /**

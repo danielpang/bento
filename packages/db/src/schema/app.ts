@@ -662,7 +662,26 @@ export const agentRuns = pgTable(
   numTurns: integer("num_turns"),
   error: text("error"),
   queuedAt: timestamp("queued_at", { withTimezone: true }).notNull().defaultNow(),
+  /**
+   * When a worker claimed the run.
+   *
+   * This is before the sandbox exists. Provisioning and the
+   * repository's setup command both happen after it, while the row
+   * is still `starting`. Billing measures from here, because the
+   * machine is already being paid for.
+   */
   startedAt: timestamp("started_at", { withTimezone: true }),
+  /**
+   * When the agent process was started in the sandbox.
+   *
+   * Null until that exec. A run that is queued or starting has no
+   * agent in the machine yet, however long it has been claimed, so
+   * the swarm board's "working" and the long-run clock both read
+   * this stamp rather than `startedAt`. Null on runs that were
+   * already going when the column was added: those keep the claim
+   * time as their clock.
+   */
+  agentStartedAt: timestamp("agent_started_at", { withTimezone: true }),
   endedAt: timestamp("ended_at", { withTimezone: true }),
   /**
    * Whether this run counts toward usage and billing.

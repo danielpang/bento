@@ -46,6 +46,15 @@ import { captureSwarmSpend } from "./spend.js";
 
 export const SWARM_WATCHDOG_QUEUE = "swarm.watchdog";
 
+/**
+ * A run whose agent process is in the sandbox.
+ *
+ * Queued and starting are the claim, the provision, and repository
+ * setup. None of those is an agent working, so the long-run clock
+ * neither warns on them nor treats them as a reason to keep a warning.
+ */
+const AGENT_IN_SANDBOX = ["running"] as const;
+
 /** Every minute. The thresholds are in tens of minutes; this is precise enough. */
 const WATCHDOG_CRON = "* * * * *";
 
@@ -223,15 +232,17 @@ async function clearStoppedRuns(
   if (flagged.length === 0) return;
 
   /*
-   * Which nodes still have an agent on them, counting the planner's
-   * turn against the root exactly as watchRuns counts it there. The
-   * two have to agree, or the clock would clear the root a second
-   * after saying it.
+   * Which nodes still have an agent in a sandbox, counting the
+   * planner's turn against the root exactly as watchRuns counts it
+   * there. The two have to agree, or the clock would clear the root
+   * a second after saying it. A queued or starting run is not an
+   * agent on the node: the flag is about an agent that is running,
+   * and it comes off when that stops being true.
    */
   const running = await ctx.db
     .select({ taskId: agentRuns.swarmTaskId })
     .from(agentRuns)
-    .where(and(eq(agentRuns.swarmId, swarm.id), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)));
+    .where(and(eq(agentRuns.swarmId, swarm.id), inArray(agentRuns.status, AGENT_IN_SANDBOX)));
   const busy = new Set<string>();
   let rootStandsIn: string | null | undefined;
   for (const run of running) {
@@ -278,12 +289,13 @@ type WatchedSwarm = {
 };
 
 /**
- * The two thresholds, over every agent currently working in one swarm.
+ * The two thresholds, over every agent that is in a sandbox.
  *
- * Elapsed is measured from when the run started rather than when it was
- * queued: a run that waited ten minutes for a slot has not been working
- * for ten minutes, and counting the wait would turn a busy swarm yellow
- * for being busy.
+ * Elapsed is measured from when the agent process started, not from
+ * the claim and not from the queue. A run that waited for a slot, or
+ * sat in provisioning and setup, has not been working for that time.
+ * A row from before agent_started_at existed has only the claim time,
+ * which is the closest clock it has.
  */
 async function watchRuns(
   ctx: AppContext,
@@ -298,15 +310,16 @@ async function watchRuns(
       role: agentRuns.role,
       taskId: agentRuns.swarmTaskId,
       startedAt: agentRuns.startedAt,
-      queuedAt: agentRuns.queuedAt,
+      agentStartedAt: agentRuns.agentStartedAt,
     })
     .from(agentRuns)
-    .where(and(eq(agentRuns.swarmId, swarm.id), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)));
+    .where(and(eq(agentRuns.swarmId, swarm.id), inArray(agentRuns.status, AGENT_IN_SANDBOX)));
   if (running.length === 0) return;
 
   let woke = false;
   for (const run of running) {
-    const since = run.startedAt ?? run.queuedAt;
+    const since = run.agentStartedAt ?? run.startedAt;
+    if (!since) continue;
     const minutes = (now.getTime() - since.getTime()) / 60_000;
     if (minutes < thresholds.warnMin) continue;
 

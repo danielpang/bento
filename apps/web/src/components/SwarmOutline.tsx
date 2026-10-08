@@ -64,7 +64,7 @@ export function SwarmOutline({
         {rows.map((row) => {
           const attention = isAttention(row.attention);
           const spend = formatUsd(cappedUsd(row.cost));
-          const note = diagramAttentionWords(row.status, row.nodeType, row.attention);
+          const note = diagramAttentionWords(row.status, row.nodeType, row.attention, row.agentActive);
           return (
             <li key={row.id}>
               <button
@@ -116,7 +116,7 @@ export function SwarmOutline({
                   {note ? (
                     <span className="chip swarm-attention-chip">
                       {note}
-                      {row.attention === "long_running" ? ` ${formatElapsed(row.elapsedMs)}` : ""}
+                      {row.attention === "long_running" ? ` ${formatElapsed(row.runningForMs ?? row.elapsedMs)}` : ""}
                     </span>
                   ) : null}
                 </span>

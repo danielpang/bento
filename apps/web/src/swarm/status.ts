@@ -126,8 +126,11 @@ export function taskWords(status: TaskStatus): string {
  * retrying the failed descendant can still move it.
  */
 export function diagramTaskWords(status: TaskStatus, nodeType: NodeType, agentActive = false): string {
+  // An agent in the sandbox is working, whatever the row's own status
+  // says. A resolver keeps the leaf landed, and a subplanner keeps a
+  // plan failed, and neither of those words is what is happening.
+  if (agentActive) return "working";
   if (nodeType === "plan" && status === "failed") return "stalled";
-  if (status === "working" && agentActive) return "working";
   if (status === "done") return "completed";
   if (status === "open" || status === "assigned" || status === "working") return "pending";
   return taskWords(status);
@@ -141,16 +144,28 @@ export function diagramTaskWords(status: TaskStatus, nodeType: NodeType, agentAc
  * is in, and the leaf is not finished until it is completed.
  */
 export function diagramTaskTone(status: TaskStatus, nodeType: NodeType, agentActive = false): Tone {
+  if (agentActive) return "running";
   if (nodeType === "plan" && status === "failed") return "gated";
-  if (status === "working" && agentActive) return "running";
   if (status === "open" || status === "assigned" || status === "working") return "idle";
   return taskTone(status);
 }
 
-/** Do not print the same failure twice on a leaf. */
-export function diagramAttentionWords(status: TaskStatus, nodeType: NodeType, attention: TaskAttention): string | null {
+/**
+ * Do not print the same failure twice on a leaf.
+ *
+ * "Still running" is a statement about an agent that is running. It
+ * is not printed on a node whose agent has not started, even when a
+ * clock flag is still sitting on the row.
+ */
+export function diagramAttentionWords(
+  status: TaskStatus,
+  nodeType: NodeType,
+  attention: TaskAttention,
+  agentActive = false,
+): string | null {
+  if (attention === "long_running" && !agentActive) return null;
   const words = attentionWords(attention);
-  return words === diagramTaskWords(status, nodeType) ? null : words;
+  return words === diagramTaskWords(status, nodeType, agentActive) ? null : words;
 }
 
 /**

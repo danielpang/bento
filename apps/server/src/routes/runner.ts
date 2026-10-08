@@ -317,7 +317,7 @@ export function runnerRoutes(ctx: AppContext) {
          */
         const [timing] = await db(c, ctx)
           .update(agentRuns)
-          .set({ status: "running" })
+          .set({ status: "running", agentStartedAt: sql`now()` })
           .where(eq(agentRuns.id, runId))
           .returning({
             queueWaitMs: sql<number>`(extract(epoch from (${agentRuns.startedAt} - ${agentRuns.queuedAt})) * 1000)::float8`,

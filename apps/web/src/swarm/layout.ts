@@ -98,6 +98,12 @@ export interface SwarmNode {
   totalLeaves: number;
   /** Milliseconds this node has been working, or worked for. */
   elapsedMs: number;
+  /**
+   * Milliseconds the agent has been in the sandbox, or null when
+   * that clock is not known. The long-run note uses this, because
+   * elapsedMs starts when the task was handed a run.
+   */
+  runningForMs: number | null;
   /** A worker is on this node, or it is asking for a person. */
   frontier: boolean;
   /** This node, or something under it, is on the frontier. */
@@ -173,6 +179,13 @@ export interface ModelOptions {
    * a run, which is what the tests that build a tree by hand use.
    */
   runningTaskIds?: ReadonlySet<string>;
+  /**
+   * When the agent on a task was started, keyed by task id.
+   *
+   * The long-run clock. Only consulted together with runningTaskIds:
+   * a fixture that omits both keeps timing from the task row.
+   */
+  agentStartedAt?: ReadonlyMap<string, string>;
 }
 
 const NO_SPEND: SwarmSpend = { measuredUsd: 0, estimatedUsd: 0, assumedUsd: 0, notionalUsd: 0 };
@@ -192,8 +205,35 @@ export function addSpend(a: SwarmSpend, b: SwarmSpend): SwarmSpend {
  * the server has not caught up, and an escalation is never downgraded
  * by the clock.
  */
-export function attentionFor(task: SwarmTask, now: number, longRunMs = LONG_RUN_WARNING_MS): TaskAttention {
+export function attentionFor(
+  task: SwarmTask,
+  now: number,
+  longRunMs = LONG_RUN_WARNING_MS,
+  /**
+   * Whether an agent is in the sandbox, and when it started.
+   *
+   * Omitted, the clock falls back to a working or assigned leaf and
+   * the task's own start, which is what a fixture that builds a tree
+   * by hand can know. Passed, including with active false, that
+   * fallback is off: a wait for a sandbox is not a long run, and a
+   * "still running" flag is dropped until an agent is actually
+   * running. The start is the agent's, not the task's.
+   */
+  agent?: { active: boolean; startedAt: string | null },
+): TaskAttention {
+  // "Still running" is a claim about an agent that is running now.
+  // A flag left from a wait, or from a run that has not reached the
+  // sandbox, is not that. Escalated is a notice that already went
+  // out, so it stays until the server takes it back.
+  if (task.attention === "long_running") {
+    const active = agent ? agent.active : task.nodeType === "leaf" && WORKING.includes(task.status);
+    return active ? "long_running" : "none";
+  }
   if (task.attention !== "none") return task.attention;
+  if (agent) {
+    if (!agent.active || task.nodeType !== "leaf" || !agent.startedAt) return "none";
+    return elapsedFor({ startedAt: agent.startedAt, endedAt: null }, now) >= longRunMs ? "long_running" : "none";
+  }
   if (task.nodeType !== "leaf" || !WORKING.includes(task.status)) return "none";
   return elapsedFor(task, now) >= longRunMs ? "long_running" : "none";
 }
@@ -225,6 +265,15 @@ export function buildSwarmModel(tasks: SwarmTask[], options: ModelOptions = {}):
   const orphanIds: string[] = [];
 
   for (const task of tasks) {
+    // An empty set is an answer: nobody is in a sandbox. Omitting the
+    // set is the fixture path, which treats a working row that names
+    // a run as active.
+    const runningTaskIds = options.runningTaskIds;
+    const live = runningTaskIds !== undefined;
+    const agentActive = runningTaskIds
+      ? runningTaskIds.has(task.id)
+      : task.status === "working" && task.assignedRunId !== null;
+    const agentStartedAt = live ? options.agentStartedAt?.get(task.id) ?? null : null;
     byId.set(task.id, {
       id: task.id,
       parentId: task.parentId,
@@ -234,10 +283,8 @@ export function buildSwarmModel(tasks: SwarmTask[], options: ModelOptions = {}):
       title: task.title,
       nodeType: task.nodeType,
       status: task.status,
-      agentActive: options.runningTaskIds
-        ? options.runningTaskIds.has(task.id)
-        : task.status === "working" && task.assignedRunId !== null,
-      attention: attentionFor(task, now, longRunMs),
+      agentActive,
+      attention: attentionFor(task, now, longRunMs, live ? { active: agentActive, startedAt: agentStartedAt } : undefined),
       weight: Number.isFinite(task.weight) && task.weight > 0 ? task.weight : 1,
       ownCost: task.cost,
       cost: task.cost,
@@ -247,6 +294,7 @@ export function buildSwarmModel(tasks: SwarmTask[], options: ModelOptions = {}):
       doneLeaves: 0,
       totalLeaves: 0,
       elapsedMs: elapsedFor(task, now),
+      runningForMs: agentStartedAt ? elapsedFor({ startedAt: agentStartedAt, endedAt: null }, now) : null,
       frontier: false,
       frontierPath: false,
       // Filled in on the walk below, because it is inherited from an
@@ -532,6 +580,8 @@ export interface OutlineRow {
   rolled: boolean;
   hasChildren: boolean;
   elapsedMs: number;
+  /** Agent time, when the agent start is known. The long-run note uses it. */
+  runningForMs: number | null;
   doneLeaves: number;
   totalLeaves: number;
   /** The follow up this row is inside, or null for the first pass. */
@@ -561,6 +611,7 @@ export function outlineRows(model: SwarmModel): OutlineRow[] {
     rolled: node.childIds.length > 0,
     hasChildren: node.childIds.length > 0,
     elapsedMs: node.elapsedMs,
+    runningForMs: node.runningForMs,
     doneLeaves: node.doneLeaves,
     totalLeaves: node.totalLeaves,
     followUp: node.followUp,
@@ -632,8 +683,18 @@ export function createModelCache(): (tasks: SwarmTask[], options?: ModelOptions)
   let lastKey = "";
   let last: SwarmModel | null = null;
   return (tasks, options = {}) => {
-    const running = [...(options.runningTaskIds ?? [])].sort().join(",");
-    const key = `${[...(options.expanded ?? [])].sort().join(",")}|${[...(options.folded ?? [])].sort().join(",")}|${options.autoCollapseCompleted !== false}|${options.now ?? 0}|${options.longRunMs ?? LONG_RUN_WARNING_MS}|${running}`;
+    // "fallback" and "set:" are different answers. An empty set means
+    // nobody is in a sandbox; omitting the set means a working row
+    // that names a run is active. Collapsing both to an empty string
+    // handed the second call the first model.
+    const running = options.runningTaskIds !== undefined
+      ? `set:${[...options.runningTaskIds].sort().join(",")}`
+      : "fallback";
+    const started = [...(options.agentStartedAt?.entries() ?? [])]
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([id, at]) => `${id}=${at}`)
+      .join(",");
+    const key = `${[...(options.expanded ?? [])].sort().join(",")}|${[...(options.folded ?? [])].sort().join(",")}|${options.autoCollapseCompleted !== false}|${options.now ?? 0}|${options.longRunMs ?? LONG_RUN_WARNING_MS}|${running}|${started}`;
     if (last && lastTasks === tasks && lastKey === key) return last;
     last = buildSwarmModel(tasks, options);
     lastTasks = tasks;

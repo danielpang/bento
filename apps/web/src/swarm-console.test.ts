@@ -261,6 +261,22 @@ test("yellow survives the switch between the two views, and the status does not 
   assert.match(outline, /Still running 1h 0m/);
 });
 
+test("a task waiting on a sandbox says pending, not that it is still running", () => {
+  const waiting = buildSwarmModel(tasks(), { now: 60 * 60 * 1000, runningTaskIds: new Set() });
+  const tree = renderToStaticMarkup(
+    createElement(SwarmTree, { model: waiting, selectedId: null, onSelect: () => {}, onToggle: () => {} }),
+  );
+  const task = tasks().find((row) => row.id === "slow")!;
+  const drawer = renderToStaticMarkup(
+    createElement(SwarmNodeDrawer, { task, node: waiting.byId.get("slow")!, onClose: () => {} }),
+  );
+  assert.match(tree, /pending/);
+  assert.doesNotMatch(tree, /Still running/);
+  assert.match(drawer, /pending/);
+  assert.match(drawer, /Waiting for an agent to start/);
+  assert.doesNotMatch(drawer, /Still running|has been running/);
+});
+
 test("both views print the same completion for the same node", () => {
   const tree = renderToStaticMarkup(
     createElement(SwarmTree, { model, selectedId: null, onSelect: () => {}, onToggle: () => {} }),
