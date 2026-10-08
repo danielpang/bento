@@ -114,23 +114,26 @@ export function SwarmPlanBrief({
       </p>
       {sources.length > 0 && (
         <ul className="swarm-plan-sources" aria-label="Plan sources">
-          {sources.map((source) => (
-            <li key={source.id} data-media={source.media}>
-              {source.media === "image" && (
-                <img className="swarm-plan-source-thumb" src={source.contentPath} alt="" loading="lazy" />
-              )}
-              <span className="swarm-plan-source-kind">{planSourceLabel(source)}</span>
-              {source.url
-                ? <a className="swarm-plan-source-name" href={source.url} target="_blank" rel="noreferrer noopener" title={source.url}>{source.name}</a>
-                : <span className="swarm-plan-source-name" title={source.name}>{source.name}</span>}
-              <span className="muted">{planSourceSize(source)}</span>
-              {source.media !== "text" && (
-                <a className="swarm-plan-source-open" href={source.contentPath} target="_blank" rel="noreferrer noopener">
-                  {source.media === "image" ? "Open" : "Download"}
-                </a>
-              )}
-            </li>
-          ))}
+          {sources.map((source) => {
+            const size = planSourceSize(source);
+            return (
+              <li key={source.id} data-media={source.media}>
+                {source.media === "image" && (
+                  <img className="swarm-plan-source-thumb" src={source.contentPath} alt="" loading="lazy" />
+                )}
+                <span className="swarm-plan-source-kind">{planSourceLabel(source)}</span>
+                {source.url
+                  ? <a className="swarm-plan-source-name" href={source.url} target="_blank" rel="noreferrer noopener" title={source.url}>{source.name}</a>
+                  : <span className="swarm-plan-source-name" title={source.name}>{source.name}</span>}
+                {size && <span className="muted">{size}</span>}
+                {source.media !== "text" && (
+                  <a className="swarm-plan-source-open" href={source.contentPath} target="_blank" rel="noreferrer noopener">
+                    {source.media === "image" ? "Open" : "Download"}
+                  </a>
+                )}
+              </li>
+            );
+          })}
         </ul>
       )}
     </div>
@@ -159,12 +162,18 @@ export function planSourceLabel(source: Pick<SwarmPlanSource, "kind" | "media">)
   return source.kind === "file" ? "File" : "Website";
 }
 
-/** How big a source is, in the unit a person reads it by. */
-export function planSourceSize(source: Pick<SwarmPlanSource, "media" | "size" | "hasText" | "byteSize">): string {
-  if (source.media === "text") return `${source.size.toLocaleString()} characters`;
+/**
+ * How big a source is, in the unit a person reads it by.
+ *
+ * A text file has no size worth printing: a character count does not
+ * say whether the plan is the right one. A PDF or an image is a
+ * download, so its size is in bytes.
+ */
+export function planSourceSize(source: Pick<SwarmPlanSource, "media" | "size" | "hasText" | "byteSize">): string | null {
+  if (source.media === "text") return null;
   const bytes = formatBytes(source.byteSize ?? 0);
   if (source.media === "image") return bytes;
-  return source.hasText ? `${bytes}, ${source.size.toLocaleString()} characters of text` : `${bytes}, no text (a scan)`;
+  return source.hasText ? bytes : `${bytes}, no text (a scan)`;
 }
 
 /**

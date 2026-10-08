@@ -141,7 +141,7 @@ export function SwarmNodeDrawer({
   const nextStep = mergeQueueFailure ? MERGE_QUEUE_FAILURE
     : primaryAction === "fix" ? "Tell the worker what to change."
     : primaryAction === "retry" ? (task.status === "assigned" ? "Start a new worker attempt." : null)
-    : workerActive ? "The worker is running. Open Worker logs to follow its progress."
+    : workerActive ? (node.agentActive ? "The worker is running. Open Worker logs to follow its progress." : "Waiting for an agent to start.")
       : primaryAction === "add" ? "Add a task to this plan."
         : primaryAction === "edit" ? "Edit the task description."
           : hasMoreActions ? "Open More actions for other options." : "No action is available for this node.";
@@ -166,8 +166,8 @@ export function SwarmNodeDrawer({
         <div className="feature-topline">
           <span className="feature-kicker">{task.nodeType === "leaf" ? "Swarm task" : "Plan node"}</span>
           <span className="status swarm-node-header-status">
-            <span className="dot" data-state={diagramTaskTone(task.status, task.nodeType)} />
-            {diagramTaskWords(task.status, task.nodeType)}
+            <span className="dot" data-state={diagramTaskTone(task.status, task.nodeType, node.agentActive)} />
+            {diagramTaskWords(task.status, task.nodeType, node.agentActive)}
           </span>
           <button className="btn btn-ghost feature-close" onClick={onClose} aria-label="Close" title="Close (Esc)">
             <span aria-hidden="true">×</span>

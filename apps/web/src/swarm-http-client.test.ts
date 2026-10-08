@@ -152,6 +152,7 @@ test("one swarm reads back with its plan, its spend and what is working", async 
   assert.deepEqual(read.tasks[0]!.cost, { measuredUsd: 1.5, estimatedUsd: 0.25, assumedUsd: 0 , notionalUsd: 0});
   assert.equal(read.tasks[0]!.attention, "none");
   assert.equal(read.tasks[1]!.attention, "question", "the server's own reason, not a severity it was flattened into");
+  assert.deepEqual(read.runningTaskIds, ["t-1"], "only a run that is in a sandbox, and only when it belongs to a task");
 
   // Nothing is invented for the surfaces the routes do not serve.
   assert.deepEqual(read.landings, []);

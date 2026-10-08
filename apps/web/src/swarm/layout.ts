@@ -76,7 +76,12 @@ export interface SwarmNode {
   title: string;
   nodeType: NodeType;
   status: TaskStatus;
-  /** This node has its own agent run, rather than inheriting working from children. */
+  /**
+   * An agent is running in a sandbox for this node.
+   *
+   * A plan that only inherited working from its children is not this,
+   * and neither is a run that is still queued or starting.
+   */
   agentActive: boolean;
   /** Derived, not copied: see `attentionFor`. */
   attention: TaskAttention;
@@ -158,6 +163,16 @@ export interface ModelOptions {
   now?: number;
   /** How long a working leaf may run before it turns yellow. */
   longRunMs?: number;
+  /**
+   * Tasks whose agent is running in a sandbox right now.
+   *
+   * When this is set, it is the only thing that makes a node active:
+   * a status of working with a run id can still be queued or starting,
+   * and those are pending until the agent is actually in the sandbox.
+   * Omitted, the model falls back to a working row that already names
+   * a run, which is what the tests that build a tree by hand use.
+   */
+  runningTaskIds?: ReadonlySet<string>;
 }
 
 const NO_SPEND: SwarmSpend = { measuredUsd: 0, estimatedUsd: 0, assumedUsd: 0, notionalUsd: 0 };
@@ -219,7 +234,9 @@ export function buildSwarmModel(tasks: SwarmTask[], options: ModelOptions = {}):
       title: task.title,
       nodeType: task.nodeType,
       status: task.status,
-      agentActive: task.status === "working" && task.assignedRunId !== null,
+      agentActive: options.runningTaskIds
+        ? options.runningTaskIds.has(task.id)
+        : task.status === "working" && task.assignedRunId !== null,
       attention: attentionFor(task, now, longRunMs),
       weight: Number.isFinite(task.weight) && task.weight > 0 ? task.weight : 1,
       ownCost: task.cost,
@@ -615,7 +632,8 @@ export function createModelCache(): (tasks: SwarmTask[], options?: ModelOptions)
   let lastKey = "";
   let last: SwarmModel | null = null;
   return (tasks, options = {}) => {
-    const key = `${[...(options.expanded ?? [])].sort().join(",")}|${[...(options.folded ?? [])].sort().join(",")}|${options.autoCollapseCompleted !== false}|${options.now ?? 0}|${options.longRunMs ?? LONG_RUN_WARNING_MS}`;
+    const running = [...(options.runningTaskIds ?? [])].sort().join(",");
+    const key = `${[...(options.expanded ?? [])].sort().join(",")}|${[...(options.folded ?? [])].sort().join(",")}|${options.autoCollapseCompleted !== false}|${options.now ?? 0}|${options.longRunMs ?? LONG_RUN_WARNING_MS}|${running}`;
     if (last && lastTasks === tasks && lastKey === key) return last;
     last = buildSwarmModel(tasks, options);
     lastTasks = tasks;

@@ -116,13 +116,35 @@ export function taskWords(status: TaskStatus): string {
   }
 }
 
-/** A failed group can still recover when its failed descendant is retried. */
-export function diagramTaskWords(status: TaskStatus, nodeType: NodeType): string {
-  return nodeType === "plan" && status === "failed" ? "stalled" : taskWords(status);
+/**
+ * What a node says on the diagram, the outline, and the drawer.
+ *
+ * "working" is only an agent that is running in a sandbox right now.
+ * A task that has not been picked up, including one whose status was
+ * rolled up from children or is only queued, reads as pending. A
+ * finished task reads as completed. A failed plan is stalled, because
+ * retrying the failed descendant can still move it.
+ */
+export function diagramTaskWords(status: TaskStatus, nodeType: NodeType, agentActive = false): string {
+  if (nodeType === "plan" && status === "failed") return "stalled";
+  if (status === "working" && agentActive) return "working";
+  if (status === "done") return "completed";
+  if (status === "open" || status === "assigned" || status === "working") return "pending";
+  return taskWords(status);
 }
 
-export function diagramTaskTone(status: TaskStatus, nodeType: NodeType): Tone {
-  return nodeType === "plan" && status === "failed" ? "gated" : taskTone(status);
+/**
+ * The hue beside those words.
+ *
+ * Pending is idle, so a queued task does not wear the same blue as an
+ * agent that is actually running. Landed stays in motion: the branch
+ * is in, and the leaf is not finished until it is completed.
+ */
+export function diagramTaskTone(status: TaskStatus, nodeType: NodeType, agentActive = false): Tone {
+  if (nodeType === "plan" && status === "failed") return "gated";
+  if (status === "working" && agentActive) return "running";
+  if (status === "open" || status === "assigned" || status === "working") return "idle";
+  return taskTone(status);
 }
 
 /** Do not print the same failure twice on a leaf. */

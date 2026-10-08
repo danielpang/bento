@@ -388,6 +388,13 @@ export interface SwarmDetail {
   pullRequests: SwarmPullRequest[];
   /** What the person handed the planner, when they handed over anything. */
   planSources?: SwarmPlanSource[];
+  /**
+   * Tasks whose agent is running in a sandbox right now.
+   *
+   * Absent on a fixture that builds the tree by hand. The page then
+   * treats a working row that already names a run as active.
+   */
+  runningTaskIds?: string[];
 }
 
 export interface SwarmPlannerRun {

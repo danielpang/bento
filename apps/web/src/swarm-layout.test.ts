@@ -107,6 +107,15 @@ test("only a node with its own working agent gets the active halo in both views"
   assert.equal(model.byId.get("active")?.agentActive, true);
   assert.equal(model.byId.get("waiting")?.agentActive, false);
   assert.equal(outlineRows(model).find((row) => row.id === "active")?.agentActive, true);
+
+  const live = buildSwarmModel([
+    node("root", null, "plan", "working"),
+    node("active", "root", "leaf", "working", { assignedRunId: "run-1" }),
+    node("starting", "root", "leaf", "working", { assignedRunId: "run-2" }),
+  ], { now: 0, runningTaskIds: new Set(["active"]) });
+  assert.equal(live.byId.get("active")?.agentActive, true);
+  assert.equal(live.byId.get("starting")?.agentActive, false, "a run that has not reached the sandbox is not working");
+  assert.equal(live.byId.get("root")?.agentActive, false);
 });
 
 test("weight decides the share, not the count", () => {

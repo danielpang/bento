@@ -1115,6 +1115,9 @@ export function toDetail(detail: WireDetail): SwarmDetail {
     ledger: [],
     pullRequests: (detail.pullRequests ?? []).map(toPullRequest),
     planSources: (detail.planSources ?? []).map((row) => toPlanSource(row, detail.swarm.id)),
+    runningTaskIds: detail.activeRuns
+      .filter((run) => run.status === "running" && run.swarmTaskId !== null)
+      .map((run) => run.swarmTaskId as string),
   };
 }
 

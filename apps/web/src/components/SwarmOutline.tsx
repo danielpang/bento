@@ -107,8 +107,8 @@ export function SwarmOutline({
                 </span>
                 <span className="swarm-row-pct">{formatCompletion(row.completion)}</span>
                 <span className="status swarm-row-status">
-                  <span className="dot" data-state={diagramTaskTone(row.status, row.nodeType)} />
-                  {diagramTaskWords(row.status, row.nodeType)}
+                  <span className="dot" data-state={diagramTaskTone(row.status, row.nodeType, row.agentActive)} />
+                  {diagramTaskWords(row.status, row.nodeType, row.agentActive)}
                 </span>
                 {/* Attention is its own column, never folded into the
                     status: a worker running long is still working. */}

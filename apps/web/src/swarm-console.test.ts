@@ -11,7 +11,7 @@ import { SwarmTree } from "./components/SwarmTree.js";
 import { SwarmOutline } from "./components/SwarmOutline.js";
 import { SwarmNodeDrawer } from "./components/SwarmNodeDrawer.js";
 import { SwarmRunOutput, SwarmRunOutputDrawer, SwarmWorkerOutputDrawer } from "./components/SwarmRunOutput.js";
-import { SwarmArtifacts, SwarmPage, WorkerStepper } from "./components/SwarmPage.js";
+import { SwarmArtifacts, SwarmPage, SwarmPlanBrief, WorkerStepper } from "./components/SwarmPage.js";
 import { ceilingRefusal, reopenEffectLines } from "./components/ReopenDialog.js";
 import {
   DEFAULT_RUN_SETTINGS,
@@ -54,7 +54,7 @@ function tasks(): SwarmTask[] {
     status,
     attention: extra.attention ?? "none",
     weight: extra.weight ?? 1,
-    assignedRunId: null,
+    assignedRunId: extra.assignedRunId ?? null,
     agentProfileId: extra.agentProfileId ?? null,
     branchName: extra.branchName ?? null,
     cost: extra.cost ?? { measuredUsd: 0, estimatedUsd: 0, assumedUsd: 0 , notionalUsd: 0},
@@ -74,6 +74,7 @@ function tasks(): SwarmTask[] {
       title: "Refund path",
       position: 1,
       attention: "long_running",
+      assignedRunId: "run-slow",
       cost: { measuredUsd: 0.5, estimatedUsd: 0.2, assumedUsd: 0 , notionalUsd: 0},
       startedAt: new Date(0).toISOString(),
     }),
@@ -205,6 +206,28 @@ test("the planner and its failure appear in both views before the plan exists", 
   }
 });
 
+test("an existing plan lists the file and not how many characters it holds", () => {
+  const html = renderToStaticMarkup(createElement(SwarmPlanBrief, {
+    planMode: "existing",
+    sources: [{
+      id: "src-1",
+      position: 0,
+      kind: "file",
+      name: "hub.css",
+      url: null,
+      mime: "text/css",
+      media: "text",
+      size: 12463,
+      hasText: true,
+      byteSize: null,
+      contentPath: "/api/swarms/s/plan-sources/src-1/content",
+    }],
+  }));
+  assert.match(html, /hub\.css/);
+  assert.match(html, /File/);
+  assert.doesNotMatch(html, /characters|12,463/);
+});
+
 test("the outline lists every node, including the ones the tree folded", () => {
   const html = renderToStaticMarkup(
     createElement(SwarmOutline, { model, selectedId: null, onSelect: () => {} }),
@@ -228,8 +251,10 @@ test("yellow survives the switch between the two views, and the status does not 
   for (const html of [tree, outline]) {
     assert.match(html, /data-attention/);
     assert.match(html, /Still running/);
-    // Still working: attention is a second axis, not a status.
+    // Attention does not replace the status. The leaf has an agent on
+    // it, so it stays working. The plan above it does not, so it is pending.
     assert.match(html, /working/);
+    assert.match(html, /pending/);
   }
   // The long run warning brings the elapsed time with it, in both.
   assert.match(tree, /Still running 1h 0m/);

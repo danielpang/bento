@@ -90,6 +90,21 @@ test("a failed descendant leaves its plan stalled without a duplicate failure la
   assert.equal(diagramAttentionWords("working", "leaf", "long_running"), "Still running");
 });
 
+test("a task says working only while an agent is running, and pending or completed otherwise", () => {
+  assert.equal(diagramTaskWords("assigned", "leaf"), "pending");
+  assert.equal(diagramTaskWords("open", "leaf"), "pending");
+  assert.equal(diagramTaskWords("working", "leaf"), "pending");
+  assert.equal(diagramTaskWords("working", "plan"), "pending");
+  assert.equal(diagramTaskTone("assigned", "leaf"), "idle");
+  assert.equal(diagramTaskTone("working", "plan"), "idle");
+  assert.equal(diagramTaskWords("working", "leaf", true), "working");
+  assert.equal(diagramTaskTone("working", "leaf", true), "running");
+  assert.equal(diagramTaskWords("done", "leaf"), "completed");
+  assert.equal(diagramTaskTone("done", "leaf"), "succeeded");
+  assert.equal(diagramTaskWords("landed", "leaf"), "landed");
+  assert.equal(diagramTaskWords("cancelled", "leaf"), "cancelled");
+});
+
 test("every swarm status resolves to one of the same five, and is called something", () => {
   const statuses: SwarmStatus[] = [
     "planning",
