@@ -1,11 +1,18 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { createServer, type Server, type ServerResponse } from "node:http";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { test } from "node:test";
-import { cloneBaseBranch, isAncestryPublishFailure, publishFeatureBranches, resolvePublishBaseSha } from "./publish.js";
+import {
+  cloneBaseBranch,
+  inaccessibleCloneExplanation,
+  isAncestryPublishFailure,
+  publishFeatureBranches,
+  resolvePublishBaseSha,
+} from "./publish.js";
 
 const run = promisify(execFile);
 
@@ -70,6 +77,27 @@ async function freshCheckout(): Promise<string> {
   return path.join(root, "checkout");
 }
 
+function listen(respond: (res: ServerResponse) => void): Promise<{ url: string; close: () => Promise<void> }> {
+  const server: Server = createServer((req, res) => {
+    respond(res);
+    req.resume();
+  });
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      resolve({
+        url: `http://127.0.0.1:${port}`,
+        close: () =>
+          new Promise((done, fail) => {
+            server.close((err) => (err ? fail(err) : done()));
+          }),
+      });
+    });
+  });
+}
+
 test("cloneBaseBranch returns the branch it was asked for when it exists", async () => {
   const remote = await seedRemote("master");
   const checkout = await freshCheckout();
@@ -112,6 +140,85 @@ test("cloneBaseBranch reports a missing branch when the fallback is off", async 
     }),
     /acme\/app has no branch named main/,
   );
+});
+
+test("an inaccessible GitHub repository is explained without the git command", () => {
+  const err = Object.assign(
+    new Error(
+      'Command failed: git -c credential.helper= -c credential.helper=!f() { echo username=x-access-token; echo "password=$BENTO_PUSH_TOKEN"; }; f clone --single-branch --branch main https://github.com/acme/missing.git /tmp/bento-seed-x/checkout',
+    ),
+    {
+      stderr:
+        "remote: Repository not found.\nfatal: repository 'https://github.com/acme/missing.git/' not found\n",
+    },
+  );
+  const sentence = inaccessibleCloneExplanation("acme/missing", "https://github.com/acme/missing.git", err);
+  assert.match(sentence ?? "", /acme\/missing could not be cloned/);
+  assert.match(sentence ?? "", /GitHub connection cannot see a private repository/);
+  assert.match(sentence ?? "", /Settings, GitHub/);
+  assert.doesNotMatch(sentence ?? "", /Command failed|credential\.helper|BENTO_PUSH_TOKEN/);
+});
+
+test("rejected GitHub credentials name the GitHub connection", () => {
+  const err = Object.assign(new Error("Command failed: git clone"), {
+    stderr: "fatal: Authentication failed for 'https://github.com/acme/private.git/'",
+  });
+  const sentence = inaccessibleCloneExplanation("acme/private", "https://github.com/acme/private.git", err);
+  assert.match(sentence ?? "", /GitHub rejected the credentials/);
+  assert.match(sentence ?? "", /Settings, GitHub/);
+});
+
+test("a missing branch is not reported as a missing repository", () => {
+  const err = Object.assign(new Error("Command failed: git clone"), {
+    stderr: "fatal: Remote branch main not found in upstream origin",
+  });
+  assert.equal(
+    inaccessibleCloneExplanation("acme/app", "https://github.com/acme/app.git", err),
+    null,
+  );
+});
+
+test("a network failure is left for the caller", () => {
+  const err = Object.assign(new Error("Command failed: git clone"), {
+    stderr: "fatal: unable to access 'https://github.com/acme/app.git/': Could not resolve host: github.com",
+  });
+  assert.equal(
+    inaccessibleCloneExplanation("acme/app", "https://github.com/acme/app.git", err),
+    null,
+  );
+});
+
+test("cloneBaseBranch explains a repository the remote will not show", async () => {
+  const server = await listen((res) => {
+    res.writeHead(404, { "content-type": "text/plain" });
+    res.end("Repository not found\n");
+  });
+  const checkout = await freshCheckout();
+  try {
+    await assert.rejects(
+      cloneBaseBranch({
+        remote: `${server.url}/acme/missing.git`,
+        label: "acme/missing",
+        baseBranch: "main",
+        checkout,
+        env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+        fallbackToDefaultBranch: true,
+      }),
+      (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.match(err.message, /acme\/missing could not be cloned from http:\/\/127\.0\.0\.1:\d+\/acme\/missing\.git/);
+        assert.match(err.message, /repository was not found/);
+        assert.doesNotMatch(err.message, /Command failed|credential\.helper|BENTO_PUSH_TOKEN|\/tmp\/bento-seed/);
+        const cause = err.cause;
+        assert.ok(cause instanceof Error);
+        assert.match(cause.message, /not found/i);
+        assert.doesNotMatch(cause.message, /credential\.helper|BENTO_PUSH_TOKEN|Command failed/);
+        return true;
+      },
+    );
+  } finally {
+    await server.close();
+  }
 });
 
 test("cloneBaseBranch explains that an empty repository has no branches", async () => {

@@ -660,6 +660,16 @@ async function withoutStageNotes(
  * Publishing does not set it. There the stored branch is the pull
  * request's base as well as the clone, so a rename is a mismatch a
  * person must reconcile, not one this quietly papers over.
+ *
+ * A repository GitHub will not show is a different failure, and it
+ * must not travel as the command that hit it. execFile's message is
+ * the whole argv, and that argv carries the credential helper, so the
+ * run record and the exception capture were a git command line ending
+ * in "repository not found". GitHub uses that same sentence when the
+ * repository is private and this organization's installation cannot
+ * see it, and when the repository was renamed or deleted. The person
+ * gets a sentence that says so. git's own line stays on the cause,
+ * without the command.
  */
 export async function cloneBaseBranch(args: {
   remote: string;
@@ -692,6 +702,8 @@ export async function cloneBaseBranch(args: {
     await cloneBranch(args.baseBranch);
     return args.baseBranch;
   } catch (err) {
+    const access = inaccessibleCloneExplanation(args.label, args.remote, err);
+    if (access) throw new Error(access, { cause: cloneFailureCause(err) });
     if (!missingBranchFailure(err)) throw err;
     if (args.fallbackToDefaultBranch) {
       const fallback = await remoteDefaultBranch(args.remote, args.env);
@@ -739,9 +751,93 @@ async function remoteDefaultBranch(remote: string, env: NodeJS.ProcessEnv): Prom
  * both are read: a driver that keeps only one of them still matches.
  */
 function missingBranchFailure(err: unknown): boolean {
+  return /Remote branch .+ not found in upstream/i.test(gitFailureText(err));
+}
+
+/**
+ * What to tell a person when the clone never reached a branch because
+ * the remote hid the repository or refused the credential.
+ *
+ * Null for every other failure. A missing branch has its own sentence.
+ * A network error is left as git wrote it: telling someone to fix the
+ * repository would be the wrong advice when this host cannot reach it.
+ */
+export function inaccessibleCloneExplanation(label: string, remote: string, err: unknown): string | null {
+  const text = gitFailureText(err);
+  if (/Remote branch .+ not found in upstream/i.test(text)) return null;
+  const github = /github\.com/i.test(remote);
+  if (repositoryNotFound(text)) {
+    if (!github) {
+      return (
+        `${label} could not be cloned from ${remote}. The remote says the repository was not found. ` +
+        "Check the URL and its access under Settings, Repositories, then run again."
+      );
+    }
+    return (
+      `${label} could not be cloned. GitHub says the repository was not found. ` +
+      "That is also what GitHub says when this organization's GitHub connection cannot see a private repository, " +
+      "and when the repository was renamed or deleted. Check it under Settings, Repositories. " +
+      "Then save a GitHub token under Settings, GitHub, or install the GitHub App on the repository, and run again."
+    );
+  }
+  if (credentialRejected(text)) {
+    if (!github) {
+      return (
+        `${label} could not be cloned from ${remote} because the remote rejected the credentials. ` +
+        "Check its access under Settings, Repositories, then run again."
+      );
+    }
+    return (
+      `${label} could not be cloned because GitHub rejected the credentials. ` +
+      "Reconnect GitHub under Settings, GitHub, and confirm the GitHub App is installed on this repository, then run again."
+    );
+  }
+  return null;
+}
+
+function repositoryNotFound(text: string): boolean {
+  return (
+    /repository not found/i.test(text) ||
+    /fatal: repository '.+' not found/i.test(text) ||
+    /requested URL returned error: 404/i.test(text)
+  );
+}
+
+function credentialRejected(text: string): boolean {
+  return (
+    /authentication failed/i.test(text) ||
+    /invalid username or token/i.test(text) ||
+    /could not read Username/i.test(text) ||
+    /terminal prompts disabled/i.test(text) ||
+    /write access to repository not granted/i.test(text) ||
+    /requested URL returned error: 401/i.test(text) ||
+    /requested URL returned error: 403/i.test(text)
+  );
+}
+
+/** stderr plus the message, which is where execFile puts git's fatal line. */
+function gitFailureText(err: unknown): string {
+  const stderr = gitStderr(err);
+  return `${stderr}\n${err instanceof Error ? err.message : String(err)}`;
+}
+
+function gitStderr(err: unknown): string {
   const stderr = typeof err === "object" && err !== null ? (err as { stderr?: unknown }).stderr : undefined;
-  const text = `${typeof stderr === "string" ? stderr : ""}\n${String(err)}`;
-  return /Remote branch .+ not found in upstream/i.test(text);
+  return typeof stderr === "string" ? stderr : "";
+}
+
+/**
+ * git's own lines, for the log and the exception cause.
+ *
+ * The command is left out. It is how the helper is spelled, and it is
+ * not a fact about the repository.
+ */
+function cloneFailureCause(err: unknown): Error {
+  const lines = gitStderr(err)
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !/credential\.helper|BENTO_PUSH_TOKEN/i.test(line));
+  return new Error(lines.slice(-6).join("\n") || "git clone failed");
 }
 
 function credentialArguments(): string[] {
