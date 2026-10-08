@@ -746,6 +746,27 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
   });
 
   /**
+   * The exec upgrade URL carries argv and the environment, and Fly's
+   * edge refuses it past roughly 64KB. A command that size is staged
+   * in a launcher on the sprite, which only a real edge can prove: a
+   * stub accepts any URL. Sized well past the line, so the test fails
+   * the day the staging stops happening rather than the day the limit
+   * moves.
+   */
+  await t.test("a command that does not fit the exec URL still runs, with its environment", { skip: needsSprite() }, async () => {
+    const payload = "<section class=\"hub\">{ color: #fff; }</section>\n".repeat(2_000);
+    const result = await collectExec(
+      driver.exec(handle, ["sh", "-c", 'printf %s "$1" | wc -c; printf %s "$BENTO_E2E_STAGED"', "_", payload], {
+        env: { BENTO_E2E_STAGED: "it's here" },
+        timeoutMs: 120_000,
+      }),
+    );
+    assert.equal(result.exitCode, 0, result.stderr.trim());
+    assert.match(result.stdout, new RegExp(`^\\s*${payload.length}\\s*it's here$`));
+    assert.doesNotMatch(result.stderr, /did not accept the exec connection/);
+  });
+
+  /**
    * A swarm's worker, provisioned the way a swarm actually provisions
    * one: from bundles rather than from a remote.
    *

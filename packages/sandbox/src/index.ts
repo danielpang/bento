@@ -4,6 +4,7 @@ export { LocalProcessDriver } from "./local-process.js";
 export {
   SpriteDriver,
   sandboxErrorKind,
+  sandboxNeverStartedCommand,
   spriteName,
   type SandboxErrorKind,
   type SpriteDriverOptions,

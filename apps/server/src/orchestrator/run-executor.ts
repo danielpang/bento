@@ -47,13 +47,14 @@ import {
   LineChannel,
   repositoryPathIn,
   sandboxErrorKind,
+  sandboxNeverStartedCommand,
   type PreparedRepository,
   type SandboxDriver,
   type SandboxHandle,
 } from "@bento/sandbox";
 import { captureJobErrors } from "../analytics.js";
 import type { AppContext } from "../context.js";
-import { unbilledReason } from "../unbilled-reasons.js";
+import { SANDBOX_REFUSED_AGENT_PREFIX, unbilledReason } from "../unbilled-reasons.js";
 import { githubConnectionFor, reviewForBranch } from "../github.js";
 import { createRepositorySeed, publishFeatureBranches } from "./publish.js";
 import { applyPendingPullRequestUpdates } from "./pull-request-updates.js";
@@ -825,6 +826,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       emitBoard("cancelled");
       return;
     }
+    reportExecFailure(ctx, runId, subject, err);
     await finishRun(ctx, runId, { ok: false, error: execFailureReason(ctx, err) }, null);
     emitBoard("failed");
     await subject.settle(ctx);
@@ -1109,6 +1111,39 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
       return;
     }
     /**
+     * A sandbox that never ran the agent is the sandbox's failure, not
+     * the agent's, and it reaches here looking like the agent's: the
+     * driver reports a refused exec connection in the stream's tail and
+     * ends with exit code -1, so the outcome is "no terminal event" plus
+     * that tail. Before this was told apart, a swarm planner whose exec
+     * upgrade Fly refused failed twice as a billed agent failure with
+     * nothing in error tracking, because only provisioning failures
+     * were captured. The driver's words go to the log and to error
+     * tracking; the run record gets one sentence the person can act on,
+     * which the unbilled-reason rules read.
+     */
+    if (sandboxNeverStartedCommand(outcome.error ?? "")) {
+      console.error(`the sandbox did not start the agent for run ${runId}:`, outcome.error);
+      ctx.analytics?.captureException(new Error(outcome.error), subject.run.startedBy, subject.organizationId, {
+        run_id: runId,
+        ...runOwnerProperties(subject.sandboxOwner),
+        source: "sandbox_exec",
+        provider: handle.provider,
+      });
+      await finishRun(
+        ctx,
+        runId,
+        {
+          ...outcome,
+          error: `${SANDBOX_REFUSED_AGENT_PREFIX}, so ${profile.cli} never ran. Run again to try a new connection.`,
+        },
+        exitCode,
+      );
+      emitBoard("failed");
+      await subject.settle(ctx);
+      return;
+    }
+    /**
      * The run limit stops the CLI mid-turn, so it never reports a
      * result, and the error is "stopped before reporting a result" plus
      * whatever the stream said last. The drivers name the stop in that
@@ -1340,6 +1375,24 @@ function runLimitReason(ctx: AppContext): string {
  * The two common exec failures get sentences; anything else keeps the
  * raw error, which is at least honest about being unexpected.
  */
+/**
+ * An exec that threw rather than streamed never ran the agent: the
+ * driver could not reach Docker, could not stage the command, or
+ * failed inside the SDK. Every one of those is the operator's to see,
+ * and until this was here none of them reached error tracking, because
+ * the run was closed as failed and nothing else looked. A run limit is
+ * the one exception: that stop was ours.
+ */
+function reportExecFailure(ctx: AppContext, runId: string, subject: RunSubject, err: unknown): void {
+  if (isExecTimeout(String(err))) return;
+  console.error(`exec failed for run ${runId}:`, err);
+  ctx.analytics?.captureException(err, subject.run.startedBy, subject.organizationId, {
+    run_id: runId,
+    ...runOwnerProperties(subject.sandboxOwner),
+    source: "agent_exec",
+  });
+}
+
 function execFailureReason(ctx: AppContext, err: unknown): string {
   return isExecTimeout(String(err))
     ? runLimitReason(ctx)
@@ -2828,6 +2881,7 @@ async function resumeInterruptedRun(
       emitBoard("cancelled");
       return;
     }
+    reportExecFailure(ctx, run.id, subject, err);
     await finishRun(ctx, run.id, { ok: false, error: execFailureReason(ctx, err) }, null);
     emitBoard("failed");
     await subject.settle(ctx);

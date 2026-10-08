@@ -18,6 +18,14 @@ export type UnbilledReason = {
   except?: readonly UnbilledMatch[];
 };
 
+/**
+ * How a run record opens when the sandbox never ran the agent: the
+ * exec connection that starts the CLI was refused and stayed refused,
+ * or the machine was gone. The executor writes the sentence and the
+ * rule below reads it, so the two share the opening words.
+ */
+export const SANDBOX_REFUSED_AGENT_PREFIX = "The sandbox did not accept the connection that starts the agent";
+
 export const UNBILLED_REASONS: readonly UnbilledReason[] = [
   {
     id: "sandbox-unavailable",
@@ -44,6 +52,11 @@ export const UNBILLED_REASONS: readonly UnbilledReason[] = [
       kind: "prefix",
       text: "sandbox provisioning failed: the sandbox exec connection failed before the command started",
     },
+  },
+  {
+    id: "sandbox-exec-refused",
+    summary: "The sandbox never accepted the connection that starts the agent, so no agent ran.",
+    match: { kind: "prefix", text: SANDBOX_REFUSED_AGENT_PREFIX },
   },
 ];
 

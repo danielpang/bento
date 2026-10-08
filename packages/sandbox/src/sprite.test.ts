@@ -12,6 +12,11 @@ import {
   FILESYSTEM_RETRY_DELAYS_MS,
   SpriteDriver,
   EXEC_HANDSHAKE_RETRY_DELAYS_MS,
+  EXEC_URL_MAX_BYTES,
+  execUrlBytes,
+  launcherScript,
+  planExecLaunch,
+  sandboxNeverStartedCommand,
   SPRITE_ACQUIRE_RATE_LIMIT_WAITS,
   SPRITE_ACQUIRE_RETRY_DELAYS_MS,
   SPRITE_DESTROY_RETRY_DELAYS_MS,
@@ -3536,4 +3541,238 @@ test("sandboxErrorKind tells the concurrent sprite limit apart from the creation
   assert.equal(sandboxErrorKind(new Error("Network error: fetch failed")), "control_plane");
   assert.equal(sandboxErrorKind(new APIError("forbidden", { statusCode: 403 })), "other");
   assert.equal(sandboxErrorKind(new Error("Command failed with exit code 1")), "other");
+});
+
+/**
+ * The SDK puts argv and the environment on the exec upgrade URL, and
+ * Fly's edge refuses a URL past roughly 64KB with a 414 that undici
+ * reports as the same "non-101" a 503 gets. A swarm planner whose
+ * prompt quoted 50KB of plan text was retried through the handshake
+ * ladder and failed every time. A command that size is staged in a
+ * launcher on the sprite instead: the launcher exports the environment
+ * and execs the command, the URL carries only `sh <launcher>`, and the
+ * launcher is removed once the stream ends.
+ */
+test("Sprite exec stages a command that does not fit the exec URL in a launcher", async () => {
+  const prompt = "plan from these sources: " + "<div class=\"hub\">{ color: #fff; }</div>\n".repeat(1500);
+  const child = fakeChild();
+  const spawns: { file: string; args: string[]; options?: Record<string, unknown> }[] = [];
+  const writes: { path: string; data: string; options?: { mode?: number } }[] = [];
+  const removed: string[] = [];
+  const sprite = {
+    spawn(file: string, args: string[], options?: Record<string, unknown>) {
+      spawns.push({ file, args, ...(options ? { options } : {}) });
+      queueMicrotask(() => child.emit("spawn"));
+      return child;
+    },
+    async listSessions() {
+      return [];
+    },
+    filesystem() {
+      return {
+        async writeFile(path: string, data: string, options?: { mode?: number }) {
+          writes.push({ path, data, ...(options ? { options } : {}) });
+        },
+        async rm(path: string) {
+          removed.push(path);
+        },
+      };
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const collected = collectExec(
+    driver.exec({ externalId: "sprite", provider: "sprite", workdir: "/workspace" }, ["codex", "exec", prompt, "--json"], {
+      cwd: "/workspace/bento",
+      env: { OPENAI_API_KEY: "sk-test", NOTE: "it's a 'quoted'\nvalue" },
+      sessionKey: "run-1",
+    }),
+  );
+  await settle();
+  child.stdout.write('{"type":"turn.completed"}\n');
+  child.emit("exit", 0);
+  const result = await collected;
+
+  assert.equal(result.exitCode, 0);
+  assert.match(result.stdout, /turn.completed/);
+  // The launcher went to the sprite before the spawn, readable by root alone.
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0]?.path, "/tmp/bento-exec-run-1.sh");
+  assert.equal(writes[0]?.options?.mode, 0o600);
+  const script = writes[0]?.data ?? "";
+  assert.match(script, /^#!\/bin\/sh\n/);
+  assert.ok(script.includes("export IS_SANDBOX='1'\n"), "IS_SANDBOX still reaches the agent");
+  assert.ok(script.includes("export OPENAI_API_KEY='sk-test'\n"));
+  assert.ok(script.includes("export NOTE='it'\\''s a '\\''quoted'\\''\nvalue'\n"), script);
+  assert.ok(script.endsWith(`exec 'codex' 'exec' '${prompt}' '--json'\n`));
+  // The URL carries the launcher and nothing of the prompt or the keys.
+  assert.equal(spawns.length, 1);
+  assert.equal(spawns[0]?.file, "sh");
+  assert.deepEqual(spawns[0]?.args, ["/tmp/bento-exec-run-1.sh"]);
+  assert.equal(spawns[0]?.options?.env, undefined);
+  assert.equal(spawns[0]?.options?.cwd, "/workspace/bento");
+  assert.equal(spawns[0]?.options?.maxRunAfterDisconnect, "10m");
+  // And is gone once the command is over.
+  await settle();
+  assert.deepEqual(removed, ["/tmp/bento-exec-run-1.sh"]);
+});
+
+test("Sprite exec reattaches to a staged command by its launcher's command line", async () => {
+  const prompt = "x".repeat(EXEC_URL_MAX_BYTES);
+  const child1 = fakeChild();
+  const child2 = fakeChild();
+  const spawns: { file: string; args: string[]; options?: Record<string, unknown> }[] = [];
+  const sprite = {
+    spawn(file: string, args: string[], options?: Record<string, unknown>) {
+      spawns.push({ file, args, ...(options ? { options } : {}) });
+      return spawns.length === 1 ? child1 : child2;
+    },
+    async listSessions() {
+      return [
+        {
+          id: "sess-launcher",
+          command: "sh /tmp/bento-exec-run-2.sh",
+          workdir: "/workspace",
+          created: new Date(0),
+          bytesPerSecond: 0,
+          isActive: false,
+          tty: false,
+        },
+      ];
+    },
+    filesystem() {
+      return {
+        async writeFile() {},
+        async rm() {},
+      };
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const collected = collectExec(
+    driver.exec({ externalId: "sprite", provider: "sprite", workdir: "/workspace" }, ["claude", "-p", prompt], {
+      sessionKey: "run-2",
+    }),
+  );
+  await settle();
+  child1.emit("spawn");
+  await settle();
+  child1.emit("exit", -1); // the socket dropped without an exit frame
+  for (let i = 0; i < 50 && spawns.length < 2; i++) await settle();
+  assert.equal(spawns.length, 2, "the driver should have attached to the launcher's session");
+  assert.equal(spawns[1]?.options?.sessionId, "sess-launcher");
+  child2.emit("spawn");
+  await settle();
+  child2.stdout.write('{"type":"result"}\n');
+  child2.emit("exit", 0);
+
+  const result = await collected;
+  assert.equal(result.exitCode, 0);
+  assert.match(result.stderr, /reattached to the running command/);
+});
+
+test("Sprite attach finds a staged command through its session key", async () => {
+  const child = fakeChild();
+  const spawns: { file: string; options?: Record<string, unknown> }[] = [];
+  const sprite = {
+    spawn(file: string, _args: string[], options?: Record<string, unknown>) {
+      spawns.push({ file, ...(options ? { options } : {}) });
+      queueMicrotask(() => child.emit("spawn"));
+      return child;
+    },
+    async listSessions() {
+      return [
+        {
+          id: "sess-launcher",
+          command: "sh /tmp/bento-exec-run-3.sh",
+          workdir: "/workspace",
+          created: new Date(0),
+          bytesPerSecond: 0,
+          isActive: true,
+          tty: false,
+        },
+      ];
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const stream = await driver.attach(
+    { externalId: "sprite", provider: "sprite", workdir: "/workspace" },
+    ["claude", "-p", "the prompt the run started with"],
+    { sessionKey: "run-3" },
+  );
+  assert.ok(stream, "the launcher's session is this run's");
+  assert.equal(spawns[0]?.options?.sessionId, "sess-launcher");
+  const collected = collectExec(stream);
+  child.stdout.write('{"type":"result"}\n');
+  child.emit("exit", 0);
+  const result = await collected;
+  assert.equal(result.exitCode, 0);
+
+  // Without the key there is nothing to name the launcher by, and a
+  // session that is some other run's is not adopted.
+  assert.equal(
+    await driver.attach({ externalId: "sprite", provider: "sprite", workdir: "/workspace" }, ["claude", "-p", "x"]),
+    null,
+  );
+});
+
+test("a command that fits the exec URL rides it unchanged", () => {
+  const launch = planExecLaunch(["claude", "-p", "do the task"], { env: { ANTHROPIC_API_KEY: "sk" } });
+  assert.equal(launch.launcher, undefined);
+  assert.deepEqual(launch.spawn, {
+    command: "claude",
+    args: ["-p", "do the task"],
+    env: { IS_SANDBOX: "1", ANTHROPIC_API_KEY: "sk" },
+  });
+  assert.deepEqual(launch.commandLines, ["claude"]);
+
+  // Measured the way the SDK encodes it: "<p>" is seven bytes on the
+  // URL, so this many of them pass the line that their length does not.
+  const html = "<p>".repeat(EXEC_URL_MAX_BYTES / 6);
+  assert.ok(execUrlBytes("codex", ["exec", html], {}) > EXEC_URL_MAX_BYTES);
+  assert.ok(execUrlBytes("codex", ["exec", "a".repeat(EXEC_URL_MAX_BYTES / 2)], {}) < EXEC_URL_MAX_BYTES);
+  // The environment counts too: keys ride the same URL as the prompt.
+  const staged = planExecLaunch(["codex", "exec", "short"], {
+    env: { BIG: "v".repeat(EXEC_URL_MAX_BYTES) },
+    sessionKey: "run/4 ok",
+  });
+  assert.equal(staged.spawn.command, "sh");
+  assert.deepEqual(staged.spawn.args, ["/tmp/bento-exec-run-4-ok.sh"]);
+  assert.deepEqual(staged.commandLines, ["sh /tmp/bento-exec-run-4-ok.sh"]);
+});
+
+test("a launcher exports every value intact and refuses a name no shell can", () => {
+  const script = launcherScript("claude", ["-p", "it's\nmulti line"], { A: "x'y", B: "" });
+  assert.equal(
+    script,
+    [
+      "#!/bin/sh",
+      "# Written by Bento for one command that did not fit the exec URL.",
+      "export A='x'\\''y'",
+      "export B=''",
+      "exec 'claude' '-p' 'it'\\''s\nmulti line'",
+      "",
+    ].join("\n"),
+  );
+  assert.throws(() => launcherScript("claude", [], { "BAD-NAME": "x" }), /not a name a shell can export/);
+});
+
+test("the driver's words for a command that never started are recognizable", () => {
+  assert.ok(
+    sandboxNeverStartedCommand(
+      "no terminal event (exit code -1): the sandbox did not accept the exec connection, retrying Error: WebSocket error: Received network error or non-101 status code. (url: [sandbox exec url]) the sandbox did not accept the exec connection, and it stayed that way through the retries",
+    ),
+  );
+  assert.ok(sandboxNeverStartedCommand("the sandbox did not accept the exec connection: attach timed out"));
+  assert.ok(
+    sandboxNeverStartedCommand("the cloud sandbox bento-x was not found, so the command was not started. Start the run again."),
+  );
+  // A refused upgrade that was then accepted is a retry, not a failure.
+  assert.equal(sandboxNeverStartedCommand("the sandbox did not accept the exec connection, retrying"), false);
+  assert.equal(sandboxNeverStartedCommand("the connection to the sandbox dropped, reattaching to the running command"), false);
+  assert.equal(sandboxNeverStartedCommand("exit code 1"), false);
 });

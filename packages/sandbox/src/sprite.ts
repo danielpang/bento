@@ -856,7 +856,17 @@ export class SpriteDriver implements SandboxDriver {
 
   async *exec(handle: SandboxHandle, argv: string[], opts?: ExecOptions): AsyncIterable<ExecChunk> {
     const sprite = await this.openSprite(handle.externalId);
-    const session = this.openSession(handle, argv, opts, sprite);
+    const launch = planExecLaunch(argv, opts);
+    if (launch.launcher) {
+      const { path, script } = launch.launcher;
+      try {
+        await callFilesystem(() => sprite.filesystem("/").writeFile(path, script, { mode: 0o600 }), "staging the command");
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        throw new Error(`could not stage the command in the sandbox, so it was not started: ${detail}`, { cause: err });
+      }
+    }
+    const session = this.openSession(handle, launch, opts, sprite);
     session.adoptInitial(sprite);
     yield* session.stream();
   }
@@ -877,10 +887,10 @@ export class SpriteDriver implements SandboxDriver {
     argv: string[],
     opts?: ExecOptions,
   ): Promise<AsyncIterable<ExecChunk> | null> {
-    const [command] = argv;
-    if (!command) throw new Error("empty argv");
+    const launch = planAttachLaunch(argv, opts);
+    const { command } = launch.spawn;
     const sprite = await this.openSprite(handle.externalId);
-    const mine = newestSessionFor(await sprite.listSessions(), command);
+    const mine = newestSessionFor(await sprite.listSessions(), launch.commandLines);
     if (!mine) return null;
 
     const child = sprite.spawn(command, [], { sessionId: mine.id });
@@ -902,7 +912,7 @@ export class SpriteDriver implements SandboxDriver {
      * why the session is built eagerly here while exec builds it
      * lazily inside its generator.
      */
-    const session = this.openSession(handle, argv, opts, sprite);
+    const session = this.openSession(handle, launch, opts, sprite);
     session.adoptAttached(child, guard);
     return session.stream();
   }
@@ -914,9 +924,8 @@ export class SpriteDriver implements SandboxDriver {
    * that already exists. Everything arms at call time, not at first
    * iteration.
    */
-  private openSession(handle: SandboxHandle, argv: string[], opts: ExecOptions | undefined, sprite: Sprite): OpenSession {
-    const [command, ...args] = argv;
-    if (!command) throw new Error("empty argv");
+  private openSession(handle: SandboxHandle, launch: ExecLaunch, opts: ExecOptions | undefined, sprite: Sprite): OpenSession {
+    const { command } = launch.spawn;
 
     /**
      * A command that goes quiet is not an idle machine, but the
@@ -924,11 +933,12 @@ export class SpriteDriver implements SandboxDriver {
      * process exec started. Held from here rather than around the
      * agent's argv so the command the sandbox runs stays exactly what
      * the caller asked for: the reattach below finds its session by
-     * that command's first word, and wrapping it in a shell would have
-     * every reattach hunting for `sh`. Released in stream()'s finally,
-     * with the task's own expiry as the backstop.
+     * the command line it was started with (see planExecLaunch), and
+     * wrapping it in a shell here would have every reattach hunting
+     * for `sh`. Released in stream()'s finally, with the task's own
+     * expiry as the backstop.
      */
-    const awake = holdSpriteAwake(sprite, command);
+    const awake = holdSpriteAwake(sprite, launch.label);
     /**
      * When this stream began, so a sandbox that paused mid command can
      * be told apart from one that never did. See reattach.
@@ -1048,10 +1058,7 @@ export class SpriteDriver implements SandboxDriver {
       const delay = EXEC_HANDSHAKE_RETRY_DELAYS_MS[handshakeRetries];
       if (delay === undefined) {
         stopKeepaliveGuard();
-        conclude(
-          -1,
-          "the sandbox did not accept the exec connection, and it stayed that way through the retries",
-        );
+        conclude(-1, EXEC_REFUSED_AFTER_RETRIES);
         return;
       }
       handshakeRetries += 1;
@@ -1066,7 +1073,7 @@ export class SpriteDriver implements SandboxDriver {
           if (done || killed || connectionOpened) return;
           const mine = newestSessionFor(
             sessions.filter((session) => session.created.getTime() >= startedAt - 15_000),
-            command,
+            launch.commandLines,
           );
           if (!mine) {
             adoptInitial(fresh);
@@ -1101,10 +1108,7 @@ export class SpriteDriver implements SandboxDriver {
             recoverInitialHandshake();
             return;
           }
-          conclude(
-            -1,
-            `the sandbox did not accept the exec connection: ${scrubExecUrl(err instanceof Error ? err.message : String(err))}`,
-          );
+          conclude(-1, `${EXEC_REFUSED}${scrubExecUrl(err instanceof Error ? err.message : String(err))}`);
         }
       })();
     };
@@ -1125,7 +1129,7 @@ export class SpriteDriver implements SandboxDriver {
           const fresh = await this.openSprite(handle.externalId);
           const sessions = await fresh.listSessions();
           if (done || killed) return;
-          const mine = newestSessionFor(sessions, command);
+          const mine = newestSessionFor(sessions, launch.commandLines);
           if (!mine) {
             /**
              * Why the process is gone, when the sandbox can say so.
@@ -1243,7 +1247,7 @@ export class SpriteDriver implements SandboxDriver {
           if (/sprite not found/i.test(err.message)) {
             conclude(
               -1,
-              `the cloud sandbox ${handle.externalId} was not found, so the command was not started. Start the run again to provision a new sandbox.`,
+              `the cloud sandbox ${handle.externalId} ${EXEC_SANDBOX_GONE}. Start the run again to provision a new sandbox.`,
             );
             return;
           }
@@ -1284,7 +1288,7 @@ export class SpriteDriver implements SandboxDriver {
     const killOverHttp = async () => {
       try {
         const fresh = await this.openSprite(handle.externalId);
-        const mine = newestSessionFor(await fresh.listSessions(), command);
+        const mine = newestSessionFor(await fresh.listSessions(), launch.commandLines);
         if (!mine) return;
         const stream = await fresh.killSession(mine.id, "SIGTERM", "10s");
         await stream.processAll(() => {});
@@ -1328,17 +1332,11 @@ export class SpriteDriver implements SandboxDriver {
 
     const adoptInitial = (sprite: Sprite) => {
       stopKeepaliveGuard();
-      const child = sprite.spawn(command, args, {
+      const child = sprite.spawn(launch.spawn.command, launch.spawn.args, {
         cwd: opts?.cwd ?? handle.workdir,
-        /**
-         * IS_SANDBOX says the sandbox is the security boundary, which a
-         * sprite is. Claude Code checks it before accepting
-         * --dangerously-skip-permissions as root, and sprites run
-         * commands as root; without it every claude-code run died at
-         * exit 1 with no output. The Docker driver learned this the same
-         * way (see docker.ts).
-         */
-        env: { IS_SANDBOX: "1", ...opts?.env },
+        // The environment, IS_SANDBOX included, is planExecLaunch's;
+        // a staged command carries it in the launcher instead.
+        ...(launch.spawn.env ? { env: launch.spawn.env } : {}),
         maxRunAfterDisconnect: EXEC_DISCONNECT_GRACE,
       });
       latest = child;
@@ -1374,6 +1372,19 @@ export class SpriteDriver implements SandboxDriver {
         // is over; holding it awake past that is billed time nobody
         // asked for.
         awake.release();
+        /**
+         * The launcher carried the run's credentials, and the sprite's
+         * disk outlives the run and goes into every checkpoint, so it
+         * does not stay. Best effort, after the process has long since
+         * exec'd past it: a file left behind is a hygiene miss, not a
+         * failed run.
+         */
+        if (launch.launcher) {
+          const stale = launch.launcher.path;
+          void bounded(sprite.filesystem("/").rm(stale, { force: true }), FILESYSTEM_TIMEOUT_MS, "removing the launcher").catch(
+            () => {},
+          );
+        }
         if (timeout) clearTimeout(timeout);
         if (reap) clearTimeout(reap);
         opts?.signal?.removeEventListener("abort", onAbort);
@@ -1688,12 +1699,156 @@ const ATTACH_TIMEOUT_MS = 30_000;
  * deleteSprite already retry. A command that actually ran and exited
  * is not in this ladder.
  *
- * The upgrade URL does carry the whole command. Fly's edge answers
- * 414 once that URL passes roughly 64KB, and the toolchain script
- * sits near 22KB, under that line, so a long command is not what
- * makes this handshake fail. Retrying the upgrade is.
+ * The upgrade URL carries the whole command and environment, and
+ * Fly's edge answers 414 once it passes roughly 64KB. A command that
+ * long never reaches this ladder: planExecLaunch stages it in a
+ * launcher file instead, so a refused upgrade here is the control
+ * plane's and retrying it is the answer.
  */
 export const EXEC_HANDSHAKE_RETRY_DELAYS_MS = [2_000, 8_000, 20_000];
+
+/**
+ * The most an exec upgrade URL may carry before the command is staged
+ * on the sprite instead.
+ *
+ * The SDK puts every argv entry and every environment variable on the
+ * upgrade URL as query parameters, form-encoded, and Fly's edge refuses
+ * the request with 414 somewhere past 64KB of URL. undici reports that
+ * refusal as the same "non-101 status code" a 503 gets, so before this
+ * limit existed a swarm planner whose prompt quoted 50KB of plan text
+ * (67KB once encoded) was retried through the whole handshake ladder
+ * and then failed with a sentence about the sandbox not accepting the
+ * connection, which was true and explained nothing. Half of the
+ * observed line, because the limit is Fly's and unpublished, and a
+ * staged command costs one small file write.
+ */
+export const EXEC_URL_MAX_BYTES = 32 * 1024;
+
+/**
+ * What one exec asks the sprite to run, and how to find it again.
+ *
+ * Ordinarily `spawn` is the caller's argv and environment verbatim.
+ * When those would not fit the upgrade URL, `spawn` is `sh` with the
+ * launcher's path, and the launcher (written to the sprite before the
+ * spawn, removed when the stream ends) exports the environment and
+ * execs the real command, so the process the session holds is still
+ * the agent. `commandLines` are what listSessions reports for either
+ * shape, which is how a reattach, a handshake retry and the HTTP kill
+ * find this session and not another.
+ */
+interface ExecLaunch {
+  /** argv's first word, for logs and the keep-awake task's label. */
+  label: string;
+  spawn: { command: string; args: string[]; env: Record<string, string> | undefined };
+  commandLines: string[];
+  launcher?: { path: string; script: string };
+}
+
+/**
+ * IS_SANDBOX says the sandbox is the security boundary, which a sprite
+ * is. Claude Code checks it before accepting
+ * --dangerously-skip-permissions as root, and sprites run commands as
+ * root; without it every claude-code run died at exit 1 with no
+ * output. The Docker driver learned this the same way (see docker.ts).
+ */
+function execEnvironment(opts: ExecOptions | undefined): Record<string, string> {
+  return { IS_SANDBOX: "1", ...opts?.env };
+}
+
+export function planExecLaunch(argv: string[], opts: ExecOptions | undefined): ExecLaunch {
+  const [command, ...args] = argv;
+  if (!command) throw new Error("empty argv");
+  const env = execEnvironment(opts);
+  if (execUrlBytes(command, args, env, opts?.cwd) <= EXEC_URL_MAX_BYTES) {
+    return { label: command, spawn: { command, args, env }, commandLines: [command] };
+  }
+  const path = launcherPath(opts?.sessionKey ?? randomUUID());
+  return {
+    label: command,
+    spawn: { command: "sh", args: [path], env: undefined },
+    commandLines: [launcherCommandLine(path)],
+    launcher: { path, script: launcherScript(command, args, env) },
+  };
+}
+
+/**
+ * An attach only has to find the session. The command may have been
+ * started either way (the environment on a reattach is not the one the
+ * run started with, so the size cannot be recomputed), so both command
+ * lines are candidates when a session key names the launcher.
+ */
+function planAttachLaunch(argv: string[], opts: ExecOptions | undefined): ExecLaunch {
+  const [command, ...args] = argv;
+  if (!command) throw new Error("empty argv");
+  const commandLines = [command];
+  if (opts?.sessionKey) commandLines.push(launcherCommandLine(launcherPath(opts.sessionKey)));
+  return { label: command, spawn: { command, args, env: undefined }, commandLines };
+}
+
+/**
+ * The upgrade URL's query, measured the way the SDK builds it
+ * (buildWebSocketURL in @fly/sprites: cmd per argv entry, path, stdin,
+ * env per variable, dir, max_run_after_disconnect). URLSearchParams
+ * encodes to ASCII, so the string's length is its byte count. The
+ * host and path are a few dozen bytes on top, well inside the margin.
+ */
+export function execUrlBytes(command: string, args: string[], env: Record<string, string>, cwd?: string): number {
+  const params = new URLSearchParams();
+  for (const arg of [command, ...args]) params.append("cmd", arg);
+  params.set("path", command);
+  params.set("stdin", "true");
+  for (const [key, value] of Object.entries(env)) params.append("env", `${key}=${value}`);
+  if (cwd) params.set("dir", cwd);
+  params.set("max_run_after_disconnect", EXEC_DISCONNECT_GRACE);
+  return params.toString().length;
+}
+
+/**
+ * Where a staged command's launcher lives. Named by the run when the
+ * caller gave one, so an attach after a server restart can name the
+ * same file; /tmp, which the sprite keeps for itself and is nowhere
+ * near a checkout.
+ */
+function launcherPath(key: string): string {
+  return `/tmp/bento-exec-${key.replace(/[^A-Za-z0-9._-]/g, "-")}.sh`;
+}
+
+function launcherCommandLine(path: string): string {
+  return `sh ${path}`;
+}
+
+/**
+ * The launcher: the environment exported, then exec into the command,
+ * so the shell is gone and the session's process is the agent itself.
+ * Single quotes carry every byte of a value, newlines included; the
+ * only character they cannot hold is the quote, which closes, escapes
+ * and reopens. A name no shell can export is a bug in the caller and
+ * is said so, rather than written as a line sh would refuse.
+ */
+export function launcherScript(command: string, args: string[], env: Record<string, string>): string {
+  const lines = ["#!/bin/sh", "# Written by Bento for one command that did not fit the exec URL."];
+  for (const [key, value] of Object.entries(env)) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error(`${JSON.stringify(key)} is not a name a shell can export`);
+    lines.push(`export ${key}=${shellQuote(value)}`);
+  }
+  lines.push(`exec ${[command, ...args].map(shellQuote).join(" ")}`);
+  return `${lines.join("\n")}\n`;
+}
+
+/**
+ * The driver's own words for a command the sandbox never ran: the exec
+ * connection was refused and stayed refused, or the machine was gone.
+ * The executor reads them off the stream's tail to tell a sandbox that
+ * never started the agent from an agent that started and failed.
+ */
+export const EXEC_REFUSED_AFTER_RETRIES =
+  "the sandbox did not accept the exec connection, and it stayed that way through the retries";
+export const EXEC_REFUSED = "the sandbox did not accept the exec connection: ";
+export const EXEC_SANDBOX_GONE = "was not found, so the command was not started";
+
+export function sandboxNeverStartedCommand(text: string): boolean {
+  return text.includes(EXEC_REFUSED_AFTER_RETRIES) || text.includes(EXEC_REFUSED) || text.includes(EXEC_SANDBOX_GONE);
+}
 
 /**
  * How long the first connection of an exec may sit connecting. Longer
@@ -1838,9 +1993,13 @@ type SpriteSession = Awaited<ReturnType<Sprite["listSessions"]>>[number];
  * feature has one sprite and one running agent (startRunIfIdle enforces
  * it), so the newest match is the run's own session.
  */
-function newestSessionFor(sessions: SpriteSession[], command: string): SpriteSession | undefined {
+/**
+ * The newest non-tty session whose command line is one of the given
+ * lines, or starts with one followed by its arguments.
+ */
+function newestSessionFor(sessions: SpriteSession[], commandLines: string[]): SpriteSession | undefined {
   return sessions
-    .filter((s) => !s.tty && (s.command === command || s.command.startsWith(`${command} `)))
+    .filter((s) => !s.tty && commandLines.some((line) => s.command === line || s.command.startsWith(`${line} `)))
     .sort((a, b) => b.created.getTime() - a.created.getTime())[0];
 }
 
