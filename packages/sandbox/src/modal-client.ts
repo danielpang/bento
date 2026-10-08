@@ -197,11 +197,11 @@ function imageRefOf(image: Image): ModalImageRef {
   return { imageId: image.imageId };
 }
 
-function adaptProc(
+export function adaptProc(
   proc: {
     stdout: { readText(): Promise<string> } & ReadableStream<Uint8Array | string>;
     stderr: { readText(): Promise<string> };
-    stdin: { writeText(text: string): Promise<void> };
+    stdin: { writeText(text: string): Promise<void>; close(): Promise<void> };
     closeStdin(): Promise<void>;
     wait(): Promise<number>;
   },
@@ -225,7 +225,24 @@ function adaptProc(
     stderrText: () => proc.stderr.readText(),
     wait: () => proc.wait(),
     writeStdin: (text) => proc.stdin.writeText(text),
-    endStdin: () => proc.closeStdin(),
+    /*
+     * The stream's own close, never closeStdin(). In modal 0.10.1
+     * closeStdin() sends EOF at offset 0, which is meant for a stream
+     * whose first write failed: after N bytes were written the server
+     * drops it as stale, and the SDK swallows the error. bento-exec
+     * stdin then never saw EOF, so a command fed through stdin (every
+     * sandbox file write) waited forever and the run hung with no log
+     * line. close() sends EOF at the offset the writes reached.
+     * closeStdin() stays as the fallback for a stream that errored and
+     * cannot close.
+     */
+    endStdin: async () => {
+      try {
+        await proc.stdin.close();
+      } catch {
+        await proc.closeStdin();
+      }
+    },
   };
 }
 

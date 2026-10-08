@@ -1,5 +1,5 @@
 import { eq, sql } from "drizzle-orm";
-import { swarmTaskEvents, swarmTasks, type Db } from "@bento/db";
+import { agentRuns, swarmTaskEvents, swarmTasks, type Db } from "@bento/db";
 
 /**
  * The one door a leaf goes through on its way to the planner, and the
@@ -31,14 +31,79 @@ import { swarmTaskEvents, swarmTasks, type Db } from "@bento/db";
 export type TaskWriter = Pick<Db, "update" | "insert">;
 
 /**
+ * How many times one piece of news is handed to a fresh planner after
+ * the planner it went to ended without deciding. Counted on the leaf as
+ * `plannerRetells`, and cleared with the latch when the leaf has new
+ * news. Without a bound, a planner that fails every time (a refused key,
+ * a provider that stays down past the coordinator's own restarts) is
+ * woken again by its own failure's tick, forever, and every one is
+ * billed.
+ */
+export const MAX_PLANNER_RETELLS = 3;
+
+/** The flags to clear whenever a leaf's news is new, so the latch and its count start over. */
+export const PLANNER_LATCH_CLEARED = {
+  plannerToldAt: undefined,
+  plannerToldBy: undefined,
+  plannerRetells: undefined,
+} as const;
+
+/**
  * The half of the wake's query that the latch is: leaves whose news has
- * not been folded into a wake yet.
+ * not been folded into a wake yet, or whose wake never reached a planner.
  *
  * Read with coalesce rather than `is null`, because the latch is a key
  * in a jsonb column: a row that never had it and a row whose value was
  * set to null both read as "not told", and only a string means told.
+ *
+ * Told means told by a planner that finished its turn. The wake stamps
+ * `plannerToldBy` with the run it started, and a run that then failed or
+ * was cancelled never read the news it was handed: a planner stranded in
+ * its sandbox, killed by a restart, or stopped by a person. Its leaves
+ * read as not told again, so a later wake carries them. Before this,
+ * such a leaf sat "working" with its report forever, and the swarm
+ * waited on a decision nobody was ever asked to make.
+ *
+ * At most MAX_PLANNER_RETELLS times per piece of news. A leaf whose news
+ * was lost that often waits for a person, as every leaf did before this.
+ *
+ * A cancelled planner's news is found here too, but deliverPlannerWake
+ * does not start a planner for it alone: a person who stopped the
+ * planner chose to, and the news rides along with the next wake that
+ * something else causes.
+ *
+ * Read here rather than cleared on each path that ends a planner run,
+ * for the reason this file exists: a latch every terminal path has to
+ * remember to clear is a latch one of them forgets. A run that is still
+ * active does not count as failed, so a planner mid turn keeps its news.
+ *
+ * Only for a leaf still waiting on that decision: one still working on
+ * its report, or one that failed. Not one already accepted, whose branch
+ * is in the merge queue and whose landing speaks for it next (a second
+ * planner told about it could reject work that is already landing), and
+ * not one a person marked done or that landed in the meantime.
+ *
+ * The run id is cast to uuid, guarded, so the lookup is the primary key
+ * rather than a scan of agent_runs per leaf, and a malformed flag reads
+ * as no run rather than failing the tick.
  */
-export const PLANNER_NOT_TOLD = sql`coalesce((${swarmTasks.flags} ->> 'plannerToldAt'), '') = ''`;
+export const PLANNER_NOT_TOLD = sql`(
+  coalesce((${swarmTasks.flags} ->> 'plannerToldAt'), '') = ''
+  or (
+    ${swarmTasks.status} in ('working', 'failed')
+    and coalesce((${swarmTasks.flags} ->> 'accepted'), '') <> 'true'
+    and (case when jsonb_typeof(${swarmTasks.flags} -> 'plannerRetells') = 'number'
+      then (${swarmTasks.flags} ->> 'plannerRetells')::numeric else 0 end) < ${MAX_PLANNER_RETELLS}
+    and exists (
+      select 1 from ${agentRuns}
+      where ${agentRuns.id} = (case
+          when (${swarmTasks.flags} ->> 'plannerToldBy') ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+          then (${swarmTasks.flags} ->> 'plannerToldBy')::uuid
+        end)
+        and ${agentRuns.status} in ('failed', 'cancelled')
+    )
+  )
+)`;
 
 export interface LeafHandover {
   /** The leaf as it was read: its current status, and its flags. */
@@ -79,7 +144,7 @@ export async function handLeafToPlanner(tx: TaskWriter, hand: LeafHandover): Pro
        * The leaf's news is new, so whatever the planner was told before
        * is not this.
        */
-      flags: { ...hand.task.flags, ...hand.flags, plannerToldAt: undefined },
+      flags: { ...hand.task.flags, ...hand.flags, ...PLANNER_LATCH_CLEARED },
       updatedAt: hand.now,
     })
     .where(eq(swarmTasks.id, hand.task.id));

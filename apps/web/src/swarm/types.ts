@@ -109,7 +109,8 @@ export interface TaskCommit {
  * Something that happened to one node.
  *
  * `kind` is the server's own word (created, assigned, status_changed,
- * attention_raised, landed, note), and `runId` is what makes a
+ * attention_raised, reported, review_requested, review_interrupted,
+ * landed, note), and `runId` is what makes a
  * resolver visible: it is the only record on the node itself that an
  * agent other than its worker was ever put on it.
  *

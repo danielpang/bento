@@ -322,7 +322,12 @@ export async function reactivateSwarmForRetry(tx: TaskWriter, swarmId: string): 
 
 export async function retryLeaf(
   tx: TaskWriter,
-  input: { task: Task; now?: Date; reason?: string } & Asker,
+  /**
+   * `rejected` when this is the planner sending a report back, said on
+   * the event so the drawer can tell it from a failed leaf assigned
+   * again with a reason, which writes the same status change.
+   */
+  input: { task: Task; now?: Date; reason?: string; rejected?: boolean } & Asker,
 ): Promise<Task | SplitRefusal> {
   const { task } = input;
   const now = input.now ?? new Date();
@@ -348,6 +353,8 @@ export async function retryLeaf(
          * told before is not this.
          */
         plannerToldAt: undefined,
+        plannerToldBy: undefined,
+        plannerRetells: undefined,
         ...(input.reason !== undefined ? { rejection: input.reason } : {}),
       },
       updatedAt: now,
@@ -360,7 +367,11 @@ export async function retryLeaf(
     fromStatus: task.status,
     toStatus: "assigned",
     ...askedBy(input),
-    detail: { retry: Number.isFinite(retries) ? retries + 1 : 1, ...(input.reason ? { rejection: input.reason } : {}) },
+    detail: {
+      retry: Number.isFinite(retries) ? retries + 1 : 1,
+      ...(input.reason ? { rejection: input.reason } : {}),
+      ...(input.rejected ? { rejected: true } : {}),
+    },
   });
   return updated ?? task;
 }

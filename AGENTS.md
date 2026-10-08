@@ -338,6 +338,63 @@ kept the hosted database busy enough to never scale down; `enqueueRun`
 wakes them, so a run queued in-process still starts at once. A bare
 send works, and waits for the next poll.
 
+## A planner that never finished its turn never read its news
+
+A leaf's report or failure is handed to the planner once, latched by
+`plannerToldAt` in its flags. The wake also records `plannerToldBy`,
+the planner run it went to, and `PLANNER_NOT_TOLD` in
+`orchestrator/swarm/planner-news.ts` reads a leaf as not told again
+once that run failed or was cancelled, unless the leaf was accepted,
+marked done, or landed meanwhile. At most `MAX_PLANNER_RETELLS` times
+per piece of news, counted as `plannerRetells` and cleared with the
+latch, so a planner that fails every time is not woken forever. A
+cancelled planner's news never starts a planner by itself (a person
+who stopped it chose to): it rides along with the next wake. A planner
+restarted after a sandbox failure reruns the same prompt, so it takes
+over the leaves the failed run was told about. Before this, a planner that was
+handed a report and then died (stranded, restarted, stopped) left the
+leaf "working" with its report forever: every later tick read it as
+told, and the swarm never moved. The rule lives in the filter, not in
+each path that ends a run, so a new terminal path cannot forget it.
+
+Each handover is written to the leaf's own log as `review_requested`
+with the planner's run id, and a handover lost this way as
+`review_interrupted`, so the node drawer shows a worker waiting on a
+planner rather than a worker nobody is looking at.
+
+A server run whose handler hangs in its sandbox before the agent says
+anything is closed by `reapStalledRuns` in `run-executor.ts`, on the
+existing `runner.reap` schedule, after `STALLED_RUN_MIN` minutes with
+no transcript line. It closes them with `SANDBOX_STALLED_AGENT_PREFIX`,
+which is on the unbilled list, so the run is not billed and the
+coordinator restarts it like any run whose sandbox failed first. A
+handler that comes back after its run was closed stops at the compare
+and set that moves the run to running, just before the agent is
+exec'd. Nothing else ends it: pg-boss expires the
+`run.execute` job after fifteen minutes but cannot stop the promise,
+and the retry's early return on a run that is not queued is what stops
+a long agent from being started twice, so it must stay a no-op. Only
+runs whose agent never produced an event are reaped (the executor's
+own system lines and the prompt it writes as a user line do not
+count); an agent that started and went quiet is usually running a long
+command. A text-mode agent (dsh) says nothing until it exits, so once
+`agentStartedAt` is stamped (as it is exec'd) it is never reaped.
+
+## Modal stdin closes through the stream, never closeStdin()
+
+Every Modal run in production hung at its first sandbox file write
+(`writeSandboxFiles`, which feeds `node -e` through stdin), so no Modal
+run had ever started an agent. modal 0.10.1's `closeStdin()` sends EOF
+at offset 0, which the server drops once bytes were written, and the
+SDK swallows the error, so `bento-exec stdin` held the FIFO open
+forever. `endStdin` in `packages/sandbox/src/modal-client.ts` closes
+the stdin stream itself, which sends EOF at the offset the writes
+reached, and keeps `closeStdin()` only as the fallback for a stream
+that cannot close. The feeder's exit is also waited on for at most
+`MODAL_STDIN_DRAIN_MS`, because exec's `finally` waits on it, and an
+unbounded wait there is what kept even the command timeout from
+ending the run.
+
 ## Queue workers poll slowly on purpose
 
 pg-boss has no push, so every idle worker costs a query per poll. The
