@@ -722,6 +722,8 @@ export function swarmRoutes(ctx: AppContext) {
           status: agentRuns.status,
           swarmTaskId: agentRuns.swarmTaskId,
           queuedAt: agentRuns.queuedAt,
+          startedAt: agentRuns.startedAt,
+          agentStartedAt: agentRuns.agentStartedAt,
         })
         .from(agentRuns)
         .where(and(eq(agentRuns.swarmId, swarm.id), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)))

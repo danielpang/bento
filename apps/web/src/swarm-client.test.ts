@@ -264,9 +264,9 @@ test("a PDF or an image travels as bytes, is sized in bytes, and is refused past
   assert.equal(planSourceLabel({ kind: "file", media: "pdf" }), "PDF");
   assert.equal(planSourceLabel({ kind: "website", media: "text" }), "Website");
   assert.equal(planSourceSize({ media: "image", size: 0, hasText: false, byteSize: 4096 }), "4 KB");
-  assert.equal(planSourceSize({ media: "pdf", size: 1200, hasText: true, byteSize: 2 * 1024 * 1024 }), "2.0 MB, 1,200 characters of text");
+  assert.equal(planSourceSize({ media: "pdf", size: 1200, hasText: true, byteSize: 2 * 1024 * 1024 }), "2.0 MB");
   assert.equal(planSourceSize({ media: "pdf", size: 0, hasText: false, byteSize: 500 }), "500 bytes, no text (a scan)");
-  assert.equal(planSourceSize({ media: "text", size: 12, hasText: true, byteSize: null }), "12 characters");
+  assert.equal(planSourceSize({ media: "text", size: 12, hasText: true, byteSize: null }), null);
 });
 
 test("a folded brief shows the goal's first line, cut at a word", () => {

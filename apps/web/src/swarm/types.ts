@@ -388,6 +388,23 @@ export interface SwarmDetail {
   pullRequests: SwarmPullRequest[];
   /** What the person handed the planner, when they handed over anything. */
   planSources?: SwarmPlanSource[];
+  /**
+   * Tasks whose agent is running in a sandbox right now.
+   *
+   * Absent on a fixture that builds the tree by hand. The page then
+   * treats a working row that already names a run as active. An empty
+   * list is an answer: nobody is in a sandbox.
+   */
+  runningTaskIds?: string[];
+  /**
+   * When the agent on a task started, keyed by task id.
+   *
+   * The long-run clock: the moment the process was exec'd, or the
+   * claim time when a run from before that stamp is still in flight.
+   * Two agents on one node keep the earlier clock, which is the run
+   * the watchdog would warn on first.
+   */
+  agentStartedAt?: Record<string, string>;
 }
 
 export interface SwarmPlannerRun {

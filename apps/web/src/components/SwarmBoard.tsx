@@ -307,7 +307,21 @@ export function SwarmBoard({
   const [workerOutput, setWorkerOutput] = useState<{ runId: string; taskTitle: string } | null>(null);
 
   const model = useMemo(
-    () => buildModel(detail?.tasks ?? [], { expanded, folded, autoCollapseCompleted: detail?.swarm.status !== "done", now }),
+    () => buildModel(detail?.tasks ?? [], {
+      expanded,
+      folded,
+      autoCollapseCompleted: detail?.swarm.status !== "done",
+      now,
+      // An empty list is an answer: nobody is in a sandbox. A fixture
+      // that omits the field keeps the run id on the task row. The
+      // check is presence, and an empty array is present.
+      ...(detail?.runningTaskIds
+        ? {
+            runningTaskIds: new Set(detail.runningTaskIds),
+            agentStartedAt: new Map(Object.entries(detail.agentStartedAt ?? {})),
+          }
+        : {}),
+    }),
     [buildModel, detail, expanded, folded, now],
   );
 

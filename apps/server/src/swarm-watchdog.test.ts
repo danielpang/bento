@@ -382,6 +382,70 @@ test("a long planner turn does not leave the whole swarm blocked for good", asyn
  * node was put there by something that knows more about it than "an
  * agent was on this for a while".
  */
+/**
+ * The clock is the agent, not the claim.
+ *
+ * A run that has been queued or provisioning for longer than the
+ * warning has not been working. A running row whose agent started a
+ * minute ago has not either, however long ago it was claimed.
+ */
+test("a run that has not started its agent is not a long run", async () => {
+  const swarm = await makeSwarm();
+  const claimed = new Date(Date.now() - (WARN_MIN + 10) * 60_000);
+  const [queuedTask] = await db
+    .insert(swarmTasks)
+    .values({ swarmId: swarm.id, title: "Waiting for a slot", status: "working" })
+    .returning();
+  await db.insert(agentRuns).values({
+    type: "swarm",
+    swarmId: swarm.id,
+    swarmTaskId: queuedTask!.id,
+    role: "worker",
+    agentProfileId: PROFILE,
+    prompt: "",
+    status: "queued",
+    queuedAt: claimed,
+  });
+  const [startingTask] = await db
+    .insert(swarmTasks)
+    .values({ swarmId: swarm.id, title: "Installing", status: "working" })
+    .returning();
+  await db.insert(agentRuns).values({
+    type: "swarm",
+    swarmId: swarm.id,
+    swarmTaskId: startingTask!.id,
+    role: "worker",
+    agentProfileId: PROFILE,
+    prompt: "",
+    status: "starting",
+    queuedAt: claimed,
+    startedAt: claimed,
+  });
+  const { task } = await workingLeaf(swarm.id, 1);
+  await db.update(agentRuns).set({
+    startedAt: claimed,
+    agentStartedAt: new Date(Date.now() - 60_000),
+  }).where(eq(agentRuns.swarmTaskId, task.id));
+
+  const result = await runWatchdog(ctx);
+  assert.deepEqual(result.warned, []);
+  assert.equal((await readTask(queuedTask!.id)).attention, null);
+  assert.equal((await readTask(startingTask!.id)).attention, null);
+  assert.equal((await readTask(task.id)).attention, null, "a minute of agent time is not the warning");
+});
+
+test("the clock comes off when the agent is no longer in the sandbox", async () => {
+  const swarm = await makeSwarm();
+  const { task, run } = await workingLeaf(swarm.id, WARN_MIN + 1);
+  await runWatchdog(ctx);
+  assert.equal((await readTask(task.id)).attention, "long_running");
+
+  await db.update(agentRuns).set({ status: "starting" }).where(eq(agentRuns.id, run.id));
+  const after = await runWatchdog(ctx);
+  assert.deepEqual(after.cleared, [task.id]);
+  assert.equal((await readTask(task.id)).attention, null);
+});
+
 test("the clock clears only what the clock wrote", async () => {
   const swarm = await makeSwarm();
   const [waiting] = await db

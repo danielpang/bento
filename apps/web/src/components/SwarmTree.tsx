@@ -255,9 +255,9 @@ function TreeNode({
 }) {
   const attention = isAttention(node.attention);
   const spend = formatUsd(cappedUsd(node.cost));
-  const words = diagramTaskWords(node.status, node.nodeType);
-  const note = diagramAttentionWords(node.status, node.nodeType, node.attention);
-  const tone = diagramTaskTone(node.status, node.nodeType);
+  const words = diagramTaskWords(node.status, node.nodeType, node.agentActive);
+  const note = diagramAttentionWords(node.status, node.nodeType, node.attention, node.agentActive);
+  const tone = diagramTaskTone(node.status, node.nodeType, node.agentActive);
   return (
     <div
       className="swarm-node"
@@ -319,7 +319,7 @@ function TreeNode({
         {attention && note && (
           <span className="swarm-node-flag">
             {note}
-            {node.attention === "long_running" ? ` ${formatElapsed(node.elapsedMs)}` : ""}
+            {node.attention === "long_running" ? ` ${formatElapsed(node.runningForMs ?? node.elapsedMs)}` : ""}
           </span>
         )}
       </button>

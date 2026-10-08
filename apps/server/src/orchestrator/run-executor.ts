@@ -582,9 +582,6 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     }
   }
 
-  await ctx.db.update(agentRuns).set({ status: "running" }).where(eq(agentRuns.id, runId));
-  emitBoard("running");
-
   /**
    * The repositories' own setup commands, before the agent starts.
    *
@@ -760,6 +757,22 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   if (!announcesLaunchOnFirstEvent(adapter)) reportAgentUp();
   let agentReported = false;
   let sessionRecorded = false;
+  /**
+   * Running means the agent process is about to be in the sandbox.
+   *
+   * Not the claim, and not the end of provisioning. Both of those
+   * leave the row at starting: a deploy in that window has no agent
+   * session to reattach to, and the swarm board must not say the
+   * task is working while setup is still installing. This is the
+   * last write before the exec, so a restart after it can attach
+   * to the process this call starts. agentStartedAt is the long-run
+   * clock. startedAt stays the claim, which is what billing measures.
+   */
+  await ctx.db.update(agentRuns).set({
+    status: "running",
+    agentStartedAt: new Date(),
+  }).where(eq(agentRuns.id, runId));
+  emitBoard("running");
   try {
     result = await runAgent({
       adapter,

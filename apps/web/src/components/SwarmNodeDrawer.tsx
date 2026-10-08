@@ -98,12 +98,12 @@ export function SwarmNodeDrawer({
   const [confirming, setConfirming] = useState(false);
   const [tab, setTab] = useState("overview");
   const mergeQueueFailure = task.nodeType === "leaf" && typeof task.flags.landingError === "string";
-  const attention = isAttention(task.attention);
-  const note = task.nodeType === "plan" && task.status === "failed" ? null
-    : diagramAttentionWords(task.status, task.nodeType, task.attention);
-  const longNote = mergeQueueFailure ? null : task.nodeType === "plan" && task.status === "failed"
+  const attention = isAttention(node.attention);
+  const note = task.nodeType === "plan" && task.status === "failed" && !node.agentActive ? null
+    : diagramAttentionWords(task.status, task.nodeType, node.attention, node.agentActive);
+  const longNote = mergeQueueFailure ? null : task.nodeType === "plan" && task.status === "failed" && !node.agentActive
     ? "A task below this plan failed. Open it to fix or retry it."
-    : attentionNote(task.attention);
+    : attentionNote(node.attention);
   const retries = Number((task.flags as { retries?: unknown }).retries ?? 0);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(task.description);
@@ -141,7 +141,7 @@ export function SwarmNodeDrawer({
   const nextStep = mergeQueueFailure ? MERGE_QUEUE_FAILURE
     : primaryAction === "fix" ? "Tell the worker what to change."
     : primaryAction === "retry" ? (task.status === "assigned" ? "Start a new worker attempt." : null)
-    : workerActive ? "The worker is running. Open Worker logs to follow its progress."
+    : workerActive ? (node.agentActive ? "The worker is running. Open Worker logs to follow its progress." : "Waiting for an agent to start.")
       : primaryAction === "add" ? "Add a task to this plan."
         : primaryAction === "edit" ? "Edit the task description."
           : hasMoreActions ? "Open More actions for other options." : "No action is available for this node.";
@@ -166,8 +166,8 @@ export function SwarmNodeDrawer({
         <div className="feature-topline">
           <span className="feature-kicker">{task.nodeType === "leaf" ? "Swarm task" : "Plan node"}</span>
           <span className="status swarm-node-header-status">
-            <span className="dot" data-state={diagramTaskTone(task.status, task.nodeType)} />
-            {diagramTaskWords(task.status, task.nodeType)}
+            <span className="dot" data-state={diagramTaskTone(task.status, task.nodeType, node.agentActive)} />
+            {diagramTaskWords(task.status, task.nodeType, node.agentActive)}
           </span>
           <button className="btn btn-ghost feature-close" onClick={onClose} aria-label="Close" title="Close (Esc)">
             <span aria-hidden="true">×</span>

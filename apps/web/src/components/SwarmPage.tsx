@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { CompletionRing } from "./CompletionRing.js";
 import { MergeQueue } from "./MergeQueue.js";
 import { OutOfCompute } from "./OutOfCompute.js";
@@ -114,23 +114,7 @@ export function SwarmPlanBrief({
       </p>
       {sources.length > 0 && (
         <ul className="swarm-plan-sources" aria-label="Plan sources">
-          {sources.map((source) => (
-            <li key={source.id} data-media={source.media}>
-              {source.media === "image" && (
-                <img className="swarm-plan-source-thumb" src={source.contentPath} alt="" loading="lazy" />
-              )}
-              <span className="swarm-plan-source-kind">{planSourceLabel(source)}</span>
-              {source.url
-                ? <a className="swarm-plan-source-name" href={source.url} target="_blank" rel="noreferrer noopener" title={source.url}>{source.name}</a>
-                : <span className="swarm-plan-source-name" title={source.name}>{source.name}</span>}
-              <span className="muted">{planSourceSize(source)}</span>
-              {source.media !== "text" && (
-                <a className="swarm-plan-source-open" href={source.contentPath} target="_blank" rel="noreferrer noopener">
-                  {source.media === "image" ? "Open" : "Download"}
-                </a>
-              )}
-            </li>
-          ))}
+          {planSourceRows(sources)}
         </ul>
       )}
     </div>
@@ -152,6 +136,74 @@ export function goalExcerpt(goal: string, max = 120): string {
   return `${(atWord > max / 2 ? cut.slice(0, atWord) : cut).trimEnd()}\u2026`;
 }
 
+/**
+ * A text file handed over as the plan.
+ *
+ * Several of these share one label. A PDF, an image, or a website
+ * stays its own row, because each of those is something to open.
+ */
+function isPlanFile(source: Pick<SwarmPlanSource, "kind" | "media">): boolean {
+  return source.kind === "file" && source.media === "text";
+}
+
+/**
+ * The sources, with every text file gathered under one label.
+ *
+ * The label is said once. Repeating it on each name is a column of
+ * the same word, and the names are the part a person came to read.
+ */
+function planSourceRows(sources: SwarmPlanSource[]): ReactNode[] {
+  const files = sources.filter(isPlanFile);
+  let filesListed = false;
+  const rows: ReactNode[] = [];
+  for (const source of sources) {
+    if (isPlanFile(source)) {
+      if (filesListed) continue;
+      filesListed = true;
+      rows.push(<PlanFiles key="files" files={files} />);
+      continue;
+    }
+    rows.push(<PlanSourceRow key={source.id} source={source} />);
+  }
+  return rows;
+}
+
+function PlanFiles({ files }: { files: SwarmPlanSource[] }) {
+  return (
+    <li className="swarm-plan-files">
+      <span className="swarm-plan-source-kind">{files.length === 1 ? "File" : "Files"}</span>
+      <ul className="swarm-plan-file-names">
+        {files.map((file) => (
+          <li key={file.id}>
+            <span className="swarm-plan-source-name" title={file.name}>{file.name}</span>
+          </li>
+        ))}
+      </ul>
+    </li>
+  );
+}
+
+function PlanSourceRow({ source }: { source: SwarmPlanSource }) {
+  const size = planSourceSize(source);
+  return (
+    <li data-media={source.media}>
+      {source.media === "image" && (
+        <img className="swarm-plan-source-thumb" src={source.contentPath} alt="" loading="lazy" />
+      )}
+      <span className="swarm-plan-source-kind">{planSourceLabel(source)}</span>
+      {source.url
+        ? <a className="swarm-plan-source-name" href={source.url} target="_blank" rel="noreferrer noopener" title={source.url}>{source.name}</a>
+        : <span className="swarm-plan-source-name" title={source.name}>{source.name}</span>}
+      {size && <span className="muted">{size}</span>}
+      {source.media !== "text" && (
+        <a className="swarm-plan-source-open" href={source.contentPath} target="_blank" rel="noreferrer noopener">
+          {source.media === "image" ? "Open" : "Download"}
+        </a>
+      )}
+    </li>
+  );
+}
+
 /** What a source is, as the list labels it. */
 export function planSourceLabel(source: Pick<SwarmPlanSource, "kind" | "media">): string {
   if (source.media === "pdf") return "PDF";
@@ -159,12 +211,18 @@ export function planSourceLabel(source: Pick<SwarmPlanSource, "kind" | "media">)
   return source.kind === "file" ? "File" : "Website";
 }
 
-/** How big a source is, in the unit a person reads it by. */
-export function planSourceSize(source: Pick<SwarmPlanSource, "media" | "size" | "hasText" | "byteSize">): string {
-  if (source.media === "text") return `${source.size.toLocaleString()} characters`;
+/**
+ * How big a source is, in the unit a person reads it by.
+ *
+ * A text file has no size worth printing: a character count does not
+ * say whether the plan is the right one. A PDF or an image is a
+ * download, so its size is in bytes.
+ */
+export function planSourceSize(source: Pick<SwarmPlanSource, "media" | "size" | "hasText" | "byteSize">): string | null {
+  if (source.media === "text") return null;
   const bytes = formatBytes(source.byteSize ?? 0);
   if (source.media === "image") return bytes;
-  return source.hasText ? `${bytes}, ${source.size.toLocaleString()} characters of text` : `${bytes}, no text (a scan)`;
+  return source.hasText ? bytes : `${bytes}, no text (a scan)`;
 }
 
 /**
@@ -350,6 +408,12 @@ export function SwarmPage({
           <div className="swarm-brief-head">
             <span className="label">Goal</span>
             {!briefOpen && <span className="swarm-brief-excerpt" title={swarm.goal}>{goalExcerpt(swarm.goal)}</span>}
+            {briefOpen && (
+              <div className="swarm-brief-metrics">
+                <div className="swarm-spend-summary"><span>Spend estimate</span><strong className="spend-figure">{formatUsd(cappedUsd(swarm.spend))}</strong><small>{swarm.budgetUsd === null ? "No budget cap" : `${formatUsd(swarm.budgetUsd)} budget`}</small></div>
+                <div className="swarm-worker-control"><span className="swarm-control-label">Workers</span><WorkerStepper workers={swarm.workers} active={swarm.workersActive} max={swarm.maxWorkers} disabledReason={busy ? "Wait for the current change to finish." : !canStop(swarm.status) ? "Worker count cannot change after the swarm ends." : null} onChange={actions.onWorkers} /></div>
+              </div>
+            )}
             <button
               type="button"
               className="swarm-brief-toggle"
@@ -367,6 +431,7 @@ export function SwarmPage({
             <div id="swarm-brief-body">
               <p>{swarm.goal}</p>
               <SwarmPlanBrief planMode={swarm.planMode} sources={detail.planSources ?? []} />
+              {(waitingForPlan || planNeedsApproval) && <p className="swarm-next-step" role="status">{nextStep}</p>}
             </div>
           )}
         </div>
@@ -381,13 +446,6 @@ export function SwarmPage({
         {!briefOpen && (waitingForPlan || planNeedsApproval) && (
           <p className="swarm-next-step swarm-next-step-folded" role="status">{nextStep}</p>
         )}
-        {briefOpen && <div className="swarm-brief-side">
-          {(waitingForPlan || planNeedsApproval) && <p className="swarm-next-step" role="status">{nextStep}</p>}
-          <div className="swarm-brief-metrics">
-            <div className="swarm-spend-summary"><span>Spend estimate</span><strong className="spend-figure">{formatUsd(cappedUsd(swarm.spend))}</strong><small>{swarm.budgetUsd === null ? "No budget cap" : `${formatUsd(swarm.budgetUsd)} budget`}</small></div>
-            <div className="swarm-worker-control"><span className="swarm-control-label">Workers</span><WorkerStepper workers={swarm.workers} active={swarm.workersActive} max={swarm.maxWorkers} disabledReason={busy ? "Wait for the current change to finish." : !canStop(swarm.status) ? "Worker count cannot change after the swarm ends." : null} onChange={actions.onWorkers} /></div>
-          </div>
-        </div>}
       </section>
 
       {swarm.question && (
