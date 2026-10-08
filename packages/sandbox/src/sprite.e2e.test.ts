@@ -767,8 +767,18 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
     assert.equal(result.exitCode, 0, result.stderr.trim());
     assert.match(result.stdout, new RegExp(`^\\s*${payload.length}\\s*it's here$`));
     assert.doesNotMatch(result.stderr, /did not accept the exec connection/);
-    // The launcher carried the environment, and does not outlive the run.
-    assert.equal(await client.sprite(handle.externalId).filesystem("/").exists(launcher), false, `${launcher} is still on the sprite`);
+    // The launcher carried the environment, and does not outlive the
+    // run. The SDK's exists() throws on a path that is not there rather
+    // than answering false, which is the answer this wants.
+    const left = await client
+      .sprite(handle.externalId)
+      .filesystem("/")
+      .exists(launcher)
+      .catch((err: unknown) => {
+        if (/no such file|not found/i.test(err instanceof Error ? err.message : String(err))) return false;
+        throw err;
+      });
+    assert.equal(left, false, `${launcher} is still on the sprite`);
   });
 
   /**
