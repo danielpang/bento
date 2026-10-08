@@ -18,6 +18,7 @@ import type { BoardEvent } from "../../events.js";
 import { captureJobErrors } from "../../analytics.js";
 import { enqueueRun, INTERACTIVE_POLL_SECONDS } from "../queue.js";
 import { queueSwarmSandboxReap } from "../reap-sandbox.js";
+import { swarmHasActiveRun } from "./reopen.js";
 import { ACTIVE_RUN_STATUSES, projectHasRepositories, SWARM_FULL, startRunIfIdle, type NewRun, type OutOfCompute } from "../start-run.js";
 import { plannerWakeMessage, type PlannerWakeItem } from "./planner-prompt.js";
 import { enqueueLanding } from "./landing.js";
@@ -362,8 +363,19 @@ export async function tickSwarm(
      * The publish above is asked for on the transition and this on the
      * status, which is deliberate: publishing twice would open a second
      * pull request, and reaping twice is no rows.
+     *
+     * Not while a run is still in flight. A failed tree wakes its
+     * planner in this same tick, and that run works in this machine.
+     * Every later tick would ask for the machine again, the job would
+     * refuse, and each refusal would be recorded as an error for as
+     * long as the agent kept working. The run's settlement is another
+     * tick, and that one queues the reap once nothing is left in
+     * flight. A job that loses the race and finds a run anyway asks
+     * again later rather than failing.
      */
-    if (swarmIsOver(result.status)) await queueSwarmSandboxReap(ctx, swarmId);
+    if (swarmIsOver(result.status) && !(await swarmHasActiveRun(ctx.db, swarmId))) {
+      await queueSwarmSandboxReap(ctx, swarmId);
+    }
   }
   return result;
 }

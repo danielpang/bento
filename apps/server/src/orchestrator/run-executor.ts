@@ -112,13 +112,7 @@ import { attachLiveConversation } from "./live-session.js";
 import { registerLinearJobs } from "./linear-sync.js";
 import { queueRunFinishedSlack } from "./slack-notify.js";
 import { registerSlackJobs } from "./slack-sync.js";
-import {
-  REAP_SANDBOX_QUEUE,
-  reapFinishedSandboxes,
-  reapSandbox,
-  reapSwarmSandbox,
-  reapSwarmTaskSandbox,
-} from "./reap-sandbox.js";
+import { REAP_SANDBOX_QUEUE, reapFinishedSandboxes, runSandboxReapJob } from "./reap-sandbox.js";
 import { latestConversationRun, resolveFollowUpRun } from "./stage-agent.js";
 import { asPipelineRun, isPipelineRun, type PipelineRun } from "./pipeline-run.js";
 import { describeRunSubject, type RunSubject } from "./run-subject.js";
@@ -3036,14 +3030,8 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
   await ctx.boss.work<{ featureId?: string; swarmId?: string; swarmTaskId?: string }>(REAP_SANDBOX_QUEUE, { batchSize: 1 }, captureJobErrors(ctx.analytics, REAP_SANDBOX_QUEUE, async (jobs) => {
     // One queue, three kinds of machine. Which id the job carries is
     // what says whose it is: a card's, a swarm's own, or the one a
-    // leaf's worker was given. The leaf is asked first because it is
-    // the narrowest, and a job naming none of them is one nothing can
-    // act on, so it is dropped rather than retried forever.
-    for (const job of jobs) {
-      if (job.data.swarmTaskId) await reapSwarmTaskSandbox(ctx, job.data.swarmTaskId);
-      else if (job.data.swarmId) await reapSwarmSandbox(ctx, job.data.swarmId);
-      else if (job.data.featureId) await reapSandbox(ctx, job.data.featureId);
-    }
+    // leaf's worker was given.
+    for (const job of jobs) await runSandboxReapJob(ctx, job.data);
   }));
   await ctx.boss.work<{ sandboxId: string }>(
     HIBERNATE_SANDBOX_QUEUE,
