@@ -47,13 +47,15 @@ import {
   LineChannel,
   repositoryPathIn,
   sandboxErrorKind,
+  sandboxNeverStartedCommand,
+  type ExecChunk,
   type PreparedRepository,
   type SandboxDriver,
   type SandboxHandle,
 } from "@bento/sandbox";
 import { captureJobErrors } from "../analytics.js";
 import type { AppContext } from "../context.js";
-import { unbilledReason } from "../unbilled-reasons.js";
+import { SANDBOX_GONE_AGENT_PREFIX, SANDBOX_REFUSED_AGENT_PREFIX, unbilledReason } from "../unbilled-reasons.js";
 import { githubConnectionFor, reviewForBranch } from "../github.js";
 import { createRepositorySeed, publishFeatureBranches } from "./publish.js";
 import { applyPendingPullRequestUpdates } from "./pull-request-updates.js";
@@ -763,14 +765,14 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       adapter,
       argv,
       exec: () =>
-        driver.exec(handle, argv, {
+        taggedSandboxExec(driver.exec(handle, argv, {
           cwd: workdir,
           env: execEnv,
           sessionKey: runId,
           timeoutMs: ctx.env.BENTO_RUN_TIMEOUT_MIN * 60 * 1000,
           signal: controller.signal,
           ...(liveChannel ? { stdin: liveChannel } : {}),
-        }),
+        })),
       // Straight to the bus, no row: the transcript gets the finished
       // message; open streams get the typing.
       onDelta: (delta) => ctx.bus.emitRunDelta(runId, delta),
@@ -825,6 +827,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       emitBoard("cancelled");
       return;
     }
+    reportExecFailure(ctx, runId, subject, err);
     await finishRun(ctx, runId, { ok: false, error: execFailureReason(ctx, err) }, null);
     emitBoard("failed");
     await subject.settle(ctx);
@@ -1109,6 +1112,46 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
       return;
     }
     /**
+     * A sandbox that never ran the agent is the sandbox's failure, not
+     * the agent's, and it reaches here looking like the agent's: the
+     * driver reports a refused exec connection in the stream's tail and
+     * ends with exit code -1, so the outcome is "no terminal event" plus
+     * that tail. Before this was told apart, a swarm planner whose exec
+     * upgrade Fly refused failed twice as a billed agent failure with
+     * nothing in error tracking, because only provisioning failures
+     * were captured. The driver's words go to the log and to error
+     * tracking; the run record gets one sentence the person can act on,
+     * which the unbilled-reason rules read.
+     */
+    const neverStarted = sandboxNeverStartedCommand(outcome.error ?? "");
+    if (neverStarted) {
+      console.error(`the sandbox did not start the agent for run ${runId}:`, outcome.error);
+      ctx.analytics?.captureException(new Error(outcome.error), subject.run.startedBy, subject.organizationId, {
+        run_id: runId,
+        ...runOwnerProperties(subject.sandboxOwner),
+        source: "sandbox_exec",
+        provider: handle.provider,
+        sandbox: neverStarted,
+      });
+      // The advice is the difference: a machine that refused the start
+      // is still there for the next try, a machine that is gone is not.
+      await finishRun(
+        ctx,
+        runId,
+        {
+          ...outcome,
+          error:
+            neverStarted === "gone"
+              ? `${SANDBOX_GONE_AGENT_PREFIX}, so ${profile.cli} never ran. Run again to provision a new sandbox.`
+              : `${SANDBOX_REFUSED_AGENT_PREFIX}, so ${profile.cli} never ran. Run again to try a new connection.`,
+        },
+        exitCode,
+      );
+      emitBoard("failed");
+      await subject.settle(ctx);
+      return;
+    }
+    /**
      * The run limit stops the CLI mid-turn, so it never reports a
      * result, and the error is "stopped before reporting a result" plus
      * whatever the stream said last. The drivers name the stop in that
@@ -1340,12 +1383,60 @@ function runLimitReason(ctx: AppContext): string {
  * The two common exec failures get sentences; anything else keeps the
  * raw error, which is at least honest about being unexpected.
  */
+/**
+ * A failure thrown by the sandbox driver's own stream, as opposed to
+ * one thrown by what consumes it.
+ *
+ * runAgent awaits the transcript writes between chunks, so a database
+ * failure twenty minutes into a run rejects through the same catch as
+ * a driver that could not reach Docker. The two are different
+ * incidents with different owners, and labelling both as the exec
+ * failing would send whoever reads error tracking after the sandbox
+ * during a database outage. The driver's rejections are tagged here,
+ * on the way in, so the catch can tell them apart.
+ */
+class SandboxExecError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = cause instanceof Error ? cause.name : "Error";
+  }
+}
+
+async function* taggedSandboxExec(chunks: AsyncIterable<ExecChunk>): AsyncIterable<ExecChunk> {
+  try {
+    for await (const chunk of chunks) yield chunk;
+  } catch (err) {
+    throw new SandboxExecError(err);
+  }
+}
+
+/**
+ * A rejection out of runAgent goes to error tracking before the run is
+ * closed, labelled by what threw: the driver (the agent never ran, or
+ * its stream broke) or the consumer (the agent ran, and recording it
+ * failed). Until this was here neither reached error tracking, because
+ * the run was closed as failed and nothing else looked. A run limit is
+ * the one exception: that stop was ours.
+ */
+function reportExecFailure(ctx: AppContext, runId: string, subject: RunSubject, err: unknown): void {
+  if (isExecTimeout(String(err))) return;
+  const source = err instanceof SandboxExecError ? "agent_exec" : "run_recording";
+  console.error(`${source === "agent_exec" ? "exec" : "recording the run"} failed for run ${runId}:`, err);
+  ctx.analytics?.captureException(err, subject.run.startedBy, subject.organizationId, {
+    run_id: runId,
+    ...runOwnerProperties(subject.sandboxOwner),
+    source,
+  });
+}
+
 function execFailureReason(ctx: AppContext, err: unknown): string {
   return isExecTimeout(String(err))
     ? runLimitReason(ctx)
     : /ENOENT.*docker\.sock|connect.*docker\.sock/i.test(String(err))
       ? "Docker is not reachable from the server. Check that Docker is running, then run again."
-      : `exec failed: ${String(err)}`;
+      : err instanceof SandboxExecError
+        ? `exec failed: ${String(err)}`
+        : `the server failed while recording the run: ${String(err)}`;
 }
 
 /**
@@ -2797,7 +2888,7 @@ async function resumeInterruptedRun(
     result = await runAgent({
       adapter,
       argv,
-      exec: () => stream,
+      exec: () => taggedSandboxExec(stream),
       initialEvents: durableEvents,
       onDelta: (delta) => ctx.bus.emitRunDelta(run.id, delta),
       onEvent: async (event, cursor) => {
@@ -2828,6 +2919,7 @@ async function resumeInterruptedRun(
       emitBoard("cancelled");
       return;
     }
+    reportExecFailure(ctx, run.id, subject, err);
     await finishRun(ctx, run.id, { ok: false, error: execFailureReason(ctx, err) }, null);
     emitBoard("failed");
     await subject.settle(ctx);

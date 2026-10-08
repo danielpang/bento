@@ -10,7 +10,7 @@ import { writeFileCommand } from "@bento/agents";
 import { AGENT_BINARIES, TOOLCHAIN_LEGACY_MARKER, TOOLCHAIN_STAMPS } from "./agent-toolchain.js";
 import { collectExec, type SandboxHandle } from "./driver.js";
 import { taskRequest } from "./keep-awake.js";
-import { SpriteDriver, spriteExistsWithRetry, spriteName } from "./sprite.js";
+import { SpriteDriver, spriteExistsWithRetry, spriteName, stagedCommandLine } from "./sprite.js";
 
 /**
  * The one test that provisions a real Fly Sprite and installs the real
@@ -743,6 +743,81 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
     // is not holding, whatever the exit code says.
     assert.doesNotMatch(result.stderr, /went to sleep/);
     assert.doesNotMatch(result.stderr, /closed before the command reported an exit/);
+  });
+
+  /**
+   * The exec upgrade URL carries argv and the environment, and Fly's
+   * edge refuses it past roughly 64KB. A command that size is staged
+   * in a launcher on the sprite, which only a real edge can prove: a
+   * stub accepts any URL. Sized well past the line, so the test fails
+   * the day the staging stops happening rather than the day the limit
+   * moves.
+   */
+  await t.test("a command that does not fit the exec URL still runs, with its environment", { skip: needsSprite() }, async () => {
+    const payload = "<section class=\"hub\">{ color: #fff; }</section>\n".repeat(2_000);
+    const sessionKey = "e2e-staged";
+    const launcher = `/tmp/bento-exec-${sessionKey}.sh`;
+    const result = await collectExec(
+      driver.exec(handle, ["sh", "-c", 'printf %s "$1" | wc -c; printf %s "$BENTO_E2E_STAGED"', "_", payload], {
+        env: { BENTO_E2E_STAGED: "it's here" },
+        sessionKey,
+        timeoutMs: 120_000,
+      }),
+    );
+    assert.equal(result.exitCode, 0, result.stderr.trim());
+    assert.match(result.stdout, new RegExp(`^\\s*${payload.length}\\s*it's here$`));
+    assert.doesNotMatch(result.stderr, /did not accept the exec connection/);
+    // The launcher carried the environment, and does not outlive the
+    // run. The SDK's exists() throws on a path that is not there rather
+    // than answering false, which is the answer this wants.
+    const left = await client
+      .sprite(handle.externalId)
+      .filesystem("/")
+      .exists(launcher)
+      .catch((err: unknown) => {
+        if (/no such file|not found/i.test(err instanceof Error ? err.message : String(err))) return false;
+        throw err;
+      });
+    assert.equal(left, false, `${launcher} is still on the sprite`);
+  });
+
+  /**
+   * How the sprite lists a staged command while it runs, because the
+   * listing is what every reattach, handshake retry and HTTP kill of
+   * one depends on, and only a real sprite can say what it reports.
+   *
+   * It reports the process that is running, not the argv it was given:
+   * the first run of this test staged `sh -c 'sleep 20; ...'` and the
+   * sprite listed the session as `sleep 20`. So the driver looks for
+   * the launcher's line and for the command's own first word (the rule
+   * an unstaged run already lives by), and this command is one process
+   * for its whole life, the way an agent CLI is between tool calls.
+   */
+  await t.test("a staged command's session is listed by a line the driver looks for", { skip: needsSprite() }, async () => {
+    const sessionKey = "e2e-staged-listing";
+    const pending = collectExec(
+      driver.exec(handle, ["sleep", "20"], {
+        // What pushes it over the line: the environment rides the same URL.
+        env: { BENTO_E2E_PAYLOAD: "<p>".repeat(20_000) },
+        sessionKey,
+        timeoutMs: 120_000,
+      }),
+    );
+    const sprite = client.sprite(handle.externalId);
+    const findable = (command: string) =>
+      [stagedCommandLine(sessionKey), "sleep"].some((line) => command === line || command.startsWith(`${line} `));
+    let listedAs: string[] = [];
+    for (let i = 0; i < 15 && !listedAs.some(findable); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      listedAs = (await sprite.listSessions()).map((session) => session.command);
+    }
+    console.log(`  the sprite lists the staged command as: ${listedAs.join(" | ")}`);
+    assert.ok(
+      listedAs.some(findable),
+      `no listed session matches the launcher's line or the command's first word; the sprite lists: ${listedAs.join(" | ")}`,
+    );
+    const result = await pending;
+    assert.equal(result.exitCode, 0, result.stderr.trim());
   });
 
   /**

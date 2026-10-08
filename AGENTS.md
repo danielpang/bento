@@ -213,6 +213,41 @@ runner route, with what the runner said about its sandbox. The whole
 path, from a run asking for a machine to an agent starting in one,
 is drawn in `docs/images/auto-sandbox-flow.png`.
 
+## A sprite command that does not fit the exec URL is staged, not retried
+
+The Sprites SDK puts every argv entry and every environment variable
+on the exec WebSocket upgrade URL, and Fly's edge refuses that URL
+past roughly 64KB with a 414 that undici reports as the same
+"non-101 status code" a 503 gets. A swarm planner whose prompt quoted
+50KB of plan text (67KB once form-encoded) was retried through the
+whole handshake ladder and failed twice, billed, with nothing in error
+tracking. `planExecLaunch` in `packages/sandbox/src/sprite.ts` now
+measures the URL the way the SDK builds it and, past
+`EXEC_URL_MAX_BYTES`, writes a launcher to the sprite that exports the
+environment and execs the command, so the URL carries only `sh
+<launcher>`. The sprite lists a session by the process that is
+running, not by the argv it was given (the real-sprite test saw a
+staged command listed as what the launcher had exec'd into), so a
+staged session is looked for by the launcher's line and by the
+command's first word, the rule an unstaged run already lives by. Do not trim
+prompts in the executor to stay under it: Modal and Docker take argv
+out of band, and the sprite driver is the one place that knows what
+fits. The launcher carries the organization's keys, so it removes
+itself as its first act: no process on this side is guaranteed to be
+around when the command ends. The executor tells a sandbox that never
+started the agent (`sandboxNeverStartedCommand`, which says whether
+the machine refused the start or was gone) apart from an agent that
+failed: it goes to error tracking as `sandbox_exec`, the run record
+opens with `SANDBOX_REFUSED_AGENT_PREFIX` or
+`SANDBOX_GONE_AGENT_PREFIX`, and the unbilled-reason rules match those
+openings. A refused upgrade whose session listing shows the command
+did start is a running process, and goes to the reattach ladder, never
+to "never started". A rejection out of `runAgent` is captured as
+`agent_exec` when the driver's stream threw and `run_recording` when
+the transcript write did, because the two are different incidents.
+The real-sprite e2e test runs a command past the line and checks that
+the sprite lists its session by a line the driver looks for.
+
 ## Starting a run goes through startRunIfIdle, never a bare insert
 
 One card, one agent. Every door that starts a run (the runs route,
