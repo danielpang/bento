@@ -1,5 +1,5 @@
 import { rememberedStageCount, skeletonStageCount, type StorageWindow } from "../board-shape.js";
-import { COLUMN_PITCH, NODE_HEIGHT, NODE_WIDTH, ROW_PITCH } from "../swarm/layout.js";
+import { COLUMN_PITCH, NODE_HEIGHT, NODE_WIDTH, ROW_PITCH, edgePath } from "../swarm/layout.js";
 import { BrandLockup } from "./BrandLockup.js";
 import { TabScroll } from "./TabScroll.js";
 
@@ -139,16 +139,6 @@ const SWARM_SKELETON_NODES = [
 const SWARM_SKELETON_WIDTH = 2 * COLUMN_PITCH + NODE_WIDTH;
 const SWARM_SKELETON_HEIGHT = ROW_PITCH + NODE_HEIGHT;
 
-/** The edge from the root's foot to a child's head, as the tree draws it. */
-function swarmSkeletonEdge(col: number): string {
-  const x1 = COLUMN_PITCH + NODE_WIDTH / 2;
-  const y1 = NODE_HEIGHT;
-  const x2 = col * COLUMN_PITCH + NODE_WIDTH / 2;
-  const y2 = ROW_PITCH;
-  const mid = (y1 + y2) / 2;
-  return `M ${x1} ${y1} C ${x1} ${mid}, ${x2} ${mid}, ${x2} ${y2}`;
-}
-
 /**
  * A swarm's page, before the list or the open swarm has arrived.
  *
@@ -205,7 +195,7 @@ export function SwarmPageSkeleton() {
               <path
                 key={n.col}
                 className="swarm-edge swarm-skeleton-edge"
-                d={swarmSkeletonEdge(n.col)}
+                d={edgePath({ x: COLUMN_PITCH, y: 0 }, { x: n.col * COLUMN_PITCH, y: ROW_PITCH })}
                 fill="none"
                 vectorEffect="non-scaling-stroke"
               />

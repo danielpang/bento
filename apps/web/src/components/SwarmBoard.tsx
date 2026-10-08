@@ -344,8 +344,28 @@ export function SwarmBoard({
       .finally(() => setBusy(false));
   }
 
-  // A swarm is a header and a tree, not lanes: its own skeleton.
-  if (swarms === null) return <SwarmPageSkeleton />;
+  // A swarm is a header and a tree, not lanes: its own skeleton. A list
+  // that failed to load says so and offers a retry, rather than leaving
+  // the skeleton shimmering over a fetch that is no longer in flight.
+  if (swarms === null) {
+    if (!error) return <SwarmPageSkeleton />;
+    return (
+      <div className="swarm-board">
+        <div className="setup-prompt" role="alert">
+          <span>{error}</span>
+          <button
+            className="btn"
+            onClick={() => {
+              setError("");
+              loadSwarms();
+            }}
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   const task = taskId ? detail?.tasks.find((row) => row.id === taskId) ?? null : null;
   const layoutNode = taskId ? model.byId.get(taskId) ?? null : null;

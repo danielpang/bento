@@ -3316,6 +3316,14 @@ a.pr-row:hover .pr-external {
   }
 }
 
+/* Without motion the band would stop wherever the shortened animation
+   left it, a stripe frozen across the bones near the right edge. */
+@media (prefers-reduced-motion: reduce) {
+  .skeleton::after {
+    display: none;
+  }
+}
+
 @keyframes skeleton-in {
   from {
     opacity: 0;
@@ -3410,7 +3418,11 @@ a.pr-row:hover .pr-external {
   align-items: flex-start;
   justify-content: center;
   padding: 56px 24px 24px;
+  /* The real stage pans by drag; this one has nothing to pan, so a
+     swipe that starts on it scrolls the page as anywhere else would. */
   cursor: default;
+  touch-action: auto;
+  user-select: auto;
 }
 
 .swarm-skeleton-tree {

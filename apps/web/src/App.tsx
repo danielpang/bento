@@ -1216,7 +1216,8 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
    * `swarming` is true from the moment the mode is remembered, but the
    * swarm board renders under `swarming && projectId` and the two
    * early returns below (no project list yet, no projects at all) draw
-   * the card board's skeleton without the board toggle. Keyed on
+   * a skeleton (the swarm page's while `swarming`, else the card
+   * board's) without the board toggle. Keyed on
    * `swarming` alone, somebody whose remembered mode is swarms and
    * whose project list fails to load got a topbar with no Board, no
    * Sessions and no toggle: nothing but the URL bar to get out with.
