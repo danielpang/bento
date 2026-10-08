@@ -413,6 +413,41 @@ test("the planner is not woken while one is already running", async () => {
   assert.equal((await read(task.id)).status, "done");
 });
 
+/**
+ * Ending the swarm and destroying its machine are different moments.
+ *
+ * A failed leaf wakes the planner in the same tick that marks the
+ * swarm failed, and that run works in the swarm's own machine. Asking
+ * for the machine then is what made every poll of the reap queue an
+ * error for as long as the planner kept working. The settlement tick,
+ * once that run has finished, is what asks.
+ */
+test("a swarm that ended with an agent still running does not reap its sandbox until that run finishes", async () => {
+  const swarm = await makeSwarm({ status: "running" });
+  await makeTask(swarm.id, { title: "broken", status: "failed", report: "it broke" });
+
+  const ended = await tickSwarm(ctx, swarm.id, starter());
+  assert.equal(ended?.status, "failed", "the failed leaf ends the swarm");
+  assert.ok(ended?.plannerRunId, "and wakes the planner that has to decide what to do");
+  assert.equal(
+    queued.some((job) => job.queue === "sandbox.reap"),
+    false,
+    "the planner is in this machine, so the reap waits",
+  );
+
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.id, ended!.plannerRunId!));
+  queued.length = 0;
+  const idle = await tickSwarm(ctx, swarm.id, starter());
+  assert.equal(idle?.plannerRunId, null, "the wake was already delivered");
+  assert.equal(
+    queued.some(
+      (job) => job.queue === "sandbox.reap" && (job.data as { swarmId?: string }).swarmId === swarm.id,
+    ),
+    true,
+    "once nothing is running, the machine is asked for",
+  );
+});
+
 test("everything waiting for the planner arrives as one wake, not one each", async () => {
   const swarm = await makeSwarm({ status: "planning" });
   await makeTask(swarm.id, { title: "first", status: "done", report: "one done" });

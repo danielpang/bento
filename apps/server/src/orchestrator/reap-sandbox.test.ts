@@ -31,7 +31,14 @@ import { ensureLocalUser, type AppContext } from "../context.js";
 import { loadEnv } from "../env.js";
 import { SecretBox } from "../secrets.js";
 import { EventBus } from "../events.js";
-import { reapFinishedSandboxes, reapSandbox, reapSwarmSandbox } from "./reap-sandbox.js";
+import {
+  SANDBOX_REAP_DEFER_MS,
+  SandboxReapDeferred,
+  reapFinishedSandboxes,
+  reapSandbox,
+  reapSwarmSandbox,
+  runSandboxReapJob,
+} from "./reap-sandbox.js";
 import { swarmWorkspaceKey } from "./swarm/sandbox.js";
 
 const run = promisify(execFile);
@@ -435,9 +442,71 @@ test("the boot sweep reclaims the machine of a swarm that is over, and leaves a 
 
 test("a swarm's machine is not taken out from under an agent still working in it", async () => {
   const swarm = await seedSwarm({ title: "Swarm with an agent", status: "cancelled", run: "running" });
-  await assert.rejects(() => reapSwarmSandbox(ctx, swarm.swarmId), /still working/);
+  await assert.rejects(
+    () => reapSwarmSandbox(ctx, swarm.swarmId),
+    (err: unknown) => {
+      assert.ok(err instanceof SandboxReapDeferred);
+      assert.match(err.message, /still working/);
+      assert.equal(err.reap.swarmId, swarm.swarmId);
+      return true;
+    },
+  );
   const [row] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, swarm.sandboxId));
   assert.equal(row?.status, "ready", "the row still points at a machine that is there");
+});
+
+/**
+ * The refusal used to fail the reap job, and every retry was an error.
+ *
+ * A swarm that has ended can still have an agent in its machine: the
+ * tick that marks it failed is the tick that wakes the planner. The
+ * job has to come back or the machine is leaked, and it has to come
+ * back without being a failure or error tracking records the wait.
+ */
+test("a reap job asked while an agent is still working comes back later instead of failing", async () => {
+  const swarm = await seedSwarm({ title: "Swarm job waits", status: "failed", run: "running" });
+  const sent: { data: unknown; options?: { startAfter?: Date } }[] = [];
+  const previous = ctx.boss;
+  ctx.boss = {
+    send: async (_queue: string, data: unknown, options?: { startAfter?: Date }) => {
+      sent.push({ data, ...(options ? { options } : {}) });
+      return "job";
+    },
+  } as AppContext["boss"];
+  try {
+    await runSandboxReapJob(ctx, { swarmId: swarm.swarmId });
+  } finally {
+    ctx.boss = previous;
+  }
+  assert.equal(destroyed.includes(swarm.externalId), false, "the machine is not destroyed");
+  assert.equal(sent.length, 1, "the same reap is asked for again");
+  assert.deepEqual(sent[0]?.data, { swarmId: swarm.swarmId });
+  const when = sent[0]?.options?.startAfter;
+  assert.ok(when instanceof Date, "it waits, rather than running again immediately");
+  const delay = when.getTime() - Date.now();
+  assert.ok(delay > SANDBOX_REAP_DEFER_MS - 5_000 && delay < SANDBOX_REAP_DEFER_MS + 5_000);
+  const [row] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, swarm.sandboxId));
+  assert.equal(row?.status, "ready");
+});
+
+test("a reap job still fails when the machine survives being destroyed", async () => {
+  const swarm = await seedSwarm({ title: "Swarm machine stuck", status: "done" });
+  const previous = ctx.drivers;
+  ctx.drivers = singleDriver({
+    provider: "docker",
+    workspace: "host",
+    async destroy() {},
+    async exists() {
+      return true;
+    },
+  } as unknown as SandboxDriver);
+  try {
+    await assert.rejects(() => runSandboxReapJob(ctx, { swarmId: swarm.swarmId }), /still there/);
+  } finally {
+    ctx.drivers = previous;
+  }
+  const [row] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, swarm.sandboxId));
+  assert.equal(row?.status, "ready", "a machine that survived is not recorded as gone");
 });
 
 /**
