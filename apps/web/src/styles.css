@@ -9571,9 +9571,8 @@ a.hours-person-name:hover {
 }
 
 .swarm-brief {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(250px, 330px);
-  gap: 20px;
+  display: flex;
+  flex-direction: column;
   margin: 0 36px;
   padding: 12px 20px;
   border: 1px solid var(--line);
@@ -9595,35 +9594,40 @@ a.hours-person-name:hover {
   overflow-wrap: anywhere;
 }
 
-.swarm-brief-side {
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  gap: 8px;
-  border-left: 1px solid var(--line);
-  padding-left: 20px;
-}
-
 .swarm-next-step {
-  margin: 0;
+  margin: 10px 0 0;
   color: var(--text-dim);
   font-size: 12px;
   line-height: 1.45;
 }
 
+/*
+ * Spend and the worker ceiling share the goal's line, beside Hide.
+ * The line is as tall as the stepper. The plan below uses the full
+ * width of the brief, so the figures do not hold a column open.
+ */
 .swarm-brief-metrics {
   display: flex;
-  align-items: end;
+  align-items: center;
   flex-wrap: wrap;
-  gap: 18px 24px;
+  gap: 6px 22px;
+  margin-left: auto;
+}
+
+.swarm-brief-metrics + .swarm-brief-toggle {
+  margin-left: 16px;
 }
 
 .swarm-spend-summary,
 .swarm-worker-control {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 5px;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.swarm-brief-metrics .btn {
+  padding: 4px 8px;
 }
 
 .swarm-spend-summary > span,
@@ -10068,14 +10072,18 @@ a.hours-person-name:hover {
 @media (max-width: 820px) {
   .swarm-head { grid-template-columns: 1fr; padding: 24px 18px 18px; }
   .swarm-head-actions { padding-top: 0; justify-content: flex-start; }
-  .swarm-brief { grid-template-columns: 1fr; margin: 0 18px; padding: 12px 16px; }
-  .swarm-brief-side { padding: 12px 0 0; border-left: 0; border-top: 1px solid var(--line); }
+  .swarm-brief { margin: 0 18px; padding: 12px 16px; }
   .swarm-artifacts { margin: 14px 18px 0; }
   .swarm-viewbar { margin: 22px 18px 0; }
   .swarm-stage, .swarm-outline { margin: 0 18px 20px; }
   .swarm-queue { margin-left: 18px; margin-right: 18px; }
   .swarm-stage { padding: 0; }
   .swarm-outline { padding-inline: 12px; }
+}
+
+@media (max-width: 640px) {
+  .swarm-brief-head .swarm-brief-toggle { order: 1; margin-left: auto; }
+  .swarm-brief-metrics { order: 2; margin-left: 0; flex-basis: 100%; }
 }
 
 
@@ -10295,15 +10303,14 @@ a.swarm-plan-source-name:hover {
  * opens it again; the metrics and the plan come back with the goal.
  */
 .swarm-brief[data-open="false"] {
-  grid-template-columns: minmax(0, 1fr);
-  gap: 0;
   padding: 8px 20px;
 }
 
 .swarm-brief-head {
   display: flex;
   align-items: center;
-  gap: 10px;
+  flex-wrap: wrap;
+  gap: 8px 10px;
   min-width: 0;
 }
 

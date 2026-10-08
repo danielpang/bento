@@ -408,6 +408,12 @@ export function SwarmPage({
           <div className="swarm-brief-head">
             <span className="label">Goal</span>
             {!briefOpen && <span className="swarm-brief-excerpt" title={swarm.goal}>{goalExcerpt(swarm.goal)}</span>}
+            {briefOpen && (
+              <div className="swarm-brief-metrics">
+                <div className="swarm-spend-summary"><span>Spend estimate</span><strong className="spend-figure">{formatUsd(cappedUsd(swarm.spend))}</strong><small>{swarm.budgetUsd === null ? "No budget cap" : `${formatUsd(swarm.budgetUsd)} budget`}</small></div>
+                <div className="swarm-worker-control"><span className="swarm-control-label">Workers</span><WorkerStepper workers={swarm.workers} active={swarm.workersActive} max={swarm.maxWorkers} disabledReason={busy ? "Wait for the current change to finish." : !canStop(swarm.status) ? "Worker count cannot change after the swarm ends." : null} onChange={actions.onWorkers} /></div>
+              </div>
+            )}
             <button
               type="button"
               className="swarm-brief-toggle"
@@ -425,6 +431,7 @@ export function SwarmPage({
             <div id="swarm-brief-body">
               <p>{swarm.goal}</p>
               <SwarmPlanBrief planMode={swarm.planMode} sources={detail.planSources ?? []} />
+              {(waitingForPlan || planNeedsApproval) && <p className="swarm-next-step" role="status">{nextStep}</p>}
             </div>
           )}
         </div>
@@ -439,13 +446,6 @@ export function SwarmPage({
         {!briefOpen && (waitingForPlan || planNeedsApproval) && (
           <p className="swarm-next-step swarm-next-step-folded" role="status">{nextStep}</p>
         )}
-        {briefOpen && <div className="swarm-brief-side">
-          {(waitingForPlan || planNeedsApproval) && <p className="swarm-next-step" role="status">{nextStep}</p>}
-          <div className="swarm-brief-metrics">
-            <div className="swarm-spend-summary"><span>Spend estimate</span><strong className="spend-figure">{formatUsd(cappedUsd(swarm.spend))}</strong><small>{swarm.budgetUsd === null ? "No budget cap" : `${formatUsd(swarm.budgetUsd)} budget`}</small></div>
-            <div className="swarm-worker-control"><span className="swarm-control-label">Workers</span><WorkerStepper workers={swarm.workers} active={swarm.workersActive} max={swarm.maxWorkers} disabledReason={busy ? "Wait for the current change to finish." : !canStop(swarm.status) ? "Worker count cannot change after the swarm ends." : null} onChange={actions.onWorkers} /></div>
-          </div>
-        </div>}
       </section>
 
       {swarm.question && (
