@@ -246,7 +246,12 @@ to "never started". A rejection out of `runAgent` is captured as
 `agent_exec` when the driver's stream threw and `run_recording` when
 the transcript write did, because the two are different incidents.
 The real-sprite e2e test runs a command past the line and checks that
-the sprite lists its session by a line the driver looks for.
+the sprite lists its session by a line the driver looks for. A
+provisioning script's socket can close without an exit frame too
+(production saw it a minute into a clone, recorded as "exit code -1",
+billed to the project): that is `ProvisionConnectionDropped`, the
+provider's failure in every phase, retried on the same ladder, with
+the script asked to outlive its socket so the retry joins it.
 
 ## Starting a run goes through startRunIfIdle, never a bare insert
 

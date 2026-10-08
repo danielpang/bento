@@ -2266,6 +2266,183 @@ test("Sprite provisioning reports a refused exec upgrade without the exec URL", 
 });
 
 /**
+ * The socket under a provisioning script can close without an exit
+ * frame, which arrives as a null code. Production saw it a minute into
+ * a repository clone and recorded "provisioning script failed with
+ * exit code -1": the project's fault, billed, no retry. The script had
+ * not failed; the connection had. It walks the handshake ladder, and
+ * the first spawn asks the server to keep the script alive across the
+ * drop so the retry can join it.
+ */
+test("Sprite provisioning retries a script whose connection dropped", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  const toolchainSpawns: { options?: Record<string, unknown> }[] = [];
+  const sprite = {
+    spawn(_file: string, args: string[], options?: Record<string, unknown>) {
+      const child = fakeChild();
+      const body = args[1] ?? "";
+      queueMicrotask(() => {
+        if (body.includes("\nSTAMPS=")) {
+          toolchainSpawns.push(options ? { options } : {});
+          if (toolchainSpawns.length === 1) {
+            child.stdout.write("installing...\n");
+            child.emit("exit", null); // the socket closed, no exit frame
+            return;
+          }
+        }
+        if (body.includes("tools-absent")) child.stdout.write("tools-present\n");
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    async listSessions() {
+      return [];
+    },
+    filesystem() {
+      return { async readdir() { return []; } };
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const pending = driver.provision({ projectId: "project", workspaceKey: "feature", hostWorkspacePath: "/unused" });
+  await settle();
+  t.mock.timers.tick(EXEC_HANDSHAKE_RETRY_DELAYS_MS[0]!);
+  await settle();
+  const handle = await pending;
+  assert.equal(handle.externalId, "bento-feature");
+  assert.equal(toolchainSpawns.length, 2);
+  assert.equal(toolchainSpawns[0]?.options?.maxRunAfterDisconnect, "5m");
+});
+
+test("Sprite provisioning joins a script still running after its connection dropped", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  const spawns: { args: string[]; sessionId?: string }[] = [];
+  const sprite = {
+    spawn(_file: string, args: string[] = [], options?: { sessionId?: string }) {
+      spawns.push({ args, ...(options?.sessionId ? { sessionId: options.sessionId } : {}) });
+      const child = fakeChild();
+      const body = args[1] ?? "";
+      queueMicrotask(() => {
+        if (options?.sessionId) {
+          child.stdout.write("tools-present\nbento-toolchain-missing: \n");
+          child.stdout.end();
+          child.stderr.end();
+          child.emit("exit", 0);
+          return;
+        }
+        if (body.includes("\nSTAMPS=")) {
+          child.emit("exit", null);
+          return;
+        }
+        if (body.includes("tools-absent")) child.stdout.write("tools-present\n");
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    async listSessions() {
+      const toolchain = spawns.find((spawn) => (spawn.args[1] ?? "").includes("\nSTAMPS="));
+      if (!toolchain) return [];
+      return [
+        {
+          id: "install-1",
+          command: `sh -c ${toolchain.args[1]}`,
+          workdir: "/",
+          created: new Date(),
+          bytesPerSecond: 0,
+          isActive: true,
+          tty: false,
+        },
+      ];
+    },
+    filesystem() {
+      return { async readdir() { return []; } };
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const pending = driver.provision({ projectId: "project", workspaceKey: "feature", hostWorkspacePath: "/unused" });
+  await settle();
+  t.mock.timers.tick(EXEC_HANDSHAKE_RETRY_DELAYS_MS[0]!);
+  await settle();
+  await pending;
+  const toolchainStarts = spawns.filter((spawn) => (spawn.args[1] ?? "").includes("\nSTAMPS="));
+  assert.equal(toolchainStarts.length, 1, "the installer is started once");
+  assert.equal(spawns.filter((spawn) => spawn.sessionId === "install-1").length, 1, "and joined once");
+});
+
+/**
+ * A connection that stays down is the provider's failure, in the
+ * checkout phase too: nothing git could have done keeps a socket open.
+ * The error names what happened and carries the output so far.
+ */
+test("Sprite provisioning blames a connection that stayed down on the provider", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  let clones = 0;
+  const sprite = {
+    spawn(_file: string, args: string[]) {
+      const child = fakeChild();
+      const body = args[1] ?? "";
+      queueMicrotask(() => {
+        if (body.includes("git clone")) {
+          clones += 1;
+          child.stderr.write("Cloning into '/workspace/app'...\n");
+          child.emit("exit", -1);
+          return;
+        }
+        if (body.includes("tools-absent")) child.stdout.write("tools-present\n");
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    async listSessions() {
+      return [];
+    },
+    filesystem() {
+      return { async readdir() { return []; } };
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const pending = driver
+    .provision({
+      projectId: "project",
+      workspaceKey: "feature",
+      hostWorkspacePath: "/unused",
+      repositories: [{ name: "app", cloneUrl: "https://x-access-token:secret@github.com/acme/app.git", branch: "main" }],
+    })
+    .then(
+      () => "resolved",
+      (err: Error) => err,
+    );
+  for (const delay of EXEC_HANDSHAKE_RETRY_DELAYS_MS) {
+    await settle();
+    t.mock.timers.tick(delay);
+  }
+  await settle();
+  const result = await pending;
+  assert.ok(result instanceof ProvisionFailure, String(result));
+  assert.equal(result.phase, "checkout");
+  assert.equal(result.blame, "provider");
+  assert.match(
+    result.message,
+    new RegExp(`the connection to the sandbox dropped while the provisioning script ran, and stayed down through ${1 + EXEC_HANDSHAKE_RETRY_DELAYS_MS.length} attempts`),
+  );
+  assert.doesNotMatch(result.message, /exit code -1/);
+  assert.match(result.stderr ?? "", /Cloning into/);
+  assert.equal(sandboxErrorKind(result.cause), "control_plane");
+  assert.equal(clones, 1 + EXEC_HANDSHAKE_RETRY_DELAYS_MS.length);
+});
+
+/**
  * The server can start the script and still fail the client's upgrade.
  * The retry has to collect that process, not start a second installer.
  */

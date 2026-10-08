@@ -195,6 +195,7 @@ export function sandboxErrorKind(err: unknown): SandboxErrorKind {
   if (err instanceof Error && /\(status 429\)/.test(err.message)) {
     return /concurrent_sprite_limit_exceeded/.test(err.message) ? "capacity" : "rate_limited";
   }
+  if (isProvisionConnectionDrop(err)) return "control_plane";
   return spriteControlIsRetriable(err) ? "control_plane" : "other";
 }
 
@@ -312,7 +313,7 @@ export function spriteBlame(phase: ProvisionPhase, err: unknown): ProvisionBlame
   if (phase !== "checkout") return "provider";
   if (err instanceof APIError || err instanceof FilesystemError) return "provider";
   if (!(err instanceof Error)) return "project";
-  if (execHandshakeIsRetriable(err)) return "provider";
+  if (execHandshakeIsRetriable(err) || isProvisionConnectionDrop(err)) return "provider";
   if (
     /Network error|fetch failed|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up|aborted due to timeout|exec connection failed|did not finish within|temporarily unavailable/i.test(
       err.message,
@@ -1717,6 +1718,42 @@ const REATTACH_DELAYS_MS = [1_000, 5_000, 15_000, 30_000, 60_000];
 const ATTACH_TIMEOUT_MS = 30_000;
 
 /**
+ * How long a provisioning script keeps running after its socket
+ * closes, so the retry in runScript can join it. Longer than the whole
+ * handshake ladder with room to spare, shorter than the script's own
+ * limit, so a script nobody comes back for still ends.
+ */
+const PROVISION_DISCONNECT_GRACE = "5m";
+
+/**
+ * A provisioning script's socket closed without an exit frame.
+ *
+ * Seen in production as "provisioning script failed with exit code -1"
+ * a minute into a repository clone, blamed on the project, billed, and
+ * not retried, when the script had done nothing wrong: the connection
+ * to it had. The output so far rides along for the run record, the
+ * way a real failure's does.
+ */
+export class ProvisionConnectionDropped extends Error {
+  readonly stdout: string;
+  readonly stderr: string;
+  constructor(stdout: string, stderr: string, attempts?: number) {
+    super(
+      attempts === undefined
+        ? "the connection to the sandbox dropped while the provisioning script ran"
+        : `the connection to the sandbox dropped while the provisioning script ran, and stayed down through ${attempts} attempts`,
+    );
+    this.name = "ProvisionConnectionDropped";
+    this.stdout = stdout;
+    this.stderr = stderr;
+  }
+}
+
+export function isProvisionConnectionDrop(err: unknown): boolean {
+  return err instanceof ProvisionConnectionDropped;
+}
+
+/**
  * Pauses after an exec WebSocket upgrade failed before the command was
  * running.
  *
@@ -2148,7 +2185,13 @@ function collectProvisionSpawn(
   args: string[],
   options?: { sessionId: string },
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const child = sprite.spawn(command, args, options);
+  /**
+   * A fresh script is asked to outlive its socket, the way an agent's
+   * command is: the retry in runScript joins a script still running
+   * rather than starting a clone or an install over from nothing. An
+   * attach names a session and inherits whatever it was started with.
+   */
+  const child = sprite.spawn(command, args, options ?? { maxRunAfterDisconnect: PROVISION_DISCONNECT_GRACE });
   const stopKeepaliveGuard = defuseKeepalive(child);
   feedStdin(child);
   return new Promise((resolve, reject) => {
@@ -2190,17 +2233,25 @@ function collectProvisionSpawn(
     });
     child.on("exit", (code: number | null) => {
       settle(() => {
-        const exitCode = code ?? -1;
-        if (exitCode !== 0) {
+        /**
+         * A real exit arrives as an unsigned byte. A missing or
+         * negative code is the socket closing without one: the script
+         * did not fail, the connection to it did. Said as such, because
+         * "exit code -1" read as the project's clone failing, was billed
+         * as one, and was never retried.
+         */
+        if (code === null || code < 0) {
+          reject(new ProvisionConnectionDropped(stdout, stderr));
+          return;
+        }
+        if (code !== 0) {
           // stdout and stderr ride on the error, the shape
           // run-executor's describeSandboxError reads to put installer
           // output in the run record.
-          reject(
-            Object.assign(new Error(`provisioning script failed with exit code ${exitCode}`), { stdout, stderr }),
-          );
+          reject(Object.assign(new Error(`provisioning script failed with exit code ${code}`), { stdout, stderr }));
           return;
         }
-        resolve({ stdout, stderr, exitCode });
+        resolve({ stdout, stderr, exitCode: code });
       });
     });
   });
@@ -2223,9 +2274,12 @@ function runScript(
       try {
         /**
          * After a refused upgrade, the server may still have started
-         * the script (the 101 was what got lost). Joining that session
-         * is the retry. Starting another `sh -c` of the same installer
-         * would race the one already writing the toolchain.
+         * the script (the 101 was what got lost); after a dropped
+         * socket it is still running, for the grace the spawn asked
+         * for. Joining that session is the retry. Starting another
+         * `sh -c` of the same installer would race the one already
+         * writing the toolchain. A script that is gone is run again:
+         * every provisioning script is written to be run twice.
          */
         if (attempt > 0) {
           const existing = await findProvisionSession(sprite, script);
@@ -2233,7 +2287,8 @@ function runScript(
         }
         return await collectProvisionSpawn(sprite, "sh", ["-c", script]);
       } catch (err) {
-        const delay = execHandshakeIsRetriable(err) ? EXEC_HANDSHAKE_RETRY_DELAYS_MS[attempt] : undefined;
+        const retriable = execHandshakeIsRetriable(err) || isProvisionConnectionDrop(err);
+        const delay = retriable ? EXEC_HANDSHAKE_RETRY_DELAYS_MS[attempt] : undefined;
         if (delay === undefined) throw presentExecFailure(err, attempt + 1);
         await sleep(delay, true);
       }
@@ -2252,6 +2307,7 @@ function runScript(
  */
 function presentExecFailure(err: unknown, attempts: number): Error {
   if (!(err instanceof Error)) return new Error(scrubExecUrl(String(err)));
+  if (err instanceof ProvisionConnectionDropped) return new ProvisionConnectionDropped(err.stdout, err.stderr, attempts);
   if (!execHandshakeIsRetriable(err)) {
     if (scrubExecUrl(err.message) === err.message) return err;
     const withOutput = err as Error & { stdout?: string; stderr?: string };
