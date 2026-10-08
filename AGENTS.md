@@ -154,9 +154,16 @@ the provider's own failure moves on to the next driver: the sprite
 driver tags every failure with its phase and its blame
 (`ProvisionFailure`), and a checkout that git refused is the
 project's, which Modal would refuse the same way, so it ends the run
-and keeps the sprite for the retry. An existing sandbox row keeps its driver with no fallback, so a
-hibernated Modal machine resumes on Modal and a swarm never splits
-across providers. A team with the network lock on is a Modal team: a
+and keeps the sprite for the retry. An existing sandbox row keeps its
+driver with no fallback, so a hibernated Modal machine resumes on
+Modal. A swarm worker with no machine of its own follows the swarm's
+provider first and, on "auto", carries the providers after it, so a
+worker whose sprite Fly cannot make is made on Modal under a sprite
+swarm rather than failed; the landing reads each machine's own row
+and moves self contained bundles through the server, so the two
+providers land onto each other. The swarm's own machine never falls
+back, because it holds the swarm's branch and that branch exists
+nowhere else. A team with the network lock on is a Modal team: a
 sprite cannot restrict egress, so `provisionWorkspace` never asks it
 for a locked run and goes straight to Modal, and the Team route
 offers the lock whenever Modal is there to take those runs. The lock
