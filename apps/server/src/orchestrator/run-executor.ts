@@ -64,7 +64,12 @@ import { branchForRun, cardBranch } from "./branch-rotation.js";
 import { recoverAncestryPublishFailures } from "./rebase-run.js";
 import { runRepositorySetup } from "./repo-setup.js";
 import { captureRunArtifacts } from "./capture-artifacts.js";
-import { SandboxProvisionError, provisionFailureCause, provisionWorkspace } from "./sandbox-provision.js";
+import {
+  SandboxProvisionError,
+  provisionFailureCause,
+  provisionFailureContext,
+  provisionWorkspace,
+} from "./sandbox-provision.js";
 import { reportSandboxReady, runOwnerProperties, type SandboxOrigin } from "./sandbox-metrics.js";
 export { sandboxProvisionConflict } from "./sandbox-provision.js";
 import { allCandidates, driversForRun, driverForSandbox, SandboxDriverUnavailable, type ProvisionDrivers } from "./sandbox-driver.js";
@@ -488,6 +493,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       source: "sandbox_provision",
       error_kind: sandboxErrorKind(reported),
       ...(err instanceof SandboxProvisionError ? { blame: err.blame, attempts } : {}),
+      ...provisionFailureContext(err),
     });
     const shown =
       err instanceof SandboxProvisionError && err.blame === "provider" ? err.message : describeSandboxError(reported);

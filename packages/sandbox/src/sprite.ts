@@ -295,6 +295,20 @@ export interface SpriteDriverOptions {
 }
 
 /**
+ * The Sprites exec socket closed before an exit frame.
+ *
+ * WSCommand starts `exitCode` at -1 and `handleClose` emits that
+ * sentinel when the socket ends without a StreamID.Exit byte. A real
+ * process exit is an unsigned byte, so a negative or missing code is
+ * never the script. The agent exec path already treats it as a dropped
+ * connection. Provisioning used to call it "exit code -1", and a
+ * checkout then blamed the project, which skipped the other provider.
+ */
+function provisionConnectionClosed(err: unknown): boolean {
+  return typeof err === "object" && err !== null && (err as { connectionClosed?: unknown }).connectionClosed === true;
+}
+
+/**
  * Whose fault a sprite provision failure is, by the phase it died in.
  *
  * Getting the machine, installing the CLIs and sweeping old checkouts
@@ -312,9 +326,9 @@ export function spriteBlame(phase: ProvisionPhase, err: unknown): ProvisionBlame
   if (phase !== "checkout") return "provider";
   if (err instanceof APIError || err instanceof FilesystemError) return "provider";
   if (!(err instanceof Error)) return "project";
-  if (execHandshakeIsRetriable(err)) return "provider";
+  if (execHandshakeIsRetriable(err) || provisionConnectionClosed(err)) return "provider";
   if (
-    /Network error|fetch failed|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up|aborted due to timeout|exec connection failed|did not finish within|temporarily unavailable/i.test(
+    /Network error|fetch failed|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up|aborted due to timeout|exec connection failed|did not finish within|temporarily unavailable|closed before the provisioning script reported an exit/i.test(
       err.message,
     )
   ) {
@@ -1726,7 +1740,7 @@ const ATTACH_TIMEOUT_MS = 30_000;
  * say whether the proxy returned 503, 404, or dropped the TCP
  * connection, because a WebSocket client does not expose the HTTP
  * status. Those are the same control-plane answers getSprite and
- * deleteSprite already retry. A command that actually ran and exited
+ * deleteSprite already retry. A command that reported a real exit
  * is not in this ladder.
  *
  * The upgrade URL carries the whole command and environment, and
@@ -1734,6 +1748,11 @@ const ATTACH_TIMEOUT_MS = 30_000;
  * long never reaches this ladder: planExecLaunch stages it in a
  * launcher file instead, so a refused upgrade here is the control
  * plane's and retrying it is the answer.
+ *
+ * The same waits cover a socket that opened and then closed without
+ * an exit frame. That is not a script failure either: the SDK reports
+ * it as exit code -1, and the process may still be running for the
+ * disconnect grace. runScript spends these waits on both.
  */
 export const EXEC_HANDSHAKE_RETRY_DELAYS_MS = [2_000, 8_000, 20_000];
 
@@ -2116,21 +2135,38 @@ function sleep(ms: number, keepAlive = false): Promise<void> {
  * A provisioning script the server already started, matched by a prefix
  * of the script body so a different `sh` on the machine is left alone.
  *
- * listSessions failing is not an answer. The upgrade failed because the
- * control plane was unreachable, and the listing often fails for the
- * same reason. The caller retries the spawn in that case.
+ * `sinceMs` drops a session from an earlier run of the same script: a
+ * reused sprite can still be listing it, and attaching there would
+ * collect the wrong process. Fifteen seconds of slack, the same window
+ * the agent exec path allows for clock skew.
+ *
+ * `"unknown"` means the listing itself failed. That is not "no such
+ * session". A refused upgrade retries the spawn anyway, because the
+ * command may never have started. A socket that dropped after the
+ * command started must not: another `sh -c` would race the one still
+ * writing.
  */
-async function findProvisionSession(sprite: Sprite, script: string): Promise<{ id: string } | null> {
+async function findProvisionSession(
+  sprite: Sprite,
+  script: string,
+  sinceMs: number,
+): Promise<{ id: string } | null | "unknown"> {
   try {
     const sessions = await sprite.listSessions();
     const needle = script.slice(0, 80);
     return (
       sessions
-        .filter((session) => !session.tty && session.command.startsWith("sh ") && session.command.includes(needle))
+        .filter(
+          (session) =>
+            !session.tty &&
+            session.command.startsWith("sh ") &&
+            session.command.includes(needle) &&
+            session.created.getTime() >= sinceMs - 15_000,
+        )
         .sort((a, b) => b.created.getTime() - a.created.getTime())[0] ?? null
     );
   } catch {
-    return null;
+    return "unknown";
   }
 }
 
@@ -2148,7 +2184,17 @@ function collectProvisionSpawn(
   args: string[],
   options?: { sessionId: string },
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const child = sprite.spawn(command, args, options);
+  /**
+   * A fresh exec dies with its socket unless the server is asked to
+   * keep the process. The grace is what a later attempt attaches to.
+   * An attach joins a process that already has its own grace from the
+   * spawn that started it, so it does not set another.
+   */
+  const child = sprite.spawn(
+    command,
+    args,
+    options?.sessionId ? options : { maxRunAfterDisconnect: EXEC_DISCONNECT_GRACE },
+  );
   const stopKeepaliveGuard = defuseKeepalive(child);
   feedStdin(child);
   return new Promise((resolve, reject) => {
@@ -2190,17 +2236,29 @@ function collectProvisionSpawn(
     });
     child.on("exit", (code: number | null) => {
       settle(() => {
-        const exitCode = code ?? -1;
-        if (exitCode !== 0) {
-          // stdout and stderr ride on the error, the shape
-          // run-executor's describeSandboxError reads to put installer
-          // output in the run record.
+        /**
+         * A real process exit arrives as an unsigned byte. The SDK
+         * leaves its exit code at -1 until that byte arrives, and
+         * handleClose emits the sentinel when the socket closes
+         * first. The close code and reason stay inside the SDK, so
+         * the only signal on this side is the missing exit. stdout
+         * and stderr still ride on the error: describeSandboxError
+         * reads them into the run record.
+         */
+        if (code === null || code < 0) {
           reject(
-            Object.assign(new Error(`provisioning script failed with exit code ${exitCode}`), { stdout, stderr }),
+            Object.assign(
+              new Error("the connection to the sandbox closed before the provisioning script reported an exit"),
+              { stdout, stderr, connectionClosed: true },
+            ),
           );
           return;
         }
-        resolve({ stdout, stderr, exitCode });
+        if (code !== 0) {
+          reject(Object.assign(new Error(`provisioning script failed with exit code ${code}`), { stdout, stderr }));
+          return;
+        }
+        resolve({ stdout, stderr, exitCode: code });
       });
     });
   });
@@ -2219,22 +2277,63 @@ function runScript(
    */
   const awake = holdSpriteAwake(sprite, "provision");
   const run = (async () => {
+    const startedAt = Date.now();
+    /**
+     * Set once a socket closed after the script was running. The next
+     * try attaches when the session is still listed. When the listing
+     * itself fails, it waits rather than starting a second copy.
+     */
+    let reattachOnly = false;
+    let carriedClose: Error | null = null;
+    let stdout = "";
+    let stderr = "";
+    const absorb = (err: unknown) => {
+      if (typeof err !== "object" || err === null) return;
+      const out = (err as { stdout?: unknown }).stdout;
+      const errText = (err as { stderr?: unknown }).stderr;
+      if (typeof out === "string" && out.trim() !== "") stdout = out;
+      if (typeof errText === "string" && errText.trim() !== "") stderr = errText;
+    };
     for (let attempt = 0; ; attempt++) {
       try {
         /**
          * After a refused upgrade, the server may still have started
-         * the script (the 101 was what got lost). Joining that session
-         * is the retry. Starting another `sh -c` of the same installer
-         * would race the one already writing the toolchain.
+         * the script (the 101 was what got lost). The same is true
+         * after a socket that closed without an exit frame: the
+         * disconnect grace keeps the process, and joining it is the
+         * retry. Starting another `sh -c` of the same installer would
+         * race the one already writing the toolchain.
          */
         if (attempt > 0) {
-          const existing = await findProvisionSession(sprite, script);
-          if (existing) return await collectProvisionSpawn(sprite, "sh", [], { sessionId: existing.id });
+          const existing = await findProvisionSession(sprite, script, startedAt);
+          if (existing && existing !== "unknown") {
+            reattachOnly = false;
+            return await collectProvisionSpawn(sprite, "sh", [], { sessionId: existing.id });
+          }
+          if (reattachOnly && existing === "unknown") {
+            throw (
+              carriedClose ??
+              Object.assign(
+                new Error("the connection to the sandbox closed before the provisioning script reported an exit"),
+                { connectionClosed: true },
+              )
+            );
+          }
         }
+        reattachOnly = false;
         return await collectProvisionSpawn(sprite, "sh", ["-c", script]);
       } catch (err) {
-        const delay = execHandshakeIsRetriable(err) ? EXEC_HANDSHAKE_RETRY_DELAYS_MS[attempt] : undefined;
-        if (delay === undefined) throw presentExecFailure(err, attempt + 1);
+        absorb(err);
+        const closed = provisionConnectionClosed(err);
+        const delay = (execHandshakeIsRetriable(err) || closed)
+          ? EXEC_HANDSHAKE_RETRY_DELAYS_MS[attempt]
+          : undefined;
+        if (delay === undefined) {
+          if (err instanceof Error && (stdout !== "" || stderr !== "")) Object.assign(err, { stdout, stderr });
+          throw presentExecFailure(err, attempt + 1);
+        }
+        if (closed && err instanceof Error) carriedClose = err;
+        reattachOnly = closed;
         await sleep(delay, true);
       }
     }
@@ -2252,9 +2351,17 @@ function runScript(
  */
 function presentExecFailure(err: unknown, attempts: number): Error {
   if (!(err instanceof Error)) return new Error(scrubExecUrl(String(err)));
+  const withOutput = err as Error & { stdout?: string; stderr?: string };
+  if (provisionConnectionClosed(err)) {
+    return Object.assign(
+      new Error(
+        `the connection to the sandbox closed before the provisioning script reported an exit after ${attempts} attempts`,
+      ),
+      { stdout: withOutput.stdout, stderr: withOutput.stderr, connectionClosed: true },
+    );
+  }
   if (!execHandshakeIsRetriable(err)) {
     if (scrubExecUrl(err.message) === err.message) return err;
-    const withOutput = err as Error & { stdout?: string; stderr?: string };
     return Object.assign(new Error(scrubExecUrl(err.message)), {
       stdout: withOutput.stdout,
       stderr: withOutput.stderr,
