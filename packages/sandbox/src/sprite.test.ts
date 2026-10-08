@@ -3868,7 +3868,9 @@ test("a command that fits the exec URL rides it unchanged", () => {
   });
   assert.equal(staged.spawn.command, "sh");
   assert.deepEqual(staged.spawn.args, ["/tmp/bento-exec-run-4-ok.sh"]);
-  assert.deepEqual(staged.commandLines, ["sh /tmp/bento-exec-run-4-ok.sh"]);
+  // Found again by the launcher's line, or by the command it exec'd
+  // into, which is what a real sprite lists once the command is up.
+  assert.deepEqual(staged.commandLines, ["sh /tmp/bento-exec-run-4-ok.sh", "codex"]);
 });
 
 test("a launcher exports every value intact and refuses a name no shell can", () => {

@@ -1762,9 +1762,11 @@ export const EXEC_URL_MAX_BYTES = 32 * 1024;
  * launcher's path, and the launcher (written to the sprite before the
  * spawn, removed when the stream ends) exports the environment and
  * execs the real command, so the process the session holds is still
- * the agent. `commandLines` are what listSessions reports for either
- * shape, which is how a reattach, a handshake retry and the HTTP kill
- * find this session and not another.
+ * the agent. `commandLines` are what listSessions may report for
+ * either shape (the sprite names a session by its running process,
+ * so a staged one reads as the command once the launcher has exec'd
+ * into it), which is how a reattach, a handshake retry and the HTTP
+ * kill find this session and not another.
  */
 interface ExecLaunch {
   /** argv's first word, for logs and the keep-awake task's label. */
@@ -1796,7 +1798,15 @@ export function planExecLaunch(argv: string[], opts: ExecOptions | undefined): E
   return {
     label: command,
     spawn: { command: "sh", args: [path], env: undefined },
-    commandLines: [launcherCommandLine(path)],
+    /**
+     * Both lines, because the sprite lists a session by the process
+     * that is running, not by the argv it was given: the real-sprite
+     * test saw a staged command listed as what the launcher had
+     * exec'd into. The launcher's line covers the moment before the
+     * exec; the command's line is the rule an unstaged run already
+     * lives by.
+     */
+    commandLines: [launcherCommandLine(path), command],
     launcher: { path, script: launcherScript(command, args, env) },
   };
 }

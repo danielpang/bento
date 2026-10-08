@@ -757,36 +757,57 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
     const payload = "<section class=\"hub\">{ color: #fff; }</section>\n".repeat(2_000);
     const sessionKey = "e2e-staged";
     const launcher = `/tmp/bento-exec-${sessionKey}.sh`;
-    const sprite = client.sprite(handle.externalId);
-    /**
-     * The command waits long enough to be listed while it runs, because
-     * the listing is what every reattach, handshake retry and HTTP kill
-     * of a staged command depends on: the session must report the
-     * launcher's command line, the one the driver looks for, and only a
-     * real sprite can say what it reports.
-     */
-    const pending = collectExec(
-      driver.exec(
-        handle,
-        ["sh", "-c", 'sleep 20; printf %s "$1" | wc -c; printf %s "$BENTO_E2E_STAGED"', "_", payload],
-        { env: { BENTO_E2E_STAGED: "it's here" }, sessionKey, timeoutMs: 120_000 },
-      ),
+    const result = await collectExec(
+      driver.exec(handle, ["sh", "-c", 'printf %s "$1" | wc -c; printf %s "$BENTO_E2E_STAGED"', "_", payload], {
+        env: { BENTO_E2E_STAGED: "it's here" },
+        sessionKey,
+        timeoutMs: 120_000,
+      }),
     );
-    let listedAs: string[] = [];
-    for (let i = 0; i < 15 && !listedAs.includes(stagedCommandLine(sessionKey)); i++) {
-      await new Promise((resolve) => setTimeout(resolve, 1_000));
-      listedAs = (await sprite.listSessions()).map((session) => session.command);
-    }
-    assert.ok(
-      listedAs.includes(stagedCommandLine(sessionKey)),
-      `the staged command's session is not listed by its launcher's command line; the sprite lists: ${listedAs.join(" | ")}`,
-    );
-    const result = await pending;
     assert.equal(result.exitCode, 0, result.stderr.trim());
     assert.match(result.stdout, new RegExp(`^\\s*${payload.length}\\s*it's here$`));
     assert.doesNotMatch(result.stderr, /did not accept the exec connection/);
     // The launcher carried the environment, and does not outlive the run.
-    assert.equal(await sprite.filesystem("/").exists(launcher), false, `${launcher} is still on the sprite`);
+    assert.equal(await client.sprite(handle.externalId).filesystem("/").exists(launcher), false, `${launcher} is still on the sprite`);
+  });
+
+  /**
+   * How the sprite lists a staged command while it runs, because the
+   * listing is what every reattach, handshake retry and HTTP kill of
+   * one depends on, and only a real sprite can say what it reports.
+   *
+   * It reports the process that is running, not the argv it was given:
+   * the first run of this test staged `sh -c 'sleep 20; ...'` and the
+   * sprite listed the session as `sleep 20`. So the driver looks for
+   * the launcher's line and for the command's own first word (the rule
+   * an unstaged run already lives by), and this command is one process
+   * for its whole life, the way an agent CLI is between tool calls.
+   */
+  await t.test("a staged command's session is listed by a line the driver looks for", { skip: needsSprite() }, async () => {
+    const sessionKey = "e2e-staged-listing";
+    const pending = collectExec(
+      driver.exec(handle, ["sleep", "20"], {
+        // What pushes it over the line: the environment rides the same URL.
+        env: { BENTO_E2E_PAYLOAD: "<p>".repeat(20_000) },
+        sessionKey,
+        timeoutMs: 120_000,
+      }),
+    );
+    const sprite = client.sprite(handle.externalId);
+    const findable = (command: string) =>
+      [stagedCommandLine(sessionKey), "sleep"].some((line) => command === line || command.startsWith(`${line} `));
+    let listedAs: string[] = [];
+    for (let i = 0; i < 15 && !listedAs.some(findable); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      listedAs = (await sprite.listSessions()).map((session) => session.command);
+    }
+    console.log(`  the sprite lists the staged command as: ${listedAs.join(" | ")}`);
+    assert.ok(
+      listedAs.some(findable),
+      `no listed session matches the launcher's line or the command's first word; the sprite lists: ${listedAs.join(" | ")}`,
+    );
+    const result = await pending;
+    assert.equal(result.exitCode, 0, result.stderr.trim());
   });
 
   /**

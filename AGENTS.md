@@ -225,7 +225,11 @@ tracking. `planExecLaunch` in `packages/sandbox/src/sprite.ts` now
 measures the URL the way the SDK builds it and, past
 `EXEC_URL_MAX_BYTES`, writes a launcher to the sprite that exports the
 environment and execs the command, so the URL carries only `sh
-<launcher>` and the session is found again by that line. Do not trim
+<launcher>`. The sprite lists a session by the process that is
+running, not by the argv it was given (the real-sprite test saw a
+staged command listed as what the launcher had exec'd into), so a
+staged session is looked for by the launcher's line and by the
+command's first word, the rule an unstaged run already lives by. Do not trim
 prompts in the executor to stay under it: Modal and Docker take argv
 out of band, and the sprite driver is the one place that knows what
 fits. The launcher carries the organization's keys, so it removes
@@ -242,7 +246,7 @@ to "never started". A rejection out of `runAgent` is captured as
 `agent_exec` when the driver's stream threw and `run_recording` when
 the transcript write did, because the two are different incidents.
 The real-sprite e2e test runs a command past the line and checks that
-the sprite lists its session by the launcher's command line.
+the sprite lists its session by a line the driver looks for.
 
 ## Starting a run goes through startRunIfIdle, never a bare insert
 
