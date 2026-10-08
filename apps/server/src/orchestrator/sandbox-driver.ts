@@ -232,18 +232,24 @@ export async function driversForSwarmProvision(
       .limit(1);
     if (row) return existingDrivers(ctx.drivers, row);
   }
-  const [swarmRow] = await db
-    .select({ projectId: swarms.projectId })
-    .from(swarms)
-    .where(eq(swarms.id, swarm.id))
-    .limit(1);
-  if (!swarmRow) return byDefault;
-  const [project] = await db
-    .select({ sandboxProvider: projects.sandboxProvider, ownerId: projects.ownerId })
-    .from(projects)
-    .where(eq(projects.id, swarmRow.projectId))
-    .limit(1);
-  const byProject = project ? await driversForProject(ctx, project, actingUserId) : byDefault;
+  // What the project would choose, read only when the answer depends
+  // on it: a worker following the swarm's machine, or a swarm with no
+  // machine yet. A live row for the swarm's own machine is the whole
+  // answer and pays for no project lookup.
+  const byProject = async (): Promise<ProvisionDrivers> => {
+    const [swarmRow] = await db
+      .select({ projectId: swarms.projectId })
+      .from(swarms)
+      .where(eq(swarms.id, swarm.id))
+      .limit(1);
+    if (!swarmRow) return byDefault;
+    const [project] = await db
+      .select({ sandboxProvider: projects.sandboxProvider, ownerId: projects.ownerId })
+      .from(projects)
+      .where(eq(projects.id, swarmRow.projectId))
+      .limit(1);
+    return project ? driversForProject(ctx, project, actingUserId) : byDefault;
+  };
 
   if (swarm.sandboxId) {
     const [row] = await db
@@ -251,7 +257,7 @@ export async function driversForSwarmProvision(
       .from(sandboxes)
       .where(and(eq(sandboxes.id, swarm.sandboxId), ne(sandboxes.status, "destroyed")))
       .limit(1);
-    if (row) return task ? workerDrivers(ctx, row, byProject) : existingDrivers(ctx.drivers, row);
+    if (row) return task ? workerDrivers(ctx, row, await byProject()) : existingDrivers(ctx.drivers, row);
   }
   const [planner] = await db
     .select({ provider: sandboxes.provider })
@@ -261,9 +267,9 @@ export async function driversForSwarmProvision(
     )
     .orderBy(desc(sandboxes.createdAt))
     .limit(1);
-  if (planner) return task ? workerDrivers(ctx, planner, byProject) : existingDrivers(ctx.drivers, planner);
+  if (planner) return task ? workerDrivers(ctx, planner, await byProject()) : existingDrivers(ctx.drivers, planner);
 
-  return byProject;
+  return byProject();
 }
 
 /**

@@ -870,7 +870,11 @@ async function settleWorkedLeaves(
       task,
       status: "failed",
       attention: "failed",
-      flags: { workerStopped: reason },
+      // The restart count ends with the series it counted. A planner
+      // that queues this leaf again starts a new one, with the policy
+      // whole; left in place, every later machine that could not be
+      // made would skip straight here, saying "four in a row" of one.
+      flags: { workerStopped: reason, [SANDBOX_RESTARTS_FLAG]: undefined },
       set: { endedAt: task.endedAt ?? now },
       runId: task.assignedRunId,
       detail: { reason },
@@ -1244,15 +1248,22 @@ async function warnLowBudget(tx: Tx, swarm: typeof swarms.$inferSelect, now: Dat
  * planner run that failed the same way, so a trailing run of them
  * longer than MAX_SANDBOX_RESTARTS means the provider has been down
  * for every try and the swarm waits, as it did before this existed,
- * for a person or the next wake. The same states as a wake, for the
- * same reason: a paused or cancelled swarm asked for no planner.
+ * for a person or the next wake. Only while the swarm is being
+ * worked: a wake may reach an ended swarm, a restart carries no news
+ * and must not.
  */
 async function restartPlannerAfterSandboxFailure(
   tx: Tx,
   swarm: typeof swarms.$inferSelect,
   deps: SwarmTickDeps,
 ): Promise<string | null> {
-  if (swarm.status === "paused" || swarm.status === "cancelled" || swarm.status === "draft") return null;
+  /*
+   * Only a swarm that is being worked. A wake may still reach an
+   * ended swarm, because a leaf can report after its ceiling; a
+   * restart carries no news and must not put a planner on a swarm
+   * that is done, timed out or out of budget.
+   */
+  if (swarm.status !== "planning" && swarm.status !== "running" && swarm.status !== "blocked") return null;
 
   const recent = await tx
     .select({

@@ -1040,6 +1040,21 @@ test("a leaf whose machine could not be made is handed to the planner once its r
   assert.match(stopped, /Sandbox failed to provision/);
   assert.ok(result?.plannerRunId, "and it is told");
   assert.match(deps.calls.find((call) => call.role === "planner")!.prompt!, /still no machine/);
+  assert.equal(
+    (row.flags as { sandboxRestarts?: number }).sandboxRestarts,
+    undefined,
+    "the count ends with the series, so a leaf the planner queues again gets the policy whole",
+  );
+});
+
+test("a planner is not started again on a swarm that has ended", async () => {
+  for (const status of ["done", "timed_out", "budget_exhausted", "failed"] as const) {
+    const swarm = await makeSwarm({ status });
+    await plannerRun(swarm.id, "failed", { error: NO_MACHINE });
+    const deps = starter();
+    await tickSwarm(ctx, swarm.id, deps);
+    assert.equal(deps.calls.filter((call) => call.role === "planner").length, 0, `${status}: a restart carries no news`);
+  }
 });
 
 test("a worker that stopped after its agent started is not restarted", async () => {

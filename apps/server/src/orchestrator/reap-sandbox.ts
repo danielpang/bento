@@ -22,11 +22,25 @@ export const REAP_SANDBOX_QUEUE = "sandbox.reap";
  */
 export const SANDBOX_REAP_DEFER_MS = 30_000;
 
+/**
+ * How many times one reap job waits before it fails instead.
+ *
+ * Two hours of thirty second waits. A run that is still active after
+ * that is not an agent finishing a long turn, it is a run row stuck
+ * in an active status, and a job that waited for it forever would be
+ * a job a minute with nothing in error tracking. The failure is
+ * recorded once, the way any other reap failure is, and the boot
+ * sweep finds the machine again.
+ */
+export const MAX_SANDBOX_REAP_DEFERRALS = 240;
+
 /** Which machine a reap job is about. A job names exactly one of these. */
 export interface SandboxReapTarget {
   featureId?: string;
   swarmId?: string;
   swarmTaskId?: string;
+  /** How many times this job has already waited for an agent to finish. */
+  deferrals?: number;
 }
 
 /**
@@ -49,12 +63,18 @@ export class SandboxReapDeferred extends Error {
   }
 }
 
-/** Puts the same reap back on the queue once an agent may have finished. */
-export async function rescheduleSandboxReap(ctx: AppContext, deferred: SandboxReapDeferred): Promise<void> {
-  console.log(`${deferred.message}; asking again later`);
-  await ctx.boss.send(REAP_SANDBOX_QUEUE, deferred.reap, {
-    startAfter: new Date(Date.now() + SANDBOX_REAP_DEFER_MS),
-  });
+/** Puts the same reap back on the queue once an agent may have finished, counting the wait. */
+export async function rescheduleSandboxReap(
+  ctx: AppContext,
+  deferred: SandboxReapDeferred,
+  deferrals: number,
+): Promise<void> {
+  console.log(`${deferred.message}; asking again later (${deferrals} of ${MAX_SANDBOX_REAP_DEFERRALS})`);
+  await ctx.boss.send(
+    REAP_SANDBOX_QUEUE,
+    { ...deferred.reap, deferrals },
+    { startAfter: new Date(Date.now() + SANDBOX_REAP_DEFER_MS) },
+  );
 }
 
 /**
@@ -376,21 +396,45 @@ async function removeSwarmTaskWorkspace(ctx: AppContext, swarmTaskId: string): P
  * A run that is still working is not a failed job. The queue's error
  * wrapper reports every throw, and a throw is also what the queue
  * gives up on after a few retries, which is sooner than an agent
- * finishes. Asking again later keeps the machine and stays quiet.
- * Anything else still fails the job, so a machine the driver could
- * not destroy is retried and recorded.
+ * finishes. Asking again later keeps the machine and stays quiet,
+ * up to MAX_SANDBOX_REAP_DEFERRALS; past that the wait is the
+ * failure it has become. Anything else still fails the job, so a
+ * machine the driver could not destroy is retried and recorded.
  */
 export async function runSandboxReapJob(ctx: AppContext, data: SandboxReapTarget): Promise<void> {
   try {
-    // The leaf is asked first because it is the narrowest. A job
-    // naming none of them is one nothing can act on, so it is dropped
-    // rather than retried forever.
-    if (data.swarmTaskId) await reapSwarmTaskSandbox(ctx, data.swarmTaskId);
-    else if (data.swarmId) await reapSwarmSandbox(ctx, data.swarmId);
-    else if (data.featureId) await reapSandbox(ctx, data.featureId);
+    await reapTarget(ctx, data);
   } catch (err) {
     if (!(err instanceof SandboxReapDeferred)) throw err;
-    await rescheduleSandboxReap(ctx, err);
+    const deferrals = (data.deferrals ?? 0) + 1;
+    if (deferrals > MAX_SANDBOX_REAP_DEFERRALS) throw err;
+    await rescheduleSandboxReap(ctx, err, deferrals);
+  }
+}
+
+/** One reap, whichever machine the target names. */
+async function reapTarget(ctx: AppContext, data: SandboxReapTarget): Promise<void> {
+  // The leaf is asked first because it is the narrowest. A target
+  // naming none of them is one nothing can act on, so it is dropped
+  // rather than retried forever.
+  if (data.swarmTaskId) await reapSwarmTaskSandbox(ctx, data.swarmTaskId);
+  else if (data.swarmId) await reapSwarmSandbox(ctx, data.swarmId);
+  else if (data.featureId) await reapSandbox(ctx, data.featureId);
+}
+
+/**
+ * The sweep's reap: a machine an agent is still in is left for the
+ * next sweep, or for its owner's own settlement, which asks for it
+ * once nothing is running. Not rescheduled, because every boot would
+ * start another chain of waits for the same machine beside the one
+ * the queue may already hold.
+ */
+async function sweepReap(ctx: AppContext, data: SandboxReapTarget): Promise<void> {
+  try {
+    await reapTarget(ctx, data);
+  } catch (err) {
+    if (!(err instanceof SandboxReapDeferred)) throw err;
+    console.log(`${err.message}; the next sweep will ask again`);
   }
 }
 
@@ -418,11 +462,11 @@ export async function reapFinishedSandboxes(ctx: AppContext): Promise<void> {
   for (const featureId of new Set(stale.map((row) => row.featureId))) {
     if (!featureId) continue;
     try {
-      await runSandboxReapJob(ctx, { featureId });
+      await sweepReap(ctx, { featureId });
     } catch (err) {
       // One machine that will not go must not stop the rest going.
-      // A run still working is not this case: the job above asked
-      // again later, and recording that wait is how a live agent
+      // A run still working is not this case: the sweep leaves it for
+      // the next pass, and recording that wait is how a live agent
       // became an error.
       console.warn(`could not reap the sandbox for feature ${featureId}:`, err);
       ctx.analytics?.captureException(err, null, null, { feature_id: featureId, source: "sandbox_reap" });
@@ -450,7 +494,7 @@ export async function reapFinishedSandboxes(ctx: AppContext): Promise<void> {
   for (const swarmId of new Set(staleSwarms.map((row) => row.swarmId))) {
     if (!swarmId) continue;
     try {
-      await runSandboxReapJob(ctx, { swarmId });
+      await sweepReap(ctx, { swarmId });
     } catch (err) {
       console.warn(`could not reap the sandbox for swarm ${swarmId}:`, err);
       ctx.analytics?.captureException(err, null, null, { swarm_id: swarmId, source: "sandbox_reap" });
@@ -479,7 +523,7 @@ export async function reapFinishedSandboxes(ctx: AppContext): Promise<void> {
         continue;
       }
       if (feature.status !== "done" && feature.status !== "cancelled") continue;
-      await runSandboxReapJob(ctx, { featureId });
+      await sweepReap(ctx, { featureId });
     } catch (err) {
       console.warn(`could not reap the workspace for feature ${featureId}:`, err);
       ctx.analytics?.captureException(err, null, null, { feature_id: featureId, source: "sandbox_reap" });

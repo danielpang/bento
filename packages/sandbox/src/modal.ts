@@ -15,6 +15,7 @@ import {
 } from "./driver.js";
 import { BENTO_EXEC_PYTHON, FrameDecoder, execDirectory, execStamp } from "./modal-exec.js";
 import { spriteSize } from "./sprite.js";
+import { shellQuote, shellQuotePart } from "./shell.js";
 import { fetchStartBundleCommand } from "./start-bundle.js";
 
 /**
@@ -1012,15 +1013,6 @@ export function persistedSandboxProvider(provider: SandboxHandle["provider"]): "
 
 function isAlreadyExists(err: unknown): boolean {
   return err instanceof Error && (err.name === "AlreadyExistsError" || /AlreadyExistsError/.test(err.message));
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
-function shellQuotePart(value: string): string {
-  if (!/^[a-zA-Z0-9._/-]+$/.test(value)) throw new Error("unsafe git reference");
-  return value;
 }
 
 async function runShell(

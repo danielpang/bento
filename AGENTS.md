@@ -308,9 +308,11 @@ failure.
 
 A reap asked for while an agent is still in the machine is not an
 error. `reapSwarmSandbox` and its siblings throw
-`SandboxReapDeferred`, the queue worker and the boot sweep put the
-same job back thirty seconds later, and the tick that ends a swarm
-asks for its machine only once no run is active: a failed leaf wakes
+`SandboxReapDeferred`, the queue worker puts the same job back thirty
+seconds later (up to `MAX_SANDBOX_REAP_DEFERRALS`, past which the wait
+is the failure it has become; the boot sweep leaves such a machine for
+the next sweep rather than starting a chain of its own), and the tick
+that ends a swarm asks for its machine only once no run is active: a failed leaf wakes
 the planner in the tick that marks the swarm failed, and that run
 works in the swarm's own machine, so asking on every tick made every
 poll of the reap queue an exception for as long as the planner kept

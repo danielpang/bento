@@ -24,6 +24,7 @@ import {
   type ProvisionPhase,
 } from "./driver.js";
 import { holdSpriteAwake } from "./keep-awake.js";
+import { shellQuote, shellQuotePart } from "./shell.js";
 import { fetchStartBundleCommand } from "./start-bundle.js";
 
 /**
@@ -2136,13 +2137,17 @@ function sleep(ms: number, keepAlive = false): Promise<void> {
 }
 
 /**
- * A provisioning script the server already started, matched by a prefix
- * of the script body so a different `sh` on the machine is left alone.
+ * A copy of this provisioning script still running on the machine,
+ * matched by a prefix of the script body so a different `sh` on the
+ * machine is left alone.
  *
- * `sinceMs` drops a session from an earlier run of the same script: a
- * reused sprite can still be listing it, and attaching there would
- * collect the wrong process. Fifteen seconds of slack, the same window
- * the agent exec path allows for clock skew.
+ * Only a live session counts. A finished one is history the listing
+ * may still carry, and attaching there would collect the wrong
+ * process. A live one is joined whoever started it: the run before
+ * this one, whose socket dropped under a clone the grace then kept
+ * alive, is still writing the same `.git`, and a second copy of the
+ * script beside it is the race this exists to avoid. That is why the
+ * first attempt asks too, not only the retries.
  *
  * `"unknown"` means the listing itself failed. That is not "no such
  * session". A refused upgrade retries the spawn anyway, because the
@@ -2150,11 +2155,7 @@ function sleep(ms: number, keepAlive = false): Promise<void> {
  * command started must not: another `sh -c` would race the one still
  * writing.
  */
-async function findProvisionSession(
-  sprite: Sprite,
-  script: string,
-  sinceMs: number,
-): Promise<{ id: string } | null | "unknown"> {
+async function findProvisionSession(sprite: Sprite, script: string): Promise<{ id: string } | null | "unknown"> {
   try {
     const sessions = await sprite.listSessions();
     const needle = script.slice(0, 80);
@@ -2163,9 +2164,9 @@ async function findProvisionSession(
         .filter(
           (session) =>
             !session.tty &&
+            session.isActive !== false &&
             session.command.startsWith("sh ") &&
-            session.command.includes(needle) &&
-            session.created.getTime() >= sinceMs - 15_000,
+            session.command.includes(needle),
         )
         .sort((a, b) => b.created.getTime() - a.created.getTime())[0] ?? null
     );
@@ -2303,11 +2304,11 @@ function runScript(
    */
   const awake = holdSpriteAwake(sprite, "provision");
   const run = (async () => {
-    const startedAt = Date.now();
     /**
-     * Set once a socket closed after the script was running. The next
-     * try attaches when the session is still listed. When the listing
-     * itself fails, it waits rather than starting a second copy.
+     * Set once a socket closed after the script was running, and kept
+     * until a listing answers: a reattach whose own upgrade was then
+     * refused has not learned that the process is gone. While it is
+     * set, a listing that fails means wait, never a second copy.
      */
     let reattachOnly = false;
     let carriedClose: Error | null = null;
@@ -2323,28 +2324,30 @@ function runScript(
     for (let attempt = 0; ; attempt++) {
       try {
         /**
-         * After a refused upgrade, the server may still have started
-         * the script (the 101 was what got lost). The same is true
-         * after a socket that closed without an exit frame: the
-         * disconnect grace keeps the process, and joining it is the
-         * retry. Starting another `sh -c` of the same installer would
-         * race the one already writing the toolchain.
+         * A copy already running is joined, on the first attempt as on
+         * a retry. After a refused upgrade the server may still have
+         * started the script (the 101 was what got lost); after a
+         * socket that closed without an exit frame the disconnect
+         * grace keeps the process; and the run before this one may
+         * have left its own copy alive on the same machine. Starting
+         * another `sh -c` beside any of them would race it.
          */
-        if (attempt > 0) {
-          const existing = await findProvisionSession(sprite, script, startedAt);
-          if (existing && existing !== "unknown") {
-            reattachOnly = false;
-            return await collectProvisionSpawn(sprite, "sh", [], { sessionId: existing.id });
-          }
-          if (reattachOnly && existing === "unknown") {
-            throw (
-              carriedClose ??
-              Object.assign(
-                new Error("the connection to the sandbox closed before the provisioning script reported an exit"),
-                { connectionClosed: true },
-              )
-            );
-          }
+        const existing = await findProvisionSession(sprite, script);
+        // The latch is not cleared here: a listing that found the
+        // process and an attach that is then refused leave it exactly
+        // where it was, and only a listing that says it is gone (the
+        // spawn below) says otherwise.
+        if (existing && existing !== "unknown") {
+          return await collectProvisionSpawn(sprite, "sh", [], { sessionId: existing.id });
+        }
+        if (reattachOnly && existing === "unknown") {
+          throw (
+            carriedClose ??
+            Object.assign(
+              new Error("the connection to the sandbox closed before the provisioning script reported an exit"),
+              { connectionClosed: true },
+            )
+          );
         }
         reattachOnly = false;
         return await collectProvisionSpawn(sprite, "sh", ["-c", script]);
@@ -2359,7 +2362,8 @@ function runScript(
           throw presentExecFailure(err, attempt + 1);
         }
         if (closed && err instanceof Error) carriedClose = err;
-        reattachOnly = closed;
+        // Never cleared here: only a listing that answers clears it.
+        if (closed) reattachOnly = true;
         await sleep(delay, true);
       }
     }
@@ -2465,16 +2469,6 @@ function defuseKeepalive(child: unknown): () => void {
   }, 10_000);
   timer.unref?.();
   return () => clearInterval(timer);
-}
-
-/** Minimal POSIX single-quote escaping for interpolated paths and URLs. */
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
-function shellQuotePart(value: string): string {
-  if (!/^[a-zA-Z0-9._/-]+$/.test(value)) throw new Error("unsafe git reference");
-  return value;
 }
 
 /**

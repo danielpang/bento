@@ -32,6 +32,7 @@ import { loadEnv } from "../env.js";
 import { SecretBox } from "../secrets.js";
 import { EventBus } from "../events.js";
 import {
+  MAX_SANDBOX_REAP_DEFERRALS,
   SANDBOX_REAP_DEFER_MS,
   SandboxReapDeferred,
   reapFinishedSandboxes,
@@ -480,13 +481,40 @@ test("a reap job asked while an agent is still working comes back later instead 
   }
   assert.equal(destroyed.includes(swarm.externalId), false, "the machine is not destroyed");
   assert.equal(sent.length, 1, "the same reap is asked for again");
-  assert.deepEqual(sent[0]?.data, { swarmId: swarm.swarmId });
+  assert.deepEqual(sent[0]?.data, { swarmId: swarm.swarmId, deferrals: 1 });
   const when = sent[0]?.options?.startAfter;
   assert.ok(when instanceof Date, "it waits, rather than running again immediately");
   const delay = when.getTime() - Date.now();
   assert.ok(delay > SANDBOX_REAP_DEFER_MS - 5_000 && delay < SANDBOX_REAP_DEFER_MS + 5_000);
   const [row] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, swarm.sandboxId));
   assert.equal(row?.status, "ready");
+});
+
+test("a reap job that has waited its fill fails rather than waiting forever", async () => {
+  const swarm = await seedSwarm({ title: "Swarm run stuck", status: "failed", run: "running" });
+  const sent: unknown[] = [];
+  const previous = ctx.boss;
+  ctx.boss = {
+    send: async (_queue: string, data: unknown) => {
+      sent.push(data);
+      return "job";
+    },
+  } as AppContext["boss"];
+  try {
+    // One wait short of the bound still waits.
+    await runSandboxReapJob(ctx, { swarmId: swarm.swarmId, deferrals: MAX_SANDBOX_REAP_DEFERRALS - 1 });
+    assert.equal(sent.length, 1);
+    // At the bound, a run still active is a run that is stuck, and
+    // the job fails so the wait is recorded once.
+    await assert.rejects(
+      () => runSandboxReapJob(ctx, { swarmId: swarm.swarmId, deferrals: MAX_SANDBOX_REAP_DEFERRALS }),
+      /still working/,
+    );
+    assert.equal(sent.length, 1, "and nothing more is queued");
+  } finally {
+    ctx.boss = previous;
+  }
+  assert.equal(destroyed.includes(swarm.externalId), false, "the machine is never destroyed under the agent");
 });
 
 test("a reap job still fails when the machine survives being destroyed", async () => {

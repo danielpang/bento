@@ -7,6 +7,7 @@ import { PassThrough } from "node:stream";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { APIError, FilesystemError, Sprite as SpriteClass, SpriteCommand, type Sprite } from "@fly/sprites";
+import { AGENT_BINARIES, agentToolchainScript } from "./agent-toolchain.js";
 import { LineChannel, ProvisionFailure, collectExec } from "./driver.js";
 import {
   FILESYSTEM_RETRY_DELAYS_MS,
@@ -2518,6 +2519,131 @@ test("Sprite provisioning starts a script again when the closed socket took the 
  * another copy of an installer that may still be writing is the race
  * the attach exists to avoid, so the retry waits and asks again.
  */
+/**
+ * A reattach can itself be refused at the upgrade. That refusal says
+ * nothing about the process, which the grace is still keeping, so the
+ * next attempt must go on treating a failed listing as "wait" rather
+ * than "start another". The flag that says so used to be cleared by
+ * the refusal.
+ */
+test("Sprite provisioning stays reattach-only after a reattach's own upgrade is refused", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  let toolchainSpawns = 0;
+  let attaches = 0;
+  let listings = 0;
+  const sprite = {
+    spawn(_file: string, args: string[], options?: { sessionId?: string }) {
+      const child = fakeChild();
+      const body = args[1] ?? "";
+      queueMicrotask(() => {
+        if (options?.sessionId) {
+          attaches += 1;
+          child.emit("error", new Error("Received network error or non-101 status code (url: wss://x)"));
+          return;
+        }
+        if (body.includes("\nSTAMPS=")) {
+          toolchainSpawns += 1;
+          child.emit("exit", null); // the socket dropped under the installer
+          return;
+        }
+        if (body.includes("tools-absent")) child.stdout.write("tools-present\n");
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    async listSessions() {
+      if (toolchainSpawns === 0) return [];
+      listings += 1;
+      // Listed once, for the reattach that is then refused. Every
+      // listing after that fails.
+      if (listings > 1) throw new Error("Network error: fetch failed");
+      return [
+        {
+          id: "install-1",
+          command: `sh -c ${agentToolchainScript(AGENT_BINARIES)}`,
+          workdir: "/",
+          created: new Date(),
+          bytesPerSecond: 0,
+          isActive: true,
+          tty: false,
+        },
+      ];
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const pending = driver
+    .provision({ projectId: "project", workspaceKey: "feature", hostWorkspacePath: "/unused" })
+    .then(
+      () => "resolved",
+      (err: Error) => err,
+    );
+  for (const delay of EXEC_HANDSHAKE_RETRY_DELAYS_MS) {
+    await settle();
+    t.mock.timers.tick(delay);
+  }
+  await settle();
+  const result = await pending;
+  assert.ok(result instanceof ProvisionFailure, String(result));
+  assert.equal(attaches, 1, "the kept process was joined once");
+  assert.equal(toolchainSpawns, 1, "and never started a second time while the listing was down");
+});
+
+/**
+ * The run before this one can leave its copy of the script alive: its
+ * socket dropped, the grace kept the clone, and the run failed anyway
+ * after the ladder. A new run on the same machine joins that copy on
+ * its first attempt rather than starting a second one beside it.
+ */
+test("Sprite provisioning joins a copy of the script already running on the machine", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  let toolchainSpawns = 0;
+  let attaches = 0;
+  const sprite = {
+    spawn(_file: string, args: string[], options?: { sessionId?: string }) {
+      const child = fakeChild();
+      const body = args[1] ?? "";
+      queueMicrotask(() => {
+        if (options?.sessionId) {
+          attaches += 1;
+          child.stdout.write("tools-present\nbento-toolchain-missing: \n");
+          child.stdout.end();
+          child.stderr.end();
+          child.emit("exit", 0);
+          return;
+        }
+        if (body.includes("\nSTAMPS=")) toolchainSpawns += 1;
+        if (body.includes("tools-absent")) child.stdout.write("tools-present\n");
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    async listSessions() {
+      // The previous run's installer, still going, and a finished one
+      // the listing still carries, which is not joined.
+      const command = `sh -c ${agentToolchainScript(AGENT_BINARIES)}`;
+      return [
+        { id: "old-done", command, workdir: "/", created: new Date(Date.now() - 600_000), bytesPerSecond: 0, isActive: false, tty: false },
+        { id: "old-live", command, workdir: "/", created: new Date(Date.now() - 120_000), bytesPerSecond: 0, isActive: true, tty: false },
+      ];
+    },
+    filesystem() {
+      return { async readdir() { return []; } };
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  await driver.provision({ projectId: "project", workspaceKey: "feature", hostWorkspacePath: "/unused" });
+  assert.equal(attaches, 1, "the live copy is joined");
+  assert.equal(toolchainSpawns, 0, "and no second installer is started beside it");
+});
+
 test("Sprite provisioning does not start a second script while the session list is down", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
   let toolchainSpawns = 0;

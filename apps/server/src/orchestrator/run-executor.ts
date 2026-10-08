@@ -3251,11 +3251,13 @@ function describeSandboxError(err: unknown): string {
   if (typeof output !== "string") return base;
   // The tail, because an installer's useful line is its last one and a
   // run record is not the place for a megabyte of progress bars.
-  // Skipped when the message already quotes that tail, which is how a
-  // script failure names the last line without printing it twice.
-  const tail = output.trim().split("\n").slice(-20).join("\n");
-  if (base.includes(tail)) return base;
-  return `${base}\n${tail}`;
+  // Without its last line when the message already quotes it, which
+  // is how a script failure names that line without printing it twice.
+  const lines = output.trim().split("\n").slice(-20);
+  const last = lines.at(-1)?.trim();
+  if (last && base.endsWith(last)) lines.pop();
+  if (lines.length === 0) return base;
+  return `${base}\n${lines.join("\n")}`;
 }
 
 function withDockerCursor(event: AgentEvent, cursor: number | undefined): AgentEvent {

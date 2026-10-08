@@ -1,3 +1,5 @@
+import { shellQuote, shellQuotePart } from "./shell.js";
+
 /**
  * Fetch the swarm's branch out of the bundle a worker was handed.
  *
@@ -18,22 +20,19 @@ export function fetchStartBundleCommand(dir: string, bundlePath: string, branch:
   const quotedPath = shellQuote(bundlePath);
   const ref = shellQuotePart(branch);
   const wanted = `refs/heads/${ref}`;
+  /**
+   * One command per line, for a script that runs under `set -e`. As
+   * an `&&`/`||` chain this read left to right, so a `list-heads` that
+   * failed (a truncated bundle) fell into the `||` branches and the
+   * script ended with "has no ref", the line a run record and error
+   * tracking quote, in place of git's own error.
+   */
   return [
     `cd ${quotedDir}`,
     `start_heads=$(git bundle list-heads ${quotedPath})`,
     `start_ref=$(printf '%s\\n' "$start_heads" | awk -v wanted="${wanted}" '$2 == wanted { print $2; exit }')`,
-    `[ -n "$start_ref" ] || start_ref=$(printf '%s\\n' "$start_heads" | awk '$2 == "HEAD" { print $2; exit }')`,
-    `[ -n "$start_ref" ] || { printf '%s\\n' "the starting branch bundle has no ref for ${ref}" >&2; exit 1; }`,
+    `if [ -z "$start_ref" ]; then start_ref=$(printf '%s\\n' "$start_heads" | awk '$2 == "HEAD" { print $2; exit }'); fi`,
+    `if [ -z "$start_ref" ]; then printf '%s\\n' "the starting branch bundle has no ref for ${ref}" >&2; exit 1; fi`,
     `git fetch ${quotedPath} "+$start_ref:refs/heads/${ref}"`,
-  ].join(" && ");
-}
-
-/** Minimal POSIX single-quote escaping for interpolated paths. */
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
-function shellQuotePart(value: string): string {
-  if (!/^[a-zA-Z0-9._/-]+$/.test(value)) throw new Error("unsafe git reference");
-  return value;
+  ].join("\n");
 }
