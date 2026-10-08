@@ -9,6 +9,14 @@ import { fetchStartBundleCommand } from "./start-bundle.js";
 
 const exec = promisify(execFile);
 
+/**
+ * Background maintenance off, for every git this test runs, including
+ * the ones inside the checkout script. A recent git may start
+ * `maintenance run --auto` detached after a fetch, and it was still
+ * writing into objects/pack when the test removed its temp directory
+ * (ENOTEMPTY on CI's git 2.55, never on 2.43). The sprite does not
+ * care what git does after the script ends; this directory does.
+ */
 const gitEnv = {
   ...process.env,
   GIT_AUTHOR_NAME: "Bento",
@@ -16,7 +24,15 @@ const gitEnv = {
   GIT_COMMITTER_NAME: "Bento",
   GIT_COMMITTER_EMAIL: "bento@example.com",
   GIT_TERMINAL_PROMPT: "0",
+  GIT_CONFIG_COUNT: "2",
+  GIT_CONFIG_KEY_0: "gc.auto",
+  GIT_CONFIG_VALUE_0: "0",
+  GIT_CONFIG_KEY_1: "maintenance.auto",
+  GIT_CONFIG_VALUE_1: "false",
 };
+
+/** The same backstop for a git that ignores the config: retry a directory something is still writing. */
+const removeRoot = (root: string) => rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 
 async function git(cwd: string, args: string[]): Promise<string> {
   const { stdout } = await exec("git", args, { cwd, env: gitEnv });
@@ -92,7 +108,7 @@ test("a HEAD start bundle has no branch ref, which is the exit 128", async () =>
     assert.equal(refused.code, 128);
     assert.match(refused.stderr, /couldn't find remote ref refs\/heads\/swarm\/checkout/);
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await removeRoot(root);
   }
 });
 
@@ -149,6 +165,6 @@ test("a worker checkout takes a HEAD bundle or a branch bundle, including on ret
       assert.equal((await git(retried, ["rev-parse", "HEAD"])).trim(), swarm);
     }
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await removeRoot(root);
   }
 });
