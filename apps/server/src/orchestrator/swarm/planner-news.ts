@@ -32,13 +32,43 @@ export type TaskWriter = Pick<Db, "update" | "insert">;
 
 /**
  * The half of the wake's query that the latch is: leaves whose news has
- * not been folded into a wake yet.
+ * not been folded into a wake yet, or whose wake never reached a planner.
  *
  * Read with coalesce rather than `is null`, because the latch is a key
  * in a jsonb column: a row that never had it and a row whose value was
  * set to null both read as "not told", and only a string means told.
+ *
+ * Told means told by a planner that finished its turn. The wake stamps
+ * `plannerToldBy` with the run it started, and a run that then failed or
+ * was cancelled never read the news it was handed: a planner stranded in
+ * its sandbox, killed by a restart, or stopped by a person. Its leaves
+ * read as not told again, so the next tick wakes a planner about them.
+ * Before this, such a leaf sat "working" with its report forever, and
+ * the swarm waited on a decision nobody was ever asked to make.
+ *
+ * Read here rather than cleared on each path that ends a planner run,
+ * for the reason this file exists: a latch every terminal path has to
+ * remember to clear is a latch one of them forgets. A run that is still
+ * active does not count as failed, so a planner mid turn keeps its news.
+ *
+ * Only for a leaf still waiting on that decision: one still working on
+ * its report, or one that failed. Not one already accepted, whose branch
+ * is in the merge queue and whose landing speaks for it next (a second
+ * planner told about it could reject work that is already landing), and
+ * not one a person marked done or that landed in the meantime.
  */
-export const PLANNER_NOT_TOLD = sql`coalesce((${swarmTasks.flags} ->> 'plannerToldAt'), '') = ''`;
+export const PLANNER_NOT_TOLD = sql`(
+  coalesce((${swarmTasks.flags} ->> 'plannerToldAt'), '') = ''
+  or (
+    ${swarmTasks.status} in ('working', 'failed')
+    and coalesce((${swarmTasks.flags} ->> 'accepted'), '') <> 'true'
+    and exists (
+      select 1 from agent_runs told_by
+      where told_by.id::text = (${swarmTasks.flags} ->> 'plannerToldBy')
+        and told_by.status in ('failed', 'cancelled')
+    )
+  )
+)`;
 
 export interface LeafHandover {
   /** The leaf as it was read: its current status, and its flags. */
@@ -79,7 +109,7 @@ export async function handLeafToPlanner(tx: TaskWriter, hand: LeafHandover): Pro
        * The leaf's news is new, so whatever the planner was told before
        * is not this.
        */
-      flags: { ...hand.task.flags, ...hand.flags, plannerToldAt: undefined },
+      flags: { ...hand.task.flags, ...hand.flags, plannerToldAt: undefined, plannerToldBy: undefined },
       updatedAt: hand.now,
     })
     .where(eq(swarmTasks.id, hand.task.id));

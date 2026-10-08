@@ -1938,6 +1938,10 @@ export const swarmTaskEvents = pgTable(
         "attention_raised",
         "attention_cleared",
         "reported",
+        // A planner was handed this leaf's report or failure, and that
+        // planner ended before deciding. Text enum, so no migration.
+        "review_requested",
+        "review_interrupted",
         "landed",
         "note",
       ],

@@ -1228,6 +1228,74 @@ test("a leaf that reported wakes the planner, and only once its worker has finis
   assert.equal(again?.plannerRunId, null);
 });
 
+test("a report handed to a planner that never finished its turn is handed to the next one", async () => {
+  /**
+   * The case that found this: a planner stranded in its sandbox was
+   * handed a leaf's report, the latch was set, the run was then closed,
+   * and every later tick read the leaf as told. The leaf sat "working"
+   * with its report and the swarm never moved again.
+   */
+  const swarm = await makeSwarm();
+  const leaf = await makeTask(swarm.id, { title: "reported", status: "working", report: "commit 60db246" });
+
+  const first = await tickSwarm(ctx, swarm.id, starter());
+  const firstPlanner = first?.plannerRunId;
+  assert.ok(firstPlanner, "the report wakes a planner");
+  assert.equal((await read(leaf.id)).flags.plannerToldBy, firstPlanner, "and the latch names the run it went to");
+
+  const requested = await db
+    .select()
+    .from(swarmTaskEvents)
+    .where(and(eq(swarmTaskEvents.taskId, leaf.id), eq(swarmTaskEvents.kind, "review_requested")));
+  assert.equal(requested.length, 1, "the leaf's own log says a planner is reviewing it");
+  assert.equal(requested[0]!.runId, firstPlanner, "and which planner");
+
+  // Still mid turn: the news is that planner's, and nobody else is told.
+  await db.update(agentRuns).set({ status: "running" }).where(eq(agentRuns.id, firstPlanner!));
+  const midTurn = await tickSwarm(ctx, swarm.id, starter());
+  assert.equal(midTurn?.plannerRunId, null, "a planner still working keeps its news");
+
+  // The planner ends without deciding.
+  await db.update(agentRuns).set({ status: "failed" }).where(eq(agentRuns.id, firstPlanner!));
+  const deps = starter();
+  const second = await tickSwarm(ctx, swarm.id, deps);
+  assert.ok(second?.plannerRunId, "the next tick hands the report to a new planner");
+  assert.notEqual(second?.plannerRunId, firstPlanner);
+  const wake = deps.calls.find((call) => call.role === "planner");
+  assert.match(wake!.prompt!, /commit 60db246/, "with the report in it");
+  assert.equal((await read(leaf.id)).flags.plannerToldBy, second?.plannerRunId);
+
+  const log = await db.select().from(swarmTaskEvents).where(eq(swarmTaskEvents.taskId, leaf.id));
+  const interrupted = log.filter((event) => event.kind === "review_interrupted");
+  assert.equal(interrupted.length, 1, "the log says the first review was interrupted");
+  assert.equal(interrupted[0]!.runId, firstPlanner);
+  assert.equal(log.filter((event) => event.kind === "review_requested").length, 2);
+
+  // A planner that finished its turn did read it, whatever it decided.
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.id, second!.plannerRunId!));
+  const afterSuccess = await tickSwarm(ctx, swarm.id, starter());
+  assert.equal(afterSuccess?.plannerRunId, null, "told once per planner that finished");
+});
+
+test("a leaf already accepted or marked done is not handed to a planner again", async () => {
+  /**
+   * The re-tell is for a decision still owed. An accepted leaf's branch
+   * is in the merge queue, and a second planner could reject work that
+   * is already landing; a leaf a person marked done needs nothing.
+   */
+  const swarm = await makeSwarm();
+  const [failedPlanner] = await db
+    .insert(agentRuns)
+    .values({ type: "swarm", swarmId: swarm.id, role: "planner", agentProfileId: PROFILE, prompt: "", status: "failed" })
+    .returning();
+  const told = { plannerToldAt: "2026-01-01T00:00:00.000Z", plannerToldBy: failedPlanner!.id };
+  await makeTask(swarm.id, { title: "accepted", status: "working", report: "r", flags: { ...told, accepted: true } });
+  await makeTask(swarm.id, { title: "marked done", status: "done", report: "r", flags: told });
+
+  const result = await tickSwarm(ctx, swarm.id, starter());
+  assert.equal(result?.plannerRunId, null);
+});
+
 test("the tick that finishes a swarm asks for it to be published, once", async () => {
   /**
    * The one thing a swarm does that leaves Bento, and the only door to

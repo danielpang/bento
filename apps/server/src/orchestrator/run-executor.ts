@@ -2609,13 +2609,20 @@ export async function recoverInterruptedRuns(ctx: AppContext): Promise<void> {
  * race a run that finished or was cancelled while recovery deliberated,
  * and the loser must change nothing.
  */
-async function failRunAsInterrupted(ctx: AppContext, run: typeof agentRuns.$inferSelect): Promise<void> {
+async function failRunAsInterrupted(
+  ctx: AppContext,
+  run: typeof agentRuns.$inferSelect,
+  how: { error: string; transcript: string } = {
+    error: "interrupted by a server restart",
+    transcript: "Bento restarted while this run was working, so the run ended here. Send a message to pick up where it left off.",
+  },
+): Promise<void> {
   const [closed] = await ctx.db
     .update(agentRuns)
     .set({
       status: "failed",
       endedAt: new Date(),
-      error: "interrupted by a server restart",
+      error: how.error,
     })
     .where(and(eq(agentRuns.id, run.id), inArray(agentRuns.status, ["starting", "running"])))
     .returning({ id: agentRuns.id });
@@ -2634,7 +2641,7 @@ async function failRunAsInterrupted(ctx: AppContext, run: typeof agentRuns.$infe
   await appendRunEvent(ctx, run.id, {
     type: "message",
     role: "system",
-    text: "Bento restarted while this run was working, so the run ended here. Send a message to pick up where it left off.",
+    text: how.transcript,
   });
   // Any stream that reconnected before recovery ran is waiting live;
   // this lets it close the way a normal finish would.
@@ -2661,6 +2668,82 @@ async function failRunAsInterrupted(ctx: AppContext, run: typeof agentRuns.$infe
     await queueRunFinishedSlack(ctx, run.id);
   }
   await subject.settle(ctx);
+}
+
+/**
+ * Minutes a run may go without a single transcript line before its
+ * agent has spoken, after which it is closed as stalled.
+ *
+ * Longer than anything the executor legitimately does in silence before
+ * an agent starts: a repository's setup command is the longest such step
+ * and is capped at twenty minutes (SETUP_TIMEOUT_MS in repo-setup.ts),
+ * and it says it is starting before it goes quiet.
+ */
+export const STALLED_RUN_MIN = 30;
+
+const STALLED_RUN_ERROR = "the agent never started in its sandbox";
+const STALLED_RUN_TRANSCRIPT =
+  "The sandbox stopped responding before the agent started, so the run ended here. Nothing was changed. Try the run again.";
+
+/**
+ * Closes server runs that stalled before their agent ever said anything.
+ *
+ * A run's handler can hang inside a sandbox call that never answers (a
+ * Modal exec or filesystem call after a provider fallback was the case
+ * that found this), and nothing else would ever end it. pg-boss expires
+ * the run.execute job after fifteen minutes but cannot stop the promise,
+ * and the retry correctly does nothing, because the same early return is
+ * what keeps a fifty minute agent from being started twice. Boot recovery
+ * only runs on boot. So the row sat "running" for the full run timeout,
+ * and a swarm planner stranded this way held the swarm's one planner
+ * slot the whole time, so nothing the swarm did could be decided.
+ *
+ * Only a run whose agent has not produced a single event: every line in
+ * its transcript is the executor's own system message. An agent that has
+ * started and then gone quiet is a different case, and usually a long
+ * command: the watchdog's thresholds and the run timeout are its clocks.
+ *
+ * The stall is measured from the run's last line, or from its start when
+ * it has none, in the database's own clock.
+ */
+export async function reapStalledRuns(ctx: AppContext, stallMin: number = STALLED_RUN_MIN): Promise<string[]> {
+  const stalled = await ctx.db
+    .select()
+    .from(agentRuns)
+    .where(
+      and(
+        eq(agentRuns.executor, "server"),
+        inArray(agentRuns.status, ["starting", "running"]),
+        sql`not exists (
+          select 1 from ${runEvents}
+          where ${runEvents.runId} = ${agentRuns.id}
+            and not (${runEvents.type} = 'message' and ${runEvents.payload} ->> 'role' = 'system')
+        )`,
+        sql`coalesce(
+          (select max(${runEvents.ts}) from ${runEvents} where ${runEvents.runId} = ${agentRuns.id}),
+          ${agentRuns.startedAt},
+          ${agentRuns.queuedAt}
+        ) < now() - make_interval(mins => ${stallMin})`,
+      ),
+    );
+
+  const closed: string[] = [];
+  for (const run of stalled) {
+    // A handler in this process that is still waiting on the sandbox is
+    // told to stop first, so it does not go on to start an agent on a
+    // run that has already ended. Its own close then loses the compare
+    // and set below and changes nothing.
+    ctx.running.get(run.id)?.abort();
+    await failRunAsInterrupted(ctx, run, { error: STALLED_RUN_ERROR, transcript: STALLED_RUN_TRANSCRIPT });
+    closed.push(run.id);
+    ctx.analytics?.captureException(new Error(`run ${run.id} stalled before its agent started`), run.startedBy, run.organizationId, {
+      run_id: run.id,
+      source: "run_stalled",
+      role: run.role,
+    });
+  }
+  if (closed.length > 0) console.warn(`closed ${closed.length} run(s) that stalled before their agent started`);
+  return closed;
 }
 
 /**
@@ -3150,6 +3233,12 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
     if (stale.length > 0) {
       console.warn(`requeued ${stale.length} run(s) whose runner went away`);
     }
+
+    // The same question for this server's own runs: one whose handler
+    // hung in its sandbox before the agent started. On this schedule
+    // rather than a new one, because every scheduled job is a query a
+    // poll on a database that should be allowed to sleep.
+    await reapStalledRuns(ctx);
   }));
 
   /**

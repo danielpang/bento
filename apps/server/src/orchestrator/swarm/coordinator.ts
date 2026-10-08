@@ -719,7 +719,7 @@ async function executeDocumentAssembly(ctx: AppContext, taskId: string): Promise
           status: "blocked",
           attention: "failed",
           report: `Document assembly failed: ${reason}`,
-          flags: { ...task.flags, assemblyError: reason, plannerToldAt: undefined },
+          flags: { ...task.flags, assemblyError: reason, plannerToldAt: undefined, plannerToldBy: undefined },
           updatedAt: new Date(),
         })
         .where(and(eq(swarmTasks.id, task.id), eq(swarmTasks.status, "working")))
@@ -1454,10 +1454,46 @@ async function deliverPlannerWake(
       .where(eq(swarmMessages.id, message.id));
   }
   for (const task of news) {
+    /*
+     * A leaf that already carries a latch is back because the planner
+     * it was handed to never finished its turn (PLANNER_NOT_TOLD let it
+     * through for that reason alone). Said on the node first, so its
+     * log reads as what happened: handed over, lost, handed over again.
+     */
+    const previousReviewer = typeof task.flags.plannerToldBy === "string" ? task.flags.plannerToldBy : null;
+    if (previousReviewer && typeof task.flags.plannerToldAt === "string" && task.flags.plannerToldAt !== "") {
+      await tx.insert(swarmTaskEvents).values({
+        taskId: task.id,
+        kind: "review_interrupted",
+        runId: previousReviewer,
+        detail: { note: "The planner reviewing this ended before it decided, so a new planner is reviewing it." },
+      });
+    }
     await tx
       .update(swarmTasks)
-      .set({ flags: { ...task.flags, plannerToldAt: now.toISOString() } })
+      // Which run was told, as well as when: PLANNER_NOT_TOLD reads a
+      // leaf as not told again once that run failed or was cancelled,
+      // because a planner that never finished its turn never read this.
+      .set({ flags: { ...task.flags, plannerToldAt: now.toISOString(), plannerToldBy: started.id } })
       .where(eq(swarmTasks.id, task.id));
+    /*
+     * And the handover itself, on the node's own log. Before this the
+     * log went from "reported" straight to the verdict, so a worker
+     * waiting on a planner looked exactly like a worker nobody was
+     * looking at, which is the one difference a person needs to see.
+     * The run id is the planner's, so the drawer can link its turn.
+     */
+    await tx.insert(swarmTaskEvents).values({
+      taskId: task.id,
+      kind: "review_requested",
+      runId: started.id,
+      detail: {
+        note:
+          task.status === "failed"
+            ? "The planner was handed this failure to decide what happens next."
+            : "The planner was handed this report to accept or send back.",
+      },
+    });
   }
   return started.id;
 }

@@ -1881,7 +1881,7 @@ export function swarmRoutes(ctx: AppContext) {
         await tx.update(swarmTasks)
           .set({
             status: "landed", attention: null, updatedAt: now,
-            flags: { ...task.flags, landingError: undefined, plannerToldAt: now.toISOString() },
+            flags: { ...task.flags, landingError: undefined, plannerToldAt: now.toISOString(), plannerToldBy: undefined },
           })
           .where(and(eq(swarmTasks.id, task.id), eq(swarmTasks.status, "failed")));
         await reactivateSwarmForRetry(tx as unknown as Db, swarm.id);

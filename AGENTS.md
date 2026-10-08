@@ -338,6 +338,34 @@ kept the hosted database busy enough to never scale down; `enqueueRun`
 wakes them, so a run queued in-process still starts at once. A bare
 send works, and waits for the next poll.
 
+## A planner that never finished its turn never read its news
+
+A leaf's report or failure is handed to the planner once, latched by
+`plannerToldAt` in its flags. The wake also records `plannerToldBy`,
+the planner run it went to, and `PLANNER_NOT_TOLD` in
+`orchestrator/swarm/planner-news.ts` reads a leaf as not told again
+once that run failed or was cancelled, unless the leaf was accepted,
+marked done, or landed meanwhile. Before this, a planner that was
+handed a report and then died (stranded, restarted, stopped) left the
+leaf "working" with its report forever: every later tick read it as
+told, and the swarm never moved. The rule lives in the filter, not in
+each path that ends a run, so a new terminal path cannot forget it.
+
+Each handover is written to the leaf's own log as `review_requested`
+with the planner's run id, and a handover lost this way as
+`review_interrupted`, so the node drawer shows a worker waiting on a
+planner rather than a worker nobody is looking at.
+
+A server run whose handler hangs in its sandbox before the agent says
+anything is closed by `reapStalledRuns` in `run-executor.ts`, on the
+existing `runner.reap` schedule, after `STALLED_RUN_MIN` minutes with
+no transcript line. Nothing else ends it: pg-boss expires the
+`run.execute` job after fifteen minutes but cannot stop the promise,
+and the retry's early return on a run that is not queued is what stops
+a long agent from being started twice, so it must stay a no-op. Only
+runs whose agent never produced an event are reaped; an agent that
+started and went quiet is usually running a long command.
+
 ## Queue workers poll slowly on purpose
 
 pg-boss has no push, so every idle worker costs a query per poll. The

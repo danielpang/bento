@@ -18,7 +18,7 @@ import { singleDriver } from "../sandbox-driver.js";
 import type { AppContext } from "../../context.js";
 import { EventBus, type BoardEvent } from "../../events.js";
 import { loadEnv } from "../../env.js";
-import { recoverInterruptedRuns } from "../run-executor.js";
+import { reapStalledRuns, recoverInterruptedRuns } from "../run-executor.js";
 import {
   enqueueSwarmTick,
   ensureSwarmTickWorker,
@@ -173,6 +173,98 @@ test("a swarm run the restart stranded is closed, and its swarm is told", async 
   const board = emitted.find((event) => event.type === "swarm_task_updated");
   assert.ok(board, "the board is told too");
   assert.equal("taskId" in board! ? board.taskId : null, task!.id);
+});
+
+/** A server run that started `minutesAgo`, with these transcript lines, each that long ago too. */
+async function stalledRun(
+  swarmId: string,
+  minutesAgo: number,
+  lines: { minutesAgo: number; payload: Record<string, unknown>; type?: string }[],
+) {
+  const [run] = await db
+    .insert(agentRuns)
+    .values({
+      type: "swarm",
+      swarmId,
+      role: "planner",
+      agentProfileId: PROFILE,
+      prompt: "",
+      status: "running",
+      executor: "server",
+      startedAt: new Date(Date.now() - minutesAgo * 60_000),
+    })
+    .returning();
+  let seq = 0;
+  for (const line of lines) {
+    await db.insert(runEvents).values({
+      runId: run!.id,
+      seq: ++seq,
+      ts: new Date(Date.now() - line.minutesAgo * 60_000),
+      type: line.type ?? "message",
+      payload: line.payload,
+    });
+  }
+  return run!;
+}
+
+const system = (text: string) => ({ type: "message", role: "system", text });
+
+test("a run that stalled before its agent started is closed, and its swarm is told", async () => {
+  /**
+   * The shape that found this: a planner whose sandbox answered every
+   * provisioning step, then never answered the agent start. pg-boss
+   * expired its job, the retry rightly did nothing, and the row said
+   * running for the whole run timeout while holding the swarm's one
+   * planner slot.
+   */
+  const swarm = await makeSwarm();
+  const stalled = await stalledRun(swarm.id, 46, [
+    { minutesAgo: 44, payload: system("Starting a Modal sandbox") },
+    { minutesAgo: 42, payload: system("Repository bento is ready on branch swarm/x.") },
+  ]);
+  // The handler that is still waiting on the sandbox, in this process.
+  const controller = new AbortController();
+  ctx.running.set(stalled.id, controller);
+
+  const closed = await reapStalledRuns(ctx);
+
+  assert.deepEqual(closed, [stalled.id]);
+  assert.ok(controller.signal.aborted, "the waiting handler is told to stop, so it cannot start an agent later");
+  const [row] = await db.select().from(agentRuns).where(eq(agentRuns.id, stalled.id));
+  assert.equal(row!.status, "failed");
+  assert.equal(row!.error, "the agent never started in its sandbox");
+  const lines = await db.select().from(runEvents).where(eq(runEvents.runId, stalled.id));
+  assert.match(
+    (lines.at(-1)!.payload as { text: string }).text,
+    /stopped responding before the agent started/,
+    "the transcript says why it ended",
+  );
+  assert.ok(
+    queued.some((job) => job.queue === "swarm.tick" && (job.data as { swarmId: string }).swarmId === swarm.id),
+    "and the reconciler is told, so a new planner can be woken",
+  );
+  ctx.running.delete(stalled.id);
+});
+
+test("a run whose agent has spoken, or that is not yet stalled, is left alone", async () => {
+  const swarm = await makeSwarm();
+  // An agent that started and then went quiet: a long command, not a stall.
+  const quietAgent = await stalledRun(swarm.id, 60, [
+    { minutesAgo: 58, payload: system("Starting codex in the sandbox.") },
+    { minutesAgo: 57, type: "init", payload: { type: "init", sessionId: "s1" } },
+  ]);
+  // Still inside the window: repository setup can be silent for twenty minutes.
+  const settingUp = await stalledRun(swarm.id, 25, [
+    { minutesAgo: 22, payload: system("Setting up bento: pnpm install") },
+  ]);
+
+  const closed = await reapStalledRuns(ctx);
+
+  assert.deepEqual(closed, []);
+  for (const run of [quietAgent, settingUp]) {
+    const [row] = await db.select().from(agentRuns).where(eq(agentRuns.id, run.id));
+    assert.equal(row!.status, "running");
+  }
 });
 
 test("planner and worker runs reattach with only their missing Docker output", { timeout: 30_000 }, async () => {

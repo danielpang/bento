@@ -348,6 +348,7 @@ export async function retryLeaf(
          * told before is not this.
          */
         plannerToldAt: undefined,
+        plannerToldBy: undefined,
         ...(input.reason !== undefined ? { rejection: input.reason } : {}),
       },
       updatedAt: now,

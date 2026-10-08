@@ -594,9 +594,20 @@ export function eventWords(event: SwarmTaskEvent): string {
     case "assigned":
       return "Worker started";
     case "status_changed":
+      // A retry carrying a reason with a run on it is the planner's
+      // reject: the reason is what it told the next worker.
+      if (event.toStatus === "assigned" && typeof event.detail?.rejection === "string" && event.runId) {
+        return "Planner sent it back";
+      }
       if (event.toStatus === "assigned") return "Queued for worker";
       if (event.toStatus === "failed") return "Worker failed";
       return event.toStatus ? `Now ${event.toStatus}` : "Status changed";
+    case "reported":
+      return "Worker reported";
+    case "review_requested":
+      return "Planner reviewing";
+    case "review_interrupted":
+      return "Planner review interrupted";
     case "attention_raised":
       // The one an agent other than this node's worker produces: a
       // conflict, with a resolver put on it.
@@ -604,7 +615,7 @@ export function eventWords(event: SwarmTaskEvent): string {
     case "landed":
       return "Landed";
     case "note":
-      return "Note";
+      return event.detail?.accepted === true ? "Planner accepted" : "Note";
     default:
       return event.kind;
   }
@@ -627,7 +638,9 @@ export function eventNote(event: SwarmTaskEvent): string {
           ? detail.landingError
           : typeof detail.landingFailed === "string"
             ? detail.landingFailed
-            : "";
+            : typeof detail.rejection === "string"
+              ? detail.rejection
+              : "";
   const firstLine = said.split("\n").find((line) => line.trim() !== "")?.trim() ?? "";
   return firstLine;
 }
