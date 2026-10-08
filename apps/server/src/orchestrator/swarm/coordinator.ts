@@ -16,8 +16,10 @@ import type { AppContext } from "../../context.js";
 import { driverForSandbox } from "../sandbox-driver.js";
 import type { BoardEvent } from "../../events.js";
 import { captureJobErrors } from "../../analytics.js";
+import { unbilledReason } from "../../unbilled-reasons.js";
 import { enqueueRun, INTERACTIVE_POLL_SECONDS } from "../queue.js";
 import { queueSwarmSandboxReap } from "../reap-sandbox.js";
+import { swarmHasActiveRun } from "./reopen.js";
 import { ACTIVE_RUN_STATUSES, projectHasRepositories, SWARM_FULL, startRunIfIdle, type NewRun, type OutOfCompute } from "../start-run.js";
 import { plannerWakeMessage, type PlannerWakeItem } from "./planner-prompt.js";
 import { enqueueLanding } from "./landing.js";
@@ -236,6 +238,50 @@ export interface SwarmTickResult {
 const FINAL_SWARM_STATUSES = ["done", "failed", "cancelled", "budget_exhausted", "timed_out"] as const;
 
 /**
+ * How many times an agent is started again on the same node after its
+ * machine could not be made, before the planner is told.
+ *
+ * A run that failed before its agent started is the sandbox's failure
+ * and not the work's: a sprite Fly could not hand over, a Modal
+ * machine that was never made, an exec socket that dropped under the
+ * clone. Nothing about the leaf changed, and the planner can do
+ * nothing about it but say "try again", which is a turn of a strong
+ * model spent on a sentence. So the coordinator says it instead, a
+ * bounded number of times. The bound is what keeps a provider that is
+ * down for the afternoon from starting a machine a minute forever:
+ * past it the planner is told, with the error and the count, and
+ * decides as it would about any other stopped worker.
+ *
+ * The same bound covers the planner's own run. A wake that died
+ * before its agent started was never heard, and the latch that folds
+ * each leaf's news into one wake has already been set for it, so
+ * without this the swarm sat with reported leaves nobody would ever
+ * decide on until a person pressed retry.
+ */
+export const MAX_SANDBOX_RESTARTS = 3;
+
+/** Where a leaf counts its restarts, read by the drawer as any other flag. */
+const SANDBOX_RESTARTS_FLAG = "sandboxRestarts";
+
+function sandboxRestarts(flags: unknown): number {
+  const value = typeof flags === "object" && flags !== null ? (flags as Record<string, unknown>)[SANDBOX_RESTARTS_FLAG] : 0;
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
+
+/**
+ * A run that failed before its agent started.
+ *
+ * The unbilled-reason rules are the one list of those failures: they
+ * exist so a person is not charged for a machine that never ran their
+ * agent, and that is the same question as whether the work was ever
+ * attempted. Read here rather than copied, so a provider failure that
+ * joins that list is restarted without this file learning its words.
+ */
+function failedBeforeAgentStarted(run: { status: string; error: string | null }): boolean {
+  return run.status === "failed" && unbilledReason(run.error) !== null;
+}
+
+/**
  * Reconciles one swarm.
  *
  * The board events are emitted after the transaction commits, never
@@ -362,8 +408,19 @@ export async function tickSwarm(
      * The publish above is asked for on the transition and this on the
      * status, which is deliberate: publishing twice would open a second
      * pull request, and reaping twice is no rows.
+     *
+     * Not while a run is still in flight. A failed tree wakes its
+     * planner in this same tick, and that run works in this machine.
+     * Every later tick would ask for the machine again, the job would
+     * refuse, and each refusal would be recorded as an error for as
+     * long as the agent kept working. The run's settlement is another
+     * tick, and that one queues the reap once nothing is left in
+     * flight. A job that loses the race and finds a run anyway asks
+     * again later rather than failing.
      */
-    if (swarmIsOver(result.status)) await queueSwarmSandboxReap(ctx, swarmId);
+    if (swarmIsOver(result.status) && !(await swarmHasActiveRun(ctx.db, swarmId))) {
+      await queueSwarmSandboxReap(ctx, swarmId);
+    }
   }
   return result;
 }
@@ -426,7 +483,15 @@ async function runTick(
    * the same reason, and that run would cancel into another tick.
    */
   const canStartAgents = await projectHasRepositories(tx as unknown as Db, swarm.projectId);
-  const plannerRunId = canStartAgents ? await deliverPlannerWake(tx, swarm, deps, now) : null;
+  /*
+   * A planner whose machine could not be made is started again before
+   * any new wake is considered: the wake it was carrying is on its row,
+   * and a run queued here is the active planner that holds every later
+   * wake until it has been heard.
+   */
+  const plannerRunId = canStartAgents
+    ? (await restartPlannerAfterSandboxFailure(tx, swarm, deps)) ?? (await deliverPlannerWake(tx, swarm, deps, now))
+    : null;
   const spawned = canStartAgents
     ? await spawnWorkers(tx, swarm, changed.tasks, deps, events, now)
     : { runIds: [], refusal: null, cap: null };
@@ -755,6 +820,18 @@ async function settleWorkedLeaves(
     // A run row that is gone takes its leaf with it: there is nothing
     // left that could still report, so this is the same case.
     if (run && (ACTIVE_RUN_STATUSES as readonly string[]).includes(run.status)) continue;
+    /*
+     * A machine that could not be made is not a worker that stopped.
+     * The node goes back to the queue and the spawn step below puts
+     * another agent on it this same tick, on the same branch and, on
+     * a driver that names machines, the same machine. Only so many
+     * times: see MAX_SANDBOX_RESTARTS.
+     */
+    const restarts = run && failedBeforeAgentStarted(run) ? sandboxRestarts(task.flags) : null;
+    if (run && restarts !== null && restarts < MAX_SANDBOX_RESTARTS) {
+      await restartAfterSandboxFailure(tx, swarm, task, run, restarts + 1, events, now);
+      continue;
+    }
     if (task.nodeType === "leaf" && run?.status === "succeeded") {
       const [lastMessage] = await tx
         .select({ payload: runEvents.payload })
@@ -779,18 +856,25 @@ async function settleWorkedLeaves(
         continue;
       }
     }
-    const reason = run?.error?.trim()
-      ? `the agent working it stopped: ${run.error.trim()}`
-      : task.nodeType === "plan"
-        ? "the planner given this part of the plan stopped without writing any tasks under it."
-        : "the agent working it stopped without reporting.";
+    const reason =
+      restarts !== null
+        ? `its sandbox could not be made, ${restarts + 1} times in a row: ${run?.error?.trim() ?? "unknown error"}`
+        : run?.error?.trim()
+          ? `the agent working it stopped: ${run.error.trim()}`
+          : task.nodeType === "plan"
+            ? "the planner given this part of the plan stopped without writing any tasks under it."
+            : "the agent working it stopped without reporting.";
     // Through the one door, so the latch that decides whether the
     // planner ever hears about this leaf is cleared by construction.
     await handLeafToPlanner(tx, {
       task,
       status: "failed",
       attention: "failed",
-      flags: { workerStopped: reason },
+      // The restart count ends with the series it counted. A planner
+      // that queues this leaf again starts a new one, with the policy
+      // whole; left in place, every later machine that could not be
+      // made would skip straight here, saying "four in a row" of one.
+      flags: { workerStopped: reason, [SANDBOX_RESTARTS_FLAG]: undefined },
       set: { endedAt: task.endedAt ?? now },
       runId: task.assignedRunId,
       detail: { reason },
@@ -808,6 +892,61 @@ async function settleWorkedLeaves(
       status: "failed",
     });
   }
+}
+
+/**
+ * Puts a node whose machine could not be made back in the queue.
+ *
+ * Back to "assigned", which is the state the spawn step starts from
+ * for a leaf and for a plan node alike, with the dead run taken off
+ * it so a stale assignedRunId cannot read as an agent still on it.
+ * The count goes on the node's flags, where the drawer shows it, and
+ * the event log says which run died and why, so a person reading the
+ * node afterwards sees three machines that were never made rather
+ * than three agents that stopped.
+ *
+ * Not through handLeafToPlanner: this is the one stop the planner is
+ * deliberately not told about, so the latch is left as it was.
+ */
+async function restartAfterSandboxFailure(
+  tx: Tx,
+  swarm: typeof swarms.$inferSelect,
+  task: Task,
+  run: { id: string; error: string | null },
+  restart: number,
+  events: BoardEvent[],
+  now: Date,
+): Promise<void> {
+  const flags = { ...task.flags, [SANDBOX_RESTARTS_FLAG]: restart };
+  await tx
+    .update(swarmTasks)
+    .set({ status: "assigned", assignedRunId: null, flags, updatedAt: now })
+    .where(eq(swarmTasks.id, task.id));
+  await tx.insert(swarmTaskEvents).values({
+    taskId: task.id,
+    kind: "status_changed",
+    fromStatus: task.status,
+    toStatus: "assigned",
+    runId: run.id,
+    detail: {
+      reason: "sandbox",
+      restart,
+      of: MAX_SANDBOX_RESTARTS,
+      error: run.error,
+    },
+  });
+  // The in-memory row too, so the spawn step this tick sees a node
+  // waiting for an agent rather than the row as it was read.
+  task.status = "assigned";
+  task.assignedRunId = null;
+  task.flags = flags;
+  events.push({
+    type: "swarm_task_updated",
+    projectId: swarm.projectId,
+    swarmId: swarm.id,
+    taskId: task.id,
+    status: "assigned",
+  });
 }
 
 /* ------------------------------------------------------------------ *
@@ -1094,6 +1233,76 @@ async function warnLowBudget(tx: Tx, swarm: typeof swarms.$inferSelect, now: Dat
 /* ------------------------------------------------------------------ *
  * Step 2: fold what the planner has not heard into one wake message.
  * ------------------------------------------------------------------ */
+
+/**
+ * Starts the planner again when its last run died before its agent
+ * started.
+ *
+ * The prompt is the failed run's own: the first plan's is empty and
+ * the executor builds it, and a wake's is the message that folded the
+ * leaves' news into it. Starting the same prompt again is what makes
+ * the latch on those leaves still true, because the planner is now
+ * going to hear exactly what the latch says it was told.
+ *
+ * Bounded by counting back from the latest run: each restart is a
+ * planner run that failed the same way, so a trailing run of them
+ * longer than MAX_SANDBOX_RESTARTS means the provider has been down
+ * for every try and the swarm waits, as it did before this existed,
+ * for a person or the next wake. Only while the swarm is being
+ * worked: a wake may reach an ended swarm, a restart carries no news
+ * and must not.
+ */
+async function restartPlannerAfterSandboxFailure(
+  tx: Tx,
+  swarm: typeof swarms.$inferSelect,
+  deps: SwarmTickDeps,
+): Promise<string | null> {
+  /*
+   * Only a swarm that is being worked. A wake may still reach an
+   * ended swarm, because a leaf can report after its ceiling; a
+   * restart carries no news and must not put a planner on a swarm
+   * that is done, timed out or out of budget.
+   */
+  if (swarm.status !== "planning" && swarm.status !== "running" && swarm.status !== "blocked") return null;
+
+  const recent = await tx
+    .select({
+      id: agentRuns.id,
+      status: agentRuns.status,
+      error: agentRuns.error,
+      prompt: agentRuns.prompt,
+      agentProfileId: agentRuns.agentProfileId,
+      startedBy: agentRuns.startedBy,
+    })
+    .from(agentRuns)
+    .where(and(eq(agentRuns.swarmId, swarm.id), eq(agentRuns.role, "planner")))
+    .orderBy(desc(agentRuns.queuedAt), desc(agentRuns.id))
+    .limit(MAX_SANDBOX_RESTARTS + 1);
+  const latest = recent[0];
+  if (!latest || !failedBeforeAgentStarted(latest)) return null;
+  let trailing = 0;
+  for (const run of recent) {
+    if (!failedBeforeAgentStarted(run)) break;
+    trailing += 1;
+  }
+  if (trailing > MAX_SANDBOX_RESTARTS) return null;
+
+  const profileId = (await plannerProfileFor(tx, swarm)) ?? latest.agentProfileId;
+  if (!profileId) return null;
+  const started = await deps.startRun(tx, {
+    type: "swarm",
+    swarmId: swarm.id,
+    role: "planner",
+    agentProfileId: profileId,
+    prompt: latest.prompt,
+    executor: "server",
+    startedBy: latest.startedBy,
+  });
+  if (started === "busy" || started === "gone" || started === SWARM_FULL || "outOfCompute" in started) {
+    return null;
+  }
+  return started.id;
+}
 
 /**
  * Everything waiting for the planner becomes one message and one run.

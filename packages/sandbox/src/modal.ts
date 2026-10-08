@@ -15,6 +15,8 @@ import {
 } from "./driver.js";
 import { BENTO_EXEC_PYTHON, FrameDecoder, execDirectory, execStamp } from "./modal-exec.js";
 import { spriteSize } from "./sprite.js";
+import { shellQuote, shellQuotePart } from "./shell.js";
+import { fetchStartBundleCommand } from "./start-bundle.js";
 
 /**
  * One App for every sandbox this deployment creates. Development and
@@ -434,6 +436,8 @@ export class ModalDriver implements SandboxDriver {
       // checkout will need. An incremental bundle is enough when the
       // reader already has the base, which is the publish path.
       ...(options.selfContained ? [] : ['if [ "$base_sha" = "$head_sha" ]; then exit 3; fi']),
+      // HEAD, not the branch name. The checkout fetches whichever
+      // ref the bundle lists. See fetchStartBundleCommand.
       options.selfContained
         ? `git bundle create ${shellQuote(bundlePath)} HEAD >/dev/null`
         : `git bundle create ${shellQuote(bundlePath)} HEAD "^$base_sha" >/dev/null`,
@@ -940,9 +944,11 @@ export class ModalDriver implements SandboxDriver {
             "fi",
             ...(repo.startBundle
               ? [
-                  // Forced, because a re-provision finds the ref already
-                  // there at an older head: the swarm's branch has moved.
-                  `cd ${shellQuote(dir)} && git fetch ${shellQuote(startPath)} +refs/heads/${shellQuotePart(repo.startBundle.branch)}:refs/heads/${shellQuotePart(repo.startBundle.branch)}`,
+                  // The bundle lists HEAD or the branch, depending on
+                  // who built it. Asking a HEAD bundle for the branch
+                  // ref is exit 128. Forced, so a re-provision replaces
+                  // the head the swarm has moved past.
+                  fetchStartBundleCommand(dir, startPath, repo.startBundle.branch),
                 ]
               : []),
             `cd ${shellQuote(dir)} && (git checkout ${shellQuote(branch)} || git checkout -b ${shellQuote(branch)} ${shellQuote(startRef)})`,
@@ -1007,15 +1013,6 @@ export function persistedSandboxProvider(provider: SandboxHandle["provider"]): "
 
 function isAlreadyExists(err: unknown): boolean {
   return err instanceof Error && (err.name === "AlreadyExistsError" || /AlreadyExistsError/.test(err.message));
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
-function shellQuotePart(value: string): string {
-  if (!/^[a-zA-Z0-9._/-]+$/.test(value)) throw new Error("unsafe git reference");
-  return value;
 }
 
 async function runShell(

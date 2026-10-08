@@ -64,7 +64,12 @@ import { branchForRun, cardBranch } from "./branch-rotation.js";
 import { recoverAncestryPublishFailures } from "./rebase-run.js";
 import { runRepositorySetup } from "./repo-setup.js";
 import { captureRunArtifacts } from "./capture-artifacts.js";
-import { SandboxProvisionError, provisionFailureCause, provisionWorkspace } from "./sandbox-provision.js";
+import {
+  SandboxProvisionError,
+  provisionFailureCause,
+  provisionFailureContext,
+  provisionWorkspace,
+} from "./sandbox-provision.js";
 import { reportSandboxReady, runOwnerProperties, type SandboxOrigin } from "./sandbox-metrics.js";
 export { sandboxProvisionConflict } from "./sandbox-provision.js";
 import { allCandidates, driversForRun, driverForSandbox, SandboxDriverUnavailable, type ProvisionDrivers } from "./sandbox-driver.js";
@@ -107,13 +112,7 @@ import { attachLiveConversation } from "./live-session.js";
 import { registerLinearJobs } from "./linear-sync.js";
 import { queueRunFinishedSlack } from "./slack-notify.js";
 import { registerSlackJobs } from "./slack-sync.js";
-import {
-  REAP_SANDBOX_QUEUE,
-  reapFinishedSandboxes,
-  reapSandbox,
-  reapSwarmSandbox,
-  reapSwarmTaskSandbox,
-} from "./reap-sandbox.js";
+import { REAP_SANDBOX_QUEUE, reapFinishedSandboxes, runSandboxReapJob } from "./reap-sandbox.js";
 import { latestConversationRun, resolveFollowUpRun } from "./stage-agent.js";
 import { asPipelineRun, isPipelineRun, type PipelineRun } from "./pipeline-run.js";
 import { describeRunSubject, type RunSubject } from "./run-subject.js";
@@ -488,6 +487,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       source: "sandbox_provision",
       error_kind: sandboxErrorKind(reported),
       ...(err instanceof SandboxProvisionError ? { blame: err.blame, attempts } : {}),
+      ...provisionFailureContext(err),
     });
     const shown =
       err instanceof SandboxProvisionError && err.blame === "provider" ? err.message : describeSandboxError(reported);
@@ -3030,14 +3030,8 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
   await ctx.boss.work<{ featureId?: string; swarmId?: string; swarmTaskId?: string }>(REAP_SANDBOX_QUEUE, { batchSize: 1 }, captureJobErrors(ctx.analytics, REAP_SANDBOX_QUEUE, async (jobs) => {
     // One queue, three kinds of machine. Which id the job carries is
     // what says whose it is: a card's, a swarm's own, or the one a
-    // leaf's worker was given. The leaf is asked first because it is
-    // the narrowest, and a job naming none of them is one nothing can
-    // act on, so it is dropped rather than retried forever.
-    for (const job of jobs) {
-      if (job.data.swarmTaskId) await reapSwarmTaskSandbox(ctx, job.data.swarmTaskId);
-      else if (job.data.swarmId) await reapSwarmSandbox(ctx, job.data.swarmId);
-      else if (job.data.featureId) await reapSandbox(ctx, job.data.featureId);
-    }
+    // leaf's worker was given.
+    for (const job of jobs) await runSandboxReapJob(ctx, job.data);
   }));
   await ctx.boss.work<{ sandboxId: string }>(
     HIBERNATE_SANDBOX_QUEUE,
@@ -3257,7 +3251,13 @@ function describeSandboxError(err: unknown): string {
   if (typeof output !== "string") return base;
   // The tail, because an installer's useful line is its last one and a
   // run record is not the place for a megabyte of progress bars.
-  return `${base}\n${output.trim().split("\n").slice(-20).join("\n")}`;
+  // Without its last line when the message already quotes it, which
+  // is how a script failure names that line without printing it twice.
+  const lines = output.trim().split("\n").slice(-20);
+  const last = lines.at(-1)?.trim();
+  if (last && base.endsWith(last)) lines.pop();
+  if (lines.length === 0) return base;
+  return `${base}\n${lines.join("\n")}`;
 }
 
 function withDockerCursor(event: AgentEvent, cursor: number | undefined): AgentEvent {

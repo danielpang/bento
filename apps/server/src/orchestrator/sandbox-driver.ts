@@ -205,11 +205,15 @@ export async function driverForProvision(
  * A live machine keeps the driver that created it, with nothing to
  * fall back to, including a worker whose swarm was already running on
  * Sprite when the project later names another provider. A worker with
- * no machine of its own follows the swarm's machine, so a swarm does
- * not split across providers: on "auto", a swarm whose planner landed
- * on Modal puts its workers on Modal too. A swarm with no machine yet
- * uses driversForProject, so a project set to Modal starts its swarm
- * on Modal and a project left on the default keeps today's driver.
+ * no machine of its own follows the swarm's machine, so a swarm stays
+ * on one provider while that provider answers: on "auto", a swarm
+ * whose planner landed on Modal puts its workers on Modal too. On
+ * "auto" a worker following a sprite swarm also carries the providers
+ * "auto" would have tried next, so a worker Fly cannot make is made on
+ * Modal rather than failed (see workerDrivers). A swarm with no
+ * machine yet uses driversForProject, so a project set to Modal starts
+ * its swarm on Modal and a project left on the default keeps today's
+ * driver.
  */
 export async function driversForSwarmProvision(
   db: Db,
@@ -228,13 +232,32 @@ export async function driversForSwarmProvision(
       .limit(1);
     if (row) return existingDrivers(ctx.drivers, row);
   }
+  // What the project would choose, read only when the answer depends
+  // on it: a worker following the swarm's machine, or a swarm with no
+  // machine yet. A live row for the swarm's own machine is the whole
+  // answer and pays for no project lookup.
+  const byProject = async (): Promise<ProvisionDrivers> => {
+    const [swarmRow] = await db
+      .select({ projectId: swarms.projectId })
+      .from(swarms)
+      .where(eq(swarms.id, swarm.id))
+      .limit(1);
+    if (!swarmRow) return byDefault;
+    const [project] = await db
+      .select({ sandboxProvider: projects.sandboxProvider, ownerId: projects.ownerId })
+      .from(projects)
+      .where(eq(projects.id, swarmRow.projectId))
+      .limit(1);
+    return project ? driversForProject(ctx, project, actingUserId) : byDefault;
+  };
+
   if (swarm.sandboxId) {
     const [row] = await db
       .select({ provider: sandboxes.provider })
       .from(sandboxes)
       .where(and(eq(sandboxes.id, swarm.sandboxId), ne(sandboxes.status, "destroyed")))
       .limit(1);
-    if (row) return existingDrivers(ctx.drivers, row);
+    if (row) return task ? workerDrivers(ctx, row, await byProject()) : existingDrivers(ctx.drivers, row);
   }
   const [planner] = await db
     .select({ provider: sandboxes.provider })
@@ -244,21 +267,33 @@ export async function driversForSwarmProvision(
     )
     .orderBy(desc(sandboxes.createdAt))
     .limit(1);
-  if (planner) return existingDrivers(ctx.drivers, planner);
+  if (planner) return task ? workerDrivers(ctx, planner, await byProject()) : existingDrivers(ctx.drivers, planner);
 
-  const [swarmRow] = await db
-    .select({ projectId: swarms.projectId })
-    .from(swarms)
-    .where(eq(swarms.id, swarm.id))
-    .limit(1);
-  if (!swarmRow) return byDefault;
-  const [project] = await db
-    .select({ sandboxProvider: projects.sandboxProvider, ownerId: projects.ownerId })
-    .from(projects)
-    .where(eq(projects.id, swarmRow.projectId))
-    .limit(1);
-  if (!project) return byDefault;
-  return driversForProject(ctx, project, actingUserId);
+  return byProject();
+}
+
+/**
+ * The drivers a worker with no machine of its own gets, following the
+ * swarm's.
+ *
+ * The swarm's provider first, so the swarm stays on one provider for
+ * as long as that provider answers. Then, when the project is on
+ * "auto", the providers "auto" would have tried after it: a worker
+ * whose sprite Fly cannot make is made on Modal, the way a card's is,
+ * rather than failed and handed back to the planner. A worker on
+ * another provider than its swarm still lands: the landing path reads
+ * each machine's own row and moves self contained bundles through
+ * this server, which never cared which machine made them. The swarm's
+ * own machine never falls back, because it holds the swarm's branch
+ * and that branch exists nowhere else. A project that named a
+ * provider gets that provider or a failed run, as everywhere else.
+ */
+function workerDrivers(ctx: AppContext, swarmRow: { provider: string }, byProject: ProvisionDrivers): ProvisionDrivers {
+  const first = driverForSandbox(ctx.drivers, swarmRow);
+  if (byProject.selection !== "auto") return { driver: first, fallbacks: [], selection: "existing" };
+  const order = allCandidates(byProject);
+  const at = order.indexOf(first);
+  return { driver: first, fallbacks: at === -1 ? [] : order.slice(at + 1), selection: "existing" };
 }
 
 /**

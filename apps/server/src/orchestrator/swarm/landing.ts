@@ -207,7 +207,20 @@ export async function performLanding(ctx: AppContext, landingId: string): Promis
 
   const landed: string[] = [];
   const problems: { repo: string; outcome: LandFailure }[] = [];
-  const remoteHandles = clone ? await landingSandboxHandles(ctx, swarm.sandboxId, task.id) : null;
+  let remoteHandles: Awaited<ReturnType<typeof landingSandboxHandles>> = null;
+  if (clone) {
+    try {
+      remoteHandles = await landingSandboxHandles(ctx, swarm.sandboxId, task.id);
+    } catch (err) {
+      return finish(
+        ctx,
+        landing,
+        "failed",
+        err instanceof Error ? err.message : "no driver configured on this server",
+        task,
+      );
+    }
+  }
   if (clone && !remoteHandles) {
     return finish(
       ctx,
@@ -217,7 +230,10 @@ export async function performLanding(ctx: AppContext, landingId: string): Promis
       task,
     );
   }
-  if (remoteHandles && (!landingDriver?.exportRepository || !landingDriver.importRepository)) {
+  if (
+    remoteHandles &&
+    (!landingDriver?.exportRepository || !landingDriver.importRepository || !remoteHandles.workerDriver.exportRepository)
+  ) {
     return finish(
       ctx,
       landing,
@@ -239,7 +255,7 @@ export async function performLanding(ctx: AppContext, landingId: string): Promis
      * land read as "already an ancestor" and cost nothing.
      */
     const outcome = remoteHandles
-      ? await landSandboxBranch(landingDriver!, {
+      ? await landSandboxBranch({ swarm: landingDriver!, worker: remoteHandles.workerDriver }, {
           repoName: repo.name,
           baseBranch: repo.defaultBranch,
           swarmBranch,
@@ -329,24 +345,28 @@ async function landingDriverFor(ctx: AppContext, swarmSandboxId: string | null):
   return driverForSandbox(ctx.drivers, row);
 }
 
-/** The two machines whose branches a remote landing reconciles. */
+/**
+ * The two machines whose branches a remote landing reconciles, and
+ * the driver that owns the worker's.
+ *
+ * The two need not share a provider. A worker whose sprite Fly could
+ * not make is made on Modal under a sprite swarm, and what the landing
+ * moves is a self contained bundle out of each machine and one back
+ * into the swarm's, through this server: which machine wrote the
+ * bytes never mattered to git. So the worker's driver is read from
+ * the worker's own row, as the swarm's is from its own, and a landing
+ * used to refuse here was a branch nobody could ever land.
+ */
 async function landingSandboxHandles(
   ctx: AppContext,
   swarmSandboxId: string | null,
   taskId: string,
-): Promise<{ swarm: SandboxHandle; worker: SandboxHandle } | null> {
+): Promise<{ swarm: SandboxHandle; worker: SandboxHandle; workerDriver: SandboxDriver } | null> {
   if (!swarmSandboxId) return null;
   const [swarmSandbox] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, swarmSandboxId)).limit(1);
   const workerRows = await ctx.db.select().from(sandboxes).where(eq(sandboxes.swarmTaskId, taskId));
   const workerSandbox = workerRows.find((row) => row.status !== "destroyed");
-  if (
-    !swarmSandbox ||
-    swarmSandbox.status === "destroyed" ||
-    !workerSandbox ||
-    swarmSandbox.provider !== workerSandbox.provider
-  ) {
-    return null;
-  }
+  if (!swarmSandbox || swarmSandbox.status === "destroyed" || !workerSandbox) return null;
   return {
     swarm: {
       externalId: swarmSandbox.externalId,
@@ -358,6 +378,7 @@ async function landingSandboxHandles(
       provider: workerSandbox.provider,
       workdir: workerSandbox.workdir,
     },
+    workerDriver: driverForSandbox(ctx.drivers, workerSandbox),
   };
 }
 
@@ -365,9 +386,13 @@ async function landingSandboxHandles(
  * Lands one repository whose object stores live in two sandboxes.
  * Export and reconciliation do not move anything. The import is the
  * single compare-and-swap that changes the swarm branch.
+ *
+ * Each export goes through the driver that owns that machine, which
+ * are two drivers when a worker fell back to Modal under a sprite
+ * swarm; the import is always the swarm's.
  */
 async function landSandboxBranch(
-  driver: SandboxDriver,
+  drivers: { swarm: SandboxDriver; worker: SandboxDriver },
   input: {
     repoName: string;
     baseBranch: string;
@@ -378,13 +403,12 @@ async function landSandboxBranch(
     workerHandle: SandboxHandle;
   },
 ): Promise<LandOutcome> {
-  const exportRepository = driver.exportRepository!;
   let swarmBundle;
   let workerBundle;
   try {
     [swarmBundle, workerBundle] = await Promise.all([
-      exportRepository.call(driver, input.swarmHandle, input.repoName, input.baseBranch, { selfContained: true }),
-      exportRepository.call(driver, input.workerHandle, input.repoName, input.baseBranch, { selfContained: true }),
+      drivers.swarm.exportRepository!(input.swarmHandle, input.repoName, input.baseBranch, { selfContained: true }),
+      drivers.worker.exportRepository!(input.workerHandle, input.repoName, input.baseBranch, { selfContained: true }),
     ]);
   } catch (err) {
     return { ok: false, reason: "moved", detail: `could not export the sandbox branches: ${String(err)}` };
@@ -403,7 +427,7 @@ async function landSandboxBranch(
 
   let imported;
   try {
-    imported = await driver.importRepository!(
+    imported = await drivers.swarm.importRepository!(
       input.swarmHandle,
       input.repoName,
       reconciled.bundle,

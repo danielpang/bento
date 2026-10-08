@@ -14,7 +14,12 @@ import { SecretBox } from "../secrets.js";
 import { recordingAnalytics } from "../test-analytics.js";
 import { singleDriver } from "./sandbox-driver.js";
 import { SANDBOX_PROVISIONED_EVENT } from "./sandbox-metrics.js";
-import { SANDBOX_UNAVAILABLE_MESSAGE, SandboxProvisionError, provisionWorkspace } from "./sandbox-provision.js";
+import {
+  SANDBOX_UNAVAILABLE_MESSAGE,
+  SandboxProvisionError,
+  provisionFailureContext,
+  provisionWorkspace,
+} from "./sandbox-provision.js";
 
 /**
  * The "auto" order at the point it matters: provisionWorkspace asking
@@ -352,6 +357,11 @@ test("a failure the driver blames on the project ends the run and keeps the spri
     assert.equal(err.cause, refused);
     assert.match(err.message, /exit code 128/);
     assert.deepEqual(err.describeFailures(), ["sprite checkout (project): provisioning script failed with exit code 128"]);
+    assert.equal(
+      provisionFailureContext(err).failure,
+      "sprite checkout (project): provisioning script failed with exit code 128",
+    );
+    assert.equal(provisionFailureContext(err).stderr, "fatal: repository not found");
     return true;
   });
   assert.deepEqual(asked, ["sprite"], "Modal would refuse the same clone, so it is not asked");

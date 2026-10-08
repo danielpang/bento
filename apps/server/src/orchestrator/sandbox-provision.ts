@@ -408,6 +408,7 @@ export async function provisionWorkspace(
         next_provider: next.provider,
         error_kind: sandboxErrorKind(reason),
         ...(err instanceof ProvisionFailure ? { phase: err.phase, blame: err.blame } : {}),
+        ...provisionFailureContext(err),
         project_id: input.projectId,
         ...("featureId" in input.owner
           ? { feature_id: input.owner.featureId }
@@ -508,6 +509,41 @@ export function provisionFailureCause(err: unknown): unknown {
   if (err instanceof SandboxProvisionError) return provisionFailureCause(err.cause);
   if (err instanceof ModalProvisionLeak || err instanceof ProvisionFailure) return err.cause ?? err;
   return err;
+}
+
+/**
+ * What error tracking can actually store about a provision failure.
+ *
+ * The attempt list is an array, and a captured exception has arrived
+ * without it, so the same lines are also one string. stderr is
+ * whatever the script managed to write. It rides on the error object,
+ * which captureException does not read, and without it a git fatal is
+ * only "exit code 128". A socket that closes first does not come with
+ * a close reason: the Sprites SDK keeps that on the WebSocket event
+ * and emits only its unset exit sentinel.
+ */
+export function provisionFailureContext(err: unknown): Record<string, string> {
+  const cause = provisionFailureCause(err);
+  const clip = (value: unknown): string | undefined => {
+    if (typeof value !== "string") return undefined;
+    const text = value.trim();
+    if (text === "") return undefined;
+    const tail = text.split("\n").slice(-20).join("\n");
+    return tail.length > 2_000 ? tail.slice(-2_000) : tail;
+  };
+  const fields: Record<string, string> = {};
+  const stderr = clip((cause as { stderr?: unknown } | null)?.stderr);
+  const stdout = clip((cause as { stdout?: unknown } | null)?.stdout);
+  if (stderr) fields.stderr = stderr;
+  else if (stdout) fields.stdout = stdout;
+  if (err instanceof SandboxProvisionError) {
+    const lines = err.describeFailures();
+    if (lines.length > 0) fields.failure = lines.join("; ");
+  } else if (err instanceof ProvisionFailure) {
+    const text = (err.message.split("\n")[0] ?? "unknown error").trim();
+    fields.failure = `${err.provider} ${err.phase} (${err.blame}): ${text}`;
+  }
+  return fields;
 }
 
 /** One driver's failed attempt, as the log and error tracking record it. */

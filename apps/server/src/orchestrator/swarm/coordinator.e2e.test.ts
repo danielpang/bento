@@ -19,7 +19,15 @@ import type { AppContext } from "../../context.js";
 import { EventBus, type BoardEvent } from "../../events.js";
 import { loadEnv } from "../../env.js";
 import { SWARM_FULL, type NewRun } from "../start-run.js";
-import { rollUpStatus, swarmStatusFrom, tickAllLiveSwarms, tickSwarm, type SwarmTickDeps } from "./coordinator.js";
+import { SANDBOX_UNAVAILABLE_MESSAGE } from "../sandbox-provision.js";
+import {
+  MAX_SANDBOX_RESTARTS,
+  rollUpStatus,
+  swarmStatusFrom,
+  tickAllLiveSwarms,
+  tickSwarm,
+  type SwarmTickDeps,
+} from "./coordinator.js";
 import { DOCUMENT_ASSEMBLY_FLAG } from "./deliverable.js";
 import { applyRunCharge } from "./ledger.js";
 
@@ -411,6 +419,41 @@ test("the planner is not woken while one is already running", async () => {
   const again = await tickSwarm(ctx, swarm.id, starter());
   assert.equal(again?.plannerRunId, null, "a delivered wake is not delivered twice");
   assert.equal((await read(task.id)).status, "done");
+});
+
+/**
+ * Ending the swarm and destroying its machine are different moments.
+ *
+ * A failed leaf wakes the planner in the same tick that marks the
+ * swarm failed, and that run works in the swarm's own machine. Asking
+ * for the machine then is what made every poll of the reap queue an
+ * error for as long as the planner kept working. The settlement tick,
+ * once that run has finished, is what asks.
+ */
+test("a swarm that ended with an agent still running does not reap its sandbox until that run finishes", async () => {
+  const swarm = await makeSwarm({ status: "running" });
+  await makeTask(swarm.id, { title: "broken", status: "failed", report: "it broke" });
+
+  const ended = await tickSwarm(ctx, swarm.id, starter());
+  assert.equal(ended?.status, "failed", "the failed leaf ends the swarm");
+  assert.ok(ended?.plannerRunId, "and wakes the planner that has to decide what to do");
+  assert.equal(
+    queued.some((job) => job.queue === "sandbox.reap"),
+    false,
+    "the planner is in this machine, so the reap waits",
+  );
+
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.id, ended!.plannerRunId!));
+  queued.length = 0;
+  const idle = await tickSwarm(ctx, swarm.id, starter());
+  assert.equal(idle?.plannerRunId, null, "the wake was already delivered");
+  assert.equal(
+    queued.some(
+      (job) => job.queue === "sandbox.reap" && (job.data as { swarmId?: string }).swarmId === swarm.id,
+    ),
+    true,
+    "once nothing is running, the machine is asked for",
+  );
 });
 
 test("everything waiting for the planner arrives as one wake, not one each", async () => {
@@ -944,6 +987,145 @@ test("a leaf whose worker stopped without reporting fails, rather than waiting f
   assert.equal(row.status, "failed", "nothing else in a swarm notices a worker that simply stopped");
   assert.equal(row.attention, "failed");
   assert.match(String((row.flags as { workerStopped?: string }).workerStopped), /ran out of context/);
+});
+
+/** What a run record says when no provider could make its machine. */
+const NO_MACHINE = `sandbox provisioning failed: ${SANDBOX_UNAVAILABLE_MESSAGE}`;
+
+test("a leaf whose machine could not be made is started again, without waking the planner", async () => {
+  /**
+   * Every worker of one swarm died this way on October 8th, at the
+   * checkout, and each death was a planner turn spent on "try again".
+   * A machine that was never made is not a worker that stopped.
+   */
+  const swarm = await makeSwarm({ status: "running" });
+  const leaf = await makeTask(swarm.id, { title: "no machine", status: "working" });
+  const dead = await runOn(swarm.id, leaf.id, "failed", NO_MACHINE);
+
+  const deps = starter();
+  const result = await tickSwarm(ctx, swarm.id, deps);
+  const row = await read(leaf.id);
+  assert.equal(row.status, "working", "another agent is on it this same tick");
+  assert.ok(row.assignedRunId && row.assignedRunId !== dead.id, "a new run, not the dead one");
+  assert.equal(row.attention, null);
+  assert.equal((row.flags as { sandboxRestarts?: number }).sandboxRestarts, 1);
+  assert.equal(result?.plannerRunId, null, "the planner is not told");
+  assert.equal(deps.calls.filter((call) => call.role === "planner").length, 0);
+  assert.deepEqual(queuedRunIds(), [row.assignedRunId], "and the replacement is queued for the executor");
+  const [restarted] = await db
+    .select()
+    .from(swarmTaskEvents)
+    .where(and(eq(swarmTaskEvents.taskId, leaf.id), eq(swarmTaskEvents.kind, "status_changed")));
+  assert.equal(restarted?.toStatus, "assigned");
+  assert.equal(restarted?.runId, dead.id);
+  assert.equal((restarted?.detail as { reason?: string })?.reason, "sandbox");
+});
+
+test("a leaf whose machine could not be made is handed to the planner once its restarts are spent", async () => {
+  const swarm = await makeSwarm({ status: "running" });
+  const leaf = await makeTask(swarm.id, {
+    title: "still no machine",
+    status: "working",
+    flags: { sandboxRestarts: MAX_SANDBOX_RESTARTS },
+  });
+  await runOn(swarm.id, leaf.id, "failed", NO_MACHINE);
+
+  const deps = starter();
+  const result = await tickSwarm(ctx, swarm.id, deps);
+  const row = await read(leaf.id);
+  assert.equal(row.status, "failed", "a provider down for every try is the planner's to decide about");
+  assert.equal(row.attention, "failed");
+  const stopped = String((row.flags as { workerStopped?: string }).workerStopped);
+  assert.match(stopped, new RegExp(`${MAX_SANDBOX_RESTARTS + 1} times in a row`));
+  assert.match(stopped, /Sandbox failed to provision/);
+  assert.ok(result?.plannerRunId, "and it is told");
+  assert.match(deps.calls.find((call) => call.role === "planner")!.prompt!, /still no machine/);
+  assert.equal(
+    (row.flags as { sandboxRestarts?: number }).sandboxRestarts,
+    undefined,
+    "the count ends with the series, so a leaf the planner queues again gets the policy whole",
+  );
+});
+
+test("a planner is not started again on a swarm that has ended", async () => {
+  for (const status of ["done", "timed_out", "budget_exhausted", "failed"] as const) {
+    const swarm = await makeSwarm({ status });
+    await plannerRun(swarm.id, "failed", { error: NO_MACHINE });
+    const deps = starter();
+    await tickSwarm(ctx, swarm.id, deps);
+    assert.equal(deps.calls.filter((call) => call.role === "planner").length, 0, `${status}: a restart carries no news`);
+  }
+});
+
+test("a worker that stopped after its agent started is not restarted", async () => {
+  const swarm = await makeSwarm({ status: "running" });
+  const leaf = await makeTask(swarm.id, { title: "agent failed", status: "working" });
+  await runOn(swarm.id, leaf.id, "failed", "the agent ran out of context");
+
+  const deps = starter();
+  await tickSwarm(ctx, swarm.id, deps);
+  assert.equal((await read(leaf.id)).status, "failed", "an agent that ran and failed is the planner's, as before");
+  assert.equal(deps.calls.filter((call) => call.role === "worker").length, 0);
+});
+
+/** A planner run the executor finished, as its row reads afterwards. */
+async function plannerRun(
+  swarmId: string,
+  status: (typeof agentRuns.$inferInsert)["status"],
+  overrides: Partial<typeof agentRuns.$inferInsert> = {},
+) {
+  const [run] = await db
+    .insert(agentRuns)
+    .values({ type: "swarm", swarmId, role: "planner", agentProfileId: PROFILE, prompt: "", status, ...overrides })
+    .returning();
+  return run!;
+}
+
+test("a planner whose machine could not be made is started again with the same prompt", async () => {
+  /**
+   * The first planner run after a deploy on October 8th died at the
+   * checkout with its exec socket, and the swarm sat in planning until
+   * a person pressed retry. A wake dies the same way: its news is
+   * latched as told, and nobody would ever tell the planner again.
+   */
+  const planning = await makeSwarm({ status: "planning" });
+  await plannerRun(planning.id, "failed", { error: NO_MACHINE, startedBy: "u1" });
+  let deps = starter();
+  let result = await tickSwarm(ctx, planning.id, deps);
+  assert.ok(result?.plannerRunId, "the first plan is asked for again");
+  const first = deps.calls.find((call) => call.role === "planner");
+  assert.equal(first?.prompt, "", "with the opening prompt the executor builds");
+  assert.equal(first?.startedBy, "u1", "as the person who started the swarm");
+  assert.deepEqual(queuedRunIds(), [result?.plannerRunId]);
+
+  const running = await makeSwarm({ status: "running" });
+  await makeTask(running.id, { title: "reported", status: "working", report: "did it", flags: { plannerToldAt: "2026-10-08T18:01:32.000Z" } });
+  await plannerRun(running.id, "failed", { error: NO_MACHINE, prompt: "the wake that was never heard" });
+  deps = starter();
+  result = await tickSwarm(ctx, running.id, deps);
+  assert.ok(result?.plannerRunId, "the wake is delivered again");
+  const calls = deps.calls.filter((call) => call.role === "planner");
+  assert.equal(calls.length, 1, "once: the restarted run holds any new wake");
+  assert.equal(calls[0]?.prompt, "the wake that was never heard");
+
+  const again = await tickSwarm(ctx, running.id, starter());
+  assert.equal(again?.plannerRunId, null, "a planner that is queued is the active planner");
+});
+
+test("a planner is not started again forever while the provider stays down", async () => {
+  const swarm = await makeSwarm({ status: "planning" });
+  for (let i = 0; i <= MAX_SANDBOX_RESTARTS; i++) {
+    await plannerRun(swarm.id, "failed", { error: NO_MACHINE, queuedAt: new Date(Date.now() - (10 - i) * 60_000) });
+  }
+  const deps = starter();
+  const result = await tickSwarm(ctx, swarm.id, deps);
+  assert.equal(result?.plannerRunId, null, "past the bound the swarm waits for a person, as it did before");
+  assert.equal(deps.calls.length, 0);
+
+  // A planner that ran and failed on its own account is not this case.
+  const stopped = await makeSwarm({ status: "planning" });
+  await plannerRun(stopped.id, "failed", { error: "the agent ran out of context" });
+  assert.equal((await tickSwarm(ctx, stopped.id, starter()))?.plannerRunId, null);
 });
 
 test("a successful worker's final message reaches the planner when it missed report", async () => {

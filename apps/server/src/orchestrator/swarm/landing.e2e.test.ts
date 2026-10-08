@@ -18,7 +18,7 @@ import {
   swarms,
   type Db,
 } from "@bento/db";
-import { LocalProcessDriver, WorktreeManager, type SandboxDriver } from "@bento/sandbox";
+import { LocalProcessDriver, WorktreeManager, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
 import { singleDriver } from "../sandbox-driver.js";
 import type { AppContext } from "../../context.js";
 import { EventBus, type BoardEvent } from "../../events.js";
@@ -473,6 +473,108 @@ test("a deployment whose driver holds the checkouts in sandboxes lands through b
     const retried = await performLanding(ctx, landing.id);
     assert.equal(retried?.status, "landed");
     assert.equal(await git(fx.swarmTree, ["rev-parse", "HEAD"]), after);
+  } finally {
+    ctx.drivers = original;
+  }
+});
+
+test("a worker made on Modal lands onto a swarm on a sprite", async () => {
+  /**
+   * A worker whose sprite Fly could not make falls back to Modal, so
+   * the two machines of one landing can belong to two providers. The
+   * landing used to refuse that pair outright, which made the fallback
+   * a branch nobody could land. Each export goes through the driver
+   * that owns its machine, and the import is the swarm's.
+   */
+  const fx = await swarmWithLeaf("modal-under-sprite");
+  await commitIn(fx.workerTree, fx.task.id, "m.txt", "from modal\n", "add m");
+  const landing = await queueLanding(fx.swarm.id, fx.task.id, fx.branch);
+  const before = await git(fx.swarmTree, ["rev-parse", "HEAD"]);
+
+  const [swarmSandbox] = await db
+    .insert(sandboxes)
+    .values({
+      projectId: PROJECT,
+      swarmId: fx.swarm.id,
+      provider: "sprite",
+      externalId: `sprite-swarm-${fx.swarm.id}`,
+      status: "ready",
+      workdir: "/workspace",
+    })
+    .returning();
+  await db.update(swarms).set({ sandboxId: swarmSandbox!.id }).where(eq(swarms.id, fx.swarm.id));
+  await db.insert(sandboxes).values({
+    projectId: PROJECT,
+    swarmId: fx.swarm.id,
+    swarmTaskId: fx.task.id,
+    provider: "modal",
+    externalId: `modal-worker-${fx.task.id}`,
+    status: "ready",
+    workdir: "/workspace",
+  });
+
+  const exported: string[] = [];
+  const exportFrom = (provider: string, tree: string) =>
+    async function exportRepository(handle: SandboxHandle, _name: string, baseBranch: string) {
+      assert.equal(handle.provider, provider, `the ${provider} driver is asked for its own machine`);
+      exported.push(`${provider}:${handle.externalId}`);
+      const baseSha = await git(tree, ["merge-base", baseBranch, "HEAD"]);
+      const headSha = await git(tree, ["rev-parse", "HEAD"]);
+      const file = path.join(dataDir, `${handle.externalId}.bundle`);
+      await git(tree, ["bundle", "create", file, "HEAD"]);
+      return { baseSha, headSha, data: await readFile(file) };
+    };
+  const spriteDriver = {
+    provider: "sprite",
+    workspace: "clone",
+    exportRepository: exportFrom("sprite", fx.swarmTree),
+    async importRepository(handle: SandboxHandle, _name: string, bundle: { data: Buffer }, options: { branch: string; expectedHeadSha: string }) {
+      assert.equal(handle.provider, "sprite", "the reconciled branch goes back into the swarm's own machine");
+      const tree = fx.swarmTree;
+      assert.equal(await git(tree, ["symbolic-ref", "--short", "HEAD"]), options.branch);
+      if ((await git(tree, ["rev-parse", "HEAD"])) !== options.expectedHeadSha) {
+        return { ok: false as const, reason: "moved" as const, detail: "the branch moved" };
+      }
+      const file = path.join(dataDir, `import-modal-${fx.swarm.id}.bundle`);
+      await writeFile(file, bundle.data);
+      await git(tree, ["fetch", "--quiet", file, "+HEAD:refs/bento/test-landing"]);
+      await git(tree, ["merge", "--ff-only", "refs/bento/test-landing"]);
+      return { ok: true as const, headSha: await git(tree, ["rev-parse", "HEAD"]) };
+    },
+    async *exec() {
+      yield { kind: "exit" as const, exitCode: 0 };
+    },
+    async provision() {
+      throw new Error("unused");
+    },
+    async destroy() {},
+  } as unknown as SandboxDriver;
+  const modalDriver = {
+    provider: "modal",
+    workspace: "clone",
+    exportRepository: exportFrom("modal", fx.workerTree),
+    async importRepository() {
+      throw new Error("a worker's machine is never imported into");
+    },
+    async provision() {
+      throw new Error("unused");
+    },
+    async destroy() {},
+  } as unknown as SandboxDriver;
+
+  const original = ctx.drivers;
+  ctx.drivers = {
+    default: spriteDriver,
+    get: (provider: string) => (provider === "sprite" ? spriteDriver : provider === "modal" ? modalDriver : undefined),
+    selectable: () => ["sprite"],
+  };
+  try {
+    const result = await performLanding(ctx, landing.id);
+    assert.equal(result?.status, "landed", result?.detail ?? "");
+    assert.deepEqual(result?.landed, ["app"]);
+    assert.deepEqual(exported.sort(), [`modal:modal-worker-${fx.task.id}`, `sprite:sprite-swarm-${fx.swarm.id}`]);
+    assert.notEqual(await git(fx.swarmTree, ["rev-parse", "HEAD"]), before);
+    assert.equal(await git(fx.swarmTree, ["show", "HEAD:m.txt"]), "from modal");
   } finally {
     ctx.drivers = original;
   }

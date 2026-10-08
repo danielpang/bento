@@ -7,6 +7,7 @@ import { PassThrough } from "node:stream";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { APIError, FilesystemError, Sprite as SpriteClass, SpriteCommand, type Sprite } from "@fly/sprites";
+import { AGENT_BINARIES, agentToolchainScript } from "./agent-toolchain.js";
 import { LineChannel, ProvisionFailure, collectExec } from "./driver.js";
 import {
   FILESYSTEM_RETRY_DELAYS_MS,
@@ -303,17 +304,19 @@ test("a worker sprite is cut from the swarm branch it was handed, not from the d
    * The swarm's branch becomes a real ref, forced, because a machine
    * provisioned twice finds the old head on it.
    *
-   * By name, never HEAD. The bundle is built from a range, and a
-   * range bundle carries the branch ref alone: asking it for HEAD
-   * fails with "couldn't find remote ref HEAD", which under set -eu
-   * took the checkout down with it. This assertion said HEAD once,
-   * which is how a command git would refuse passed its own test.
+   * The export records HEAD (`git bundle create HEAD ^base`). A bundle
+   * built from a named range records refs/heads/<branch> and has no
+   * HEAD. The script reads whichever the bundle lists. Hardcoding the
+   * branch ref is what git answers with exit 128, "couldn't find
+   * remote ref refs/heads/<branch>", after the seed has already cloned.
    */
-  assert.match(
+  assert.match(commands, /git bundle list-heads '\/tmp\/bento-start-api\.bundle'/);
+  assert.match(commands, /refs\/heads\/swarm\/checkout/);
+  assert.doesNotMatch(
     commands,
-    /git fetch '\/tmp\/bento-start-api\.bundle' \+refs\/heads\/swarm\/checkout:refs\/heads\/swarm\/checkout/,
+    /git fetch '\/tmp\/bento-start-api\.bundle' \+refs\/heads\/swarm\/checkout:/,
+    "a HEAD bundle has no branch ref to fetch by that name",
   );
-  assert.doesNotMatch(commands, /\+HEAD:/, "a bundle built from a range has no HEAD to fetch");
   // And the worker's branch is cut from it.
   assert.match(commands, /git checkout -b 'swarm\/checkout-aaaaaaaa' 'swarm\/checkout'/);
   assert.doesNotMatch(
@@ -673,6 +676,7 @@ test("Sprite provisioning tags each failure with its phase and whose fault it is
   assert.equal(checkout.phase, "checkout");
   assert.equal(checkout.blame, "project");
   assert.match(checkout.stderr ?? "", /not found/);
+  assert.match(checkout.message, /exit code 128: fatal: repository 'https:\/\/github.com\/acme\/api.git\/' not found/);
 
   // The machine could not reach the remote at all: Fly's network, not the repository.
   const noRoute = new SpriteDriver({ token: "token" });
@@ -2383,6 +2387,370 @@ test("Sprite provisioning does not retry a script that exited", async () => {
     },
   );
   assert.equal(toolchainSpawns, 1);
+});
+
+/**
+ * The Sprites SDK starts an exec's exit code at -1 and emits that
+ * sentinel from handleClose when the socket ends without an exit
+ * frame. A provisioning script used to die as "exit code -1". The
+ * process is kept for the disconnect grace, and the retry joins it.
+ */
+test("Sprite provisioning reattaches when the exec socket closes without an exit", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  const spawns: { args: string[]; options?: { sessionId?: string; maxRunAfterDisconnect?: string } }[] = [];
+  const sprite = {
+    spawn(file: string, args: string[] = [], options?: { sessionId?: string; maxRunAfterDisconnect?: string }) {
+      assert.equal(file, "sh");
+      spawns.push({ args, ...(options ? { options } : {}) });
+      const child = fakeChild();
+      const body = args[1] ?? "";
+      queueMicrotask(() => {
+        if (options?.sessionId) {
+          child.stdout.write("tools-present\nbento-toolchain-missing: \n");
+          child.stdout.end();
+          child.stderr.end();
+          child.emit("exit", 0);
+          return;
+        }
+        if (body.includes("\nSTAMPS=")) {
+          child.stderr.write("still installing\n");
+          child.emit("exit", -1);
+          return;
+        }
+        if (body.includes("tools-absent")) child.stdout.write("tools-present\n");
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    async listSessions() {
+      const toolchain = spawns.find((spawn) => (spawn.args[1] ?? "").includes("\nSTAMPS="));
+      if (!toolchain) return [];
+      return [
+        {
+          id: "install-1",
+          command: `sh -c ${toolchain.args[1]}`,
+          workdir: "/",
+          created: new Date(),
+          bytesPerSecond: 0,
+          isActive: true,
+          tty: false,
+        },
+      ];
+    },
+    filesystem() {
+      return { async readdir() { return []; } };
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const pending = driver.provision({
+    projectId: "project",
+    workspaceKey: "feature",
+    hostWorkspacePath: "/unused",
+  });
+  await settle();
+  t.mock.timers.tick(EXEC_HANDSHAKE_RETRY_DELAYS_MS[0]!);
+  await settle();
+  await pending;
+
+  const installs = spawns.filter((spawn) => (spawn.args[1] ?? "").includes("\nSTAMPS=") || spawn.options?.sessionId);
+  assert.equal(installs.length, 2);
+  assert.equal(installs[0]?.options?.maxRunAfterDisconnect, "10m");
+  assert.equal(installs[0]?.options?.sessionId, undefined);
+  assert.equal(installs[1]?.options?.sessionId, "install-1");
+  assert.equal(installs[1]?.options?.maxRunAfterDisconnect, undefined);
+});
+
+/**
+ * The grace keeps the process only while the machine does. When the
+ * session is already gone, the script is started again. The scripts
+ * are written to be run twice: a clone fetches when the checkout is
+ * already there, and an installer leaves once its stamp is present.
+ */
+test("Sprite provisioning starts a script again when the closed socket took the process with it", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  let toolchainSpawns = 0;
+  const sprite = {
+    spawn(_file: string, args: string[]) {
+      const child = fakeChild();
+      const body = args[1] ?? "";
+      queueMicrotask(() => {
+        if (body.includes("\nSTAMPS=")) {
+          toolchainSpawns += 1;
+          if (toolchainSpawns === 1) {
+            child.emit("exit", -1);
+            return;
+          }
+        }
+        if (body.includes("tools-absent")) child.stdout.write("tools-present\n");
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    async listSessions() {
+      return [];
+    },
+    filesystem() {
+      return { async readdir() { return []; } };
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const pending = driver.provision({
+    projectId: "project",
+    workspaceKey: "feature",
+    hostWorkspacePath: "/unused",
+  });
+  await settle();
+  t.mock.timers.tick(EXEC_HANDSHAKE_RETRY_DELAYS_MS[0]!);
+  await settle();
+  await pending;
+  assert.equal(toolchainSpawns, 2);
+});
+
+/**
+ * A listing that fails has not said the process is gone. Starting
+ * another copy of an installer that may still be writing is the race
+ * the attach exists to avoid, so the retry waits and asks again.
+ */
+/**
+ * A reattach can itself be refused at the upgrade. That refusal says
+ * nothing about the process, which the grace is still keeping, so the
+ * next attempt must go on treating a failed listing as "wait" rather
+ * than "start another". The flag that says so used to be cleared by
+ * the refusal.
+ */
+test("Sprite provisioning stays reattach-only after a reattach's own upgrade is refused", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  let toolchainSpawns = 0;
+  let attaches = 0;
+  let listings = 0;
+  const sprite = {
+    spawn(_file: string, args: string[], options?: { sessionId?: string }) {
+      const child = fakeChild();
+      const body = args[1] ?? "";
+      queueMicrotask(() => {
+        if (options?.sessionId) {
+          attaches += 1;
+          child.emit("error", new Error("Received network error or non-101 status code (url: wss://x)"));
+          return;
+        }
+        if (body.includes("\nSTAMPS=")) {
+          toolchainSpawns += 1;
+          child.emit("exit", null); // the socket dropped under the installer
+          return;
+        }
+        if (body.includes("tools-absent")) child.stdout.write("tools-present\n");
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    async listSessions() {
+      if (toolchainSpawns === 0) return [];
+      listings += 1;
+      // Listed once, for the reattach that is then refused. Every
+      // listing after that fails.
+      if (listings > 1) throw new Error("Network error: fetch failed");
+      return [
+        {
+          id: "install-1",
+          command: `sh -c ${agentToolchainScript(AGENT_BINARIES)}`,
+          workdir: "/",
+          created: new Date(),
+          bytesPerSecond: 0,
+          isActive: true,
+          tty: false,
+        },
+      ];
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const pending = driver
+    .provision({ projectId: "project", workspaceKey: "feature", hostWorkspacePath: "/unused" })
+    .then(
+      () => "resolved",
+      (err: Error) => err,
+    );
+  for (const delay of EXEC_HANDSHAKE_RETRY_DELAYS_MS) {
+    await settle();
+    t.mock.timers.tick(delay);
+  }
+  await settle();
+  const result = await pending;
+  assert.ok(result instanceof ProvisionFailure, String(result));
+  assert.equal(attaches, 1, "the kept process was joined once");
+  assert.equal(toolchainSpawns, 1, "and never started a second time while the listing was down");
+});
+
+/**
+ * The run before this one can leave its copy of the script alive: its
+ * socket dropped, the grace kept the clone, and the run failed anyway
+ * after the ladder. A new run on the same machine joins that copy on
+ * its first attempt rather than starting a second one beside it.
+ */
+test("Sprite provisioning joins a copy of the script already running on the machine", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  let toolchainSpawns = 0;
+  let attaches = 0;
+  const sprite = {
+    spawn(_file: string, args: string[], options?: { sessionId?: string }) {
+      const child = fakeChild();
+      const body = args[1] ?? "";
+      queueMicrotask(() => {
+        if (options?.sessionId) {
+          attaches += 1;
+          child.stdout.write("tools-present\nbento-toolchain-missing: \n");
+          child.stdout.end();
+          child.stderr.end();
+          child.emit("exit", 0);
+          return;
+        }
+        if (body.includes("\nSTAMPS=")) toolchainSpawns += 1;
+        if (body.includes("tools-absent")) child.stdout.write("tools-present\n");
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    async listSessions() {
+      // The previous run's installer, still going, and a finished one
+      // the listing still carries, which is not joined.
+      const command = `sh -c ${agentToolchainScript(AGENT_BINARIES)}`;
+      return [
+        { id: "old-done", command, workdir: "/", created: new Date(Date.now() - 600_000), bytesPerSecond: 0, isActive: false, tty: false },
+        { id: "old-live", command, workdir: "/", created: new Date(Date.now() - 120_000), bytesPerSecond: 0, isActive: true, tty: false },
+      ];
+    },
+    filesystem() {
+      return { async readdir() { return []; } };
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  await driver.provision({ projectId: "project", workspaceKey: "feature", hostWorkspacePath: "/unused" });
+  assert.equal(attaches, 1, "the live copy is joined");
+  assert.equal(toolchainSpawns, 0, "and no second installer is started beside it");
+});
+
+test("Sprite provisioning does not start a second script while the session list is down", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  let toolchainSpawns = 0;
+  const sprite = {
+    spawn(_file: string, args: string[]) {
+      const child = fakeChild();
+      const body = args[1] ?? "";
+      queueMicrotask(() => {
+        if (body.includes("\nSTAMPS=")) {
+          toolchainSpawns += 1;
+          child.emit("exit", -1);
+          return;
+        }
+        if (body.includes("tools-absent")) child.stdout.write("tools-present\n");
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    async listSessions() {
+      throw new Error("Network error: fetch failed");
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const pending = driver
+    .provision({ projectId: "project", workspaceKey: "feature", hostWorkspacePath: "/unused" })
+    .then(
+      () => "resolved",
+      (err: Error) => err,
+    );
+  for (const delay of EXEC_HANDSHAKE_RETRY_DELAYS_MS) {
+    await settle();
+    t.mock.timers.tick(delay);
+  }
+  await settle();
+  const result = await pending;
+  assert.ok(result instanceof ProvisionFailure);
+  assert.equal(result.phase, "install");
+  assert.equal(result.blame, "provider");
+  assert.match(result.message, /closed before the provisioning script reported an exit/);
+  assert.match(result.message, /after 4 attempts/);
+  assert.doesNotMatch(result.message, /exit code -1/);
+  assert.equal(toolchainSpawns, 1);
+});
+
+/**
+ * The production failure was this close during checkout. Exit code -1
+ * did not match a transport failure, so the checkout was blamed on the
+ * project: the run ended, Modal was not asked, and the person was told
+ * the script had failed. A missing exit is the provider's socket.
+ */
+test("Sprite provisioning blames a checkout whose socket closed on the provider", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  let cloneSpawns = 0;
+  const sprite = {
+    spawn(_file: string, args: string[], options?: { maxRunAfterDisconnect?: string }) {
+      const child = fakeChild();
+      const body = args[1] ?? "";
+      queueMicrotask(() => {
+        if (body.includes("git clone")) {
+          cloneSpawns += 1;
+          assert.equal(options?.maxRunAfterDisconnect, "10m");
+          child.stderr.write("fatal: early close\n");
+          child.emit("exit", null);
+          return;
+        }
+        if (body.includes("tools-absent")) child.stdout.write("tools-present\n");
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    async listSessions() {
+      return [];
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const pending = driver
+    .provision({
+      projectId: "project",
+      workspaceKey: "feature",
+      hostWorkspacePath: "/unused",
+      repositories: [{ name: "api", cloneUrl: "https://github.com/acme/api.git", branch: "feature/work" }],
+    })
+    .then(
+      () => "resolved",
+      (err: unknown) => err,
+    );
+  for (const delay of EXEC_HANDSHAKE_RETRY_DELAYS_MS) {
+    await settle();
+    t.mock.timers.tick(delay);
+  }
+  await settle();
+  const result = await pending;
+  assert.ok(result instanceof ProvisionFailure);
+  assert.equal(result.phase, "checkout");
+  assert.equal(result.blame, "provider");
+  assert.match(result.message, /closed before the provisioning script reported an exit after 4 attempts/);
+  assert.doesNotMatch(result.message, /exit code/);
+  assert.match(result.stderr ?? "", /early close/);
+  assert.equal(cloneSpawns, 1 + EXEC_HANDSHAKE_RETRY_DELAYS_MS.length);
 });
 
 /**
