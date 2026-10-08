@@ -206,26 +206,60 @@ test("the planner and its failure appear in both views before the plan exists", 
   }
 });
 
+const planFile = (id: string, name: string, size: number) => ({
+  id,
+  position: 0,
+  kind: "file" as const,
+  name,
+  url: null,
+  mime: "text/css",
+  media: "text" as const,
+  size,
+  hasText: true,
+  byteSize: null,
+  contentPath: `/api/swarms/s/plan-sources/${id}/content`,
+});
+
 test("an existing plan lists the file and not how many characters it holds", () => {
   const html = renderToStaticMarkup(createElement(SwarmPlanBrief, {
     planMode: "existing",
-    sources: [{
-      id: "src-1",
-      position: 0,
-      kind: "file",
-      name: "hub.css",
-      url: null,
-      mime: "text/css",
-      media: "text",
-      size: 12463,
-      hasText: true,
-      byteSize: null,
-      contentPath: "/api/swarms/s/plan-sources/src-1/content",
-    }],
+    sources: [planFile("src-1", "hub.css", 12463)],
   }));
   assert.match(html, /hub\.css/);
-  assert.match(html, /File/);
+  assert.match(html, />File</);
   assert.doesNotMatch(html, /characters|12,463/);
+});
+
+test("several plan files share one label, and a download stays its own row", () => {
+  const html = renderToStaticMarkup(createElement(SwarmPlanBrief, {
+    planMode: "existing",
+    sources: [
+      planFile("src-1", "hub.css", 12463),
+      planFile("src-2", "hub.js", 8402),
+      planFile("src-3", "index.html", 3104),
+      {
+        id: "src-4",
+        position: 3,
+        kind: "file",
+        name: "mockup.png",
+        url: null,
+        mime: "image/png",
+        media: "image",
+        size: 0,
+        hasText: false,
+        byteSize: 4096,
+        contentPath: "/api/swarms/s/plan-sources/src-4/content",
+      },
+    ],
+  }));
+  assert.equal(html.match(/>Files</g)?.length, 1, "the label is said once");
+  assert.doesNotMatch(html, />File</);
+  assert.match(html, /hub\.css/);
+  assert.match(html, /hub\.js/);
+  assert.match(html, /index\.html/);
+  assert.match(html, />Image</);
+  assert.match(html, /4 KB/);
+  assert.doesNotMatch(html, /characters|12,463|8,402|3,104/);
 });
 
 test("the outline lists every node, including the ones the tree folded", () => {

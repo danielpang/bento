@@ -10129,11 +10129,37 @@ a.hours-person-name:hover {
   font-size: 12px;
 }
 
-/* Under the goal, a file is a short chip. The name does not stretch
-   the row across the brief. */
-.swarm-brief-plan .swarm-plan-sources li {
+/* Under the goal, a source is a short chip. The name does not stretch
+   the row across the brief. Text files share one chip: the label is
+   said once, and the names are a list inside it. */
+.swarm-brief-plan .swarm-plan-sources > li {
   width: max-content;
   max-width: min(100%, 28rem);
+}
+
+.swarm-brief-plan .swarm-plan-files {
+  align-items: baseline;
+  gap: 10px;
+}
+
+.swarm-brief-plan .swarm-plan-file-names {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.swarm-brief-plan .swarm-plan-sources .swarm-plan-file-names li {
+  display: block;
+  width: auto;
+  max-width: none;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
 }
 
 .swarm-brief-plan .swarm-plan-source-name {

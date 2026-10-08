@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { CompletionRing } from "./CompletionRing.js";
 import { MergeQueue } from "./MergeQueue.js";
 import { OutOfCompute } from "./OutOfCompute.js";
@@ -114,26 +114,7 @@ export function SwarmPlanBrief({
       </p>
       {sources.length > 0 && (
         <ul className="swarm-plan-sources" aria-label="Plan sources">
-          {sources.map((source) => {
-            const size = planSourceSize(source);
-            return (
-              <li key={source.id} data-media={source.media}>
-                {source.media === "image" && (
-                  <img className="swarm-plan-source-thumb" src={source.contentPath} alt="" loading="lazy" />
-                )}
-                <span className="swarm-plan-source-kind">{planSourceLabel(source)}</span>
-                {source.url
-                  ? <a className="swarm-plan-source-name" href={source.url} target="_blank" rel="noreferrer noopener" title={source.url}>{source.name}</a>
-                  : <span className="swarm-plan-source-name" title={source.name}>{source.name}</span>}
-                {size && <span className="muted">{size}</span>}
-                {source.media !== "text" && (
-                  <a className="swarm-plan-source-open" href={source.contentPath} target="_blank" rel="noreferrer noopener">
-                    {source.media === "image" ? "Open" : "Download"}
-                  </a>
-                )}
-              </li>
-            );
-          })}
+          {planSourceRows(sources)}
         </ul>
       )}
     </div>
@@ -153,6 +134,74 @@ export function goalExcerpt(goal: string, max = 120): string {
   const cut = line.slice(0, max);
   const atWord = cut.lastIndexOf(" ");
   return `${(atWord > max / 2 ? cut.slice(0, atWord) : cut).trimEnd()}\u2026`;
+}
+
+/**
+ * A text file handed over as the plan.
+ *
+ * Several of these share one label. A PDF, an image, or a website
+ * stays its own row, because each of those is something to open.
+ */
+function isPlanFile(source: Pick<SwarmPlanSource, "kind" | "media">): boolean {
+  return source.kind === "file" && source.media === "text";
+}
+
+/**
+ * The sources, with every text file gathered under one label.
+ *
+ * The label is said once. Repeating it on each name is a column of
+ * the same word, and the names are the part a person came to read.
+ */
+function planSourceRows(sources: SwarmPlanSource[]): ReactNode[] {
+  const files = sources.filter(isPlanFile);
+  let filesListed = false;
+  const rows: ReactNode[] = [];
+  for (const source of sources) {
+    if (isPlanFile(source)) {
+      if (filesListed) continue;
+      filesListed = true;
+      rows.push(<PlanFiles key="files" files={files} />);
+      continue;
+    }
+    rows.push(<PlanSourceRow key={source.id} source={source} />);
+  }
+  return rows;
+}
+
+function PlanFiles({ files }: { files: SwarmPlanSource[] }) {
+  return (
+    <li className="swarm-plan-files">
+      <span className="swarm-plan-source-kind">{files.length === 1 ? "File" : "Files"}</span>
+      <ul className="swarm-plan-file-names">
+        {files.map((file) => (
+          <li key={file.id}>
+            <span className="swarm-plan-source-name" title={file.name}>{file.name}</span>
+          </li>
+        ))}
+      </ul>
+    </li>
+  );
+}
+
+function PlanSourceRow({ source }: { source: SwarmPlanSource }) {
+  const size = planSourceSize(source);
+  return (
+    <li data-media={source.media}>
+      {source.media === "image" && (
+        <img className="swarm-plan-source-thumb" src={source.contentPath} alt="" loading="lazy" />
+      )}
+      <span className="swarm-plan-source-kind">{planSourceLabel(source)}</span>
+      {source.url
+        ? <a className="swarm-plan-source-name" href={source.url} target="_blank" rel="noreferrer noopener" title={source.url}>{source.name}</a>
+        : <span className="swarm-plan-source-name" title={source.name}>{source.name}</span>}
+      {size && <span className="muted">{size}</span>}
+      {source.media !== "text" && (
+        <a className="swarm-plan-source-open" href={source.contentPath} target="_blank" rel="noreferrer noopener">
+          {source.media === "image" ? "Open" : "Download"}
+        </a>
+      )}
+    </li>
+  );
 }
 
 /** What a source is, as the list labels it. */
