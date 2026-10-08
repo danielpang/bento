@@ -27,10 +27,21 @@ test("a planner's reject reads as the planner sending it back, with its reason",
     kind: "status_changed",
     toStatus: "assigned",
     runId: "p1",
-    detail: { retry: 2, rejection: "Run the full suite.\nThen report again." },
+    detail: { retry: 2, rejection: "Run the full suite.\nThen report again.", rejected: true },
   });
   assert.equal(eventWords(rejected), "Planner sent it back");
   assert.equal(eventNote(rejected), "Run the full suite.");
+
+  // A failed leaf the planner assigns again with a reason writes the same
+  // status change and text, but no report was sent back.
+  const reassigned = event({
+    kind: "status_changed",
+    fromStatus: "failed",
+    toStatus: "assigned",
+    runId: "p1",
+    detail: { retry: 1, rejection: "Use the staging database." },
+  });
+  assert.equal(eventWords(reassigned), "Queued for worker");
 
   // A retry a person pressed carries no reason and is still a plain retry.
   assert.equal(eventWords(event({ kind: "status_changed", toStatus: "assigned", detail: { retry: 1 } })), "Queued for worker");

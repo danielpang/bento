@@ -957,7 +957,7 @@ async function reject(
   }
   if (!task.report) throw new ToolRefusal(`task ${task.id} has not reported yet, so there is nothing to reject.`);
 
-  const retried = await retryLeaf(ctx.db, { task, runId: caller.runId, reason: args.reason });
+  const retried = await retryLeaf(ctx.db, { task, runId: caller.runId, reason: args.reason, rejected: true });
   if ("refused" in retried) throw new ToolRefusal(retried.refused);
   events.push(taskEvent(caller, task.id, "assigned"));
   return `Sent ${task.id} back to be worked again. The next agent on it is told your reason.`;

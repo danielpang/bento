@@ -719,7 +719,7 @@ async function executeDocumentAssembly(ctx: AppContext, taskId: string): Promise
           status: "blocked",
           attention: "failed",
           report: `Document assembly failed: ${reason}`,
-          flags: { ...task.flags, assemblyError: reason, plannerToldAt: undefined, plannerToldBy: undefined },
+          flags: { ...task.flags, assemblyError: reason, plannerToldAt: undefined, plannerToldBy: undefined, plannerRetells: undefined },
           updatedAt: new Date(),
         })
         .where(and(eq(swarmTasks.id, task.id), eq(swarmTasks.status, "working")))
@@ -1301,7 +1301,45 @@ async function restartPlannerAfterSandboxFailure(
   if (started === "busy" || started === "gone" || started === SWARM_FULL || "outOfCompute" in started) {
     return null;
   }
+  /*
+   * The leaves the failed run was told about are now this run's news:
+   * it carries the same prompt. Restamped, or PLANNER_NOT_TOLD would
+   * read them as lost with the failed run and hand them to yet another
+   * planner once this one had already decided. Not a re-tell, so the
+   * count is left alone: this restart has its own bound above.
+   */
+  const moved = await tx
+    .update(swarmTasks)
+    .set({ flags: sql`${swarmTasks.flags} || jsonb_build_object('plannerToldBy', ${started.id}::text)` })
+    .where(and(eq(swarmTasks.swarmId, swarm.id), sql`${swarmTasks.flags} ->> 'plannerToldBy' = ${latest.id}::text`))
+    .returning({ id: swarmTasks.id });
+  for (const task of moved) {
+    await tx.insert(swarmTaskEvents).values([
+      {
+        taskId: task.id,
+        kind: "review_interrupted",
+        runId: latest.id,
+        detail: { note: "The planner reviewing this could not start, so it is being started again." },
+      },
+      {
+        taskId: task.id,
+        kind: "review_requested",
+        runId: started.id,
+        detail: { note: "The planner was started again with this to decide." },
+      },
+    ]);
+  }
   return started.id;
+}
+
+/** Whether a leaf's latch is set: its news went out in some wake. */
+function isTold(flags: Record<string, unknown>): boolean {
+  return typeof flags.plannerToldAt === "string" && flags.plannerToldAt !== "";
+}
+
+function retellCount(flags: Record<string, unknown>): number {
+  const value = flags.plannerRetells;
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
 }
 
 /**
@@ -1405,7 +1443,29 @@ async function deliverPlannerWake(
   );
   const news = reported.filter((task) => !stillWorking.has(task.id));
 
-  if (pending.length === 0 && news.length === 0) return null;
+  /*
+   * News whose planner a person stopped rides along and never wakes a
+   * planner by itself: the stop was a choice, and a planner started on
+   * the stop's own tick would make the planner impossible to stop short
+   * of pausing the swarm. It goes out with the next wake that something
+   * else causes (another leaf, a message from a person).
+   */
+  const toldBy = news
+    .map((task) => (isTold(task.flags) && typeof task.flags.plannerToldBy === "string" ? task.flags.plannerToldBy : null))
+    .filter((id): id is string => id !== null);
+  const stoppedBy = new Set(
+    toldBy.length === 0
+      ? []
+      : (
+          await tx
+            .select({ id: agentRuns.id })
+            .from(agentRuns)
+            .where(and(inArray(agentRuns.id, toldBy), eq(agentRuns.status, "cancelled")))
+        ).map((row) => row.id),
+  );
+  const wakes = news.some((task) => !(isTold(task.flags) && stoppedBy.has(String(task.flags.plannerToldBy))));
+
+  if (pending.length === 0 && !wakes) return null;
 
   const profileId = await plannerProfileFor(tx, swarm);
   // Nothing to run the planner as. The messages stay queued, so this
@@ -1461,7 +1521,8 @@ async function deliverPlannerWake(
      * log reads as what happened: handed over, lost, handed over again.
      */
     const previousReviewer = typeof task.flags.plannerToldBy === "string" ? task.flags.plannerToldBy : null;
-    if (previousReviewer && typeof task.flags.plannerToldAt === "string" && task.flags.plannerToldAt !== "") {
+    const retold = previousReviewer !== null && isTold(task.flags);
+    if (retold) {
       await tx.insert(swarmTaskEvents).values({
         taskId: task.id,
         kind: "review_interrupted",
@@ -1474,7 +1535,16 @@ async function deliverPlannerWake(
       // Which run was told, as well as when: PLANNER_NOT_TOLD reads a
       // leaf as not told again once that run failed or was cancelled,
       // because a planner that never finished its turn never read this.
-      .set({ flags: { ...task.flags, plannerToldAt: now.toISOString(), plannerToldBy: started.id } })
+      // A re-tell is counted, so the same news is lost and handed over
+      // at most MAX_PLANNER_RETELLS times (see PLANNER_NOT_TOLD).
+      .set({
+        flags: {
+          ...task.flags,
+          plannerToldAt: now.toISOString(),
+          plannerToldBy: started.id,
+          ...(retold ? { plannerRetells: retellCount(task.flags) + 1 } : {}),
+        },
+      })
       .where(eq(swarmTasks.id, task.id));
     /*
      * And the handover itself, on the node's own log. Before this the

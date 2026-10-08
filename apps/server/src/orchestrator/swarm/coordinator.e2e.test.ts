@@ -30,6 +30,7 @@ import {
 } from "./coordinator.js";
 import { DOCUMENT_ASSEMBLY_FLAG } from "./deliverable.js";
 import { applyRunCharge } from "./ledger.js";
+import { MAX_PLANNER_RETELLS } from "./planner-news.js";
 
 /**
  * The coordinator, against a real database and a stubbed run starter.
@@ -1275,6 +1276,91 @@ test("a report handed to a planner that never finished its turn is handed to the
   await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.id, second!.plannerRunId!));
   const afterSuccess = await tickSwarm(ctx, swarm.id, starter());
   assert.equal(afterSuccess?.plannerRunId, null, "told once per planner that finished");
+});
+
+test("lost news is handed over at most MAX_PLANNER_RETELLS times", async () => {
+  /**
+   * A planner that fails every time (a refused key, a provider that
+   * stays down) settles into a tick that would read its leaves as not
+   * told again. Unbounded, that is a billed planner per tick, forever.
+   */
+  const swarm = await makeSwarm();
+  const leaf = await makeTask(swarm.id, { title: "reported", status: "working", report: "r" });
+
+  const planners: string[] = [];
+  for (let attempt = 0; attempt <= MAX_PLANNER_RETELLS; attempt++) {
+    const result = await tickSwarm(ctx, swarm.id, starter());
+    assert.ok(result?.plannerRunId, `handover ${attempt + 1} wakes a planner`);
+    planners.push(result.plannerRunId);
+    await db.update(agentRuns).set({ status: "failed", error: "auth failed" }).where(eq(agentRuns.id, result.plannerRunId));
+  }
+  assert.equal((await read(leaf.id)).flags.plannerRetells, MAX_PLANNER_RETELLS);
+
+  const exhausted = await tickSwarm(ctx, swarm.id, starter());
+  assert.equal(exhausted?.plannerRunId, null, "past the bound the leaf waits for a person");
+  assert.equal(new Set(planners).size, MAX_PLANNER_RETELLS + 1);
+});
+
+test("a stopped planner's news waits for the next wake instead of starting one", async () => {
+  /**
+   * A person who stops a planner chose to. A planner started on the
+   * stop's own tick would make it impossible to stop; the news is not
+   * lost either, it goes out with whatever wakes the planner next.
+   */
+  const swarm = await makeSwarm();
+  const leaf = await makeTask(swarm.id, { title: "reported", status: "working", report: "commit aaa" });
+  const first = await tickSwarm(ctx, swarm.id, starter());
+  assert.ok(first?.plannerRunId);
+  await db.update(agentRuns).set({ status: "cancelled" }).where(eq(agentRuns.id, first.plannerRunId));
+
+  const afterStop = await tickSwarm(ctx, swarm.id, starter());
+  assert.equal(afterStop?.plannerRunId, null, "stopping the planner does not start another");
+
+  await makeTask(swarm.id, { title: "second", status: "working", report: "commit bbb" });
+  const deps = starter();
+  const next = await tickSwarm(ctx, swarm.id, deps);
+  assert.ok(next?.plannerRunId, "fresh news wakes the planner");
+  const wake = deps.calls.find((call) => call.role === "planner");
+  assert.match(wake!.prompt!, /commit bbb/);
+  assert.match(wake!.prompt!, /commit aaa/, "and the stopped planner's news rides along");
+  assert.equal((await read(leaf.id)).flags.plannerToldBy, next.plannerRunId);
+});
+
+test("a planner restarted after its machine failed takes over the leaves it was told about", async () => {
+  /**
+   * The restart reruns the failed run's prompt, so its leaves are this
+   * run's news. Left pointing at the failed run, they would be handed
+   * to a third planner after this one had already decided.
+   */
+  const swarm = await makeSwarm();
+  const [dead] = await db
+    .insert(agentRuns)
+    .values({
+      type: "swarm",
+      swarmId: swarm.id,
+      role: "planner",
+      agentProfileId: PROFILE,
+      prompt: "news about the leaf",
+      status: "failed",
+      error: NO_MACHINE,
+    })
+    .returning();
+  const leaf = await makeTask(swarm.id, {
+    title: "reported",
+    status: "working",
+    report: "r",
+    flags: { plannerToldAt: "2026-01-01T00:00:00.000Z", plannerToldBy: dead!.id },
+  });
+
+  const restarted = await tickSwarm(ctx, swarm.id, starter());
+  assert.ok(restarted?.plannerRunId && restarted.plannerRunId !== dead!.id);
+  const row = await read(leaf.id);
+  assert.equal(row.flags.plannerToldBy, restarted.plannerRunId, "the leaf now names the restarted run");
+  assert.equal(row.flags.plannerRetells, undefined, "a restart is not a re-tell");
+
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.id, restarted.plannerRunId));
+  const after = await tickSwarm(ctx, swarm.id, starter());
+  assert.equal(after?.plannerRunId, null, "nobody is told a second time");
 });
 
 test("a leaf already accepted or marked done is not handed to a planner again", async () => {

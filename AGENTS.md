@@ -345,7 +345,13 @@ A leaf's report or failure is handed to the planner once, latched by
 the planner run it went to, and `PLANNER_NOT_TOLD` in
 `orchestrator/swarm/planner-news.ts` reads a leaf as not told again
 once that run failed or was cancelled, unless the leaf was accepted,
-marked done, or landed meanwhile. Before this, a planner that was
+marked done, or landed meanwhile. At most `MAX_PLANNER_RETELLS` times
+per piece of news, counted as `plannerRetells` and cleared with the
+latch, so a planner that fails every time is not woken forever. A
+cancelled planner's news never starts a planner by itself (a person
+who stopped it chose to): it rides along with the next wake. A planner
+restarted after a sandbox failure reruns the same prompt, so it takes
+over the leaves the failed run was told about. Before this, a planner that was
 handed a report and then died (stranded, restarted, stopped) left the
 leaf "working" with its report forever: every later tick read it as
 told, and the swarm never moved. The rule lives in the filter, not in
@@ -359,12 +365,20 @@ planner rather than a worker nobody is looking at.
 A server run whose handler hangs in its sandbox before the agent says
 anything is closed by `reapStalledRuns` in `run-executor.ts`, on the
 existing `runner.reap` schedule, after `STALLED_RUN_MIN` minutes with
-no transcript line. Nothing else ends it: pg-boss expires the
+no transcript line. It closes them with `SANDBOX_STALLED_AGENT_PREFIX`,
+which is on the unbilled list, so the run is not billed and the
+coordinator restarts it like any run whose sandbox failed first. A
+handler that comes back after its run was closed stops at the compare
+and set that moves the run to running, just before the agent is
+exec'd. Nothing else ends it: pg-boss expires the
 `run.execute` job after fifteen minutes but cannot stop the promise,
 and the retry's early return on a run that is not queued is what stops
 a long agent from being started twice, so it must stay a no-op. Only
-runs whose agent never produced an event are reaped; an agent that
-started and went quiet is usually running a long command.
+runs whose agent never produced an event are reaped (the executor's
+own system lines and the prompt it writes as a user line do not
+count); an agent that started and went quiet is usually running a long
+command. A text-mode agent (dsh) says nothing until it exits, so once
+`agentStartedAt` is stamped (as it is exec'd) it is never reaped.
 
 ## Queue workers poll slowly on purpose
 

@@ -594,9 +594,10 @@ export function eventWords(event: SwarmTaskEvent): string {
     case "assigned":
       return "Worker started";
     case "status_changed":
-      // A retry carrying a reason with a run on it is the planner's
-      // reject: the reason is what it told the next worker.
-      if (event.toStatus === "assigned" && typeof event.detail?.rejection === "string" && event.runId) {
+      // The planner's reject says so on the event. A failed leaf the
+      // planner assigns again with a reason writes the same status
+      // change and rejection text, and is not a report sent back.
+      if (event.toStatus === "assigned" && event.detail?.rejected === true) {
         return "Planner sent it back";
       }
       if (event.toStatus === "assigned") return "Queued for worker";

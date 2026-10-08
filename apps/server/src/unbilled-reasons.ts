@@ -29,6 +29,12 @@ export type UnbilledReason = {
  */
 export const SANDBOX_REFUSED_AGENT_PREFIX = "The sandbox did not accept the command that starts the agent";
 export const SANDBOX_GONE_AGENT_PREFIX = "The sandbox for this run no longer exists";
+/**
+ * How a run record opens when its sandbox stopped answering before the
+ * agent was launched, and reapStalledRuns closed it. Written by the
+ * reaper and read by the rule below, like the two above.
+ */
+export const SANDBOX_STALLED_AGENT_PREFIX = "The sandbox stopped responding before the agent started";
 
 export const UNBILLED_REASONS: readonly UnbilledReason[] = [
   {
@@ -66,6 +72,11 @@ export const UNBILLED_REASONS: readonly UnbilledReason[] = [
     id: "sandbox-gone",
     summary: "The sandbox was gone when the agent was to start, so no agent ran.",
     match: { kind: "prefix", text: SANDBOX_GONE_AGENT_PREFIX },
+  },
+  {
+    id: "sandbox-stalled",
+    summary: "The sandbox stopped answering before the agent was launched, so no agent ran.",
+    match: { kind: "prefix", text: SANDBOX_STALLED_AGENT_PREFIX },
   },
 ];
 

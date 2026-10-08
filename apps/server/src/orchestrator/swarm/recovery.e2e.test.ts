@@ -19,6 +19,7 @@ import type { AppContext } from "../../context.js";
 import { EventBus, type BoardEvent } from "../../events.js";
 import { loadEnv } from "../../env.js";
 import { reapStalledRuns, recoverInterruptedRuns } from "../run-executor.js";
+import { unbilledReason } from "../../unbilled-reasons.js";
 import {
   enqueueSwarmTick,
   ensureSwarmTickWorker,
@@ -180,6 +181,8 @@ async function stalledRun(
   swarmId: string,
   minutesAgo: number,
   lines: { minutesAgo: number; payload: Record<string, unknown>; type?: string }[],
+  agentProfileId: string = PROFILE,
+  agentStartedMinutesAgo?: number,
 ) {
   const [run] = await db
     .insert(agentRuns)
@@ -187,11 +190,14 @@ async function stalledRun(
       type: "swarm",
       swarmId,
       role: "planner",
-      agentProfileId: PROFILE,
+      agentProfileId,
       prompt: "",
       status: "running",
       executor: "server",
       startedAt: new Date(Date.now() - minutesAgo * 60_000),
+      ...(agentStartedMinutesAgo !== undefined
+        ? { agentStartedAt: new Date(Date.now() - agentStartedMinutesAgo * 60_000) }
+        : {}),
     })
     .returning();
   let seq = 0;
@@ -232,7 +238,8 @@ test("a run that stalled before its agent started is closed, and its swarm is to
   assert.ok(controller.signal.aborted, "the waiting handler is told to stop, so it cannot start an agent later");
   const [row] = await db.select().from(agentRuns).where(eq(agentRuns.id, stalled.id));
   assert.equal(row!.status, "failed");
-  assert.equal(row!.error, "the agent never started in its sandbox");
+  assert.match(row!.error!, /^The sandbox stopped responding before the agent started/);
+  assert.equal(unbilledReason(row!.error)?.id, "sandbox-stalled", "and is not billed, so the coordinator restarts it");
   const lines = await db.select().from(runEvents).where(eq(runEvents.runId, stalled.id));
   assert.match(
     (lines.at(-1)!.payload as { text: string }).text,
@@ -265,6 +272,47 @@ test("a run whose agent has spoken, or that is not yet stalled, is left alone", 
     const [row] = await db.select().from(agentRuns).where(eq(agentRuns.id, run.id));
     assert.equal(row!.status, "running");
   }
+});
+
+test("a text-mode agent that was launched is working, and a person's prompt is not the agent speaking", async () => {
+  /**
+   * dsh prints nothing until it exits, so its launch line is the last
+   * line for as long as it works; agentStartedAt says it was exec'd. And the executor opens a stage run's
+   * transcript with the person's prompt as a user line, which says
+   * nothing about whether the agent ever started.
+   */
+  const DSH = "33333333-3333-3333-3333-333333333333";
+  await pool.query(
+    `insert into agent_profiles (id,owner_id,organization_id,name,cli,model) values ($1,'u1',null,'D','dsh','deepseek') on conflict do nothing`,
+    [DSH],
+  );
+  const swarm = await makeSwarm();
+  const working = await stalledRun(
+    swarm.id,
+    60,
+    [
+      { minutesAgo: 58, payload: system("Repository bento is ready on branch swarm/x.") },
+      { minutesAgo: 57, payload: system("Starting dsh in the sandbox.") },
+    ],
+    DSH,
+    57,
+  );
+  const neverLaunched = await stalledRun(
+    swarm.id,
+    60,
+    [{ minutesAgo: 58, payload: system("Repository bento is ready on branch swarm/x.") }],
+    DSH,
+  );
+  const prompted = await stalledRun(swarm.id, 60, [
+    { minutesAgo: 59, payload: { type: "message", role: "user", text: "Fix the login page" } },
+    { minutesAgo: 58, payload: system("Starting a Modal sandbox") },
+  ]);
+
+  const closed = await reapStalledRuns(ctx);
+
+  assert.deepEqual(new Set(closed), new Set([neverLaunched.id, prompted.id]));
+  const [row] = await db.select().from(agentRuns).where(eq(agentRuns.id, working.id));
+  assert.equal(row!.status, "running", "the launched dsh agent keeps working");
 });
 
 test("planner and worker runs reattach with only their missing Docker output", { timeout: 30_000 }, async () => {
