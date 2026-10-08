@@ -53,6 +53,21 @@ test(
       assert.equal(version.exitCode, 0, version.stderr);
       assert.ok(version.stdout.trim().length > 0);
 
+      // A command that reads stdin to its end, the shape every file
+      // written through writeSandboxFiles takes. EOF has to arrive after
+      // the bytes, at their offset: sent at offset 0 it was dropped, and
+      // the command waited for input until the timeout killed it.
+      const fed = await collectExec(
+        driver.exec(handle, ["sh", "-c", "cat; echo done"], {
+          timeoutMs: 60_000,
+          stdin: (async function* () {
+            yield "from-stdin";
+          })(),
+        }),
+      );
+      assert.equal(fed.exitCode, 0, fed.stderr);
+      assert.equal(fed.stdout, "from-stdin\ndone\n");
+
       let release: (() => void) | undefined;
       const seen = new Promise<void>((resolve) => {
         release = resolve;
