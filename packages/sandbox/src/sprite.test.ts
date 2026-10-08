@@ -303,17 +303,19 @@ test("a worker sprite is cut from the swarm branch it was handed, not from the d
    * The swarm's branch becomes a real ref, forced, because a machine
    * provisioned twice finds the old head on it.
    *
-   * By name, never HEAD. The bundle is built from a range, and a
-   * range bundle carries the branch ref alone: asking it for HEAD
-   * fails with "couldn't find remote ref HEAD", which under set -eu
-   * took the checkout down with it. This assertion said HEAD once,
-   * which is how a command git would refuse passed its own test.
+   * The export records HEAD (`git bundle create HEAD ^base`). A bundle
+   * built from a named range records refs/heads/<branch> and has no
+   * HEAD. The script reads whichever the bundle lists. Hardcoding the
+   * branch ref is what git answers with exit 128, "couldn't find
+   * remote ref refs/heads/<branch>", after the seed has already cloned.
    */
-  assert.match(
+  assert.match(commands, /git bundle list-heads '\/tmp\/bento-start-api\.bundle'/);
+  assert.match(commands, /refs\/heads\/swarm\/checkout/);
+  assert.doesNotMatch(
     commands,
-    /git fetch '\/tmp\/bento-start-api\.bundle' \+refs\/heads\/swarm\/checkout:refs\/heads\/swarm\/checkout/,
+    /git fetch '\/tmp\/bento-start-api\.bundle' \+refs\/heads\/swarm\/checkout:/,
+    "a HEAD bundle has no branch ref to fetch by that name",
   );
-  assert.doesNotMatch(commands, /\+HEAD:/, "a bundle built from a range has no HEAD to fetch");
   // And the worker's branch is cut from it.
   assert.match(commands, /git checkout -b 'swarm\/checkout-aaaaaaaa' 'swarm\/checkout'/);
   assert.doesNotMatch(
@@ -673,6 +675,7 @@ test("Sprite provisioning tags each failure with its phase and whose fault it is
   assert.equal(checkout.phase, "checkout");
   assert.equal(checkout.blame, "project");
   assert.match(checkout.stderr ?? "", /not found/);
+  assert.match(checkout.message, /exit code 128: fatal: repository 'https:\/\/github.com\/acme\/api.git\/' not found/);
 
   // The machine could not reach the remote at all: Fly's network, not the repository.
   const noRoute = new SpriteDriver({ token: "token" });
