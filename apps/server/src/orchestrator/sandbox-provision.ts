@@ -512,13 +512,15 @@ export function provisionFailureCause(err: unknown): unknown {
 }
 
 /**
- * Strings error tracking can store about a provision failure.
+ * What error tracking can actually store about a provision failure.
  *
  * The attempt list is an array, and a captured exception has arrived
- * without it, so the same lines are also one string. stderr is the
- * script's own output. It rides on the error object, which
- * captureException does not read, and without it a git fatal is only
- * "exit code 128".
+ * without it, so the same lines are also one string. stderr is
+ * whatever the script managed to write. It rides on the error object,
+ * which captureException does not read, and without it a git fatal is
+ * only "exit code 128". A socket that closes first does not come with
+ * a close reason: the Sprites SDK keeps that on the WebSocket event
+ * and emits only its unset exit sentinel.
  */
 export function provisionFailureContext(err: unknown): Record<string, string> {
   const cause = provisionFailureCause(err);

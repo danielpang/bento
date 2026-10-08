@@ -67,6 +67,14 @@ export const UNBILLED_REASONS: readonly UnbilledReason[] = [
     summary: "The sandbox was gone when the agent was to start, so no agent ran.",
     match: { kind: "prefix", text: SANDBOX_GONE_AGENT_PREFIX },
   },
+  {
+    id: "sprite-exec-closed",
+    summary: "The Sprite exec connection closed before the provisioning script reported an exit.",
+    match: {
+      kind: "prefix",
+      text: "sandbox provisioning failed: the connection to the sandbox closed before the provisioning script reported an exit",
+    },
+  },
 ];
 
 type CompiledReason = {
