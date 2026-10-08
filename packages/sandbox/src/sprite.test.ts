@@ -3602,6 +3602,9 @@ test("Sprite exec stages a command that does not fit the exec URL in a launcher"
   assert.equal(writes[0]?.options?.mode, 0o600);
   const script = writes[0]?.data ?? "";
   assert.match(script, /^#!\/bin\/sh\n/);
+  // It removes itself first, so a run that ends under a reattach, or
+  // under no server at all, leaves no credentials on the disk.
+  assert.ok(script.includes('\nrm -f -- "$0"\n'), script);
   assert.ok(script.includes("export IS_SANDBOX='1'\n"), "IS_SANDBOX still reaches the agent");
   assert.ok(script.includes("export OPENAI_API_KEY='sk-test'\n"));
   assert.ok(script.includes("export NOTE='it'\\''s a '\\''quoted'\\''\nvalue'\n"), script);
@@ -3613,9 +3616,129 @@ test("Sprite exec stages a command that does not fit the exec URL in a launcher"
   assert.equal(spawns[0]?.options?.env, undefined);
   assert.equal(spawns[0]?.options?.cwd, "/workspace/bento");
   assert.equal(spawns[0]?.options?.maxRunAfterDisconnect, "10m");
-  // And is gone once the command is over.
+  // And is swept once the command is over, for the launcher a sandbox
+  // never ran (one that ran removed itself).
   await settle();
   assert.deepEqual(removed, ["/tmp/bento-exec-run-1.sh"]);
+});
+
+/**
+ * A launcher the sprite would not take is a sandbox that never ran the
+ * command, and it ends the way a refused upgrade does: in the stream,
+ * so the executor classifies and bills both the same. A thrown error
+ * used to make a dead sprite billable only when the prompt was long.
+ */
+test("Sprite exec reports a launcher the sandbox would not take as a command that never started", async () => {
+  const prompt = "x".repeat(EXEC_URL_MAX_BYTES);
+  const spawns: string[] = [];
+  const make = (writeFile: () => Promise<void>) => {
+    const sprite = {
+      spawn(file: string) {
+        spawns.push(file);
+        return fakeChild();
+      },
+      async listSessions() {
+        return [];
+      },
+      filesystem() {
+        return { writeFile, async rm() {} };
+      },
+    };
+    const driver = new SpriteDriver({ token: "token" });
+    stubClient(driver, sprite);
+    return driver;
+  };
+
+  const refused = await collectExec(
+    make(async () => {
+      throw new Error("Failed to write file: permission denied (url: wss://api.sprites.dev/v1/sprites/x/exec?env=KEY%3Dsecret)");
+    }).exec({ externalId: "sprite", provider: "sprite", workdir: "/workspace" }, ["claude", "-p", prompt], { env: { KEY: "secret" } }),
+  );
+  assert.equal(refused.exitCode, -1);
+  assert.match(refused.stderr, /could not take the command, so it was not started: Failed to write file: permission denied/);
+  assert.doesNotMatch(refused.stderr, /secret|wss:/);
+  assert.equal(sandboxNeverStartedCommand(refused.stderr), "refused");
+
+  const gone = await collectExec(
+    make(async () => {
+      throw new Error("sprite not found");
+    }).exec({ externalId: "bento-x", provider: "sprite", workdir: "/workspace" }, ["claude", "-p", prompt]),
+  );
+  assert.equal(gone.exitCode, -1);
+  assert.match(gone.stderr, /the cloud sandbox bento-x was not found, so the command was not started/);
+  assert.equal(sandboxNeverStartedCommand(gone.stderr), "gone");
+  assert.deepEqual(spawns, [], "nothing is spawned without its launcher");
+});
+
+/**
+ * A refused upgrade whose session listing then shows the command did
+ * start is a running process, whatever its attach then does. Before,
+ * an attach that failed for a reason the handshake ladder does not
+ * retry ended the run as "never started": the executor said the agent
+ * never ran and did not bill it, while the agent went on committing
+ * in the sprite. It is the reattach ladder's case.
+ */
+test("Sprite exec does not call a started command refused when its attach fails", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  const spawns: { options?: { sessionId?: string } }[] = [];
+  const attached = fakeChild();
+  const sprite = {
+    spawn(_file: string, _args: string[] = [], options?: { sessionId?: string }) {
+      spawns.push(options ? { options } : {});
+      if (spawns.length === 1) {
+        const started = fakeChild();
+        queueMicrotask(() =>
+          started.emit("error", new Error("WebSocket error: Received network error or non-101 status code. (url: wss://x)")),
+        );
+        return started;
+      }
+      if (spawns.length === 2) {
+        // The attach the handshake retry makes: it never opens.
+        return fakeChild();
+      }
+      queueMicrotask(() => attached.emit("spawn"));
+      return attached;
+    },
+    async listSessions() {
+      return [
+        {
+          id: "sess-started",
+          command: "claude -p do the task",
+          workdir: "/workspace",
+          created: new Date(),
+          bytesPerSecond: 0,
+          isActive: true,
+          tty: false,
+        },
+      ];
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const pending = collectExec(
+    driver.exec({ externalId: "sprite", provider: "sprite", workdir: "/workspace" }, ["claude", "-p", "do the task"]),
+  );
+  await settle();
+  t.mock.timers.tick(EXEC_HANDSHAKE_RETRY_DELAYS_MS[0]!);
+  await settle();
+  // The handshake retry's attach sits connecting until its deadline.
+  t.mock.timers.tick(30_000);
+  for (let i = 0; i < 50 && spawns.length < 3; i++) {
+    await settle();
+    t.mock.timers.tick(1_000);
+  }
+  assert.equal(spawns.length, 3, "the reattach ladder should have tried the session");
+  assert.equal(spawns[2]?.options?.sessionId, "sess-started");
+  await settle();
+  attached.stdout.write('{"type":"result"}\n');
+  attached.emit("exit", 0);
+  const result = await pending;
+
+  assert.equal(result.exitCode, 0);
+  assert.match(result.stderr, /the command is running but its connection could not be opened \(attach timed out\), reattaching/);
+  assert.match(result.stderr, /reattached to the running command/);
+  assert.equal(sandboxNeverStartedCommand(result.stderr), null);
 });
 
 test("Sprite exec reattaches to a staged command by its launcher's command line", async () => {
@@ -3735,6 +3858,9 @@ test("a command that fits the exec URL rides it unchanged", () => {
   const html = "<p>".repeat(EXEC_URL_MAX_BYTES / 6);
   assert.ok(execUrlBytes("codex", ["exec", html], {}) > EXEC_URL_MAX_BYTES);
   assert.ok(execUrlBytes("codex", ["exec", "a".repeat(EXEC_URL_MAX_BYTES / 2)], {}) < EXEC_URL_MAX_BYTES);
+  // The directory counts, with the workspace standing in when the
+  // caller leaves it out, the way the spawn fills it in.
+  assert.ok(execUrlBytes("sh", ["-c", "true"], {}, "/workspace/" + "d".repeat(EXEC_URL_MAX_BYTES)) > EXEC_URL_MAX_BYTES);
   // The environment counts too: keys ride the same URL as the prompt.
   const staged = planExecLaunch(["codex", "exec", "short"], {
     env: { BIG: "v".repeat(EXEC_URL_MAX_BYTES) },
@@ -3752,6 +3878,7 @@ test("a launcher exports every value intact and refuses a name no shell can", ()
     [
       "#!/bin/sh",
       "# Written by Bento for one command that did not fit the exec URL.",
+      'rm -f -- "$0"',
       "export A='x'\\''y'",
       "export B=''",
       "exec 'claude' '-p' 'it'\\''s\nmulti line'",
@@ -3761,18 +3888,26 @@ test("a launcher exports every value intact and refuses a name no shell can", ()
   assert.throws(() => launcherScript("claude", [], { "BAD-NAME": "x" }), /not a name a shell can export/);
 });
 
-test("the driver's words for a command that never started are recognizable", () => {
-  assert.ok(
+test("the driver's words for a command that never started are recognizable, by kind", () => {
+  assert.equal(
     sandboxNeverStartedCommand(
       "no terminal event (exit code -1): the sandbox did not accept the exec connection, retrying Error: WebSocket error: Received network error or non-101 status code. (url: [sandbox exec url]) the sandbox did not accept the exec connection, and it stayed that way through the retries",
     ),
+    "refused",
   );
-  assert.ok(sandboxNeverStartedCommand("the sandbox did not accept the exec connection: attach timed out"));
-  assert.ok(
+  assert.equal(sandboxNeverStartedCommand("the sandbox did not accept the exec connection: Network error: fetch failed"), "refused");
+  assert.equal(sandboxNeverStartedCommand("the sandbox could not take the command, so it was not started: disk full"), "refused");
+  assert.equal(
     sandboxNeverStartedCommand("the cloud sandbox bento-x was not found, so the command was not started. Start the run again."),
+    "gone",
   );
-  // A refused upgrade that was then accepted is a retry, not a failure.
-  assert.equal(sandboxNeverStartedCommand("the sandbox did not accept the exec connection, retrying"), false);
-  assert.equal(sandboxNeverStartedCommand("the connection to the sandbox dropped, reattaching to the running command"), false);
-  assert.equal(sandboxNeverStartedCommand("exit code 1"), false);
+  // A refused upgrade that was then accepted is a retry, not a failure,
+  // and a started command whose connection fails is a reattach.
+  assert.equal(sandboxNeverStartedCommand("the sandbox did not accept the exec connection, retrying"), null);
+  assert.equal(sandboxNeverStartedCommand("the connection to the sandbox dropped, reattaching to the running command"), null);
+  assert.equal(
+    sandboxNeverStartedCommand("the command is running but its connection could not be opened (attach timed out), reattaching"),
+    null,
+  );
+  assert.equal(sandboxNeverStartedCommand("exit code 1"), null);
 });

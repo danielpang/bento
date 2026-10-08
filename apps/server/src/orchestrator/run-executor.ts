@@ -48,13 +48,14 @@ import {
   repositoryPathIn,
   sandboxErrorKind,
   sandboxNeverStartedCommand,
+  type ExecChunk,
   type PreparedRepository,
   type SandboxDriver,
   type SandboxHandle,
 } from "@bento/sandbox";
 import { captureJobErrors } from "../analytics.js";
 import type { AppContext } from "../context.js";
-import { SANDBOX_REFUSED_AGENT_PREFIX, unbilledReason } from "../unbilled-reasons.js";
+import { SANDBOX_GONE_AGENT_PREFIX, SANDBOX_REFUSED_AGENT_PREFIX, unbilledReason } from "../unbilled-reasons.js";
 import { githubConnectionFor, reviewForBranch } from "../github.js";
 import { createRepositorySeed, publishFeatureBranches } from "./publish.js";
 import { applyPendingPullRequestUpdates } from "./pull-request-updates.js";
@@ -764,14 +765,14 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       adapter,
       argv,
       exec: () =>
-        driver.exec(handle, argv, {
+        taggedSandboxExec(driver.exec(handle, argv, {
           cwd: workdir,
           env: execEnv,
           sessionKey: runId,
           timeoutMs: ctx.env.BENTO_RUN_TIMEOUT_MIN * 60 * 1000,
           signal: controller.signal,
           ...(liveChannel ? { stdin: liveChannel } : {}),
-        }),
+        })),
       // Straight to the bus, no row: the transcript gets the finished
       // message; open streams get the typing.
       onDelta: (delta) => ctx.bus.emitRunDelta(runId, delta),
@@ -1122,20 +1123,27 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
      * tracking; the run record gets one sentence the person can act on,
      * which the unbilled-reason rules read.
      */
-    if (sandboxNeverStartedCommand(outcome.error ?? "")) {
+    const neverStarted = sandboxNeverStartedCommand(outcome.error ?? "");
+    if (neverStarted) {
       console.error(`the sandbox did not start the agent for run ${runId}:`, outcome.error);
       ctx.analytics?.captureException(new Error(outcome.error), subject.run.startedBy, subject.organizationId, {
         run_id: runId,
         ...runOwnerProperties(subject.sandboxOwner),
         source: "sandbox_exec",
         provider: handle.provider,
+        sandbox: neverStarted,
       });
+      // The advice is the difference: a machine that refused the start
+      // is still there for the next try, a machine that is gone is not.
       await finishRun(
         ctx,
         runId,
         {
           ...outcome,
-          error: `${SANDBOX_REFUSED_AGENT_PREFIX}, so ${profile.cli} never ran. Run again to try a new connection.`,
+          error:
+            neverStarted === "gone"
+              ? `${SANDBOX_GONE_AGENT_PREFIX}, so ${profile.cli} never ran. Run again to provision a new sandbox.`
+              : `${SANDBOX_REFUSED_AGENT_PREFIX}, so ${profile.cli} never ran. Run again to try a new connection.`,
         },
         exitCode,
       );
@@ -1376,20 +1384,48 @@ function runLimitReason(ctx: AppContext): string {
  * raw error, which is at least honest about being unexpected.
  */
 /**
- * An exec that threw rather than streamed never ran the agent: the
- * driver could not reach Docker, could not stage the command, or
- * failed inside the SDK. Every one of those is the operator's to see,
- * and until this was here none of them reached error tracking, because
+ * A failure thrown by the sandbox driver's own stream, as opposed to
+ * one thrown by what consumes it.
+ *
+ * runAgent awaits the transcript writes between chunks, so a database
+ * failure twenty minutes into a run rejects through the same catch as
+ * a driver that could not reach Docker. The two are different
+ * incidents with different owners, and labelling both as the exec
+ * failing would send whoever reads error tracking after the sandbox
+ * during a database outage. The driver's rejections are tagged here,
+ * on the way in, so the catch can tell them apart.
+ */
+class SandboxExecError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = cause instanceof Error ? cause.name : "Error";
+  }
+}
+
+async function* taggedSandboxExec(chunks: AsyncIterable<ExecChunk>): AsyncIterable<ExecChunk> {
+  try {
+    for await (const chunk of chunks) yield chunk;
+  } catch (err) {
+    throw new SandboxExecError(err);
+  }
+}
+
+/**
+ * A rejection out of runAgent goes to error tracking before the run is
+ * closed, labelled by what threw: the driver (the agent never ran, or
+ * its stream broke) or the consumer (the agent ran, and recording it
+ * failed). Until this was here neither reached error tracking, because
  * the run was closed as failed and nothing else looked. A run limit is
  * the one exception: that stop was ours.
  */
 function reportExecFailure(ctx: AppContext, runId: string, subject: RunSubject, err: unknown): void {
   if (isExecTimeout(String(err))) return;
-  console.error(`exec failed for run ${runId}:`, err);
+  const source = err instanceof SandboxExecError ? "agent_exec" : "run_recording";
+  console.error(`${source === "agent_exec" ? "exec" : "recording the run"} failed for run ${runId}:`, err);
   ctx.analytics?.captureException(err, subject.run.startedBy, subject.organizationId, {
     run_id: runId,
     ...runOwnerProperties(subject.sandboxOwner),
-    source: "agent_exec",
+    source,
   });
 }
 
@@ -1398,7 +1434,9 @@ function execFailureReason(ctx: AppContext, err: unknown): string {
     ? runLimitReason(ctx)
     : /ENOENT.*docker\.sock|connect.*docker\.sock/i.test(String(err))
       ? "Docker is not reachable from the server. Check that Docker is running, then run again."
-      : `exec failed: ${String(err)}`;
+      : err instanceof SandboxExecError
+        ? `exec failed: ${String(err)}`
+        : `the server failed while recording the run: ${String(err)}`;
 }
 
 /**
@@ -2850,7 +2888,7 @@ async function resumeInterruptedRun(
     result = await runAgent({
       adapter,
       argv,
-      exec: () => stream,
+      exec: () => taggedSandboxExec(stream),
       initialEvents: durableEvents,
       onDelta: (delta) => ctx.bus.emitRunDelta(run.id, delta),
       onEvent: async (event, cursor) => {

@@ -856,14 +856,31 @@ export class SpriteDriver implements SandboxDriver {
 
   async *exec(handle: SandboxHandle, argv: string[], opts?: ExecOptions): AsyncIterable<ExecChunk> {
     const sprite = await this.openSprite(handle.externalId);
-    const launch = planExecLaunch(argv, opts);
+    // Measured with the directory the spawn will use, so the budget
+    // and the URL cannot drift apart for a caller that leaves cwd out.
+    const launch = planExecLaunch(argv, { ...opts, cwd: opts?.cwd ?? handle.workdir });
     if (launch.launcher) {
       const { path, script } = launch.launcher;
       try {
         await callFilesystem(() => sprite.filesystem("/").writeFile(path, script, { mode: 0o600 }), "staging the command");
       } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
-        throw new Error(`could not stage the command in the sandbox, so it was not started: ${detail}`, { cause: err });
+        /**
+         * Reported the way every other "the command never started"
+         * ends: in the stream, with exit code -1, so the executor
+         * reads a staging failure and a refused upgrade as the same
+         * thing and bills neither. A thrown error here would have
+         * been an "exec failed" nobody classifies, and whether a dead
+         * sprite was billed would have depended on the prompt's size.
+         */
+        const detail = scrubExecUrl(err instanceof Error ? err.message : String(err));
+        yield {
+          kind: "stderr",
+          data: /sprite not found/i.test(detail)
+            ? `the cloud sandbox ${handle.externalId} ${EXEC_SANDBOX_GONE}. Start the run again to provision a new sandbox.`
+            : `${EXEC_NOT_STAGED}: ${detail}`,
+        };
+        yield { kind: "exit", exitCode: -1 };
+        return;
       }
     }
     const session = this.openSession(handle, launch, opts, sprite);
@@ -1090,7 +1107,20 @@ export class SpriteDriver implements SandboxDriver {
               recoverInitialHandshake();
               return;
             }
-            throw err;
+            /**
+             * The listing is proof the command started, so this is no
+             * longer a refused start: it is a running process whose
+             * connection will not open, which is the reattach ladder's
+             * case. Concluding here as "never started" would have the
+             * executor say the agent never ran, and not bill a run
+             * whose agent was still committing in the sprite.
+             */
+            push({
+              kind: "stderr",
+              data: `the command is running but its connection could not be opened (${scrubExecUrl(err instanceof Error ? err.message : String(err))}), reattaching to the running command`,
+            });
+            void reattach();
+            return;
           }
           if (done || killed) {
             guard();
@@ -1373,11 +1403,11 @@ export class SpriteDriver implements SandboxDriver {
         // asked for.
         awake.release();
         /**
-         * The launcher carried the run's credentials, and the sprite's
-         * disk outlives the run and goes into every checkpoint, so it
-         * does not stay. Best effort, after the process has long since
-         * exec'd past it: a file left behind is a hygiene miss, not a
-         * failed run.
+         * A launcher that ran removed itself (see launcherScript); this
+         * is for one the sandbox never started, whose credentials would
+         * otherwise sit on a disk that outlives the run and goes into
+         * every checkpoint. Best effort: a file left behind is a
+         * hygiene miss, not a failed run.
          */
         if (launch.launcher) {
           const stale = launch.launcher.path;
@@ -1820,13 +1850,23 @@ function launcherCommandLine(path: string): string {
 /**
  * The launcher: the environment exported, then exec into the command,
  * so the shell is gone and the session's process is the agent itself.
+ *
+ * Its first act is to remove itself. It carries the organization's
+ * keys, the sprite's disk outlives the run and is captured into every
+ * checkpoint, and no process on this side is guaranteed to be around
+ * when the command ends: a deploy mid-run hands the session to a
+ * reattach that knows nothing of the file. The shell has the script
+ * open by then, so the unlink costs it nothing. A reattach after a
+ * refused upgrade never needs the file either: it joins the session
+ * the first start made.
+ *
  * Single quotes carry every byte of a value, newlines included; the
  * only character they cannot hold is the quote, which closes, escapes
  * and reopens. A name no shell can export is a bug in the caller and
  * is said so, rather than written as a line sh would refuse.
  */
 export function launcherScript(command: string, args: string[], env: Record<string, string>): string {
-  const lines = ["#!/bin/sh", "# Written by Bento for one command that did not fit the exec URL."];
+  const lines = ["#!/bin/sh", "# Written by Bento for one command that did not fit the exec URL.", 'rm -f -- "$0"'];
   for (const [key, value] of Object.entries(env)) {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error(`${JSON.stringify(key)} is not a name a shell can export`);
     lines.push(`export ${key}=${shellQuote(value)}`);
@@ -1837,17 +1877,32 @@ export function launcherScript(command: string, args: string[], env: Record<stri
 
 /**
  * The driver's own words for a command the sandbox never ran: the exec
- * connection was refused and stayed refused, or the machine was gone.
- * The executor reads them off the stream's tail to tell a sandbox that
- * never started the agent from an agent that started and failed.
+ * connection was refused and stayed refused, the launcher could not be
+ * written, or the machine was gone. The executor reads them off the
+ * stream's tail to tell a sandbox that never started the agent from an
+ * agent that started and failed, and the two kinds get different
+ * advice: a refused connection is worth another try on the same
+ * machine, a missing machine needs a new one.
  */
 export const EXEC_REFUSED_AFTER_RETRIES =
   "the sandbox did not accept the exec connection, and it stayed that way through the retries";
 export const EXEC_REFUSED = "the sandbox did not accept the exec connection: ";
+export const EXEC_NOT_STAGED = "the sandbox could not take the command, so it was not started";
 export const EXEC_SANDBOX_GONE = "was not found, so the command was not started";
 
-export function sandboxNeverStartedCommand(text: string): boolean {
-  return text.includes(EXEC_REFUSED_AFTER_RETRIES) || text.includes(EXEC_REFUSED) || text.includes(EXEC_SANDBOX_GONE);
+export type SandboxNeverStarted = "refused" | "gone";
+
+export function sandboxNeverStartedCommand(text: string): SandboxNeverStarted | null {
+  if (text.includes(EXEC_SANDBOX_GONE)) return "gone";
+  if (text.includes(EXEC_REFUSED_AFTER_RETRIES) || text.includes(EXEC_REFUSED) || text.includes(EXEC_NOT_STAGED)) {
+    return "refused";
+  }
+  return null;
+}
+
+/** The command line a staged command's session reports, for a test against a real sprite. */
+export function stagedCommandLine(sessionKey: string): string {
+  return launcherCommandLine(launcherPath(sessionKey));
 }
 
 /**

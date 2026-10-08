@@ -10,7 +10,7 @@ import { writeFileCommand } from "@bento/agents";
 import { AGENT_BINARIES, TOOLCHAIN_LEGACY_MARKER, TOOLCHAIN_STAMPS } from "./agent-toolchain.js";
 import { collectExec, type SandboxHandle } from "./driver.js";
 import { taskRequest } from "./keep-awake.js";
-import { SpriteDriver, spriteExistsWithRetry, spriteName } from "./sprite.js";
+import { SpriteDriver, spriteExistsWithRetry, spriteName, stagedCommandLine } from "./sprite.js";
 
 /**
  * The one test that provisions a real Fly Sprite and installs the real
@@ -755,15 +755,38 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
    */
   await t.test("a command that does not fit the exec URL still runs, with its environment", { skip: needsSprite() }, async () => {
     const payload = "<section class=\"hub\">{ color: #fff; }</section>\n".repeat(2_000);
-    const result = await collectExec(
-      driver.exec(handle, ["sh", "-c", 'printf %s "$1" | wc -c; printf %s "$BENTO_E2E_STAGED"', "_", payload], {
-        env: { BENTO_E2E_STAGED: "it's here" },
-        timeoutMs: 120_000,
-      }),
+    const sessionKey = "e2e-staged";
+    const launcher = `/tmp/bento-exec-${sessionKey}.sh`;
+    const sprite = client.sprite(handle.externalId);
+    /**
+     * The command waits long enough to be listed while it runs, because
+     * the listing is what every reattach, handshake retry and HTTP kill
+     * of a staged command depends on: the session must report the
+     * launcher's command line, the one the driver looks for, and only a
+     * real sprite can say what it reports.
+     */
+    const pending = collectExec(
+      driver.exec(
+        handle,
+        ["sh", "-c", 'sleep 20; printf %s "$1" | wc -c; printf %s "$BENTO_E2E_STAGED"', "_", payload],
+        { env: { BENTO_E2E_STAGED: "it's here" }, sessionKey, timeoutMs: 120_000 },
+      ),
     );
+    let listedAs: string[] = [];
+    for (let i = 0; i < 15 && !listedAs.includes(stagedCommandLine(sessionKey)); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      listedAs = (await sprite.listSessions()).map((session) => session.command);
+    }
+    assert.ok(
+      listedAs.includes(stagedCommandLine(sessionKey)),
+      `the staged command's session is not listed by its launcher's command line; the sprite lists: ${listedAs.join(" | ")}`,
+    );
+    const result = await pending;
     assert.equal(result.exitCode, 0, result.stderr.trim());
     assert.match(result.stdout, new RegExp(`^\\s*${payload.length}\\s*it's here$`));
     assert.doesNotMatch(result.stderr, /did not accept the exec connection/);
+    // The launcher carried the environment, and does not outlive the run.
+    assert.equal(await sprite.filesystem("/").exists(launcher), false, `${launcher} is still on the sprite`);
   });
 
   /**

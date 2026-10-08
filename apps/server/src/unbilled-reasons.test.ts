@@ -30,9 +30,13 @@ test("provider failures before a Sprite starts are not billed", () => {
   );
   assert.equal(
     unbilledReason(
-      "The sandbox did not accept the connection that starts the agent, so codex never ran. Run again to try a new connection.",
+      "The sandbox did not accept the command that starts the agent, so codex never ran. Run again to try a new connection.",
     )?.id,
     "sandbox-exec-refused",
+  );
+  assert.equal(
+    unbilledReason("The sandbox for this run no longer exists, so codex never ran. Run again to provision a new sandbox.")?.id,
+    "sandbox-gone",
   );
 });
 
