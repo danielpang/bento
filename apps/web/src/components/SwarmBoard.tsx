@@ -9,7 +9,7 @@ import { SwarmEmpty, SwarmStrip } from "./SwarmStrip.js";
 import { SwarmNodeDrawer } from "./SwarmNodeDrawer.js";
 import { SwarmRunOutput, SwarmRunOutputDrawer, SwarmWorkerOutputDrawer } from "./SwarmRunOutput.js";
 import { SwarmPage } from "./SwarmPage.js";
-import { BoardSkeleton } from "./Skeleton.js";
+import { SwarmPageSkeleton } from "./Skeleton.js";
 import { swarmApi, type SwarmAgent } from "../swarm/client.js";
 import { createModelCache } from "../swarm/layout.js";
 import type { ModeSurfaces } from "../swarm/plan.js";
@@ -344,8 +344,8 @@ export function SwarmBoard({
       .finally(() => setBusy(false));
   }
 
-  // Swarm lanes are not the project's stages: the seeded shape.
-  if (swarms === null) return <BoardSkeleton projectId={null} />;
+  // A swarm is a header and a tree, not lanes: its own skeleton.
+  if (swarms === null) return <SwarmPageSkeleton />;
 
   const task = taskId ? detail?.tasks.find((row) => row.id === taskId) ?? null : null;
   const layoutNode = taskId ? model.byId.get(taskId) ?? null : null;
@@ -433,7 +433,7 @@ export function SwarmBoard({
           }}
         />
       ) : (
-        <BoardSkeleton projectId={null} />
+        <SwarmPageSkeleton />
       )}
 
       {task && layoutNode && (

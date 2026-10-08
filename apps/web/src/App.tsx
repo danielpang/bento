@@ -28,6 +28,7 @@ import {
   SettingsPageSkeleton,
   Skeleton,
   SpendPageSkeleton,
+  SwarmPageSkeleton,
 } from "./components/Skeleton.js";
 import { useGitHubOutcome } from "./components/GitHubIdentity.js";
 import { SignOutButton } from "./components/IconButtons.js";
@@ -1276,6 +1277,8 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
           <SessionsListSkeleton framed />
         ) : screen === "spend" ? (
           <SpendPageSkeleton />
+        ) : swarming ? (
+          <SwarmPageSkeleton />
         ) : (
           <BoardSkeleton projectId={projectId} />
         )}
@@ -1399,9 +1402,9 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
         </Suspense>
       ) : swarming && projectId ? (
         /* A second board of the same project. Its own boundary, like
-           the panels: the chunk arrives without blanking the chrome. Its
-           lanes are not stages, so the skeleton takes the seeded shape. */
-        <Suspense fallback={<BoardSkeleton projectId={null} />}>
+           the panels: the chunk arrives without blanking the chrome. A
+           swarm has no lanes, so its skeleton is the swarm page's own. */
+        <Suspense fallback={<SwarmPageSkeleton />}>
           <SwarmBoard
             projectId={projectId}
             client={client}

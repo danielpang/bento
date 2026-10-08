@@ -1,5 +1,5 @@
-import type { CSSProperties } from "react";
 import { rememberedStageCount, skeletonStageCount, type StorageWindow } from "../board-shape.js";
+import { COLUMN_PITCH, NODE_HEIGHT, NODE_WIDTH, ROW_PITCH } from "../swarm/layout.js";
 import { BrandLockup } from "./BrandLockup.js";
 import { TabScroll } from "./TabScroll.js";
 
@@ -100,7 +100,7 @@ export function BoardSkeleton({
     <div className="board" aria-busy="true" aria-label="Loading board">
       <LoadingStatus label="Loading board" />
       {skeletonLanes(stages).map((lane, i) => (
-        <section key={i} className="lane" data-kind="stage" style={{ "--skeleton-i": i } as CSSProperties}>
+        <section key={i} className="lane" data-kind="stage">
           <header className="lane-head">
             <div className="lane-title">
               <span className="lane-title-text">
@@ -121,6 +121,122 @@ export function BoardSkeleton({
           </div>
         </section>
       ))}
+    </div>
+  );
+}
+
+/**
+ * A small tree in the swarm diagram's own units: a root and three
+ * children. Not the swarm's real plan, which is data; just enough of
+ * the shape that the page reads as a swarm and not as a board.
+ */
+const SWARM_SKELETON_NODES = [
+  { col: 1, row: 0, title: "68%" },
+  { col: 0, row: 1, title: "74%" },
+  { col: 1, row: 1, title: "58%" },
+  { col: 2, row: 1, title: "66%" },
+];
+const SWARM_SKELETON_WIDTH = 2 * COLUMN_PITCH + NODE_WIDTH;
+const SWARM_SKELETON_HEIGHT = ROW_PITCH + NODE_HEIGHT;
+
+/** The edge from the root's foot to a child's head, as the tree draws it. */
+function swarmSkeletonEdge(col: number): string {
+  const x1 = COLUMN_PITCH + NODE_WIDTH / 2;
+  const y1 = NODE_HEIGHT;
+  const x2 = col * COLUMN_PITCH + NODE_WIDTH / 2;
+  const y2 = ROW_PITCH;
+  const mid = (y1 + y2) / 2;
+  return `M ${x1} ${y1} C ${x1} ${mid}, ${x2} ${mid}, ${x2} ${y2}`;
+}
+
+/**
+ * A swarm's page, before the list or the open swarm has arrived.
+ *
+ * The header, the goal, the diagram bar and a tree, in the page's own
+ * classes, so the real swarm sits down where this was. A swarm has no
+ * lanes, which is why this is not the board's skeleton.
+ */
+export function SwarmPageSkeleton() {
+  return (
+    <div className="swarm-page swarm-page-skeleton" aria-busy="true" aria-label="Loading swarm">
+      <LoadingStatus label="Loading swarm" />
+      <header className="swarm-head" aria-hidden="true">
+        <div className="swarm-head-lead">
+          <Skeleton width={40} height={40} radius="50%" />
+          <div className="swarm-head-copy">
+            <Skeleton height={26} width="13rem" radius={6} />
+            <div className="swarm-head-chips">
+              <Skeleton height={12} width="4.2rem" />
+              <Skeleton height={12} width="7.4rem" />
+              <Skeleton height={12} width="3.6rem" />
+            </div>
+          </div>
+        </div>
+        <div className="swarm-head-actions">
+          <Skeleton className="skeleton-btn" width="6.4rem" />
+          <Skeleton className="skeleton-btn" width="4.8rem" />
+          <Skeleton className="skeleton-btn" width="2.6rem" />
+        </div>
+      </header>
+
+      <section className="swarm-brief" aria-hidden="true">
+        <div className="swarm-brief-head">
+          <Skeleton height={11} width="2.4rem" />
+          <Skeleton className="swarm-skeleton-excerpt" height={12} width="56%" />
+        </div>
+      </section>
+
+      <div className="swarm-viewbar" aria-hidden="true">
+        <Skeleton height={13} width="4.4rem" />
+        <Skeleton height={28} width="8.6rem" radius={6} />
+      </div>
+
+      <div className="swarm-stage swarm-stage-skeleton" aria-hidden="true">
+        <div
+          className="swarm-skeleton-tree"
+          style={{ aspectRatio: `${SWARM_SKELETON_WIDTH} / ${SWARM_SKELETON_HEIGHT}` }}
+        >
+          <svg
+            className="swarm-edges"
+            viewBox={`0 0 ${SWARM_SKELETON_WIDTH} ${SWARM_SKELETON_HEIGHT}`}
+            preserveAspectRatio="none"
+          >
+            {SWARM_SKELETON_NODES.filter((n) => n.row === 1).map((n) => (
+              <path
+                key={n.col}
+                className="swarm-edge swarm-skeleton-edge"
+                d={swarmSkeletonEdge(n.col)}
+                fill="none"
+                vectorEffect="non-scaling-stroke"
+              />
+            ))}
+          </svg>
+          {SWARM_SKELETON_NODES.map((n, i) => (
+            <div
+              key={i}
+              className="swarm-skeleton-node"
+              style={{
+                left: `${((n.col * COLUMN_PITCH) / SWARM_SKELETON_WIDTH) * 100}%`,
+                top: `${((n.row * ROW_PITCH) / SWARM_SKELETON_HEIGHT) * 100}%`,
+                width: `${(NODE_WIDTH / SWARM_SKELETON_WIDTH) * 100}%`,
+                height: `${(NODE_HEIGHT / SWARM_SKELETON_HEIGHT) * 100}%`,
+              }}
+            >
+              <span className="swarm-node-head">
+                <Skeleton width={18} height={18} radius="50%" />
+                <span className="skeleton-lines">
+                  <Skeleton height={12} width={n.title} />
+                  <Skeleton height={12} width="44%" />
+                </span>
+              </span>
+              <span className="swarm-node-foot">
+                <Skeleton height={10} width="46%" />
+                <Skeleton height={10} width="22%" />
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
