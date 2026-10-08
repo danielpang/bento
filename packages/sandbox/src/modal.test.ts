@@ -6,6 +6,7 @@ import { spawn } from "node:child_process";
 import test from "node:test";
 import { collectExec, execTimeoutMessage } from "./driver.js";
 import { BENTO_EXEC_PYTHON, FrameDecoder } from "./modal-exec.js";
+import { adaptProc } from "./modal-client.js";
 import {
   MODAL_SANDBOX_TIMEOUT_MS,
   ModalDriver,
@@ -137,11 +138,12 @@ function fake(options?: { running?: boolean; exitText?: string | null; dirs?: Mo
   };
 }
 
-function driver(api: ModalApi, options?: { cpu?: number; memoryMiB?: number }): ModalDriver {
+function driver(api: ModalApi, options?: { cpu?: number; memoryMiB?: number; stdinDrainMs?: number }): ModalDriver {
   return new ModalDriver({
     tokenId: "id",
     tokenSecret: "secret",
     api,
+    ...(options?.stdinDrainMs ? { stdinDrainMs: options.stdinDrainMs } : {}),
     ...(options?.cpu ? { cpu: options.cpu } : {}),
     ...(options?.memoryMiB ? { memoryMiB: options.memoryMiB } : {}),
   });
@@ -381,6 +383,64 @@ test("create retries AlreadyExistsError and then keeps the name", async () => {
   const handle = await driver(env.api).provision(spec);
   assert.equal(handle.externalId, "bento-feature-1");
   assert.equal(attempts, 2);
+});
+
+test("stdin is closed through the stream, at the offset its writes reached", async () => {
+  /**
+   * modal 0.10.1's closeStdin() sends EOF at offset 0, which the server
+   * drops after any bytes were written. Every Modal run hung at its
+   * first sandbox file write because of it.
+   */
+  const calls: string[] = [];
+  const proc = adaptProc(
+    {
+      stdout: Object.assign(new ReadableStream<Uint8Array>(), { readText: async () => "" }),
+      stderr: { readText: async () => "" },
+      stdin: {
+        writeText: async () => {
+          calls.push("write");
+        },
+        close: async () => {
+          calls.push("close");
+        },
+      },
+      closeStdin: async () => {
+        calls.push("closeStdin");
+      },
+      wait: async () => 0,
+    },
+    false,
+  );
+  await proc.writeStdin("data\n");
+  await proc.endStdin();
+  assert.deepEqual(calls, ["write", "close"]);
+});
+
+test("a stdin feeder that never exits cannot hold the command's result", async () => {
+  /**
+   * The production hang: EOF was lost, so bento-exec stdin never exited,
+   * and exec's finally waited on it forever. Nothing ended the run, not
+   * even the command timeout.
+   */
+  const env = fake({ running: true });
+  const modal = driver(env.api, { stdinDrainMs: 20 });
+  const box = env.box;
+  const original = box.exec;
+  box.exec = async (argv, opts) => {
+    if (argv[1] === "stdin") {
+      env.execs.push(argv);
+      return { ...textProc(0), wait: () => new Promise<number>(() => {}) };
+    }
+    return original(argv, opts);
+  };
+  async function* lines() {
+    yield "hello";
+  }
+  const done = await collectExec(
+    modal.exec({ externalId: "bento-feature-1", provider: "modal", workdir: "/workspace" }, ["cat"], { stdin: lines() }),
+  );
+  assert.equal(done.exitCode, 0);
+  assert.ok(env.execs.some((argv) => argv[1] === "eof"), "the runner is still told to close its end");
 });
 
 test("exec parses frames, and a timeout writes execTimeoutMessage", async () => {

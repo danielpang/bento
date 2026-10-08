@@ -380,6 +380,21 @@ count); an agent that started and went quiet is usually running a long
 command. A text-mode agent (dsh) says nothing until it exits, so once
 `agentStartedAt` is stamped (as it is exec'd) it is never reaped.
 
+## Modal stdin closes through the stream, never closeStdin()
+
+Every Modal run in production hung at its first sandbox file write
+(`writeSandboxFiles`, which feeds `node -e` through stdin), so no Modal
+run had ever started an agent. modal 0.10.1's `closeStdin()` sends EOF
+at offset 0, which the server drops once bytes were written, and the
+SDK swallows the error, so `bento-exec stdin` held the FIFO open
+forever. `endStdin` in `packages/sandbox/src/modal-client.ts` closes
+the stdin stream itself, which sends EOF at the offset the writes
+reached, and keeps `closeStdin()` only as the fallback for a stream
+that cannot close. The feeder's exit is also waited on for at most
+`MODAL_STDIN_DRAIN_MS`, because exec's `finally` waits on it, and an
+unbounded wait there is what kept even the command timeout from
+ending the run.
+
 ## Queue workers poll slowly on purpose
 
 pg-boss has no push, so every idle worker costs a query per poll. The

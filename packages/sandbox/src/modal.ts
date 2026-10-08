@@ -54,6 +54,15 @@ const SNAPSHOT_TIMEOUT_MS = 240_000;
 const CREATE_NAME_RETRY_MS = [2_000, 2_000];
 const LIFETIME_NOTICE_MS = 23 * 60 * 60 * 1000;
 
+/**
+ * How long a stdin feeder may take to exit once its input is closed.
+ * It exits as soon as EOF reaches it, so this only runs out when EOF
+ * was lost. The command's own result never waits on the feeder longer
+ * than this: before the bound, a lost EOF left exec's `finally` waiting
+ * on the feeder forever, so even the command timeout could not end it.
+ */
+export const MODAL_STDIN_DRAIN_MS = 30_000;
+
 export interface ModalImageRef {
   imageId: string;
 }
@@ -153,6 +162,8 @@ export interface ModalDriverOptions {
   memoryMiB?: number;
   /** Test double. Production leaves this unset and builds a real client. */
   api?: ModalApi;
+  /** Test override for MODAL_STDIN_DRAIN_MS. */
+  stdinDrainMs?: number;
 }
 
 export function modalSandboxSize(cpu: number, memoryMiB: number): string {
@@ -874,7 +885,8 @@ export class ModalDriver implements SandboxDriver {
       }
     } finally {
       await proc.endStdin().catch(() => {});
-      await proc.wait().catch(() => {});
+      const drained = await settlesWithin(proc.wait(), this.options.stdinDrainMs ?? MODAL_STDIN_DRAIN_MS);
+      if (!drained) console.warn(`modal stdin feeder for ${dir} did not exit after its input was closed`);
       await this.closeStdin(box, dir);
     }
   }
@@ -1034,4 +1046,17 @@ async function runShell(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Whether `promise` settles (either way) within `ms`. Never rejects. */
+async function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<false>((resolve) => {
+    timer = setTimeout(() => resolve(false), ms);
+  });
+  try {
+    return await Promise.race([promise.then(() => true, () => true), expired]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
