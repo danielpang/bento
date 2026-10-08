@@ -24,6 +24,7 @@ import {
   type ProvisionPhase,
 } from "./driver.js";
 import { holdSpriteAwake } from "./keep-awake.js";
+import { fetchStartBundleCommand } from "./start-bundle.js";
 
 /**
  * The machine one workspace's work happens on. Exported because a test
@@ -543,11 +544,11 @@ export class SpriteDriver implements SandboxDriver {
             "fi",
             ...(repo.startBundle
               ? [
-                  // Forced, because a re-provision of the same machine
-                  // finds the ref already there at an older head: the
-                  // swarm's branch has moved since, and the stale one
-                  // is not a start point anybody wants.
-                  `cd ${shellQuote(dir)} && git fetch ${shellQuote(startPath)} +refs/heads/${shellQuotePart(repo.startBundle.branch)}:refs/heads/${shellQuotePart(repo.startBundle.branch)}`,
+                  // The bundle lists HEAD or the branch, depending on
+                  // who built it. Asking a HEAD bundle for the branch
+                  // ref is exit 128. Forced, so a re-provision replaces
+                  // the head the swarm has moved past.
+                  fetchStartBundleCommand(dir, startPath, repo.startBundle.branch),
                 ]
               : []),
             `cd ${shellQuote(dir)} && (git checkout ${shellQuote(branch)} || git checkout -b ${shellQuote(branch)} ${shellQuote(startRef)})`,
@@ -1507,6 +1508,9 @@ export class SpriteDriver implements SandboxDriver {
       ...(options.selfContained ? [] : ['if [ "$base_sha" = "$head_sha" ]; then exit 3; fi']),
       'tmp=$(mktemp /tmp/bento-bundle.XXXXXX)',
       'trap \'rm -f "$tmp"\' EXIT',
+      // HEAD, not the branch name. The checkout fetches whichever
+      // ref the bundle lists (HEAD, or refs/heads/<branch> for a
+      // range bundle). Asking this one for the branch ref is exit 128.
       options.selfContained
         ? 'git bundle create "$tmp" HEAD >/dev/null'
         : 'git bundle create "$tmp" HEAD "^$base_sha" >/dev/null',
@@ -2142,6 +2146,25 @@ async function findProvisionSession(sprite: Sprite, script: string): Promise<{ i
  * the retries: releasing it during the pause between upgrades would
  * invite the sleep the hold exists to prevent.
  */
+/**
+ * A script that exited.
+ *
+ * stdout and stderr stay on the error for the run record. The message
+ * quotes the last line of that output, because that is the only part
+ * of the error captureException sends, and a git fatal was filed as
+ * "exit code 128" with the reason only in the server log.
+ */
+function provisioningScriptError(exitCode: number, stdout: string, stderr: string): Error {
+  const output = (stderr.trim() !== "" ? stderr : stdout).trim();
+  const last = output.split("\n").at(-1)?.trim() ?? "";
+  const detail = last.length > 500 ? last.slice(0, 500) : last;
+  const message =
+    detail === ""
+      ? `provisioning script failed with exit code ${exitCode}`
+      : `provisioning script failed with exit code ${exitCode}: ${detail}`;
+  return Object.assign(new Error(message), { stdout, stderr });
+}
+
 function collectProvisionSpawn(
   sprite: Sprite,
   command: string,
@@ -2194,10 +2217,10 @@ function collectProvisionSpawn(
         if (exitCode !== 0) {
           // stdout and stderr ride on the error, the shape
           // run-executor's describeSandboxError reads to put installer
-          // output in the run record.
-          reject(
-            Object.assign(new Error(`provisioning script failed with exit code ${exitCode}`), { stdout, stderr }),
-          );
+          // output in the run record. The message quotes the last line
+          // too: captureException reads the message, not those fields,
+          // and a git fatal was filed as "exit code 128".
+          reject(provisioningScriptError(exitCode, stdout, stderr));
           return;
         }
         resolve({ stdout, stderr, exitCode });

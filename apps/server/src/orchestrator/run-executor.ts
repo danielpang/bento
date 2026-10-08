@@ -64,7 +64,12 @@ import { branchForRun, cardBranch } from "./branch-rotation.js";
 import { recoverAncestryPublishFailures } from "./rebase-run.js";
 import { runRepositorySetup } from "./repo-setup.js";
 import { captureRunArtifacts } from "./capture-artifacts.js";
-import { SandboxProvisionError, provisionFailureCause, provisionWorkspace } from "./sandbox-provision.js";
+import {
+  SandboxProvisionError,
+  provisionFailureCause,
+  provisionFailureContext,
+  provisionWorkspace,
+} from "./sandbox-provision.js";
 import { reportSandboxReady, runOwnerProperties, type SandboxOrigin } from "./sandbox-metrics.js";
 export { sandboxProvisionConflict } from "./sandbox-provision.js";
 import { allCandidates, driversForRun, driverForSandbox, SandboxDriverUnavailable, type ProvisionDrivers } from "./sandbox-driver.js";
@@ -488,6 +493,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       source: "sandbox_provision",
       error_kind: sandboxErrorKind(reported),
       ...(err instanceof SandboxProvisionError ? { blame: err.blame, attempts } : {}),
+      ...provisionFailureContext(err),
     });
     const shown =
       err instanceof SandboxProvisionError && err.blame === "provider" ? err.message : describeSandboxError(reported);
@@ -3257,7 +3263,11 @@ function describeSandboxError(err: unknown): string {
   if (typeof output !== "string") return base;
   // The tail, because an installer's useful line is its last one and a
   // run record is not the place for a megabyte of progress bars.
-  return `${base}\n${output.trim().split("\n").slice(-20).join("\n")}`;
+  // Skipped when the message already quotes that tail, which is how a
+  // script failure names the last line without printing it twice.
+  const tail = output.trim().split("\n").slice(-20).join("\n");
+  if (base.includes(tail)) return base;
+  return `${base}\n${tail}`;
 }
 
 function withDockerCursor(event: AgentEvent, cursor: number | undefined): AgentEvent {
