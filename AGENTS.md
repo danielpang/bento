@@ -248,6 +248,67 @@ the transcript write did, because the two are different incidents.
 The real-sprite e2e test runs a command past the line and checks that
 the sprite lists its session by a line the driver looks for.
 
+A provisioning script's socket can close without an exit frame too.
+The SDK starts every exec's exit code at -1 and emits that from
+`handleClose` when the socket ends before the exit byte, so "exit
+code -1" is never the script: production saw it a minute into a
+checkout, blamed on the project, billed, and never retried. The
+driver now reads a missing or negative code as a dropped connection:
+every fresh script asks the sprite to keep the process for
+`EXEC_DISCONNECT_GRACE`, the retry walks the handshake ladder and
+joins the script when the session listing still shows it, starts it
+again when the listing says it is gone (every provisioning script is
+written to be run twice), and waits without starting a second copy
+when the listing itself fails. A drop that outlasts the ladder is
+the provider's failure in every phase, `control_plane` in error
+tracking, and reaches the run record as the generic unavailable
+sentence. A script that did exit quotes the last line of its stderr
+in the message, and `provisionFailureContext` puts the output on the
+captured exception, because captureException reads only the message
+and a git fatal was filed as "exit code 128" with the reason in the
+server log alone.
+
+## A swarm worker starts from the ref its bundle has, and a machine that was never made is not a worker that stopped
+
+A worker on a clone driver is cut from the swarm's branch, which has
+never been pushed: it travels as a bundle that `exportRepository`
+builds with `git bundle create HEAD ^base`, and the only ref in that
+bundle is `HEAD`. The checkout once fetched `refs/heads/<swarm
+branch>` from it, which git refuses with exit 128, so every worker of
+a swarm died at the checkout while the unit test and the sprite e2e,
+which both built a range bundle (`base..branch`, which carries the
+branch ref and no `HEAD`), agreed the command was fine.
+`fetchStartBundleCommand` in `packages/sandbox/src/start-bundle.ts`
+lists the bundle's heads and fetches whichever of the two it has;
+both drivers use it, and `start-bundle.test.ts` runs the production
+shape through real git. Do not hardcode either ref again.
+
+A run that failed before its agent started (no provider could make
+its machine, the exec socket dropped, the sandbox was gone) is the
+sandbox's failure and not the work's, and the unbilled-reason rules
+in `apps/server/src/unbilled-reasons.ts` are the one list of those
+failures. The coordinator reads that list: a leaf or plan node whose
+run died that way goes back to "assigned" and the same tick starts
+another agent on it, up to `MAX_SANDBOX_RESTARTS` times, counted in
+the node's `sandboxRestarts` flag, before the planner is told. A
+planner run that died that way is started again with its own prompt
+(the first plan's is empty, a wake's is the folded news) up to the
+same bound, because the latch that folds each leaf's news into one
+wake was already set for the run that never heard it; before this a
+swarm sat in planning until a person pressed retry. An agent that
+ran and failed is still the planner's to decide about, on the first
+failure.
+
+A reap asked for while an agent is still in the machine is not an
+error. `reapSwarmSandbox` and its siblings throw
+`SandboxReapDeferred`, the queue worker and the boot sweep put the
+same job back thirty seconds later, and the tick that ends a swarm
+asks for its machine only once no run is active: a failed leaf wakes
+the planner in the tick that marks the swarm failed, and that run
+works in the swarm's own machine, so asking on every tick made every
+poll of the reap queue an exception for as long as the planner kept
+working.
+
 ## Starting a run goes through startRunIfIdle, never a bare insert
 
 One card, one agent. Every door that starts a run (the runs route,
