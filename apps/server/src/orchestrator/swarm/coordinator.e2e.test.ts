@@ -16,6 +16,7 @@ import {
   type Db,
 } from "@bento/db";
 import type { AppContext } from "../../context.js";
+import { FakeJobQueue } from "../../jobs/index.js";
 import { EventBus, type BoardEvent } from "../../events.js";
 import { loadEnv } from "../../env.js";
 import { SWARM_FULL, type NewRun } from "../start-run.js";
@@ -41,11 +42,10 @@ const PROFILE = "22222222-2222-2222-2222-222222222222";
 let pool: ReturnType<typeof createPool>;
 let db: Db;
 let ctx: AppContext;
+let jobs: FakeJobQueue;
 let emitted: BoardEvent[];
 /** Jobs the tick queued, in order. A run row without one never starts. */
-let queued: { queue: string; data: { runId?: string } }[];
-/** Run workers this process nudged, so a queued run does not wait for a poll. */
-let notified: string[];
+let queued: FakeJobQueue["sent"];
 
 before(async () => {
   const admin = new pg.Client({ connectionString: adminUrl });
@@ -75,8 +75,8 @@ before(async () => {
 
   const bus = new EventBus();
   emitted = [];
-  queued = [];
-  notified = [];
+  jobs = new FakeJobQueue();
+  queued = jobs.sent;
   ctx = {
     env: loadEnv({ BENTO_MODE: "local", DATABASE_URL: testUrl } as NodeJS.ProcessEnv),
     db,
@@ -92,22 +92,7 @@ before(async () => {
      * never queued anything passed them while every swarm it started
      * deadlocked.
      */
-    boss: {
-      send: async (queue: string, data: unknown) => {
-        queued.push({ queue, data: data as { runId?: string } });
-        return "job";
-      },
-      notifyWorker: (id: string) => notified.push(id),
-      // The tick registers the landing worker lazily, the way it
-      // registers its own: a stub that cannot be worked would make
-      // every tick that promotes a landing throw.
-      work: async () => "worker",
-      offWork: async () => {},
-      createQueue: async () => {},
-      schedule: async () => {},
-      unschedule: async () => {},
-    },
-    runWorkers: ["worker-1"],
+    jobs,
   } as unknown as AppContext;
   bus.onBoardEvent(PROJECT, (event) => emitted.push(event));
 });
@@ -120,12 +105,12 @@ beforeEach(async () => {
   await pool.query("delete from swarms");
   emitted.length = 0;
   queued.length = 0;
-  notified.length = 0;
+  jobs.woken.length = 0;
 });
 
 /** The runs this tick actually handed to the `run.execute` workers. */
 const queuedRunIds = () =>
-  queued.filter((job) => job.queue === "run.execute").map((job) => job.data.runId);
+  queued.filter((job) => job.queue === "run.execute").map((job) => (job.data as { runId?: string }).runId);
 
 /** A stubbed door: it records what was asked for, and inserts a real row. */
 function starter(
@@ -499,7 +484,7 @@ test("workers spawn up to the ceiling, and a plan limit stops the loop on the le
    * what makes it start now rather than then.
    */
   assert.deepEqual(queuedRunIds(), [result!.workerRunIds[0]], "the spawned worker was queued");
-  assert.deepEqual(notified, ["worker-1"], "and this process's workers were woken");
+  assert.deepEqual(jobs.woken, ["run.execute"], "and this process's workers were woken");
 
   const refused = await read(second.id);
   assert.equal(refused.status, "assigned", "a refused leaf keeps its place in the queue");
@@ -842,11 +827,10 @@ test("a promotion whose job could not be sent gives the claim back", async () =>
     .values({ swarmId: swarm.id, taskId: done.id, position: 0 })
     .returning();
 
-  const boss = ctx.boss as unknown as { send: (queue: string, data: unknown) => Promise<string> };
-  const real = boss.send;
-  boss.send = async (queue: string, data: unknown) => {
+  const real = jobs.send.bind(jobs);
+  jobs.send = async (queue, data, opts) => {
     if (queue === "swarm.land") throw new Error("the queue is not reachable");
-    return real(queue, data);
+    return real(queue, data, opts);
   };
   try {
     await assert.rejects(
@@ -855,7 +839,7 @@ test("a promotion whose job could not be sent gives the claim back", async () =>
       "the failure is not swallowed: pg-boss retries the tick",
     );
   } finally {
-    boss.send = real;
+    jobs.send = real;
   }
 
   const [row] = await db.select().from(swarmLandings).where(eq(swarmLandings.id, landing!.id));

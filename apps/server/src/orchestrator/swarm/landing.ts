@@ -77,8 +77,8 @@ export const SWARM_LAND_QUEUE = "swarm.land";
 const MAX_LANDING_ATTEMPTS = 5;
 
 /**
- * Which pg-boss instances already have a landing worker. Keyed by the
- * boss for the reason the tick worker's set is: the tests run many
+ * Which JobQueue instances already have a landing worker. Keyed by the
+ * queue for the reason the tick worker's set is: the tests run many
  * contexts in one process, each with its own.
  */
 const landWorkers = new WeakSet<object>();
@@ -105,18 +105,18 @@ export interface LandingResult {
  * poll is only the backstop for a job queued by a process that died.
  */
 export async function ensureLandingWorker(ctx: AppContext): Promise<void> {
-  if (landWorkers.has(ctx.boss)) return;
-  landWorkers.add(ctx.boss);
+  if (landWorkers.has(ctx.jobs)) return;
+  landWorkers.add(ctx.jobs);
   try {
-    await ctx.boss.work<{ landingId: string }>(
+    await ctx.jobs.work<{ landingId: string }>(
       SWARM_LAND_QUEUE,
       { batchSize: 1, pollingIntervalSeconds: QUEUE_POLL_SECONDS },
-      captureJobErrors(ctx.analytics, SWARM_LAND_QUEUE, async (jobs) => {
-        for (const job of jobs) await performLanding(ctx, job.data.landingId);
+      captureJobErrors(ctx.analytics, SWARM_LAND_QUEUE, async (data) => {
+        await performLanding(ctx, data.landingId);
       }),
     );
   } catch (err) {
-    landWorkers.delete(ctx.boss);
+    landWorkers.delete(ctx.jobs);
     throw err;
   }
 }
@@ -130,7 +130,7 @@ export async function ensureLandingWorker(ctx: AppContext): Promise<void> {
  */
 export async function enqueueLanding(ctx: AppContext, landingId: string): Promise<void> {
   await ensureLandingWorker(ctx);
-  await ctx.boss.send(SWARM_LAND_QUEUE, { landingId }, { singletonKey: landingId });
+  await ctx.jobs.send(SWARM_LAND_QUEUE, { landingId }, { coalesceKey: landingId });
 }
 
 /** Where a workspace's checkout of one repository is, on this host. */

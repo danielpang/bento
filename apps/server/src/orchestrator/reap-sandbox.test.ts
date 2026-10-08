@@ -28,6 +28,7 @@ import pg from "pg";
 import { DiskArtifactStore } from "../artifact-store.js";
 import { artifactStorageKey } from "./capture-artifacts.js";
 import { ensureLocalUser, type AppContext } from "../context.js";
+import { FakeJobQueue } from "../jobs/index.js";
 import { loadEnv } from "../env.js";
 import { SecretBox } from "../secrets.js";
 import { EventBus } from "../events.js";
@@ -82,7 +83,7 @@ before(async () => {
     env,
     db,
     pool,
-    boss: { send: async () => "job" } as AppContext["boss"],
+    jobs: new FakeJobQueue(),
     bus: new EventBus(),
     drivers: singleDriver({
       provider: "docker",

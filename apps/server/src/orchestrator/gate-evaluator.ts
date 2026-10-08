@@ -492,7 +492,7 @@ export async function advanceFeature(
    * criteria that need no agent, and otherwise say why it cannot.
    */
   if (nextStage && !nextStage.defaultAgentProfileId) {
-    await ctx.boss.send("gate.evaluate", { featureId: feature.id });
+    await ctx.jobs.send("gate.evaluate", { featureId: feature.id });
   }
 
   // Hand off to the next stage's agent when one is configured. If a run
@@ -609,7 +609,7 @@ export async function moveFeatureTo(
   if (target) {
     if (!forward) await stopRunsOutsideStage(ctx, feature, target.id);
     if (forward && !target.defaultAgentProfileId) {
-      await ctx.boss.send("gate.evaluate", { featureId: feature.id });
+      await ctx.jobs.send("gate.evaluate", { featureId: feature.id });
     } else if (forward) {
       // Forward arrives ready for the stage, so its agent starts, the
       // same as advance. A drag during a run on the same stage starts

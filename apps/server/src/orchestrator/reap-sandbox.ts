@@ -32,12 +32,12 @@ const FEATURE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
  * because Fly was slow. A job retries; a click does not.
  */
 export async function queueSandboxReap(ctx: AppContext, featureId: string): Promise<void> {
-  await ctx.boss.send(REAP_SANDBOX_QUEUE, { featureId });
+  await ctx.jobs.send(REAP_SANDBOX_QUEUE, { featureId });
 }
 
 /** The same request for a swarm that is over, through the same queue. */
 export async function queueSwarmSandboxReap(ctx: AppContext, swarmId: string): Promise<void> {
-  await ctx.boss.send(REAP_SANDBOX_QUEUE, { swarmId });
+  await ctx.jobs.send(REAP_SANDBOX_QUEUE, { swarmId });
 }
 
 /** A swarm this reaper treats as over: nothing of it will run again. */
@@ -59,7 +59,7 @@ const FINISHED_SWARM_STATUSES = ["done", "failed", "cancelled"] as const;
  * outlive every leaf.
  */
 export async function queueSwarmTaskSandboxReap(ctx: AppContext, swarmTaskId: string): Promise<void> {
-  await ctx.boss.send(REAP_SANDBOX_QUEUE, { swarmTaskId });
+  await ctx.jobs.send(REAP_SANDBOX_QUEUE, { swarmTaskId });
 }
 
 /**

@@ -116,18 +116,18 @@ export async function hasActiveSwarms(ctx: Pick<AppContext, "db">): Promise<bool
 }
 
 /**
- * Which pg-boss instances already have a tick worker.
+ * Which JobQueue instances already have a tick worker.
  *
- * Keyed by the boss rather than held as a module flag, because the
+ * Keyed by the queue rather than held as a module flag, because the
  * tests run many contexts in one process and each has its own.
  */
 const tickWorkers = new WeakSet<object>();
 
 /**
- * One thing at a time, per boss, for the worker's own lifecycle.
+ * One thing at a time, per queue, for the worker's own lifecycle.
  *
  * Starting a worker and stopping one are two steps each: mark the
- * boss, then talk to pg-boss. Interleaved, they lose ticks. A caller
+ * queue, then talk to it. Interleaved, they lose ticks. A caller
  * that read the mark while a stop sat between its delete and its
  * offWork sent a tick into a queue whose worker was already going
  * away, and one that read it just after registered a worker the stop
@@ -140,13 +140,13 @@ const tickWorkers = new WeakSet<object>();
  */
 const workerLifecycle = new WeakMap<object, Promise<unknown>>();
 
-function inTurn<T>(boss: object, step: () => Promise<T>): Promise<T> {
-  const previous = workerLifecycle.get(boss) ?? Promise.resolve();
+function inTurn<T>(jobs: object, step: () => Promise<T>): Promise<T> {
+  const previous = workerLifecycle.get(jobs) ?? Promise.resolve();
   // Whatever the previous turn did, including throwing, the next one
   // runs: a failed registration must not wedge the queue for good.
   const next = previous.then(step, step);
   workerLifecycle.set(
-    boss,
+    jobs,
     next.then(
       () => {},
       () => {},
@@ -2019,9 +2019,9 @@ export async function enqueueSwarmTick(ctx: AppContext, swarmId: string): Promis
   // lifecycle lock: a deployment with no swarms runs no worker, so the
   // order is what keeps a job from waiting for the next restart to be
   // read, and the lock is what keeps a stop from landing in between.
-  await inTurn(ctx.boss, async () => {
+  await inTurn(ctx.jobs, async () => {
     await registerTickWorker(ctx);
-    await ctx.boss.send(SWARM_TICK_QUEUE, { swarmId }, { singletonKey: swarmId });
+    await ctx.jobs.send(SWARM_TICK_QUEUE, { swarmId }, { coalesceKey: swarmId });
   });
   /**
    * And the clock, from the same door.
@@ -2050,23 +2050,23 @@ export async function enqueueSwarmTick(ctx: AppContext, swarmId: string): Promis
  * swarm settles. Single job at a time, because two ticks for one swarm
  * serializing on its row lock is work done twice.
  *
- * Idempotent, and safe to call concurrently: the boss is marked before
+ * Idempotent, and safe to call concurrently: the queue is marked before
  * the await, so a second caller does not register a second worker.
  */
 export async function ensureSwarmTickWorker(ctx: AppContext): Promise<void> {
-  await inTurn(ctx.boss, () => registerTickWorker(ctx));
+  await inTurn(ctx.jobs, () => registerTickWorker(ctx));
 }
 
 /** The registration itself. Only ever called inside a lifecycle turn. */
 async function registerTickWorker(ctx: AppContext): Promise<void> {
-  if (tickWorkers.has(ctx.boss)) return;
-  tickWorkers.add(ctx.boss);
+  if (tickWorkers.has(ctx.jobs)) return;
+  tickWorkers.add(ctx.jobs);
   try {
-    await ctx.boss.work<{ swarmId: string }>(
+    await ctx.jobs.work<{ swarmId: string }>(
       SWARM_TICK_QUEUE,
       { batchSize: 1, pollingIntervalSeconds: INTERACTIVE_POLL_SECONDS },
-      captureJobErrors(ctx.analytics, SWARM_TICK_QUEUE, async (jobs) => {
-        for (const job of jobs) await tickSwarm(ctx, job.data.swarmId);
+      captureJobErrors(ctx.analytics, SWARM_TICK_QUEUE, async (data) => {
+        await tickSwarm(ctx, data.swarmId);
         // After the tick, because the tick is what settles the last
         // swarm. offWork only flags the worker, so a stop from inside
         // its own handler does not wait on this job.
@@ -2074,7 +2074,7 @@ async function registerTickWorker(ctx: AppContext): Promise<void> {
       }),
     );
   } catch (err) {
-    tickWorkers.delete(ctx.boss);
+    tickWorkers.delete(ctx.jobs);
     throw err;
   }
 }
@@ -2090,11 +2090,11 @@ async function registerTickWorker(ctx: AppContext): Promise<void> {
  * one that comes after finds no worker registered and registers again.
  */
 export async function stopSwarmTickWorkerIfIdle(ctx: AppContext): Promise<boolean> {
-  const stopped = await inTurn(ctx.boss, async () => {
-    if (!tickWorkers.has(ctx.boss)) return false;
+  const stopped = await inTurn(ctx.jobs, async () => {
+    if (!tickWorkers.has(ctx.jobs)) return false;
     if (await hasActiveSwarms(ctx)) return false;
-    tickWorkers.delete(ctx.boss);
-    await ctx.boss.offWork(SWARM_TICK_QUEUE);
+    tickWorkers.delete(ctx.jobs);
+    await ctx.jobs.offWork(SWARM_TICK_QUEUE);
     return true;
   });
   /**
@@ -2116,10 +2116,10 @@ export async function stopSwarmTickWorkerIfIdle(ctx: AppContext): Promise<boolea
 
 /** Stops the tick worker, so an idle deployment stops paying for the poll. */
 export async function stopSwarmTickWorker(ctx: AppContext): Promise<void> {
-  await inTurn(ctx.boss, async () => {
-    if (!tickWorkers.has(ctx.boss)) return;
-    tickWorkers.delete(ctx.boss);
-    await ctx.boss.offWork(SWARM_TICK_QUEUE);
+  await inTurn(ctx.jobs, async () => {
+    if (!tickWorkers.has(ctx.jobs)) return;
+    tickWorkers.delete(ctx.jobs);
+    await ctx.jobs.offWork(SWARM_TICK_QUEUE);
   });
 }
 

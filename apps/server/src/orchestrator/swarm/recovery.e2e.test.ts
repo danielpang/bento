@@ -16,6 +16,7 @@ import {
 import { LocalProcessDriver, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
 import { singleDriver } from "../sandbox-driver.js";
 import type { AppContext } from "../../context.js";
+import { FakeJobQueue } from "../../jobs/index.js";
 import { EventBus, type BoardEvent } from "../../events.js";
 import { loadEnv } from "../../env.js";
 import { recoverInterruptedRuns } from "../run-executor.js";
@@ -46,9 +47,10 @@ const PROFILE = "22222222-2222-2222-2222-222222222222";
 let pool: ReturnType<typeof createPool>;
 let db: Db;
 let ctx: AppContext;
-let queued: { queue: string; data: unknown; options?: unknown }[];
-let workers: string[];
-let stopped: string[];
+let jobs: FakeJobQueue;
+let queued: FakeJobQueue["sent"];
+let workers: FakeJobQueue["worked"];
+let stopped: FakeJobQueue["offWorked"];
 let emitted: BoardEvent[];
 
 before(async () => {
@@ -71,9 +73,10 @@ before(async () => {
     [PROFILE],
   );
 
-  queued = [];
-  workers = [];
-  stopped = [];
+  jobs = new FakeJobQueue();
+  queued = jobs.sent;
+  workers = jobs.worked;
+  stopped = jobs.offWorked;
   emitted = [];
   const bus = new EventBus();
   bus.onBoardEvent(PROJECT, (event) => emitted.push(event));
@@ -87,20 +90,7 @@ before(async () => {
     liveInputs: new Map(),
     draining: false,
     userId: "u1",
-    boss: {
-      send: async (queue: string, data: unknown, options?: unknown) => {
-        queued.push({ queue, data, options });
-        return "job";
-      },
-      work: async (queue: string) => {
-        workers.push(queue);
-        return "worker";
-      },
-      offWork: async (queue: string) => {
-        stopped.push(queue);
-      },
-      notifyWorker: () => {},
-    } as unknown as AppContext["boss"],
+    jobs,
   } as unknown as AppContext;
 });
 
@@ -114,7 +104,7 @@ beforeEach(async () => {
   workers.length = 0;
   stopped.length = 0;
   emitted.length = 0;
-  // The worker registry is keyed by the boss, and this file has one:
+  // The worker registry is keyed by the queue, and this file has one:
   // clear it so each test sees a process that has not started it.
   await stopSwarmTickWorker(ctx);
   stopped.length = 0;
@@ -318,10 +308,7 @@ test("every swarm still working gets one tick at boot", async () => {
   }
   // Coalesced by swarm, so a burst cannot become a tick per event.
   for (const job of queued.filter((job) => job.queue === "swarm.tick")) {
-    assert.equal(
-      (job.options as { singletonKey?: string }).singletonKey,
-      (job.data as { swarmId: string }).swarmId,
-    );
+    assert.equal(job.opts?.coalesceKey, (job.data as { swarmId: string }).swarmId);
   }
 });
 
@@ -379,36 +366,37 @@ test("the worker stops once the last swarm settles", async () => {
  * The window between deciding to stop and having stopped.
  *
  * Starting the worker and stopping it are two steps each: mark the
- * boss, then talk to pg-boss. A tick that arrived in between saw a
+ * queue, then talk to it. A tick that arrived in between saw a
  * mark that no longer had a worker behind it, or registered one the
  * stop then took away, and either way the job sat in the queue until
  * something else started a swarm. Driven rather than argued about: the
  * stop is held open, a tick is enqueued into the gap, and the order
- * the boss was actually called in is the assertion.
+ * the queue was actually called in is the assertion.
  */
 test("a tick enqueued while the worker is stopping waits for the stop rather than racing it", async () => {
   const calls: string[] = [];
   let releaseOffWork: (() => void) | null = null;
+  const holdingJobs = new FakeJobQueue();
+  // Only the tick worker's lifecycle is under test. enqueueSwarmTick
+  // also starts the watchdog, whose work/offWork would otherwise show
+  // up as a second "work" after send.
+  holdingJobs.work = async (queue) => {
+    if (queue === "swarm.tick") calls.push("work");
+  };
+  holdingJobs.offWork = async (queue) => {
+    if (queue !== "swarm.tick") return;
+    calls.push("offWork:start");
+    await new Promise<void>((resolve) => {
+      releaseOffWork = resolve;
+    });
+    calls.push("offWork:end");
+  };
+  holdingJobs.send = async () => {
+    calls.push("send");
+  };
   const holding = {
     ...ctx,
-    boss: {
-      work: async () => {
-        calls.push("work");
-        return "worker";
-      },
-      offWork: async () => {
-        calls.push("offWork:start");
-        await new Promise<void>((resolve) => {
-          releaseOffWork = resolve;
-        });
-        calls.push("offWork:end");
-      },
-      send: async () => {
-        calls.push("send");
-        return "job";
-      },
-      notifyWorker: () => {},
-    },
+    jobs: holdingJobs,
   } as unknown as AppContext;
 
   const swarm = await makeSwarm("running");
@@ -445,5 +433,8 @@ test("a worker does not stop while a swarm is still live", async () => {
 
   await db.update(swarms).set({ status: "done" }).where(eq(swarms.id, swarm.id));
   assert.equal(await stopSwarmTickWorkerIfIdle(ctx), true);
-  assert.deepEqual(stopped, ["swarm.tick"]);
+  assert.deepEqual(
+    stopped.filter((queue) => queue === "swarm.tick"),
+    ["swarm.tick"],
+  );
 });

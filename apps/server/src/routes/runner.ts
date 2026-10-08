@@ -466,7 +466,7 @@ export function runnerRoutes(ctx: AppContext) {
           runId,
           status: body.ok ? "succeeded" : "failed",
         });
-        await ctx.boss.send("gate.evaluate", { featureId: feature.id });
+        await ctx.jobs.send("gate.evaluate", { featureId: feature.id });
       }
       return c.json({ ok: true });
     });

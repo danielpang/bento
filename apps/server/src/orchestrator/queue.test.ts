@@ -3,37 +3,20 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import type PgBoss from "pg-boss";
+import { FakeJobQueue } from "../jobs/index.js";
 import { enqueueRun, INTERACTIVE_POLL_SECONDS, QUEUE_POLL_SECONDS, RUN_WORKER_POLL_SECONDS } from "./queue.js";
 
-function fakeBoss() {
-  const calls: Array<{ op: "send" | "notify"; arg: unknown }> = [];
-  const boss = {
-    send: async (name: string, data: object) => {
-      calls.push({ op: "send", arg: [name, data] });
-      return "job-1";
-    },
-    notifyWorker: (id: string) => {
-      calls.push({ op: "notify", arg: id });
-    },
-  };
-  return { boss: boss as unknown as PgBoss, calls };
-}
-
 test("enqueueRun sends the job before it wakes workers", async () => {
-  const { boss, calls } = fakeBoss();
-  await enqueueRun({ boss, runWorkers: ["w1", "w2"] }, "run-1");
-  assert.deepEqual(calls, [
-    { op: "send", arg: ["run.execute", { runId: "run-1" }] },
-    { op: "notify", arg: "w1" },
-    { op: "notify", arg: "w2" },
-  ]);
+  const jobs = new FakeJobQueue();
+  await enqueueRun({ jobs }, "run-1");
+  assert.deepEqual(jobs.sent, [{ queue: "run.execute", data: { runId: "run-1" } }]);
+  assert.deepEqual(jobs.woken, ["run.execute"]);
 });
 
 test("enqueueRun still queues when this process has no run workers", async () => {
-  const { boss, calls } = fakeBoss();
-  await enqueueRun({ boss }, "run-1");
-  assert.deepEqual(calls, [{ op: "send", arg: ["run.execute", { runId: "run-1" }] }]);
+  const jobs = new FakeJobQueue();
+  await enqueueRun({ jobs }, "run-1");
+  assert.deepEqual(jobs.sent, [{ queue: "run.execute", data: { runId: "run-1" } }]);
 });
 
 test("run workers poll slower than a queue a person is waiting on", () => {
@@ -59,11 +42,39 @@ test("run.execute jobs go through enqueueRun, not a bare send", () => {
       if (!ent.name.endsWith(".ts")) continue;
       if (ent.name === "queue.ts" || ent.name === "queue.test.ts") continue;
       const src = readFileSync(path, "utf8");
-      if (src.includes('boss.send("run.execute"') || src.includes("boss.send('run.execute'")) {
+      if (src.includes('jobs.send("run.execute"') || src.includes("jobs.send('run.execute'")) {
         offenders.push(path.slice(srcRoot.length + 1));
       }
     }
   };
   visit(srcRoot);
   assert.deepEqual(offenders, [], `bare run.execute send in ${offenders.join(", ")}`);
+});
+
+/**
+ * AppContext.jobs is the only door. The pg-boss client lives inside
+ * the adapter, so a leftover ctx.boss is a call that skipped it.
+ */
+test("ctx.boss stays inside the pg-boss adapter", () => {
+  const srcRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const allowed = new Set(["jobs/pg-boss.ts"]);
+  const offenders: string[] = [];
+  const visit = (dir: string) => {
+    for (const ent of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, ent.name);
+      if (ent.isDirectory()) {
+        visit(path);
+        continue;
+      }
+      if (!ent.name.endsWith(".ts")) continue;
+      const rel = path.slice(srcRoot.length + 1).replaceAll("\\", "/");
+      if (allowed.has(rel) || rel === "orchestrator/queue.test.ts") continue;
+      const src = readFileSync(path, "utf8");
+      if (src.includes("ctx.boss") || src.includes("context.boss")) {
+        offenders.push(rel);
+      }
+    }
+  };
+  visit(srcRoot);
+  assert.deepEqual(offenders, [], `ctx.boss outside the adapter in ${offenders.join(", ")}`);
 });

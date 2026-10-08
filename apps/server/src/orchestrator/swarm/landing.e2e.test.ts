@@ -21,6 +21,7 @@ import {
 import { LocalProcessDriver, WorktreeManager, type SandboxDriver } from "@bento/sandbox";
 import { singleDriver } from "../sandbox-driver.js";
 import type { AppContext } from "../../context.js";
+import { FakeJobQueue } from "../../jobs/index.js";
 import { EventBus, type BoardEvent } from "../../events.js";
 import { loadEnv } from "../../env.js";
 import { taskTrailer, workerBranchName } from "./branches.js";
@@ -62,7 +63,7 @@ let pool: ReturnType<typeof createPool>;
 let db: Db;
 let ctx: AppContext;
 let emitted: BoardEvent[];
-let queued: { queue: string; data: Record<string, unknown> }[];
+let queued: FakeJobQueue["sent"];
 let dataDir: string;
 let repoPath: string;
 
@@ -99,7 +100,8 @@ before(async () => {
 
   const bus = new EventBus();
   emitted = [];
-  queued = [];
+  const jobs = new FakeJobQueue();
+  queued = jobs.sent;
   ctx = {
     env: loadEnv({ BENTO_MODE: "local", DATABASE_URL: testUrl } as NodeJS.ProcessEnv),
     db,
@@ -110,16 +112,7 @@ before(async () => {
     // Only the workspace is read here, and only to refuse a driver that
     // keeps its checkouts inside the machine rather than on this host.
     drivers: singleDriver({ provider: "docker", workspace: "host" } as unknown as SandboxDriver),
-    boss: {
-      send: async (queue: string, data: unknown) => {
-        queued.push({ queue, data: data as Record<string, unknown> });
-        return "job";
-      },
-      work: async () => "worker",
-      offWork: async () => {},
-      notifyWorker: () => {},
-    },
-    runWorkers: [],
+    jobs,
   } as unknown as AppContext;
   bus.onBoardEvent(PROJECT, (event) => emitted.push(event));
 });
@@ -236,7 +229,7 @@ test("a leaf that lands is done, its branch is on the swarm's, and its machine i
   // The leaf's machine is no longer able to do anything useful, so it is
   // queued for reaping by its own task id rather than the swarm's.
   assert.ok(
-    queued.some((job) => job.queue === "sandbox.reap" && job.data.swarmTaskId === fx.task.id),
+    queued.some((job) => job.queue === "sandbox.reap" && (job.data as { swarmTaskId?: string }).swarmTaskId === fx.task.id),
     "the worker's sandbox is asked for the moment its branch lands",
   );
   assert.ok(queued.some((job) => job.queue === "swarm.tick"));
@@ -302,7 +295,7 @@ test("a conflict holds the queue, switches the leaf to merge, and has one resolv
    * retried: a team with no agent hours left cannot start a resolver
    * this second and the queue must not end over it.
    */
-  assert.ok(queued.some((job) => job.queue === "swarm.tick" && job.data.swarmId === fx.swarm.id));
+  assert.ok(queued.some((job) => job.queue === "swarm.tick" && (job.data as { swarmId?: string }).swarmId === fx.swarm.id));
   const ticked = await tickSwarm(ctx, fx.swarm.id);
   assert.equal(ticked?.resolverRunIds.length, 1, "one agent, on the conflict the queue is held by");
   const resolverRunId = ticked!.resolverRunIds[0]!;
@@ -312,7 +305,7 @@ test("a conflict holds the queue, switches the leaf to merge, and has one resolv
   assert.equal(run!.role, "resolver");
   assert.equal(run!.swarmTaskId, fx.task.id);
   assert.ok(
-    queued.some((job) => job.queue === "run.execute" && job.data.runId === resolverRunId),
+    queued.some((job) => job.queue === "run.execute" && (job.data as { runId?: string }).runId === resolverRunId),
     "and handed to the queue, because a run row with no job never starts",
   );
 
@@ -376,7 +369,7 @@ test("a landing for work somebody withdrew is cancelled rather than applied", as
   // And its machine goes, for the reason a landed leaf's does: the
   // branch it holds is never going anywhere now.
   assert.ok(
-    queued.some((job) => job.queue === "sandbox.reap" && job.data.swarmTaskId === fx.task.id),
+    queued.some((job) => job.queue === "sandbox.reap" && (job.data as { swarmTaskId?: string }).swarmTaskId === fx.task.id),
     "a withdrawn leaf's sandbox is asked for too",
   );
 });

@@ -22,6 +22,7 @@ import { singleDriver } from "./sandbox-driver.js";
 import pg from "pg";
 import { DiskArtifactStore } from "../artifact-store.js";
 import { ensureLocalUser, type AppContext } from "../context.js";
+import { FakeJobQueue } from "../jobs/index.js";
 import { loadEnv } from "../env.js";
 import { SecretBox } from "../secrets.js";
 import { EventBus } from "../events.js";
@@ -39,7 +40,7 @@ const testDbName = "hibernate_sandbox_test";
 const testUrl = baseUrl.replace(/\/[^/]+$/, `/${testDbName}`);
 
 let ctx: AppContext;
-const jobs: { name: string; data: { sandboxId?: string } }[] = [];
+const jobs = new FakeJobQueue();
 
 async function scratchDir(prefix: string): Promise<string> {
   return realpath(await mkdtemp(path.join(tmpdir(), prefix)));
@@ -67,12 +68,7 @@ before(async () => {
     env,
     db,
     pool,
-    boss: {
-      send: async (name: string, data: { sandboxId?: string }) => {
-        jobs.push({ name, data });
-        return "job";
-      },
-    } as AppContext["boss"],
+    jobs,
     bus: new EventBus(),
     drivers: singleDriver({ provider: "local-process", workspace: "host" } as unknown as SandboxDriver),
     worktrees: new WorktreeManager(dataDir),
@@ -90,7 +86,9 @@ after(async () => {
 });
 
 function jobsFor(sandboxId: string) {
-  return jobs.filter((job) => job.name === HIBERNATE_SANDBOX_QUEUE && job.data.sandboxId === sandboxId);
+  return jobs.sent.filter(
+    (job) => job.queue === HIBERNATE_SANDBOX_QUEUE && (job.data as { sandboxId?: string }).sandboxId === sandboxId,
+  );
 }
 
 function useModal(api: ModalApi): ModalDriver {

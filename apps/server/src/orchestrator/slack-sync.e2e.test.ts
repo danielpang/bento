@@ -30,6 +30,7 @@ import {
 import { LocalProcessDriver, WorktreeManager } from "@bento/sandbox";
 import { singleDriver } from "./sandbox-driver.js";
 import { DiskArtifactStore } from "../artifact-store.js";
+import { PgBossQueue } from "../jobs/index.js";
 import { SecretBox } from "../secrets.js";
 import { ensureLocalUser, LOCAL_USER_ID, type AppContext } from "../context.js";
 import { EventBus } from "../events.js";
@@ -67,7 +68,7 @@ const emails = new Map<string, string | null>([
 ]);
 let notifySent = 0;
 const notifyJobs: SlackNotifyJob[] = [];
-let realSend: PgBoss["send"];
+let realSend: AppContext["jobs"]["send"];
 
 before(async () => {
   const admin = new pg.Client({ connectionString: baseUrl });
@@ -91,16 +92,14 @@ before(async () => {
   const boss = new PgBoss({ connectionString: testUrl, schema: "pgboss" });
   boss.on("error", () => {});
   await boss.start();
-  await boss.createQueue("slack.notify");
-  await boss.createQueue("gate.evaluate");
-  await boss.createQueue("swarm.tick");
   const userId = await ensureLocalUser(db);
+  const jobs = new PgBossQueue(boss);
 
   ctx = {
     env,
     db,
     pool,
-    boss,
+    jobs,
     bus: new EventBus(),
     drivers: singleDriver(new LocalProcessDriver()),
     worktrees: new WorktreeManager(dataDir),
@@ -112,14 +111,14 @@ before(async () => {
     userId,
   };
 
-  realSend = ctx.boss.send.bind(ctx.boss);
-  ctx.boss.send = (async (name: string, data: object | null, options?: object) => {
+  realSend = ctx.jobs.send.bind(ctx.jobs);
+  ctx.jobs.send = (async (name, data, options) => {
     if (name === "slack.notify") {
       notifySent += 1;
       notifyJobs.push(data as SlackNotifyJob);
     }
-    return realSend(name, data as never, options as never);
-  }) as PgBoss["send"];
+    return realSend(name, data, options);
+  }) as AppContext["jobs"]["send"];
 
   globalThis.fetch = stubSlack();
 
@@ -170,7 +169,7 @@ before(async () => {
 
 after(async () => {
   globalThis.fetch = originalFetch;
-  await ctx.boss.stop({ close: true, timeout: 1000 });
+  await ctx.jobs.stop();
   await ctx.pool.end();
 });
 

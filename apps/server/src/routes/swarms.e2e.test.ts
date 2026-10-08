@@ -34,6 +34,7 @@ import { createApp } from "../app.js";
 import { DiskArtifactStore } from "../artifact-store.js";
 import { SecretBox } from "../secrets.js";
 import { ensureLocalUser, type AppContext, type Entitlements } from "../context.js";
+import { FakeJobQueue } from "../jobs/index.js";
 import { EventBus } from "../events.js";
 import { loadEnv } from "../env.js";
 import { createFeatureFlags } from "../feature-flags.js";
@@ -65,7 +66,7 @@ let projectId: string;
 /** The project's repository on disk, for the route that reads git. */
 let repoDir: string;
 /** Jobs the routes queued, instead of a real pg-boss. */
-let queued: { queue: string; data: unknown; options?: unknown }[];
+let queued: FakeJobQueue["sent"];
 /** Every statement the pool ran, so a stream can be held to its budget. */
 let statements: string[];
 
@@ -103,26 +104,14 @@ before(async () => {
   };
   db = createDb(pool);
   const userId = await ensureLocalUser(db);
-  queued = [];
+  const jobs = new FakeJobQueue();
+  queued = jobs.sent;
 
   ctx = {
     env,
     db,
     pool,
-    boss: {
-      send: async (queue: string, data: unknown, options?: unknown) => {
-        queued.push({ queue, data, options });
-        return "job";
-      },
-      // The tick door starts the reconciler's worker before it queues
-      // the job, so a deployment with no swarms registers none.
-      createQueue: async () => {},
-      work: async () => "worker",
-      offWork: async () => {},
-      schedule: async () => {},
-      unschedule: async () => {},
-      notifyWorker: () => {},
-    } as unknown as AppContext["boss"],
+    jobs,
     bus: new EventBus(),
     drivers: singleDriver(new LocalProcessDriver()),
     worktrees: new WorktreeManager(dataDir),
@@ -161,7 +150,7 @@ beforeEach(async () => {
   await db.delete(swarms);
   await db.update(projects).set({ executor: "server" }).where(eq(projects.id, projectId));
   ctx.running.clear();
-  queued = [];
+  queued.length = 0;
   statements.length = 0;
 });
 
@@ -1824,7 +1813,7 @@ test("raising the budget wakes the swarm, and the planner's warning is due again
     .update(swarms)
     .set({ status: "budget_exhausted", pausedReason: "budget", budgetUsd: "5", budgetWarnedAt: new Date() })
     .where(eq(swarms.id, swarm.id));
-  queued = [];
+  queued.length = 0;
 
   const res = await patch(`/api/swarms/${swarm.id}`, { budgetUsd: 40 });
   assert.equal(res.status, 200, await res.clone().text());
@@ -1852,7 +1841,7 @@ test("raising the time limit wakes the swarm the clock stopped", async () => {
     .update(swarms)
     .set({ status: "timed_out", pausedReason: "time_limit", timeLimitMin: 120 })
     .where(eq(swarms.id, swarm.id));
-  queued = [];
+  queued.length = 0;
 
   const res = await patch(`/api/swarms/${swarm.id}`, { timeLimitMin: 240 });
   assert.equal(res.status, 200, await res.clone().text());

@@ -19,6 +19,7 @@ import {
 import { eq } from "drizzle-orm";
 import { createApp } from "../app.js";
 import type { AppContext } from "../context.js";
+import { FakeJobQueue } from "../jobs/index.js";
 import { loadEnv } from "../env.js";
 import { evaluateFeatureGate } from "./gate-evaluator.js";
 import { startFeatureFollowUpRun } from "./rebase-run.js";
@@ -52,7 +53,7 @@ let pool: ReturnType<typeof createPool>;
 let db: Db;
 let ctx: AppContext;
 let app: ReturnType<typeof createApp>;
-const jobs: { name: string; data: unknown }[] = [];
+const jobs = new FakeJobQueue();
 const board: { type: string; status?: string; runId?: string }[] = [];
 
 before(async () => {
@@ -94,11 +95,7 @@ before(async () => {
     pool,
     userId: "u1",
     driver: { provider: "local-process" },
-    boss: {
-      async send(name: string, data: unknown) {
-        jobs.push({ name, data });
-      },
-    },
+    jobs,
     bus: {
       emitRunEvent() {},
       emitBoardEvent(event: { type: string; status?: string; runId?: string }) {
@@ -147,7 +144,7 @@ test("a project with no repositories refuses a new run and cancels one already q
     })
     .returning();
 
-  jobs.length = 0;
+  jobs.sent.length = 0;
   board.length = 0;
   await assert.doesNotReject(executeRun(ctx, run!.id));
 
@@ -164,14 +161,14 @@ test("a project with no repositories refuses a new run and cancels one already q
   );
   // Cancelling settles the card. The gate is what would have been
   // skipped, and a second delivery of the same job must not settle again.
-  assert.deepEqual(jobs, [{ name: "gate.evaluate", data: { featureId: FEATURE } }]);
+  assert.deepEqual(jobs.sent, [{ queue: "gate.evaluate", data: { featureId: FEATURE } }]);
 
   // A duplicate job, the shape a retry or a boot requeue would deliver,
   // finds the run already closed and writes nothing further.
   await executeRun(ctx, run!.id);
   const again = await db.select().from(runEvents).where(eq(runEvents.runId, run!.id));
   assert.equal(again.length, 0);
-  assert.deepEqual(jobs, [{ name: "gate.evaluate", data: { featureId: FEATURE } }]);
+  assert.deepEqual(jobs.sent, [{ queue: "gate.evaluate", data: { featureId: FEATURE } }]);
 
   const quick = await app.request(`/api/features/${FEATURE}/quick-run?cli=claude-code`, { method: "POST" });
   assert.equal(quick.status, 409, await quick.clone().text());
@@ -290,7 +287,7 @@ test("a project with no repositories refuses a new run and cancels one already q
   assert.equal(judgment?.status, "pending");
   assert.equal((judgment?.detail as { message?: string } | null)?.message, NO_REPOSITORIES);
 
-  assert.deepEqual(jobs, [{ name: "gate.evaluate", data: { featureId: FEATURE } }]);
+  assert.deepEqual(jobs.sent, [{ queue: "gate.evaluate", data: { featureId: FEATURE } }]);
 
   await db.insert(repositories).values({
     projectId: PROJECT,
@@ -298,7 +295,7 @@ test("a project with no repositories refuses a new run and cancels one already q
     localPath: "/tmp/app",
     position: 0,
   });
-  jobs.length = 0;
+  jobs.sent.length = 0;
   const started = await app.request("/api/runs", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -307,5 +304,5 @@ test("a project with no repositories refuses a new run and cancels one already q
   assert.equal(started.status, 201, await started.clone().text());
   const body = (await started.json()) as { id: string; status: string };
   assert.equal(body.status, "queued");
-  assert.deepEqual(jobs, [{ name: "run.execute", data: { runId: body.id } }]);
+  assert.deepEqual(jobs.sent, [{ queue: "run.execute", data: { runId: body.id } }]);
 });

@@ -24,10 +24,10 @@ export const MODAL_SWEEP_GRACE_MS = 2 * MODAL_REPO_PREPARE_TIMEOUT_MS + 15 * 60 
 
 /** Queue a hibernation after the warm window. A duplicate job is safe: the worker skips a row that is already hibernated. */
 export async function armModalHibernation(ctx: AppContext, sandboxId: string): Promise<void> {
-  await ctx.boss.send(
+  await ctx.jobs.send(
     HIBERNATE_SANDBOX_QUEUE,
     { sandboxId },
-    { startAfter: new Date(Date.now() + MODAL_WARM_WINDOW_MS) },
+    { delayMs: MODAL_WARM_WINDOW_MS },
   );
 }
 

@@ -8,6 +8,7 @@ import { startLogExport } from "./log-export.js";
 import { attachPgBus } from "./pg-bus.js";
 import { WorktreeManager } from "@bento/sandbox";
 import PgBoss from "pg-boss";
+import { PgBossQueue } from "./jobs/index.js";
 import { createApp } from "./app.js";
 import { createArtifactStore } from "./artifact-store.js";
 import { createAuth, type AuthHooks } from "./auth.js";
@@ -120,6 +121,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
       analytics?.captureException(err, null, null, { source: "pg-boss" });
     });
     await boss.start();
+    const jobs = new PgBossQueue(boss);
 
     // Local mode has a single implicit user; multi mode uses better-auth.
     const userId = env.BENTO_MODE === "multi" ? "" : await ensureLocalUser(db);
@@ -207,7 +209,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
       env,
       db,
       pool,
-      boss,
+      jobs,
       bus: new EventBus(),
       drivers: createDrivers(env, {
         onSpriteLookupRetry: (info) => reportSpriteLookupRetry(analytics, info),
@@ -378,7 +380,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
           server.handle.close(() => resolve());
           (server.handle as { closeAllConnections?: () => void }).closeAllConnections?.();
         });
-        await boss.stop({ close: true, timeout: 2000 }).catch(() => {});
+        await jobs.stop();
         await pgBus.stop().catch(() => {});
         // Flush before the pool closes: capture is fire and forget, so
         // whatever queued in the last seconds is only on this machine.

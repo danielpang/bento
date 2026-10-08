@@ -14,6 +14,7 @@ import {
   type Db,
 } from "@bento/db";
 import type { AppContext } from "./context.js";
+import { FakeJobQueue } from "./jobs/index.js";
 import { EventBus, type BoardEvent } from "./events.js";
 import { loadEnv } from "./env.js";
 import { runWatchdog } from "./orchestrator/swarm/watchdog.js";
@@ -48,7 +49,7 @@ let pool: ReturnType<typeof createPool>;
 let db: Db;
 let ctx: AppContext;
 let emitted: BoardEvent[];
-let queued: { queue: string; data: unknown }[];
+let queued: FakeJobQueue["sent"];
 
 before(async () => {
   const admin = new pg.Client({ connectionString: adminUrl });
@@ -72,26 +73,15 @@ before(async () => {
 
   const bus = new EventBus();
   emitted = [];
-  queued = [];
+  const jobs = new FakeJobQueue();
+  queued = jobs.sent;
   ctx = {
     env: loadEnv({ BENTO_MODE: "local", DATABASE_URL: testUrl } as NodeJS.ProcessEnv),
     db,
     pool,
     bus,
     userId: "u1",
-    boss: {
-      send: async (queue: string, data: unknown) => {
-        queued.push({ queue, data });
-        return "job";
-      },
-      notifyWorker: () => {},
-      work: async () => "worker",
-      offWork: async () => {},
-      createQueue: async () => {},
-      schedule: async () => {},
-      unschedule: async () => {},
-    },
-    runWorkers: [],
+    jobs,
   } as unknown as AppContext;
   bus.onBoardEvent(PROJECT, (event) => emitted.push(event));
 });

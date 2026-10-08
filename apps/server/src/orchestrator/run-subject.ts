@@ -163,7 +163,7 @@ async function pipelineSubject(
         text,
       }),
     settle: async (context) => {
-      await context.boss.send("gate.evaluate", { featureId: feature.id });
+      await context.jobs.send("gate.evaluate", { featureId: feature.id });
     },
   };
 }

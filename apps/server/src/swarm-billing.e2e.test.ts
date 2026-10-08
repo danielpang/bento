@@ -26,6 +26,7 @@ import { createApp } from "./app.js";
 import { DiskArtifactStore } from "./artifact-store.js";
 import { SecretBox } from "./secrets.js";
 import { ensureLocalUser, type AppContext, type Entitlements } from "./context.js";
+import { FakeJobQueue } from "./jobs/index.js";
 import { EventBus } from "./events.js";
 import { loadEnv } from "./env.js";
 import { createFeatureFlags } from "./feature-flags.js";
@@ -151,15 +152,7 @@ before(async () => {
     env,
     db,
     pool,
-    boss: {
-      send: async () => "job",
-      work: async () => "worker",
-      offWork: async () => {},
-      notifyWorker: () => {},
-      createQueue: async () => {},
-      schedule: async () => {},
-      unschedule: async () => {},
-    } as unknown as AppContext["boss"],
+    jobs: new FakeJobQueue(),
     bus: new EventBus(),
     drivers: singleDriver(new LocalProcessDriver()),
     worktrees: new WorktreeManager(dataDir),

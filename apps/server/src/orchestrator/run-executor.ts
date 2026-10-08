@@ -117,8 +117,8 @@ import {
 import { latestConversationRun, resolveFollowUpRun } from "./stage-agent.js";
 import { asPipelineRun, isPipelineRun, type PipelineRun } from "./pipeline-run.js";
 import { describeRunSubject, type RunSubject } from "./run-subject.js";
-import { SWARM_TICK_QUEUE, tickAllLiveSwarms } from "./swarm/coordinator.js";
-import { SWARM_LAND_QUEUE, resumeClaimedLandings } from "./swarm/landing.js";
+import { tickAllLiveSwarms } from "./swarm/coordinator.js";
+import { resumeClaimedLandings } from "./swarm/landing.js";
 import {
   claimQueuedMessages,
   confirmDelivered,
@@ -2967,30 +2967,6 @@ async function requeueWaitingRuns(ctx: AppContext): Promise<void> {
 }
 
 export async function registerJobs(ctx: AppContext): Promise<void> {
-  await ctx.boss.createQueue("run.execute");
-  await ctx.boss.createQueue("gate.evaluate");
-  await ctx.boss.createQueue("runner.reap");
-  await ctx.boss.createQueue(REAP_SANDBOX_QUEUE);
-  /**
-   * The swarm reconciler's queue, keyed by swarm.
-   *
-   * "short" plus a singleton key of the swarm id is what makes a burst
-   * of events one tick: while a tick for a swarm is waiting to be
-   * picked up, another send for the same swarm creates no second job.
-   * A tick that is already running does not swallow the next one, so an
-   * event that arrives mid tick still gets read.
-   */
-  await ctx.boss.createQueue(SWARM_TICK_QUEUE, { name: SWARM_TICK_QUEUE, policy: "short" });
-  /**
-   * The merge queue's own queue. "short" with the landing's id as the
-   * key, so a landing that is already waiting is not queued twice; one
-   * at a time within a swarm is the partial unique index's job and not
-   * this one's.
-   */
-  await ctx.boss.createQueue(SWARM_LAND_QUEUE, { name: SWARM_LAND_QUEUE, policy: "short" });
-  await ctx.boss.createQueue(HIBERNATE_SANDBOX_QUEUE);
-  await ctx.boss.createQueue(MODAL_SWEEP_QUEUE);
-
   await recoverInterruptedRuns(ctx);
   /**
    * Landings the previous process was holding.
@@ -3027,27 +3003,29 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
    * Sequentially rather than in parallel: this is housekeeping, and it
    * should never compete with an agent for the provider's rate limit.
    */
-  await ctx.boss.work<{ featureId?: string; swarmId?: string; swarmTaskId?: string }>(REAP_SANDBOX_QUEUE, { batchSize: 1 }, captureJobErrors(ctx.analytics, REAP_SANDBOX_QUEUE, async (jobs) => {
-    // One queue, three kinds of machine. Which id the job carries is
-    // what says whose it is: a card's, a swarm's own, or the one a
-    // leaf's worker was given. The leaf is asked first because it is
-    // the narrowest, and a job naming none of them is one nothing can
-    // act on, so it is dropped rather than retried forever.
-    for (const job of jobs) {
-      if (job.data.swarmTaskId) await reapSwarmTaskSandbox(ctx, job.data.swarmTaskId);
-      else if (job.data.swarmId) await reapSwarmSandbox(ctx, job.data.swarmId);
-      else if (job.data.featureId) await reapSandbox(ctx, job.data.featureId);
-    }
-  }));
-  await ctx.boss.work<{ sandboxId: string }>(
-    HIBERNATE_SANDBOX_QUEUE,
-    { batchSize: 1, pollingIntervalSeconds: QUEUE_POLL_SECONDS },
-    captureJobErrors(ctx.analytics, HIBERNATE_SANDBOX_QUEUE, async (jobs) => {
-      for (const job of jobs) await hibernateSandbox(ctx, job.data.sandboxId);
+  await ctx.jobs.work<{ featureId?: string; swarmId?: string; swarmTaskId?: string }>(
+    REAP_SANDBOX_QUEUE,
+    { batchSize: 1 },
+    captureJobErrors(ctx.analytics, REAP_SANDBOX_QUEUE, async (data) => {
+      // One queue, three kinds of machine. Which id the job carries is
+      // what says whose it is: a card's, a swarm's own, or the one a
+      // leaf's worker was given. The leaf is asked first because it is
+      // the narrowest, and a job naming none of them is one nothing can
+      // act on, so it is dropped rather than retried forever.
+      if (data.swarmTaskId) await reapSwarmTaskSandbox(ctx, data.swarmTaskId);
+      else if (data.swarmId) await reapSwarmSandbox(ctx, data.swarmId);
+      else if (data.featureId) await reapSandbox(ctx, data.featureId);
     }),
   );
-  await ctx.boss.schedule(MODAL_SWEEP_QUEUE, "0 9 * * *");
-  await ctx.boss.work(
+  await ctx.jobs.work<{ sandboxId: string }>(
+    HIBERNATE_SANDBOX_QUEUE,
+    { batchSize: 1, pollingIntervalSeconds: QUEUE_POLL_SECONDS },
+    captureJobErrors(ctx.analytics, HIBERNATE_SANDBOX_QUEUE, async (data) => {
+      await hibernateSandbox(ctx, data.sandboxId);
+    }),
+  );
+  await ctx.jobs.schedule(MODAL_SWEEP_QUEUE, MODAL_SWEEP_QUEUE, "0 9 * * *");
+  await ctx.jobs.work(
     MODAL_SWEEP_QUEUE,
     { pollingIntervalSeconds: QUEUE_POLL_SECONDS },
     captureJobErrors(ctx.analytics, MODAL_SWEEP_QUEUE, async () => {
@@ -3074,37 +3052,34 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
    * its run finishes. The count is this process's capacity, not a plan
    * limit: hosted Fly raises it, a laptop stays at the default of 4.
    *
-   * The workers poll slowly and are woken by enqueueRun instead, so
-   * their ids are kept on the context for it. A run queued through a
-   * bare boss.send still runs, on the next poll.
+   * The workers poll slowly and are woken by enqueueRun instead. A run
+   * queued through a bare jobs.send still runs, on the next poll.
    */
-  ctx.runWorkers = [];
-  for (let slot = 0; slot < ctx.env.BENTO_MAX_CONCURRENT_RUNS; slot++) {
-    const workerId = await ctx.boss.work<{ runId: string }>("run.execute", { batchSize: 1, pollingIntervalSeconds: RUN_WORKER_POLL_SECONDS }, async (jobs) => {
-      for (const job of jobs) {
-        try {
-          await executeRun(ctx, job.data.runId);
-        } catch (err) {
-          // The in-flight draft dies with the run, or it leaks for the
-          // life of the process: this catch is the path finishRun never
-          // reaches, so nothing downstream clears it.
-          ctx.bus.dropRunDraft(job.data.runId);
-          console.error(`run.execute ${job.data.runId} failed:`, err);
-          ctx.analytics?.captureException(err, null, null, { queue: "run.execute", run_id: job.data.runId });
-          throw err;
-        }
+  await ctx.jobs.work<{ runId: string }>(
+    "run.execute",
+    { concurrency: ctx.env.BENTO_MAX_CONCURRENT_RUNS, batchSize: 1, pollingIntervalSeconds: RUN_WORKER_POLL_SECONDS },
+    async (data) => {
+      try {
+        await executeRun(ctx, data.runId);
+      } catch (err) {
+        // The in-flight draft dies with the run, or it leaks for the
+        // life of the process: this catch is the path finishRun never
+        // reaches, so nothing downstream clears it.
+        ctx.bus.dropRunDraft(data.runId);
+        console.error(`run.execute ${data.runId} failed:`, err);
+        ctx.analytics?.captureException(err, null, null, { queue: "run.execute", run_id: data.runId });
+        throw err;
       }
-    });
-    ctx.runWorkers.push(workerId);
-  }
+    },
+  );
 
   /**
    * Requeues runs a runner claimed but never reported on, which happens
    * when the machine goes away mid-run. Without this the run sits in
    * "starting" forever and the card's pipeline is stuck.
    */
-  await ctx.boss.schedule("runner.reap", "*/5 * * * *");
-  await ctx.boss.work("runner.reap", captureJobErrors(ctx.analytics, "runner.reap", async () => {
+  await ctx.jobs.schedule("runner.reap", "runner.reap", "*/5 * * * *");
+  await ctx.jobs.work("runner.reap", {}, captureJobErrors(ctx.analytics, "runner.reap", async () => {
     const cutoff = new Date(Date.now() - ctx.env.BENTO_RUNNER_CLAIM_TIMEOUT_MIN * 60_000);
     const stale = await ctx.db
       .update(agentRuns)
@@ -3160,28 +3135,23 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
   // Polled at the interactive pace rather than the slow default: this
   // is what moves a card once its run ends, and one worker every two
   // seconds is cheap where a worker per slot was not.
-  await ctx.boss.work<{ featureId: string }>("gate.evaluate", { batchSize: 5, pollingIntervalSeconds: INTERACTIVE_POLL_SECONDS }, async (jobs) => {
-    await Promise.all(
-      jobs.map(async (job) => {
-        try {
-          await evaluateFeatureGate(ctx, job.data.featureId);
-        } catch (err) {
-          console.error(`gate.evaluate ${job.data.featureId} failed:`, err);
-          ctx.analytics?.captureException(err, null, null, { queue: "gate.evaluate", feature_id: job.data.featureId });
-          throw err;
-        }
-      }),
-    );
+  await ctx.jobs.work<{ featureId: string }>("gate.evaluate", { batchSize: 5, pollingIntervalSeconds: INTERACTIVE_POLL_SECONDS }, async (data) => {
+    try {
+      await evaluateFeatureGate(ctx, data.featureId);
+    } catch (err) {
+      console.error(`gate.evaluate ${data.featureId} failed:`, err);
+      ctx.analytics?.captureException(err, null, null, { queue: "gate.evaluate", feature_id: data.featureId });
+      throw err;
+    }
   });
 
   // Safety net for gates whose inputs change without a webhook (a long
   // running check, a self-hosted instance with no public URL).
-  await ctx.boss.createQueue("gate.sweep");
-  await ctx.boss.schedule("gate.sweep", "*/5 * * * *");
-  await ctx.boss.work("gate.sweep", captureJobErrors(ctx.analytics, "gate.sweep", async () => {
+  await ctx.jobs.schedule("gate.sweep", "gate.sweep", "*/5 * * * *");
+  await ctx.jobs.work("gate.sweep", {}, captureJobErrors(ctx.analytics, "gate.sweep", async () => {
     const gated = await ctx.db.select({ id: features.id }).from(features).where(eq(features.status, "gated"));
     for (const row of gated) {
-      await ctx.boss.send("gate.evaluate", { featureId: row.id });
+      await ctx.jobs.send("gate.evaluate", { featureId: row.id });
     }
     /**
      * Also here, not only at boot. A message parked because the team
@@ -3217,10 +3187,10 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
    * nothing but a job, an archive row, and a query per minute.
    */
   if (ctx.analytics) {
-    await ctx.boss.createQueue("run.queue-snapshot");
-    await ctx.boss.schedule("run.queue-snapshot", "*/5 * * * *");
-    await ctx.boss.work(
+    await ctx.jobs.schedule("run.queue-snapshot", "run.queue-snapshot", "*/5 * * * *");
+    await ctx.jobs.work(
       "run.queue-snapshot",
+      {},
       captureJobErrors(ctx.analytics, "run.queue-snapshot", async () => {
         await captureRunQueueDepth(ctx);
       }),

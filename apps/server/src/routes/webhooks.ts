@@ -51,7 +51,7 @@ export function webhookRoutes(ctx: AppContext) {
       const event = parseIssueWebhook(payload);
       if (!event) return c.json({ ok: true, matched: 0 });
 
-      await ctx.boss.send("linear.inbound", {
+      await ctx.jobs.send("linear.inbound", {
         organizationId,
         action: event.action,
         issue: event.data,
@@ -103,7 +103,7 @@ export function webhookRoutes(ctx: AppContext) {
       const featureRows = await db(c, ctx).select().from(features).where(eq(features.projectId, project.id));
       for (const feature of featureRows) {
         if (feature.prNumber !== target.prNumber) continue;
-        await ctx.boss.send("gate.evaluate", { featureId: feature.id });
+        await ctx.jobs.send("gate.evaluate", { featureId: feature.id });
         matched += 1;
       }
     }
@@ -138,7 +138,7 @@ export function webhookRoutes(ctx: AppContext) {
         return c.json({ ok: true });
       }
       const inbound = slackInboundMessage(payload);
-      if (inbound) await ctx.boss.send("slack.inbound", inbound);
+      if (inbound) await ctx.jobs.send("slack.inbound", inbound);
       return c.json({ ok: true });
     })
     /**
@@ -162,7 +162,7 @@ export function webhookRoutes(ctx: AppContext) {
         if (pick) {
           const resolved = await resolvePickLocation(ctx, pick);
           if (resolved) {
-            await ctx.boss.send("slack.inbound", {
+            await ctx.jobs.send("slack.inbound", {
               kind: "pick_project",
               teamId: resolved.teamId,
               channelId: resolved.channelId,
@@ -202,7 +202,7 @@ export function webhookRoutes(ctx: AppContext) {
         if (action?.action_id === "approve" && action.value && payload.message?.ts && teamId && channelId && userId) {
           const target = parseReviewTarget(action.value);
           if (target) {
-            await ctx.boss.send("slack.inbound", {
+            await ctx.jobs.send("slack.inbound", {
               kind: "approve",
               teamId,
               channelId,
@@ -246,7 +246,7 @@ export function webhookRoutes(ctx: AppContext) {
           && meta.channelId
           && meta.messageTs
         ) {
-          await ctx.boss.send("slack.inbound", {
+          await ctx.jobs.send("slack.inbound", {
             kind: "reject",
             teamId,
             channelId: meta.channelId,

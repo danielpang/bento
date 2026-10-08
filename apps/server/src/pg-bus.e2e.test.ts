@@ -14,6 +14,7 @@ import { singleDriver } from "./orchestrator/sandbox-driver.js";
 import PgBoss from "pg-boss";
 import pg from "pg";
 import { createApp } from "./app.js";
+import { PgBossQueue } from "./jobs/index.js";
 import { DiskArtifactStore } from "./artifact-store.js";
 import { SecretBox } from "./secrets.js";
 import { ensureLocalUser, type AppContext } from "./context.js";
@@ -64,7 +65,7 @@ async function makeContext(): Promise<AppContext> {
     env,
     db,
     pool,
-    boss,
+    jobs: new PgBossQueue(boss),
     bus: new EventBus(),
     drivers: singleDriver(new LocalProcessDriver()),
     worktrees: new WorktreeManager(dataDir),
@@ -119,8 +120,8 @@ before(async () => {
 });
 
 after(async () => {
-  await ctxA.boss.stop({ close: true, timeout: 1000 });
-  await ctxB.boss.stop({ close: true, timeout: 1000 });
+  await ctxA.jobs.stop();
+  await ctxB.jobs.stop();
   await pgBusA.stop();
   await pgBusB.stop();
   await ctxA.pool.end();

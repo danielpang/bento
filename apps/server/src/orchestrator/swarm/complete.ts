@@ -54,8 +54,8 @@ import { driverForSandbox } from "../sandbox-driver.js";
 export const SWARM_PUBLISH_QUEUE = "swarm.publish";
 
 /**
- * Which pg-boss instances already have a publish worker. Keyed by the
- * boss for the reason the tick and landing sets are: the tests run
+ * Which JobQueue instances already have a publish worker. Keyed by the
+ * queue for the reason the tick and landing sets are: the tests run
  * many contexts in one process, each with its own.
  */
 const publishWorkers = new WeakSet<object>();
@@ -79,18 +79,18 @@ export interface SwarmPublishResult {
  * something anybody can see.
  */
 export async function ensureSwarmPublishWorker(ctx: AppContext): Promise<void> {
-  if (publishWorkers.has(ctx.boss)) return;
-  publishWorkers.add(ctx.boss);
+  if (publishWorkers.has(ctx.jobs)) return;
+  publishWorkers.add(ctx.jobs);
   try {
-    await ctx.boss.work<{ swarmId: string }>(
+    await ctx.jobs.work<{ swarmId: string }>(
       SWARM_PUBLISH_QUEUE,
       { batchSize: 1, pollingIntervalSeconds: QUEUE_POLL_SECONDS },
-      captureJobErrors(ctx.analytics, SWARM_PUBLISH_QUEUE, async (jobs) => {
-        for (const job of jobs) await publishFinishedSwarm(ctx, job.data.swarmId);
+      captureJobErrors(ctx.analytics, SWARM_PUBLISH_QUEUE, async (data) => {
+        await publishFinishedSwarm(ctx, data.swarmId);
       }),
     );
   } catch (err) {
-    publishWorkers.delete(ctx.boss);
+    publishWorkers.delete(ctx.jobs);
     throw err;
   }
 }
@@ -108,7 +108,7 @@ export async function ensureSwarmPublishWorker(ctx: AppContext): Promise<void> {
  */
 export async function enqueueSwarmPublish(ctx: AppContext, swarmId: string): Promise<void> {
   await ensureSwarmPublishWorker(ctx);
-  await ctx.boss.send(SWARM_PUBLISH_QUEUE, { swarmId }, { singletonKey: swarmId });
+  await ctx.jobs.send(SWARM_PUBLISH_QUEUE, { swarmId }, { dedupeKey: swarmId });
 }
 
 /**

@@ -233,7 +233,7 @@ export function runRoutes(ctx: AppContext) {
       // The filesystem went back, so the gate decision made from it is
       // stale: re-evaluate rather than leaving the card showing checks
       // that passed against code no longer there.
-      await ctx.boss.send("gate.evaluate", { featureId: run.featureId });
+      await ctx.jobs.send("gate.evaluate", { featureId: run.featureId });
       return c.json({ ok: true, restoredTo: run.checkpointId });
     })
     /**

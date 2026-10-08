@@ -10,12 +10,12 @@ import {
   type SandboxDriver,
   type SpriteLookupRetry,
 } from "@bento/sandbox";
-import type PgBoss from "pg-boss";
 import type pg from "pg";
 import type { Analytics } from "./analytics.js";
 import type { FeatureFlags } from "./feature-flags.js";
 import type { ArtifactStore } from "./artifact-store.js";
 import type { Auth } from "./auth.js";
+import type { JobQueue } from "./jobs/index.js";
 import type { SecretBox } from "./secrets.js";
 import { EventBus } from "./events.js";
 import type { Env } from "./env.js";
@@ -103,7 +103,7 @@ export interface AppContext {
   env: Env;
   db: Db;
   pool: pg.Pool;
-  boss: PgBoss;
+  jobs: JobQueue;
   bus: EventBus;
   /**
    * Every sandbox driver this process built. `default` is what
@@ -142,13 +142,6 @@ export interface AppContext {
    * next reports.
    */
   running: Map<string, AbortController>;
-  /**
-   * pg-boss ids of this process's `run.execute` workers, set by
-   * registerJobs. enqueueRun wakes them, which is what lets idle
-   * workers poll slowly without a queued run waiting on the poll.
-   * Absent on a context that never registered jobs.
-   */
-  runWorkers?: string[];
   /**
    * Live agent sessions by run id: a handle that delivers a user
    * message into the working process's stdin. Present only while the

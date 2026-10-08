@@ -30,7 +30,7 @@ const PERMANENT_SLACK_ERRORS = new Set([
   "cannot_reply_to_message",
 ]);
 
-const NOTIFY_SEND_OPTIONS = { retryLimit: 8, retryDelay: 15, retryBackoff: true } as const;
+const NOTIFY_SEND_OPTIONS = { attempts: 9, backoffMs: 15_000 } as const;
 
 export type SlackNotifyJob =
   | { type: "created"; featureId: string; setupNote?: string }
@@ -82,7 +82,7 @@ async function swarmThreadLinkFor(ctx: AppContext, swarmId: string): Promise<Thr
  *
  * Enqueue is retried here because the callers (a finished run, a gate
  * move) cannot themselves be retried without redoing work. The job's
- * own retryLimit covers Slack API failures after it is queued.
+ * own retry covers Slack API failures after it is queued.
  */
 export async function queueSlackNotify(ctx: AppContext, job: SlackNotifyJob): Promise<void> {
   if (isSwarmSlackNotifyJob(job)) {
@@ -94,7 +94,7 @@ export async function queueSlackNotify(ctx: AppContext, job: SlackNotifyJob): Pr
   let lastErr: unknown;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
-      await ctx.boss.send("slack.notify", job, NOTIFY_SEND_OPTIONS);
+      await ctx.jobs.send("slack.notify", job, NOTIFY_SEND_OPTIONS);
       return;
     } catch (err) {
       lastErr = err;
@@ -127,7 +127,7 @@ export async function queueSwarmSlackNotify(
   let lastErr: unknown;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
-      await ctx.boss.send("slack.notify", job, NOTIFY_SEND_OPTIONS);
+      await ctx.jobs.send("slack.notify", job, NOTIFY_SEND_OPTIONS);
       return;
     } catch (err) {
       lastErr = err;

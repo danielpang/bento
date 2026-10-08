@@ -52,7 +52,7 @@ const WATCHDOG_CRON = "* * * * *";
 /** How much of a stuck agent's transcript the planner is shown. */
 const TAIL_LINES = 12;
 
-/** Which pg-boss instances already have a watchdog. Keyed like the others. */
+/** Which JobQueue instances already have a watchdog. Keyed like the others. */
 const watchdogs = new WeakSet<object>();
 
 /** When a running node turns yellow, and when the planner is woken about it. */
@@ -72,12 +72,11 @@ const DEFAULT_THRESHOLDS: Thresholds = { warnMin: 20, escalateMin: 45 };
  * and nobody is waiting on the moment it is picked up.
  */
 export async function ensureSwarmWatchdog(ctx: AppContext): Promise<void> {
-  if (watchdogs.has(ctx.boss)) return;
-  watchdogs.add(ctx.boss);
+  if (watchdogs.has(ctx.jobs)) return;
+  watchdogs.add(ctx.jobs);
   try {
-    await ctx.boss.createQueue(SWARM_WATCHDOG_QUEUE);
-    await ctx.boss.schedule(SWARM_WATCHDOG_QUEUE, WATCHDOG_CRON);
-    await ctx.boss.work(
+    await ctx.jobs.schedule(SWARM_WATCHDOG_QUEUE, SWARM_WATCHDOG_QUEUE, WATCHDOG_CRON);
+    await ctx.jobs.work(
       SWARM_WATCHDOG_QUEUE,
       { batchSize: 1, pollingIntervalSeconds: QUEUE_POLL_SECONDS },
       captureJobErrors(ctx.analytics, SWARM_WATCHDOG_QUEUE, async () => {
@@ -85,7 +84,7 @@ export async function ensureSwarmWatchdog(ctx: AppContext): Promise<void> {
       }),
     );
   } catch (err) {
-    watchdogs.delete(ctx.boss);
+    watchdogs.delete(ctx.jobs);
     throw err;
   }
 }
@@ -99,10 +98,10 @@ export async function ensureSwarmWatchdog(ctx: AppContext): Promise<void> {
  * and every one of those jobs is a query.
  */
 export async function stopSwarmWatchdog(ctx: AppContext): Promise<void> {
-  if (!watchdogs.has(ctx.boss)) return;
-  watchdogs.delete(ctx.boss);
-  await ctx.boss.offWork(SWARM_WATCHDOG_QUEUE);
-  await ctx.boss.unschedule(SWARM_WATCHDOG_QUEUE).catch(() => {
+  if (!watchdogs.has(ctx.jobs)) return;
+  watchdogs.delete(ctx.jobs);
+  await ctx.jobs.offWork(SWARM_WATCHDOG_QUEUE);
+  await ctx.jobs.unschedule(SWARM_WATCHDOG_QUEUE).catch(() => {
     // A schedule that is already gone is the state this wanted.
   });
 }

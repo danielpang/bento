@@ -1485,7 +1485,7 @@ export function featureRoutes(ctx: AppContext) {
         .where(eq(features.id, c.req.param("id")))
         .returning();
       if (!updated) return c.json({ error: "not found" }, 404);
-      await ctx.boss.send("gate.evaluate", { featureId: updated.id });
+      await ctx.jobs.send("gate.evaluate", { featureId: updated.id });
       return c.json(updated);
     })
     /**
