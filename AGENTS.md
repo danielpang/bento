@@ -205,7 +205,10 @@ text. All of these, and `sandbox ready`, name the run (`run_id`,
 `role`, `run_type`), which `provisionWorkspace` takes as `run`, and
 the run itself records the provider that answered in
 `agent_runs.sandbox_provider`, because the sandboxes row is rewritten
-when a machine is made again. The console shows that provider to beta
+when a machine is made again. Runs from before the column were filled
+by migration 0054 from their own transcripts (the Modal driver's
+"Starting a Modal sandbox" line) and their rows, leaving null what
+neither could say for sure. The console shows that provider to beta
 testers only, and the routes that return whole run rows drop it for
 everyone else (`runsForCaller`). A new
 place that provisions must go through `provisionWorkspace` so it is
