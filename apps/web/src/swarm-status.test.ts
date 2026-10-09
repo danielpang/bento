@@ -99,6 +99,9 @@ test("a task says working only while an agent is running, and pending or complet
   assert.equal(diagramTaskWords("working", "plan"), "pending");
   assert.equal(diagramTaskTone("assigned", "leaf"), "idle");
   assert.equal(diagramTaskTone("working", "plan"), "idle");
+  assert.equal(diagramTaskWords("working", "leaf", false, "waiting"), "waiting to land", "an accepted leaf is not pending");
+  assert.equal(diagramTaskWords("working", "leaf", false, "failed"), "landing failed");
+  assert.equal(diagramTaskTone("working", "leaf", false, "failed"), "failed");
   assert.equal(diagramTaskWords("working", "leaf", true), "working");
   assert.equal(diagramTaskTone("working", "leaf", true), "running");
   assert.equal(diagramTaskWords("landed", "leaf", true), "working", "a resolver is an agent in the sandbox");

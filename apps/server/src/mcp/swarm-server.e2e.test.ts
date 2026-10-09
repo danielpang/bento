@@ -501,6 +501,38 @@ test("accepting queues the branch once, and rejecting sends the leaf back with t
   );
 });
 
+test("accepting a leaf whose earlier landing failed queues its branch again", async () => {
+  // Production's shape: the landing failed, the planner retried the leaf,
+  // the worker reported again, and the accept left the failed row alone,
+  // so the leaf sat "working" with nothing in the queue to land it.
+  const { token, swarmId } = await agentOn("planner");
+  const leaf = await makeTask(swarmId, { status: "working", branchName: "swarm/s/again", report: "redone" });
+  await db.insert(swarmLandings).values({ swarmId, taskId: leaf.id, branchName: "swarm/s/again", position: 0 });
+  const [other] = await db.insert(swarmLandings)
+    .values({ swarmId, taskId: (await makeTask(swarmId, { status: "done" })).id, position: 1, status: "landed" })
+    .returning();
+  await db.update(swarmLandings)
+    .set({ status: "failed", error: "the sandbox is unavailable", errorCode: "swarm_sandbox_gone", attempt: 6, endedAt: new Date() })
+    .where(eq(swarmLandings.taskId, leaf.id));
+  await db.update(swarmTasks)
+    .set({ flags: { landingError: "the sandbox is unavailable", landingErrorCode: "swarm_sandbox_gone" } })
+    .where(eq(swarmTasks.id, leaf.id));
+
+  await call(token, "accept", { taskId: leaf.id });
+
+  const landings = await db.select().from(swarmLandings).where(eq(swarmLandings.taskId, leaf.id));
+  assert.equal(landings.length, 1, "the same row, not a second one");
+  assert.equal(landings[0]!.status, "queued");
+  assert.equal(landings[0]!.error, null);
+  assert.equal(landings[0]!.errorCode, null);
+  assert.equal(landings[0]!.attempt, 0, "the new branch gets its own tries");
+  assert.ok(landings[0]!.position > other!.position, "and goes to the back of the queue");
+  const flags = (await task(leaf.id))!.flags as { landingError?: string; landingErrorCode?: string; accepted?: boolean };
+  assert.equal(flags.accepted, true);
+  assert.equal(flags.landingError, undefined, "the old attempt's failure no longer shows");
+  assert.equal(flags.landingErrorCode, undefined);
+});
+
 test("a planner fixes a failed leaf forward on the same task", async () => {
   const { token, swarmId } = await agentOn("planner");
   const leaf = await makeTask(swarmId, { status: "failed", report: null, flags: { workerStopped: "no report" } });

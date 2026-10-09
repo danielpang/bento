@@ -711,6 +711,33 @@ test("any failed leaf leads with starting the task over, and keeps the other way
   assert.match(workerHtml, /Retry in the same sandbox/);
 });
 
+test("a finished leaf stuck waiting on the merge queue reads as such, and can still be started over", () => {
+  // Production's shape: accepted, still "working" on the row, its landing
+  // failed. It used to read "pending" with only a merge queue retry.
+  const stuck = { ...tasks().find((row) => row.id === "slow")!, status: "working" as const, assignedRunId: null,
+    flags: { accepted: true, landingError: "the swarm or worker sandbox is unavailable" } };
+  const stuckModel = buildSwarmModel([stuck], { now: NOW, runningTaskIds: new Set() });
+  const stuckHtml = renderToStaticMarkup(createElement(SwarmNodeDrawer, {
+    task: stuck, node: stuckModel.byId.get("slow")!, onClose: () => {},
+    onStartOver: () => {}, onRetryLanding: () => {}, onRetry: () => {},
+  }));
+  assert.match(stuckHtml, /landing failed/);
+  assert.doesNotMatch(stuckHtml, /pending/);
+  assert.match(stuckHtml, /Retry merge queue/);
+  assert.match(stuckHtml, />Retry task</, "starting over is there whatever the leaf is stuck in");
+
+  const waiting = { ...stuck, flags: { accepted: true } };
+  const waitingModel = buildSwarmModel([waiting], { now: NOW, runningTaskIds: new Set() });
+  const waitingHtml = renderToStaticMarkup(createElement(SwarmNodeDrawer, {
+    task: waiting, node: waitingModel.byId.get("slow")!, onClose: () => {},
+    onStartOver: () => {}, onRetry: () => {},
+  }));
+  assert.match(waitingHtml, /waiting to land/);
+  assert.match(waitingHtml, /Waiting to land\./);
+  assert.doesNotMatch(waitingHtml, /Waiting for an agent to start/);
+  assert.match(waitingHtml, />Retry task</);
+});
+
 test("a failed plan drawer calls the recoverable parent stalled", () => {
   const plan = { ...tasks().find((row) => row.nodeType === "plan")!, status: "failed" as const, attention: "failed" as const };
   const model = buildSwarmModel([plan], { now: NOW });

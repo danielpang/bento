@@ -53,6 +53,7 @@ import {
   reactivateSwarmForRetry,
   retryLeaf,
   retryRefusal,
+  withdrawTaskLandings,
   splitLeaf,
 } from "../orchestrator/swarm/task-actions.js";
 import { quoteUntrusted } from "../orchestrator/swarm/planner-prompt.js";
@@ -1866,8 +1867,17 @@ export function swarmRoutes(ctx: AppContext) {
        * have an agent on it, and that leaf is exactly the one somebody
        * reaches for Retry on.
        */
-      const refusedFor = retryRefusal(task);
+      const refusedFor = retryRefusal(task, { fresh });
       if (refusedFor) return c.json({ error: refusedFor, code: "NOT_A_LEAF" }, 409);
+      /*
+       * Starting over discards the branch, so the branch leaves the merge
+       * queue first: a queued or failed landing of it would land, or
+       * offer to land, work that no longer exists. One being landed this
+       * moment is the one thing this waits for.
+       */
+      if (fresh && (await withdrawTaskLandings(db(c, ctx), task.id, new Date())) === "landing") {
+        return c.json({ error: "This task's branch is landing right now. Try again when the merge queue finishes with it." }, 409);
+      }
 
       /*
        * Then the agent on it stops, and then the leaf goes back in the
@@ -1904,7 +1914,15 @@ export function swarmRoutes(ctx: AppContext) {
       const found = await accessibleTask(ctx, c);
       if ("refusal" in found) return found.refusal;
       const { swarm, task } = found;
-      if (swarm.status === "cancelled" || swarm.status === "done" || task.status !== "failed" || typeof task.flags.landingError !== "string") {
+      /*
+       * A failed landing of a leaf that failed with it, or of one the
+       * planner accepted again since (retried, reported, accepted): the
+       * second used to be refused here, and with the planner's accept
+       * also leaving the failed row alone, nothing could ever land it.
+       */
+      const retryable = task.nodeType === "leaf" &&
+        (task.status === "failed" || (task.flags.accepted === true && (task.status === "working" || task.status === "landed")));
+      if (swarm.status === "cancelled" || swarm.status === "done" || !retryable) {
         return c.json({ error: "This task has no failed merge queue entry to retry." }, 409);
       }
       const [landing] = await db(c, ctx).select().from(swarmLandings)
@@ -1927,10 +1945,10 @@ export function swarmRoutes(ctx: AppContext) {
             status: "landed", attention: null, updatedAt: now,
             flags: { ...task.flags, landingError: undefined, landingErrorCode: undefined, plannerToldAt: now.toISOString(), plannerToldBy: undefined, plannerRetells: undefined },
           })
-          .where(and(eq(swarmTasks.id, task.id), eq(swarmTasks.status, "failed")));
+          .where(and(eq(swarmTasks.id, task.id), eq(swarmTasks.status, task.status)));
         await reactivateSwarmForRetry(tx as unknown as Db, swarm.id);
         await tx.insert(swarmTaskEvents).values({
-          taskId: task.id, kind: "status_changed", fromStatus: "failed", toStatus: "landed",
+          taskId: task.id, kind: "status_changed", fromStatus: task.status, toStatus: "landed",
           detail: { mergeQueueRetry: landing.id },
         });
         return true;

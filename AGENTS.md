@@ -366,6 +366,18 @@ task over by itself once (`autoStartedOver`) when its sandbox failed past
 or could not be started, before the planner is told. The plain retry
 continues in the same machine on the same branch.
 
+"Retry task" is the way out of anything, so the console offers it on
+every leaf that is not done or cancelled, whatever it is stuck in. It
+takes the task's branch out of the merge queue (`withdrawTaskLandings`),
+and waits only for a landing moving that branch this moment. Every
+retry clears what was said about the last attempt (`accepted`, the
+landing failure), because the next one is judged on its own report.
+And an accept puts a task's failed or withdrawn landing row back at the
+end of the queue (`requeuedLanding`): accept once looked only for a
+row, found the failed one, and queued nothing, so a leaf whose landing
+failed and whose retry the planner then accepted sat "working" with
+nothing to land it and a merge queue retry that refused it.
+
 ## A swarm's branches are on GitHub as soon as there is anything on them
 
 The swarm's machine used to hold the only copy of every landed task until

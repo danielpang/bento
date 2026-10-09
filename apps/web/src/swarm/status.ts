@@ -125,11 +125,20 @@ export function taskWords(status: TaskStatus): string {
  * finished task reads as completed. A failed plan is stalled, because
  * retrying the failed descendant can still move it.
  */
-export function diagramTaskWords(status: TaskStatus, nodeType: NodeType, agentActive = false): string {
+export function diagramTaskWords(
+  status: TaskStatus,
+  nodeType: NodeType,
+  agentActive = false,
+  landing: "waiting" | "failed" | null = null,
+): string {
   // An agent in the sandbox is working, whatever the row's own status
   // says. A resolver keeps the leaf landed, and a subplanner keeps a
   // plan failed, and neither of those words is what is happening.
   if (agentActive) return "working";
+  // A leaf whose work is finished and accepted is not pending: its
+  // branch is in the merge queue, or failed to land.
+  if (landing === "failed") return "landing failed";
+  if (landing === "waiting") return "waiting to land";
   if (nodeType === "plan" && status === "failed") return "stalled";
   if (status === "done") return "completed";
   if (status === "open" || status === "assigned" || status === "working") return "pending";
@@ -143,8 +152,15 @@ export function diagramTaskWords(status: TaskStatus, nodeType: NodeType, agentAc
  * agent that is actually running. Landed stays in motion: the branch
  * is in, and the leaf is not finished until it is completed.
  */
-export function diagramTaskTone(status: TaskStatus, nodeType: NodeType, agentActive = false): Tone {
+export function diagramTaskTone(
+  status: TaskStatus,
+  nodeType: NodeType,
+  agentActive = false,
+  landing: "waiting" | "failed" | null = null,
+): Tone {
   if (agentActive) return "running";
+  if (landing === "failed") return "failed";
+  if (landing === "waiting") return taskTone("landed");
   if (nodeType === "plan" && status === "failed") return "gated";
   if (status === "open" || status === "assigned" || status === "working") return "idle";
   return taskTone(status);

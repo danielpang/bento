@@ -83,6 +83,13 @@ export interface SwarmNode {
    * and neither is a run that is still queued or starting.
    */
   agentActive: boolean;
+  /**
+   * Where a finished leaf's branch is in the merge queue: "waiting"
+   * once the planner accepted it, "failed" when its landing failed.
+   * Null for anything else. Without it an accepted leaf read as
+   * "pending", as if its agent had not started.
+   */
+  landing: NodeLanding;
   /** Derived, not copied: see `attentionFor`. */
   attention: TaskAttention;
   weight: number;
@@ -284,6 +291,7 @@ export function buildSwarmModel(tasks: SwarmTask[], options: ModelOptions = {}):
       nodeType: task.nodeType,
       status: task.status,
       agentActive,
+      landing: nodeLanding(task),
       attention: attentionFor(task, now, longRunMs, live ? { active: agentActive, startedAt: agentStartedAt } : undefined),
       weight: Number.isFinite(task.weight) && task.weight > 0 ? task.weight : 1,
       ownCost: task.cost,
@@ -564,6 +572,15 @@ function round(n: number): number {
   return Math.round(n * 100) / 100;
 }
 
+export type NodeLanding = "waiting" | "failed" | null;
+
+function nodeLanding(task: { nodeType: NodeType; status: TaskStatus; flags?: Record<string, unknown> | null }): NodeLanding {
+  if (task.nodeType !== "leaf" || (task.status !== "working" && task.status !== "landed" && task.status !== "failed")) return null;
+  if (typeof task.flags?.landingError === "string") return "failed";
+  if (task.status === "landed" || task.flags?.accepted === true) return "waiting";
+  return null;
+}
+
 /** One row of the outline: the same node, read as a list rather than a tree. */
 export interface OutlineRow {
   id: string;
@@ -573,6 +590,7 @@ export interface OutlineRow {
   nodeType: NodeType;
   status: TaskStatus;
   agentActive: boolean;
+  landing: NodeLanding;
   attention: TaskAttention;
   completion: number;
   cost: SwarmSpend;
@@ -605,6 +623,7 @@ export function outlineRows(model: SwarmModel): OutlineRow[] {
     nodeType: node.nodeType,
     status: node.status,
     agentActive: node.agentActive,
+    landing: node.landing,
     attention: node.attention,
     completion: node.completion,
     cost: node.cost,

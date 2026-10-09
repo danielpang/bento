@@ -14,7 +14,7 @@ import {
 } from "@bento/db";
 import type { AppContext } from "../context.js";
 import { driverForSandbox } from "../orchestrator/sandbox-driver.js";
-import { cancelTaskTree, reactivateSwarmForRetry, retryLeaf, splitLeaf } from "../orchestrator/swarm/task-actions.js";
+import { cancelTaskTree, reactivateSwarmForRetry, requeuedLanding, retryLeaf, splitLeaf } from "../orchestrator/swarm/task-actions.js";
 import type { BoardEvent } from "../events.js";
 import { ACTIVE_RUN_STATUSES } from "../orchestrator/start-run.js";
 import { quoteUntrusted } from "../orchestrator/swarm/planner-prompt.js";
@@ -910,7 +910,14 @@ async function accept(
       .update(swarmTasks)
       .set({
         attention: null,
-        flags: { ...task.flags, accepted: true, ...(args.note ? { acceptNote: args.note } : {}) },
+        flags: {
+          ...task.flags,
+          accepted: true,
+          ...(args.note ? { acceptNote: args.note } : {}),
+          // A failure of an earlier attempt's landing is not this one's.
+          landingError: undefined,
+          landingErrorCode: undefined,
+        },
         updatedAt: new Date(),
       })
       .where(eq(swarmTasks.id, task.id));
@@ -920,24 +927,35 @@ async function accept(
       runId: caller.runId,
       detail: { accepted: true, ...(args.note ? { note: args.note } : {}) },
     });
-    // Accepted work joins the merge queue. One row per task, so
-    // accepting twice does not queue the branch twice.
-    const [queued] = await tx
-      .select({ id: swarmLandings.id })
+    /*
+     * Accepted work joins the merge queue. One row per task, so
+     * accepting twice does not queue the branch twice. A row an earlier
+     * attempt's landing ended (failed, or withdrawn by a start over) is
+     * queued again at the back: this is a new branch to land, and
+     * leaving the old row as it was is how an accepted leaf sat
+     * "working" forever with nothing in the queue to land it.
+     */
+    const [existing] = await tx
+      .select({ id: swarmLandings.id, status: swarmLandings.status })
       .from(swarmLandings)
       .where(and(eq(swarmLandings.swarmId, caller.swarmId), eq(swarmLandings.taskId, task.id)))
       .limit(1);
-    if (!queued) {
-      const [position] = await tx
-        .select({ next: sql<number>`coalesce(max(${swarmLandings.position}), -1) + 1` })
-        .from(swarmLandings)
-        .where(eq(swarmLandings.swarmId, caller.swarmId));
+    const [position] = await tx
+      .select({ next: sql<number>`coalesce(max(${swarmLandings.position}), -1) + 1` })
+      .from(swarmLandings)
+      .where(eq(swarmLandings.swarmId, caller.swarmId));
+    if (!existing) {
       await tx.insert(swarmLandings).values({
         swarmId: caller.swarmId,
         taskId: task.id,
         branchName: task.branchName,
         position: position?.next ?? 0,
       });
+    } else if (existing.status === "failed" || existing.status === "cancelled") {
+      await tx
+        .update(swarmLandings)
+        .set(requeuedLanding(task.branchName, position?.next ?? 0, new Date()))
+        .where(and(eq(swarmLandings.id, existing.id), eq(swarmLandings.status, existing.status)));
     }
   });
   events.push(taskEvent(caller, task.id, task.status));

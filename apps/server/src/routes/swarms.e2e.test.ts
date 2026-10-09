@@ -1642,6 +1642,67 @@ test("retrying a failed merge queue entry keeps the worker's accepted work", asy
   assert.equal(queued.some((job) => job.queue === "run.execute"), false, "the worker is not run again");
 });
 
+test("a merge queue entry whose leaf the planner accepted again can be retried", async () => {
+  // Production's shape: the landing failed, the planner retried the leaf
+  // and accepted the new report, and the leaf stayed "working". The
+  // retry used to answer that there was no failed entry to retry.
+  const swarm = await createSwarm();
+  const tree = await treeOf(swarm.id);
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.swarmId, swarm.id));
+  await db.update(swarmTasks).set({
+    status: "working", report: "redone",
+    flags: { accepted: true, landingError: "the swarm or worker sandbox is unavailable" },
+  }).where(eq(swarmTasks.id, tree.first.id));
+  const [landing] = await db.insert(swarmLandings).values({
+    swarmId: swarm.id, taskId: tree.first.id, branchName: "swarm/accepted-again",
+    status: "failed", error: "the swarm or worker sandbox is unavailable", position: 0, attempt: 6, endedAt: new Date(),
+  }).returning();
+
+  const response = await post(`/api/swarms/${swarm.id}/tasks/${tree.first.id}/landing/retry`);
+  assert.equal(response.status, 200, await response.clone().text());
+  const task = await readTask(tree.first.id);
+  assert.equal(task.status, "landed");
+  assert.equal((task.flags as { landingError?: string }).landingError, undefined);
+  const [after] = await db.select().from(swarmLandings).where(eq(swarmLandings.id, landing!.id));
+  assert.equal(after!.status, "queued");
+});
+
+test("a leaf can be started over whatever it is stuck in, and leaves the merge queue", async () => {
+  const swarm = await createSwarm();
+  const tree = await treeOf(swarm.id);
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.swarmId, swarm.id));
+  await db.update(swarmTasks).set({
+    status: "landed", report: "done", branchName: "swarm/stuck-in-queue",
+    flags: { accepted: true, acceptNote: "fine" },
+  }).where(eq(swarmTasks.id, tree.first.id));
+  const [landing] = await db.insert(swarmLandings).values({
+    swarmId: swarm.id, taskId: tree.first.id, branchName: "swarm/stuck-in-queue", status: "queued", position: 0,
+  }).returning();
+
+  const plain = await post(`/api/swarms/${swarm.id}/tasks/${tree.first.id}/retry`);
+  assert.equal(plain.status, 409, "a plain retry would leave the queued branch behind it");
+
+  await db.update(swarmLandings).set({ status: "landing" }).where(eq(swarmLandings.id, landing!.id));
+  const midLanding = await post(`/api/swarms/${swarm.id}/tasks/${tree.first.id}/retry`, { fresh: true });
+  assert.equal(midLanding.status, 409, "a branch being landed right now is not pulled out from under the landing");
+  assert.equal((await readTask(tree.first.id)).status, "landed", "and nothing changed");
+
+  await db.update(swarmLandings).set({ status: "queued" }).where(eq(swarmLandings.id, landing!.id));
+  const res = await post(`/api/swarms/${swarm.id}/tasks/${tree.first.id}/retry`, { fresh: true });
+  assert.equal(res.status, 200, await res.clone().text());
+  const task = await readTask(tree.first.id);
+  assert.equal(task.status, "assigned");
+  assert.equal((task.flags as { startingOver?: boolean }).startingOver, true);
+  assert.equal((task.flags as { accepted?: boolean }).accepted, undefined, "the next attempt is accepted on its own report");
+  const [after] = await db.select().from(swarmLandings).where(eq(swarmLandings.id, landing!.id));
+  assert.equal(after!.status, "cancelled", "the discarded branch is not landed");
+
+  // A leaf whose agent is still on it starts over too.
+  await db.update(swarmTasks).set({ status: "working", flags: {} }).where(eq(swarmTasks.id, tree.first.id));
+  const working = await post(`/api/swarms/${swarm.id}/tasks/${tree.first.id}/retry`, { fresh: true });
+  assert.equal(working.status, 200, await working.clone().text());
+});
+
 test("retrying a failed worker also resumes a manually paused swarm", async () => {
   const swarm = await createSwarm();
   const tree = await treeOf(swarm.id);

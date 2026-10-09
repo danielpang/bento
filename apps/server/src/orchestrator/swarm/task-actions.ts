@@ -1,5 +1,5 @@
 import { and, eq, inArray, or, sql } from "drizzle-orm";
-import { swarmTaskEvents, swarmTasks, swarms, type Db } from "@bento/db";
+import { swarmLandings, swarmTaskEvents, swarmTasks, swarms, type Db } from "@bento/db";
 
 /**
  * What can be done to one node, written once.
@@ -294,17 +294,70 @@ export async function splitLeaf(
  * queue, and a refusal discovered after that is an agent killed for a
  * request that then answered "nothing changed".
  */
-export function retryRefusal(task: Task): string | null {
+export function retryRefusal(task: Task, options: { fresh?: boolean } = {}): string | null {
   if (task.nodeType !== "leaf") {
     return "A plan node is worked through its own tasks. Retry one of those.";
   }
   if (task.status === "cancelled") {
     return "This task was cancelled. The planner can hand the work out again.";
   }
-  if (task.status === "done" || task.status === "landed") {
+  if (task.status === "done") {
     return "This task's branch already landed. Add follow up work as a new task.";
   }
+  /*
+   * "landed" is a branch waiting in the merge queue, not one on the
+   * swarm's branch yet. Starting over withdraws it from the queue (the
+   * route does that), which is the way out of a landing that cannot
+   * finish. A plain retry would leave the queued branch behind it.
+   */
+  if (task.status === "landed" && !options.fresh) {
+    return "This task's branch is waiting in the merge queue. Retry the task to start it over instead.";
+  }
   return null;
+}
+
+/**
+ * A merge queue row put back at the back of the queue for a new branch:
+ * nothing of the landing that ended it (its error, its backoff, its
+ * resolver, its count of tries) is about the branch landing next.
+ */
+export function requeuedLanding(branchName: string | null, position: number, now: Date) {
+  return {
+    status: "queued" as const,
+    branchName,
+    position,
+    error: null,
+    errorCode: null,
+    notBefore: null,
+    resolverRunId: null,
+    attempt: 0,
+    startedAt: null,
+    endedAt: null,
+    updatedAt: now,
+  };
+}
+
+/**
+ * Takes a task's branch out of the merge queue, for a start over: the
+ * branch is being discarded, so a queued, conflicted or failed row for
+ * it would land, or offer to land, work nobody wants. Null when a
+ * landing is moving that branch right now, which nothing may pull out
+ * from under it; the caller says so instead.
+ */
+export async function withdrawTaskLandings(tx: TaskWriter, taskId: string, now: Date): Promise<"withdrawn" | "landing"> {
+  const rows = await tx
+    .select({ id: swarmLandings.id, status: swarmLandings.status })
+    .from(swarmLandings)
+    .where(eq(swarmLandings.taskId, taskId));
+  if (rows.some((row) => row.status === "landing")) return "landing";
+  const open = rows.filter((row) => row.status === "queued" || row.status === "conflicted" || row.status === "failed");
+  if (open.length > 0) {
+    await tx
+      .update(swarmLandings)
+      .set({ status: "cancelled", notBefore: null, endedAt: now, updatedAt: now })
+      .where(inArray(swarmLandings.id, open.map((row) => row.id)));
+  }
+  return "withdrawn";
 }
 
 /** A deliberate retry resumes a person's pause or a failed ending. Plan limits remain in force. */
@@ -345,7 +398,7 @@ export async function retryLeaf(
 ): Promise<Task | SplitRefusal> {
   const { task } = input;
   const now = input.now ?? new Date();
-  const refused = retryRefusal(task);
+  const refused = retryRefusal(task, { fresh: input.fresh === true });
   if (refused) return { refused };
   const retries = Number((task.flags as { retries?: unknown }).retries ?? 0);
   const [updated] = await tx
@@ -369,10 +422,18 @@ export async function retryLeaf(
         plannerToldAt: undefined,
         plannerToldBy: undefined,
         plannerRetells: undefined,
+        /*
+         * And what was said about the last attempt: its acceptance and
+         * its merge queue failure. The next attempt is accepted or not
+         * on its own report, and a failure left on it would keep
+         * offering a merge queue retry for a landing that is not there.
+         */
+        accepted: undefined,
+        acceptNote: undefined,
+        landingError: undefined,
+        landingErrorCode: undefined,
         ...(input.fresh
           ? {
-              landingError: undefined,
-              landingErrorCode: undefined,
               workerStopped: undefined,
               rejection: undefined,
               sandboxRestarts: undefined,
