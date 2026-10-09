@@ -84,10 +84,10 @@ export interface SwarmNode {
    */
   agentActive: boolean;
   /**
-   * Where a finished leaf's branch is in the merge queue: "waiting"
-   * once the planner accepted it, "failed" when its landing failed.
-   * Null for anything else. Without it an accepted leaf read as
-   * "pending", as if its agent had not started.
+   * Where a finished leaf's work is: reported and waiting for the
+   * planner's review, accepted and waiting to land, or failed to land.
+   * Null for anything else. Without it a leaf whose agent had finished
+   * read as "pending", as if its agent had not started.
    */
   landing: NodeLanding;
   /** Derived, not copied: see `attentionFor`. */
@@ -572,12 +572,29 @@ function round(n: number): number {
   return Math.round(n * 100) / 100;
 }
 
-export type NodeLanding = "waiting" | "failed" | null;
+export type NodeLanding = "waiting" | "failed" | "review" | null;
 
-function nodeLanding(task: { nodeType: NodeType; status: TaskStatus; flags?: Record<string, unknown> | null }): NodeLanding {
+/**
+ * Where a leaf's finished work is, when its row's status does not say.
+ *
+ * "failed" when its landing failed, "waiting" once the planner
+ * accepted it and its branch is in the merge queue, and "review" when
+ * its worker reported and the planner has not accepted it yet. A
+ * failed leaf is never "waiting": an acceptance left on a leaf whose
+ * next attempt failed is about the attempt before, and read as waiting
+ * to land it hid the failure.
+ */
+export function nodeLanding(task: {
+  nodeType: NodeType;
+  status: TaskStatus;
+  report?: string | null;
+  flags?: Record<string, unknown> | null;
+}): NodeLanding {
   if (task.nodeType !== "leaf" || (task.status !== "working" && task.status !== "landed" && task.status !== "failed")) return null;
   if (typeof task.flags?.landingError === "string") return "failed";
+  if (task.status === "failed") return null;
   if (task.status === "landed" || task.flags?.accepted === true) return "waiting";
+  if (typeof task.report === "string" && task.report.trim() !== "") return "review";
   return null;
 }
 

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import type { SwarmLanding, SwarmTask } from "../swarm/types.js";
+import type { SwarmLanding, SwarmStatus, SwarmTask } from "../swarm/types.js";
 import { MERGE_QUEUE_FAILURE, landingFailureWords } from "../swarm/failures.js";
+import { taskActionRefusal } from "../swarm/status.js";
 
 /**
  * The merge queue, as a person needs to read it.
@@ -96,6 +97,9 @@ export function MergeQueue({
   tasks,
   selectedId,
   onSelect,
+  onRetryLanding,
+  swarmStatus,
+  now = Date.now(),
 }: {
   landings: SwarmLanding[];
   summary?: { total: number; committed: number };
@@ -107,6 +111,12 @@ export function MergeQueue({
   tasks: SwarmTask[];
   selectedId?: string | null;
   onSelect?: (taskId: string) => void;
+  /** Retries a failed row's landing, offered where the route would take it. */
+  onRetryLanding?: (taskId: string) => void;
+  /** The swarm's status, which closes the queue once it is done or stopped. */
+  swarmStatus?: SwarmStatus;
+  /** The instant a backoff is measured against. Passed by a test, the clock otherwise. */
+  now?: number;
 }) {
   const [commandCopyState, setCommandCopyState] = useState<"idle" | "copied" | "failed">("idle");
   useEffect(() => {
@@ -128,6 +138,15 @@ export function MergeQueue({
     committed: landings.filter((landing) => landing.status === "landed").length,
   };
   const titles = new Map(tasks.map((task) => [task.id, task.title]));
+  /*
+   * A failed row offers a retry only where the route would take it: the
+   * server's own answer for the task, and a swarm whose queue is open.
+   */
+  const retryable = new Set(
+    onRetryLanding && taskActionRefusal(swarmStatus, "retryLanding") === null
+      ? tasks.filter((task) => task.canRetryLanding === true).map((task) => task.id)
+      : [],
+  );
   const inFlight = landings.filter((landing) => landing.status === "landing" || landing.status === "conflicted");
   const waiting = landings.filter((landing) => landing.status === "queued");
   /**
@@ -205,6 +224,9 @@ export function MergeQueue({
             title={titles.get(landing.taskId) ?? "a task that is no longer in the plan"}
             selected={selectedId === landing.taskId}
             onSelect={onSelect}
+            onRetry={landing.status === "failed" && retryable.has(landing.taskId) ? onRetryLanding : undefined}
+            busy={busy}
+            now={now}
           />
         ))}
       </ul>
@@ -217,12 +239,19 @@ function Row({
   title,
   selected,
   onSelect,
+  onRetry,
+  busy,
+  now,
 }: {
   landing: SwarmLanding;
   title: string;
   selected: boolean;
   onSelect?: (taskId: string) => void;
+  onRetry?: (taskId: string) => void;
+  busy?: boolean;
+  now: number;
 }) {
+  const backoff = landing.status === "queued" ? backoffMinutes(landing.notBefore, now) : null;
   const words = WORDS[landing.status];
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   useEffect(() => {
@@ -283,6 +312,25 @@ function Row({
       {landing.status === "failed" && (
         <p className="swarm-queue-note">{landingFailureWords(landing.errorCode) ?? MERGE_QUEUE_FAILURE}</p>
       )}
+      {onRetry && (
+        <div className="swarm-queue-actions">
+          <button type="button" className="btn" disabled={busy} title="Try landing this task's branch again, from the sandbox it is in." onClick={() => onRetry(landing.taskId)}>
+            Retry merge queue
+          </button>
+        </div>
+      )}
+      {landing.status === "cancelled" && (
+        <p className="muted swarm-queue-note">
+          Withdrawn. This branch left the queue when its task was retried, marked done or cancelled, or the swarm was stopped.
+        </p>
+      )}
+      {backoff !== null && (
+        <p className="muted swarm-queue-note">
+          {backoff <= 1
+            ? "The last try did not land. The next one is in about a minute."
+            : `The last try did not land. The next one is in about ${backoff} minutes.`}
+        </p>
+      )}
       {landing.status === "landing" && (
         <p className="swarm-queue-note">Landing. If a sandbox holding this branch is asleep, Bento starts it first, which can take a minute.</p>
       )}
@@ -315,4 +363,12 @@ function Row({
       )}
     </li>
   );
+}
+
+/** Whole minutes until a queued row may be tried again, or null when it may go now. */
+export function backoffMinutes(notBefore: string | null | undefined, now: number): number | null {
+  if (!notBefore) return null;
+  const at = Date.parse(notBefore);
+  if (!Number.isFinite(at) || at <= now) return null;
+  return Math.max(1, Math.ceil((at - now) / 60_000));
 }

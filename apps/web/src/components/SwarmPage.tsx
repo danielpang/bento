@@ -4,7 +4,8 @@ import { MergeQueue } from "./MergeQueue.js";
 import { OutOfCompute } from "./OutOfCompute.js";
 import { SwarmOutline } from "./SwarmOutline.js";
 import { SwarmTree } from "./SwarmTree.js";
-import { canPause, canReopen, canResume, canStop, pausedWords, swarmTone, swarmWords } from "../swarm/status.js";
+import { canPause, canReopen, canResume, canStop, ceilingAction, pausedWords, swarmTone, swarmWords } from "../swarm/status.js";
+import { idleWords } from "../swarm/waiting.js";
 import { cappedUsd, formatUsd } from "../swarm/money.js";
 import { formatCompletion, type SwarmModel } from "../swarm/layout.js";
 import { formatElapsed } from "../swarm/time.js";
@@ -58,6 +59,8 @@ export interface SwarmActions {
   onRetryPlanner?: () => void;
   onStop: () => void;
   onReleaseBranch?: () => void;
+  /** Retries one task's failed merge queue entry, from the queue's own row. */
+  onRetryLanding?: (taskId: string) => void;
   /**
    * Opens the pull requests of a finished swarm, in the shape a person
    * chooses: one for the swarm, or one per task, stacked. The branches
@@ -304,15 +307,30 @@ export function SwarmPage({
         : "The plan is not ready. Message the planner to finish it."
     : "Review the diagram, then approve the plan to start ready workers.";
   const plannerFailed = waitingForPlan && detail.plannerRun?.status === "failed";
+  const ceiling = ceilingAction(swarm.status);
   const primaryAction = planNeedsApproval
     ? { label: "Approve plan", onClick: actions.onResume }
     : canResume(swarm.status)
       ? { label: "Resume work", onClick: actions.onResume }
-      : canReopen(swarm.status)
-        ? { label: "Add follow up", onClick: actions.onReopen }
-        : swarm.status === "running"
-          ? { label: "Pause work", onClick: actions.onPause }
-          : null;
+      // A ceiling is lifted by raising it, which Settings does and the
+      // coordinator acts on. Starting is refused for both.
+      : ceiling
+        ? { label: ceiling, onClick: actions.onSettings }
+        : canReopen(swarm.status)
+          ? { label: "Add follow up", onClick: actions.onReopen }
+          : swarm.status === "running" || swarm.status === "waiting"
+            ? { label: "Pause work", onClick: actions.onPause }
+            : null;
+  /*
+   * Why a swarm that says it is at work is not moving. "waiting" is the
+   * server's blocked: something in the tree wants a person. A running
+   * swarm with nothing running and nothing landing says what it is
+   * waiting on, when the tree shows it; without this the header showed
+   * only Pause and Stop over a swarm that was doing nothing.
+   */
+  const stillWords = swarm.status === "waiting"
+    ? "This swarm is waiting for you. Open the highlighted tasks in the diagram to see what each one needs."
+    : idleWords(detail);
 
   return (
     <div className="swarm-page">
@@ -329,6 +347,11 @@ export function SwarmPage({
       {stopped && (
         <p className="swarm-paused" role="status">
           {stopped}
+        </p>
+      )}
+      {!stopped && stillWords && (
+        <p className="swarm-paused" role="status" data-kind="idle">
+          {stillWords}
         </p>
       )}
 
@@ -381,8 +404,11 @@ export function SwarmPage({
             </summary>
             <div className="swarm-more-menu">
               {swarm.status === "planning" && plannerActive && canPause(swarm.status) && <button className="btn" disabled={busy} onClick={actions.onPause}>Pause planner</button>}
-              {planNeedsApproval && (swarm.status === "running" || swarm.status === "waiting") && (
+              {(swarm.status === "running" || swarm.status === "waiting") && primaryAction?.label !== "Pause work" && (
                 <button className="btn" disabled={busy} onClick={actions.onPause}>Pause work</button>
+              )}
+              {canReopen(swarm.status) && primaryAction?.label !== "Add follow up" && (
+                <button className="btn" disabled={busy} onClick={actions.onReopen}>Add follow up</button>
               )}
               {canStop(swarm.status) && <button className="btn" disabled={busy} onClick={actions.onStop}>Stop swarm</button>}
               {swarm.archivedAt ? (
@@ -561,6 +587,8 @@ export function SwarmPage({
           swarmDone={swarm.status === "done"}
           checkout={detail.branchCheckout}
           onReleaseBranch={actions.onReleaseBranch}
+          onRetryLanding={actions.onRetryLanding}
+          swarmStatus={swarm.status}
           busy={busy}
           tasks={detail.tasks}
           selectedId={selectedId}

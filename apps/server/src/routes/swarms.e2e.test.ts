@@ -1703,6 +1703,203 @@ test("a leaf can be started over whatever it is stuck in, and leaves the merge q
   assert.equal(working.status, 200, await working.clone().text());
 });
 
+/** A worker run on one leaf, in an active status. */
+async function workerOn(swarmId: string, taskId: string, status: "queued" | "running" = "running") {
+  const [run] = await db.insert(agentRuns).values({
+    type: "swarm", swarmId, swarmTaskId: taskId, role: "worker",
+    agentProfileId: (await db.select().from(agentProfiles).limit(1))[0]!.id,
+    prompt: "", status,
+  }).returning();
+  return run!;
+}
+
+const landingOf = async (id: string) => (await db.select().from(swarmLandings).where(eq(swarmLandings.id, id)))[0]!;
+
+test("a plain retry takes the old attempt's branch out of the merge queue too", async () => {
+  // An accepted leaf whose branch is queued, retried in the same sandbox:
+  // the queued row used to stay, land the old branch, and mark the task
+  // done under the new worker.
+  const swarm = await createSwarm();
+  const tree = await treeOf(swarm.id);
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.swarmId, swarm.id));
+  await db.update(swarmTasks).set({
+    status: "working", report: "first attempt", branchName: "swarm/old-attempt", flags: { accepted: true },
+  }).where(eq(swarmTasks.id, tree.first.id));
+  const [landing] = await db.insert(swarmLandings).values({
+    swarmId: swarm.id, taskId: tree.first.id, branchName: "swarm/old-attempt", status: "queued", position: 0,
+  }).returning();
+
+  await db.update(swarmLandings).set({ status: "landing" }).where(eq(swarmLandings.id, landing!.id));
+  const midLanding = await post(`/api/swarms/${swarm.id}/tasks/${tree.first.id}/retry`);
+  assert.equal(midLanding.status, 409, "a branch being landed right now is not pulled out from under the landing");
+  assert.equal(((await midLanding.json()) as { code: string }).code, "LANDING_IN_FLIGHT");
+  assert.equal((await readTask(tree.first.id)).status, "working", "and nothing changed");
+
+  await db.update(swarmLandings).set({ status: "queued" }).where(eq(swarmLandings.id, landing!.id));
+  const res = await post(`/api/swarms/${swarm.id}/tasks/${tree.first.id}/retry`);
+  assert.equal(res.status, 200, await res.clone().text());
+  assert.equal((await landingOf(landing!.id)).status, "cancelled", "the old attempt's branch is not landed");
+  const task = await readTask(tree.first.id);
+  assert.equal(task.status, "assigned");
+  assert.equal((task.flags as { accepted?: boolean }).accepted, undefined);
+});
+
+test("marking a leaf done takes its branch out of the merge queue and its landing failure off it", async () => {
+  const swarm = await createSwarm();
+  const tree = await treeOf(swarm.id);
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.swarmId, swarm.id));
+  await db.update(swarmTasks).set({
+    status: "failed", attention: "failed",
+    flags: { accepted: true, landingError: "the sandbox is gone", landingErrorCode: "wake_failed" },
+  }).where(eq(swarmTasks.id, tree.first.id));
+  const [landing] = await db.insert(swarmLandings).values({
+    swarmId: swarm.id, taskId: tree.first.id, branchName: "swarm/first", status: "landing", position: 0,
+  }).returning();
+
+  const midLanding = await post(`/api/swarms/${swarm.id}/tasks/${tree.first.id}/done`);
+  assert.equal(midLanding.status, 409);
+  assert.equal((await readTask(tree.first.id)).status, "failed", "nothing changed under the landing");
+
+  await db.update(swarmLandings).set({ status: "failed" }).where(eq(swarmLandings.id, landing!.id));
+  const res = await post(`/api/swarms/${swarm.id}/tasks/${tree.first.id}/done`);
+  assert.equal(res.status, 200, await res.clone().text());
+  const task = await readTask(tree.first.id);
+  assert.equal(task.status, "done");
+  assert.equal((task.flags as { landingError?: string }).landingError, undefined);
+  assert.equal((task.flags as { landingErrorCode?: string }).landingErrorCode, undefined);
+  assert.equal((await landingOf(landing!.id)).status, "cancelled", "a failed entry no longer offers to land it");
+});
+
+test("cancelling takes the subtree's branches out of the merge queue, and works on a failed swarm", async () => {
+  const swarm = await createSwarm();
+  const tree = await treeOf(swarm.id);
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.swarmId, swarm.id));
+  await db.update(swarms).set({ status: "failed" }).where(eq(swarms.id, swarm.id));
+  await db.update(swarmTasks).set({
+    status: "failed", attention: "failed", flags: { landingError: "detached head", landingErrorCode: "landing_failed" },
+  }).where(eq(swarmTasks.id, tree.first.id));
+  await db.update(swarmTasks).set({ status: "landed", flags: { accepted: true } }).where(eq(swarmTasks.id, tree.second.id));
+  const [failed] = await db.insert(swarmLandings).values({
+    swarmId: swarm.id, taskId: tree.first.id, branchName: "swarm/first", status: "failed", position: 0, endedAt: new Date(),
+  }).returning();
+  const [queuedRow] = await db.insert(swarmLandings).values({
+    swarmId: swarm.id, taskId: tree.second.id, branchName: "swarm/second", status: "landing", position: 1,
+  }).returning();
+
+  const midLanding = await post(`/api/swarms/${swarm.id}/tasks/${tree.plan.id}/cancel`);
+  assert.equal(midLanding.status, 409, "a landing in flight anywhere below refuses the whole cancel");
+  assert.equal((await readTask(tree.first.id)).status, "failed", "and nothing was cancelled");
+  assert.equal((await landingOf(failed!.id)).status, "failed");
+
+  await db.update(swarmLandings).set({ status: "queued" }).where(eq(swarmLandings.id, queuedRow!.id));
+  const res = await post(`/api/swarms/${swarm.id}/tasks/${tree.plan.id}/cancel`);
+  assert.equal(res.status, 200, await res.clone().text());
+  assert.equal((await landingOf(failed!.id)).status, "cancelled");
+  assert.equal((await landingOf(queuedRow!.id)).status, "cancelled");
+  const first = await readTask(tree.first.id);
+  assert.equal(first.status, "cancelled");
+  assert.equal((first.flags as { landingError?: string }).landingError, undefined);
+  assert.equal((first.flags as { landingErrorCode?: string }).landingErrorCode, undefined);
+});
+
+test("a leaf of a failed swarm can be split", async () => {
+  const swarm = await createSwarm();
+  const tree = await treeOf(swarm.id);
+  await db.update(swarms).set({ status: "failed" }).where(eq(swarms.id, swarm.id));
+  await db.update(swarmTasks).set({ status: "failed", attention: "failed" }).where(eq(swarmTasks.id, tree.first.id));
+  const res = await post(`/api/swarms/${swarm.id}/tasks/${tree.first.id}/split`, { children: [{ title: "Smaller" }] });
+  assert.equal(res.status, 201, await res.clone().text());
+  assert.equal((await readTask(tree.first.id)).nodeType, "plan");
+});
+
+test("the merge queue retry is refused only by an agent on its own task, and requeues the entry fresh", async () => {
+  const swarm = await createSwarm();
+  const tree = await treeOf(swarm.id);
+  // The planner the failure woke is working: that used to refuse the retry.
+  const { run: planner } = await plannerAtWork(swarm.id);
+  await db.update(swarmTasks).set({
+    status: "failed", attention: "conflict", report: "done", flags: { accepted: true, conflict: "CONFLICT in a.ts" },
+  }).where(eq(swarmTasks.id, tree.first.id));
+  const [landing] = await db.insert(swarmLandings).values({
+    swarmId: swarm.id, taskId: tree.first.id, branchName: "swarm/first", status: "failed",
+    error: "CONFLICT in a.ts", errorCode: "conflict_unresolved", position: 3, attempt: 4,
+    resolverRunId: planner.id, endedAt: new Date(),
+  }).returning();
+
+  const tree1 = await (await app.request(`/api/swarms/${swarm.id}`)).json() as { tasks: { id: string; canRetryLanding: boolean }[] };
+  assert.equal(tree1.tasks.find((task) => task.id === tree.first.id)?.canRetryLanding, true);
+  assert.equal(tree1.tasks.find((task) => task.id === tree.second.id)?.canRetryLanding, false);
+  const node = await (await app.request(`/api/swarms/${swarm.id}/tasks/${tree.first.id}`)).json() as { task: { canRetryLanding: boolean } };
+  assert.equal(node.task.canRetryLanding, true, "the drawer's own route says the same");
+
+  // An agent on this task does refuse it, in its own words, and the
+  // tree says so before anybody presses the button.
+  const worker = await workerOn(swarm.id, tree.first.id, "queued");
+  const busy = await post(`/api/swarms/${swarm.id}/tasks/${tree.first.id}/landing/retry`);
+  assert.equal(busy.status, 409);
+  assert.match(((await busy.json()) as { error: string }).error, /An agent is working on this task/);
+  const tree2 = await (await app.request(`/api/swarms/${swarm.id}`)).json() as { tasks: { id: string; canRetryLanding: boolean }[] };
+  assert.equal(tree2.tasks.find((task) => task.id === tree.first.id)?.canRetryLanding, false);
+  await db.update(agentRuns).set({ status: "cancelled" }).where(eq(agentRuns.id, worker.id));
+
+  const res = await post(`/api/swarms/${swarm.id}/tasks/${tree.first.id}/landing/retry`);
+  assert.equal(res.status, 200, await res.clone().text());
+  const after = await landingOf(landing!.id);
+  assert.equal(after.status, "queued");
+  assert.equal(after.attempt, 0, "the tries of the failed landing are not this one's");
+  assert.equal(after.resolverRunId, null, "a conflict gets a resolver again rather than failing at once");
+  assert.equal(after.errorCode, null);
+  assert.equal(after.position, 3, "it keeps its place in the queue");
+});
+
+test("each merge queue retry refusal says its own reason", async () => {
+  const swarm = await createSwarm();
+  const tree = await treeOf(swarm.id);
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.swarmId, swarm.id));
+  const retry = async () => {
+    const res = await post(`/api/swarms/${swarm.id}/tasks/${tree.first.id}/landing/retry`);
+    assert.equal(res.status, 409);
+    return ((await res.json()) as { error: string }).error;
+  };
+
+  await db.update(swarmTasks).set({ status: "failed", attention: "failed" }).where(eq(swarmTasks.id, tree.first.id));
+  assert.match(await retry(), /no failed merge queue entry/);
+
+  await db.insert(swarmLandings).values({
+    swarmId: swarm.id, taskId: tree.first.id, branchName: "swarm/first", status: "failed", position: 0, endedAt: new Date(),
+  });
+  // Sent back after the swarm's checks failed: the branch already landed.
+  await db.update(swarmTasks).set({ status: "assigned" }).where(eq(swarmTasks.id, tree.first.id));
+  assert.match(await retry(), /no failed merge queue entry/);
+  await db.update(swarmTasks).set({ status: "cancelled" }).where(eq(swarmTasks.id, tree.first.id));
+  assert.match(await retry(), /This task was cancelled/);
+  await db.update(swarmTasks).set({ status: "done" }).where(eq(swarmTasks.id, tree.first.id));
+  assert.match(await retry(), /This task is already done/);
+  await db.update(swarmTasks).set({ status: "failed" }).where(eq(swarmTasks.id, tree.first.id));
+  await db.update(swarms).set({ status: "done" }).where(eq(swarms.id, swarm.id));
+  assert.match(await retry(), /This swarm is done/);
+  await db.update(swarms).set({ status: "cancelled" }).where(eq(swarms.id, swarm.id));
+  assert.match(await retry(), /This swarm was stopped/);
+});
+
+test("a swarm stopped by a ceiling is not started past it, and is told to raise it", async () => {
+  const swarm = await createSwarm();
+  await treeOf(swarm.id);
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.swarmId, swarm.id));
+  for (const [status, pausedReason, code, words] of [
+    ["budget_exhausted", "budget", "BUDGET", /Raise the budget in Settings/],
+    ["timed_out", "time_limit", "TIME_LIMIT", /Raise the time limit in Settings/],
+  ] as const) {
+    await db.update(swarms).set({ status, pausedReason }).where(eq(swarms.id, swarm.id));
+    const res = await post(`/api/swarms/${swarm.id}/start`);
+    assert.equal(res.status, 409, status);
+    const body = (await res.json()) as { code: string; error: string };
+    assert.equal(body.code, code);
+    assert.match(body.error, words);
+    assert.equal((await readSwarm(swarm.id)).status, status, "and it is not put back to running");
+  }
+});
+
 test("retrying a failed worker also resumes a manually paused swarm", async () => {
   const swarm = await createSwarm();
   const tree = await treeOf(swarm.id);
