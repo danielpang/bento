@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import test from "node:test";
-import { collectExec, execTimeoutMessage } from "./driver.js";
+import { collectExec, execTimeoutMessage, SandboxImageLost } from "./driver.js";
 import { BENTO_EXEC_PYTHON, FrameDecoder } from "./modal-exec.js";
 import { adaptProc } from "./modal-client.js";
 import {
@@ -335,7 +335,13 @@ test("wake refuses rather than boot a fresh clone when no snapshot survives", as
   gone.api.imageFromId = async () => null;
   await assert.rejects(
     driver(gone.api).wake({ externalId: "bento-x", provider: "modal", workdir: "/workspace", imageRef: "im-gone" }),
-    /no snapshot of its workspace survives/,
+    (err: unknown) => {
+      // Typed, so a caller can tell a machine that is gone for good
+      // from a provider that failed to answer.
+      assert.ok(err instanceof SandboxImageLost);
+      assert.match(err.message, /no snapshot of its workspace survives/);
+      return true;
+    },
   );
   assert.equal(gone.creates.length, 0);
   assert.equal(gone.toolchainCalls, 0);

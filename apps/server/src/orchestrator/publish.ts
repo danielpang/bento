@@ -838,6 +838,9 @@ async function withoutStageNotes(
  * gets a sentence that says so. git's own line stays on the cause,
  * without the command.
  */
+/** How long a clone GitHub refused waits before it is asked once more. */
+export const CLONE_ACCESS_RETRY_MS = 2_000;
+
 export async function cloneBaseBranch(args: {
   remote: string;
   /** owner/repository, because the run record does not name it otherwise. */
@@ -866,7 +869,21 @@ export async function cloneBaseBranch(args: {
       { env: args.env },
     );
   try {
-    await cloneBranch(args.baseBranch);
+    try {
+      await cloneBranch(args.baseBranch);
+    } catch (first) {
+      /*
+       * GitHub answers "not found" or a refused credential now and then
+       * for a repository it served a moment before (a swarm planner hit
+       * it right after a deploy, and the same clone worked two seconds
+       * later). Read as the project's failure, that ends and bills the
+       * run and hands it to a person, so it is asked once more first.
+       */
+      if (!inaccessibleCloneExplanation(args.label, args.remote, first)) throw first;
+      await rm(args.checkout, { recursive: true, force: true }).catch(() => {});
+      await new Promise((resolve) => setTimeout(resolve, CLONE_ACCESS_RETRY_MS));
+      await cloneBranch(args.baseBranch);
+    }
     return args.baseBranch;
   } catch (err) {
     const access = inaccessibleCloneExplanation(args.label, args.remote, err);

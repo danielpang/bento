@@ -1,5 +1,5 @@
 import { and, eq, inArray, or, sql } from "drizzle-orm";
-import { swarmTaskEvents, swarmTasks, swarms, type Db } from "@bento/db";
+import { swarmLandings, swarmTaskEvents, swarmTasks, swarms, type Db } from "@bento/db";
 
 /**
  * What can be done to one node, written once.
@@ -58,9 +58,31 @@ export async function cancelTaskTree(
   const ids = [input.task.id, ...(await descendantIds(tx, input.task.id))];
   const cancelled = await tx
     .update(swarmTasks)
-    .set({ status: "cancelled", attention: null, endedAt: now, updatedAt: now })
+    .set({
+      status: "cancelled",
+      attention: null,
+      // A merge queue failure is about a branch that is no longer going
+      // anywhere, and left on the row it kept offering to land it.
+      flags: sql`${swarmTasks.flags} - 'landingError' - 'landingErrorCode'`,
+      endedAt: now,
+      updatedAt: now,
+    })
     .where(and(inArray(swarmTasks.id, ids), sql`${swarmTasks.status} <> 'cancelled'`))
     .returning({ id: swarmTasks.id });
+  /*
+   * And their branches leave the merge queue: a cancelled task's queued
+   * row would otherwise land work nobody wants, and land it as the
+   * task's "done". A landing already moving one is left to finish,
+   * because nothing may pull a branch out from under it; a person's
+   * cancel asks first (`withdrawTaskLandings`) and refuses instead.
+   */
+  if (cancelled.length > 0) {
+    const rows = await tx
+      .select({ id: swarmLandings.id, status: swarmLandings.status })
+      .from(swarmLandings)
+      .where(inArray(swarmLandings.taskId, cancelled.map((row) => row.id)));
+    await withdrawOpen(tx, rows, now);
+  }
   for (const row of cancelled) {
     await tx.insert(swarmTaskEvents).values({
       taskId: row.id,
@@ -294,16 +316,134 @@ export async function splitLeaf(
  * queue, and a refusal discovered after that is an agent killed for a
  * request that then answered "nothing changed".
  */
-export function retryRefusal(task: Task): string | null {
+export function retryRefusal(task: Task, options: { fresh?: boolean } = {}): string | null {
   if (task.nodeType !== "leaf") {
     return "A plan node is worked through its own tasks. Retry one of those.";
   }
   if (task.status === "cancelled") {
     return "This task was cancelled. The planner can hand the work out again.";
   }
-  if (task.status === "done" || task.status === "landed") {
+  if (task.status === "done") {
     return "This task's branch already landed. Add follow up work as a new task.";
   }
+  /*
+   * "landed" is a branch waiting in the merge queue, not one on the
+   * swarm's branch yet. Starting over withdraws it from the queue (the
+   * route does that), which is the way out of a landing that cannot
+   * finish. A plain retry would leave the queued branch behind it.
+   */
+  if (task.status === "landed" && !options.fresh) {
+    return "This task's branch is waiting in the merge queue. Retry the task to start it over instead.";
+  }
+  return null;
+}
+
+/**
+ * A merge queue row put back at the back of the queue for a new branch:
+ * nothing of the landing that ended it (its error, its backoff, its
+ * resolver, its count of tries) is about the branch landing next.
+ */
+export function requeuedLanding(branchName: string | null, position: number, now: Date) {
+  return {
+    status: "queued" as const,
+    branchName,
+    position,
+    error: null,
+    errorCode: null,
+    notBefore: null,
+    resolverRunId: null,
+    attempt: 0,
+    startedAt: null,
+    endedAt: null,
+    updatedAt: now,
+  };
+}
+
+/**
+ * Takes tasks' branches out of the merge queue, because the work on them
+ * is being discarded, finished by hand, or withdrawn: a start over, a
+ * plain retry (the next attempt is a new report, accepted or not on its
+ * own), a person marking the task done, or a cancel. A queued,
+ * conflicted or failed row left behind would land, or offer to land,
+ * work nobody wants: a plain retry once landed the old branch and marked
+ * the task done under the new worker.
+ *
+ * "landing" when a landing is moving one of those branches right now,
+ * which nothing may pull out from under it. Nothing is withdrawn then,
+ * so the caller can refuse the whole request rather than half of it.
+ */
+export async function withdrawTaskLandings(
+  tx: TaskWriter,
+  taskIds: string | readonly string[],
+  now: Date,
+): Promise<"withdrawn" | "landing"> {
+  const ids = typeof taskIds === "string" ? [taskIds] : [...taskIds];
+  if (ids.length === 0) return "withdrawn";
+  const rows = await tx
+    .select({ id: swarmLandings.id, status: swarmLandings.status })
+    .from(swarmLandings)
+    .where(inArray(swarmLandings.taskId, ids));
+  if (rows.some((row) => row.status === "landing")) return "landing";
+  await withdrawOpen(tx, rows, now);
+  return "withdrawn";
+}
+
+/** The rows of a merge queue that have not ended, moved to "cancelled". */
+async function withdrawOpen(
+  tx: TaskWriter,
+  rows: { id: string; status: (typeof swarmLandings.$inferSelect)["status"] }[],
+  now: Date,
+): Promise<void> {
+  const open = rows.filter((row) => row.status === "queued" || row.status === "conflicted" || row.status === "failed");
+  if (open.length === 0) return;
+  await tx
+    .update(swarmLandings)
+    .set({ status: "cancelled", notBefore: null, endedAt: now, updatedAt: now })
+    .where(inArray(swarmLandings.id, open.map((row) => row.id)));
+}
+
+/**
+ * Why a task's failed merge queue entry cannot be retried, or null.
+ *
+ * One answer for the route that does it and for the console that offers
+ * it, which is what the per task `canRetryLanding` the detail routes
+ * send is. The two used to be separate rules, and the drawer offered a
+ * button the route then refused with a sentence that fit none of the
+ * reasons.
+ *
+ * Eligible: a leaf whose landing failed with it, or one the planner has
+ * accepted again since (retried, reported, accepted) while its row
+ * still says failed. A leaf sent back after the swarm's branch failed
+ * its checks is "assigned": its branch already landed and the next
+ * attempt is the worker's, so the queue has nothing to retry.
+ *
+ * Only an agent on this task stands in the way. The planner the failure
+ * just woke is usually running, and it works in the swarm's machine
+ * without touching this branch; refusing on any run in the swarm meant
+ * the retry was refused at exactly the moment a person was looking.
+ */
+export function landingRetryRefusal(input: {
+  swarm: { status: (typeof swarms.$inferSelect)["status"] };
+  task: Pick<Task, "nodeType" | "status" | "flags">;
+  /** A failed merge queue row exists for this task. */
+  failedLanding: boolean;
+  /** A queued, starting or running agent run names this task. */
+  agentOnTask: boolean;
+}): string | null {
+  const { swarm, task } = input;
+  if (swarm.status === "done") {
+    return "This swarm is done, so its merge queue is closed. Add a follow up to change its work.";
+  }
+  if (swarm.status === "cancelled") {
+    return "This swarm was stopped, so its merge queue is closed.";
+  }
+  if (task.nodeType !== "leaf") return "A plan node has no branch of its own to land.";
+  if (task.status === "done") return "This task is already done.";
+  if (task.status === "cancelled") return "This task was cancelled, so its branch is not landed.";
+  const accepted = (task.flags as { accepted?: unknown }).accepted === true;
+  const eligible = task.status === "failed" || (accepted && (task.status === "working" || task.status === "landed"));
+  if (!eligible || !input.failedLanding) return "This task has no failed merge queue entry to retry.";
+  if (input.agentOnTask) return "An agent is working on this task. Retry the merge queue after it finishes.";
   return null;
 }
 
@@ -345,7 +485,7 @@ export async function retryLeaf(
 ): Promise<Task | SplitRefusal> {
   const { task } = input;
   const now = input.now ?? new Date();
-  const refused = retryRefusal(task);
+  const refused = retryRefusal(task, { fresh: input.fresh === true });
   if (refused) return { refused };
   const retries = Number((task.flags as { retries?: unknown }).retries ?? 0);
   const [updated] = await tx
@@ -369,10 +509,18 @@ export async function retryLeaf(
         plannerToldAt: undefined,
         plannerToldBy: undefined,
         plannerRetells: undefined,
+        /*
+         * And what was said about the last attempt: its acceptance and
+         * its merge queue failure. The next attempt is accepted or not
+         * on its own report, and a failure left on it would keep
+         * offering a merge queue retry for a landing that is not there.
+         */
+        accepted: undefined,
+        acceptNote: undefined,
+        landingError: undefined,
+        landingErrorCode: undefined,
         ...(input.fresh
           ? {
-              landingError: undefined,
-              landingErrorCode: undefined,
               workerStopped: undefined,
               rejection: undefined,
               sandboxRestarts: undefined,

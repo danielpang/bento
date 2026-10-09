@@ -21,8 +21,8 @@ import { enqueueRun, INTERACTIVE_POLL_SECONDS } from "../queue.js";
 import { queueSwarmSandboxReap } from "../reap-sandbox.js";
 import { swarmHasActiveRun } from "./reopen.js";
 import { ACTIVE_RUN_STATUSES, projectHasRepositories, SWARM_FULL, startRunIfIdle, type NewRun, type OutOfCompute } from "../start-run.js";
-import { plannerWakeMessage, type PlannerWakeItem } from "./planner-prompt.js";
-import { enqueueLanding } from "./landing.js";
+import { plannerWakeMessage, quoteUntrusted, type PlannerWakeItem } from "./planner-prompt.js";
+import { enqueueLanding, MAX_LANDING_ATTEMPTS } from "./landing.js";
 import { enqueueSwarmPush } from "./remote-branches.js";
 import { resumeStartOvers } from "./start-over.js";
 import { retryLeaf } from "./task-actions.js";
@@ -35,9 +35,15 @@ import {
   isDocumentSwarm,
 } from "./deliverable.js";
 import { SWARM_DESIGN_PATH } from "./design-document.js";
-import { handLeafToPlanner, PLANNER_NOT_TOLD } from "./planner-news.js";
+import {
+  handLeafToPlanner,
+  MAX_PLANNER_RETELLS,
+  PLANNER_NOT_TOLD,
+  PLANNER_RETELLS_EXHAUSTED,
+  withoutAcceptance,
+} from "./planner-news.js";
 import { observedAverageRunCost, budgetIsLow, enforcedSpend, money, spendOf } from "./ledger.js";
-import { ensureSwarmWatchdog, hasWatchedSwarms, stopSwarmWatchdog } from "./watchdog.js";
+import { ensureSwarmWatchdog, hasWatchedSwarms, stopSwarmWatchdog, WATCHED_SWARMS } from "./watchdog.js";
 import { captureSwarmSpend, type SwarmSpendOutcome } from "./spend.js";
 import { queueSwarmSlackNotify } from "../slack-notify.js";
 
@@ -112,16 +118,19 @@ function swarmIsOver(status: (typeof swarms.$inferSelect)["status"]): boolean {
 /**
  * Whether a swarm that ended this way is finished with its machine.
  *
- * Every ending but "failed". A failed swarm is the one a person picks
- * up again from the same branch, by retrying a leaf or a landing, and
- * that branch has never been pushed: the swarm's machine is the only
- * copy of every leaf that already landed. Reaping it on failure turned
- * a landing retry into "the swarm's sandbox is gone" and lost the
- * landed work with it. Archiving or deleting the swarm still reaps it,
- * and a Modal machine hibernates on its own meanwhile.
+ * Only "done" and "cancelled". Every other ending is one a person
+ * picks up again from the same branch: a failed swarm by retrying a
+ * leaf or a landing, and a swarm that ran out of budget or time by
+ * raising the ceiling, which spawnsFrom resumes. The swarm's machine
+ * holds that branch, and whatever GitHub has no copy of is lost with
+ * it: reaping on failure turned a landing retry into "the swarm's
+ * sandbox is gone" and lost the landed work. Archiving or deleting the
+ * swarm still reaps it, the sweep takes one nobody has touched past
+ * FAILED_SWARM_MACHINE_GRACE_MS, and a Modal machine hibernates on its
+ * own meanwhile.
  */
 export function swarmReleasesMachine(status: (typeof swarms.$inferSelect)["status"]): boolean {
-  return swarmIsOver(status) && status !== "failed";
+  return swarmIsOver(status) && (status === "done" || status === "cancelled");
 }
 
 /** Whether any swarm on this deployment has work a tick would act on. */
@@ -295,7 +304,12 @@ function sandboxRestarts(flags: unknown): number {
  * joins that list is restarted without this file learning its words.
  */
 function failedBeforeAgentStarted(run: { status: string; error: string | null }): boolean {
-  return run.status === "failed" && unbilledReason(run.error) !== null;
+  if (run.status !== "failed") return false;
+  const reason = unbilledReason(run.error);
+  // A lost branch is unbilled (no agent ran) but not a sandbox blip:
+  // another start finds the same nothing, so it goes to the planner and
+  // the person rather than round the restart loop.
+  return reason !== null && reason.id !== "swarm-branch-lost";
 }
 
 /**
@@ -512,14 +526,28 @@ async function runTick(
    * and a run queued here is the active planner that holds every later
    * wake until it has been heard.
    */
-  const plannerRunId = canStartAgents
-    ? (await restartPlannerAfterSandboxFailure(tx, swarm, deps)) ?? (await deliverPlannerWake(tx, swarm, deps, now))
-    : null;
+  await flagUndecidedLeaves(tx, swarm, changed.tasks, events, now);
+  /*
+   * A ceiling that refused the planner or a resolver is collected here,
+   * so the swarm pauses (or ends on its budget) the way it does when a
+   * worker is refused. Before, only a worker's refusal said anything:
+   * a swarm whose one remaining step was a planner turn sat "running"
+   * with nothing starting and nothing saying why.
+   */
+  const refusals: ComputeRefusal[] = [];
+  let plannerRunId: string | null = null;
+  if (canStartAgents) {
+    plannerRunId = await restartPlannerAfterSandboxFailure(tx, swarm, deps, refusals, events, now);
+    if (!plannerRunId) {
+      await noticeIdleOpenLeaves(tx, swarm, changed.tasks, now);
+      plannerRunId = await deliverPlannerWake(tx, swarm, deps, now, refusals, events);
+    }
+  }
   const spawned = canStartAgents
     ? await spawnWorkers(tx, swarm, changed.tasks, deps, events, now)
     : { runIds: [], refusal: null, cap: null };
-  const landing = await advanceLandingQueue(tx, swarm, changed.tasks, deps, events, now, canStartAgents);
-  const status = await recomputeSwarmStatus(tx, swarm, changed.tasks, events, spawned);
+  const landing = await advanceLandingQueue(tx, swarm, changed.tasks, deps, events, now, canStartAgents, refusals);
+  const status = await recomputeSwarmStatus(tx, swarm, changed.tasks, events, withRefusals(swarm, spawned, refusals));
 
   return {
     changedTasks: changed.changedCount,
@@ -868,7 +896,14 @@ async function settleWorkedLeaves(
       task.nodeType === "leaf" &&
       !(task.flags as { autoStartedOver?: boolean }).autoStartedOver
     ) {
-      const restarted = await retryLeaf(tx as unknown as Parameters<typeof retryLeaf>[0], { task, fresh: true, auto: true, now });
+      // The verdict goes with the attempt: a task started over is work
+      // nobody has accepted yet.
+      const restarted = await retryLeaf(tx as unknown as Parameters<typeof retryLeaf>[0], {
+        task: withoutAcceptance(task),
+        fresh: true,
+        auto: true,
+        now,
+      });
       if (!("refused" in restarted)) {
         Object.assign(task, restarted);
         events.push({ type: "swarm_task_updated", projectId: swarm.projectId, swarmId: swarm.id, taskId: task.id, status: task.status });
@@ -1048,6 +1083,22 @@ export function rollUpStatus(current: TaskStatus, children: TaskStatus[]): TaskS
   return "working";
 }
 
+/**
+ * What a node counts as in its parent's summary.
+ *
+ * Its own status, except for a leaf waiting to start over. That leaf is
+ * "assigned" while a job takes its old machine down, and the spawn step
+ * deliberately passes it over until the job is done, so in the summary
+ * it read as waiting work beside, say, a failed sibling: the rollup
+ * called the pair "failed", the swarm was written failed, and a failed
+ * swarm spawns nothing, so the leaf a person had just restarted never
+ * started. It is work in flight, and counts as such.
+ */
+function rollupStatusOf(task: Task, status: TaskStatus = task.status): TaskStatus {
+  if (status === "assigned" && (task.flags as { startingOver?: boolean }).startingOver === true) return "working";
+  return status;
+}
+
 function statusWithDependents(
   task: Task,
   children: Task[],
@@ -1066,7 +1117,7 @@ function statusWithDependents(
     own,
     subtree: own === "done" && dependent.length > 0
       ? rollUpStatus(own, [own, ...dependent])
-      : own,
+      : rollupStatusOf(task, own),
   };
 }
 
@@ -1126,7 +1177,7 @@ async function rollUp(
     if (children.length === 0) {
       const cost = leafCost(task);
       next.set(task.id, { status: task.status, cost });
-      subtreeStatus.set(task.id, task.status);
+      subtreeStatus.set(task.id, rollupStatusOf(task));
       return cost;
     }
     /*
@@ -1299,14 +1350,26 @@ async function restartPlannerAfterSandboxFailure(
   tx: Tx,
   swarm: typeof swarms.$inferSelect,
   deps: SwarmTickDeps,
+  refusals: ComputeRefusal[],
+  events: BoardEvent[],
+  now: Date,
 ): Promise<string | null> {
   /*
    * Only a swarm that is being worked. A wake may still reach an
    * ended swarm, because a leaf can report after its ceiling; a
    * restart carries no news and must not put a planner on a swarm
-   * that is done, timed out or out of budget.
+   * that is done, timed out or out of budget. A swarm paused on its
+   * plan's hours is being worked: a refused restart is what paused it,
+   * and asking again is how it leaves the pause.
    */
-  if (swarm.status !== "planning" && swarm.status !== "running" && swarm.status !== "blocked") return null;
+  if (
+    swarm.status !== "planning" &&
+    swarm.status !== "running" &&
+    swarm.status !== "blocked" &&
+    !pausedOnPlanLimit(swarm)
+  ) {
+    return null;
+  }
 
   const recent = await tx
     .select({
@@ -1341,9 +1404,22 @@ async function restartPlannerAfterSandboxFailure(
     executor: "server",
     startedBy: latest.startedBy,
   });
-  if (started === "busy" || started === "gone" || started === SWARM_FULL || "outOfCompute" in started) {
+  if (started !== "busy" && started !== "gone" && started !== SWARM_FULL && "outOfCompute" in started) {
+    refusals.push({ refusal: started.outOfCompute, cap: started.cap ?? "plan" });
     return null;
   }
+  if (started === "busy" || started === "gone" || started === SWARM_FULL) return null;
+  await resumeFromPlanLimit(tx, swarm, events, now);
+  /*
+   * And the messages it carried. The prompt is the same, so they are
+   * this run's now, for the reason the leaves below are restamped:
+   * left on the failed run, the wake would put them back in the queue
+   * and hand them over a second time.
+   */
+  await tx
+    .update(swarmMessages)
+    .set({ runId: started.id })
+    .where(and(eq(swarmMessages.runId, latest.id), eq(swarmMessages.status, "sent")));
   /*
    * The leaves the failed run was told about are now this run's news:
    * it carries the same prompt. Restamped, or PLANNER_NOT_TOLD would
@@ -1401,8 +1477,17 @@ async function deliverPlannerWake(
   swarm: typeof swarms.$inferSelect,
   deps: SwarmTickDeps,
   now: Date,
+  refusals: ComputeRefusal[],
+  events: BoardEvent[],
 ): Promise<string | null> {
-  if (swarm.status === "paused" || swarm.status === "cancelled" || swarm.status === "draft") return null;
+  /*
+   * A swarm paused on its plan's hours is the exception to the pause:
+   * a refused wake is one of the things that pauses it, and the wake
+   * asking again is how it notices the hours came back.
+   */
+  if ((swarm.status === "paused" && !pausedOnPlanLimit(swarm)) || swarm.status === "cancelled" || swarm.status === "draft") {
+    return null;
+  }
 
   const [activePlanner] = await tx
     .select({ id: agentRuns.id })
@@ -1416,6 +1501,34 @@ async function deliverPlannerWake(
     )
     .limit(1);
   if (activePlanner) return null;
+
+  /*
+   * Messages handed to a planner that then failed or was stopped go
+   * back in the queue. That planner never finished the turn they were
+   * in, so nobody read them, and a feature card's messages have always
+   * gone back the same way. Read here rather than on each path that
+   * ends a run, for the reason PLANNER_NOT_TOLD is: every terminal path
+   * passes through a tick, and not every one remembers to settle.
+   *
+   * The run stays on the row, so the wake below can tell a message that
+   * is back from one that is new.
+   */
+  await tx
+    .update(swarmMessages)
+    .set({ status: "queued", sentAt: null })
+    .where(
+      and(
+        eq(swarmMessages.swarmId, swarm.id),
+        isNull(swarmMessages.taskId),
+        eq(swarmMessages.status, "sent"),
+        sql`exists (
+          select 1 from ${agentRuns}
+          where ${agentRuns.id} = ${swarmMessages.runId}
+            and ${agentRuns.role} = 'planner'
+            and ${agentRuns.status} in ('failed', 'cancelled')
+        )`,
+      ),
+    );
 
   // Messages a person sent to the plan rather than to one leaf.
   const pending = await tx
@@ -1487,33 +1600,73 @@ async function deliverPlannerWake(
   const news = reported.filter((task) => !stillWorking.has(task.id));
 
   /*
-   * News whose planner a person stopped rides along and never wakes a
-   * planner by itself: the stop was a choice, and a planner started on
-   * the stop's own tick would make the planner impossible to stop short
-   * of pausing the swarm. It goes out with the next wake that something
-   * else causes (another leaf, a message from a person).
+   * How each earlier reviewer ended, for the news and the messages that
+   * are back: stopped by a person, failed, or finished without deciding.
    */
   const toldBy = news
     .map((task) => (isTold(task.flags) && typeof task.flags.plannerToldBy === "string" ? task.flags.plannerToldBy : null))
     .filter((id): id is string => id !== null);
-  const stoppedBy = new Set(
-    toldBy.length === 0
+  const earlierRuns = [...toldBy, ...pending.map((message) => message.runId).filter((id): id is string => id !== null)];
+  const endedAs = new Map(
+    earlierRuns.length === 0
       ? []
       : (
           await tx
-            .select({ id: agentRuns.id })
+            .select({ id: agentRuns.id, status: agentRuns.status })
             .from(agentRuns)
-            .where(and(inArray(agentRuns.id, toldBy), eq(agentRuns.status, "cancelled")))
-        ).map((row) => row.id),
+            .where(inArray(agentRuns.id, [...new Set(earlierRuns)]))
+        ).map((row) => [row.id, row.status] as const),
   );
-  const wakes = news.some((task) => !(isTold(task.flags) && stoppedBy.has(String(task.flags.plannerToldBy))));
 
-  if (pending.length === 0 && !wakes) return null;
+  /*
+   * News whose planner a person stopped rides along and never wakes a
+   * planner by itself: the stop was a choice, and a planner started on
+   * the stop's own tick would make the planner impossible to stop short
+   * of pausing the swarm. It goes out with the next wake that something
+   * else causes (another leaf, a message from a person). A message that
+   * went to that planner rides along the same way.
+   */
+  const stoppedBy = (runId: unknown) => typeof runId === "string" && endedAs.get(runId) === "cancelled";
+  const wakes = news.some((task) => !(isTold(task.flags) && stoppedBy(task.flags.plannerToldBy)));
+
+  /*
+   * A message that is back because its planner failed wakes the next
+   * one, as many times as a leaf's news would be handed over again and
+   * no more: a planner that fails every turn (a refused key, a provider
+   * that stays down) would otherwise be started again by its own
+   * failure's tick, forever, on a message nobody can read. Past that it
+   * rides along with whatever wakes the planner next.
+   */
+  const failedStreak = pending.some((message) => message.runId !== null && endedAs.get(message.runId) === "failed")
+    ? await failedPlannerStreak(tx, swarm.id)
+    : 0;
+  const messageWakes = pending.some((message) => {
+    if (message.runId === null) return true;
+    const ended = endedAs.get(message.runId);
+    if (ended === "cancelled") return false;
+    if (ended === "failed") return failedStreak < MAX_PLANNER_RETELLS;
+    return true;
+  });
+
+  if (!messageWakes && !wakes) return null;
 
   const profileId = await plannerProfileFor(tx, swarm);
   // Nothing to run the planner as. The messages stay queued, so this
   // resolves itself the moment a planner agent is set in the swarm's settings.
   if (!profileId) return null;
+
+  /*
+   * A leaf back because the planner it went to finished its turn
+   * without accepting or rejecting it. Said in Bento's own words, so the
+   * planner reads that its last turn left this undecided rather than
+   * seeing the same report again as if it were new.
+   */
+  const undecided = news.filter(
+    (task) =>
+      isTold(task.flags) &&
+      typeof task.flags.plannerToldBy === "string" &&
+      endedAs.get(task.flags.plannerToldBy) === "succeeded",
+  );
 
   const items: PlannerWakeItem[] = [
     ...news.map((task) => ({
@@ -1528,6 +1681,10 @@ async function deliverPlannerWake(
         ? ({ kind: "notice" as const, text: message.text })
         : ({ kind: "message" as const, text: message.text }),
     ),
+    ...undecided.map((task) => ({
+      kind: "notice" as const,
+      text: `Your last turn ended without accepting or rejecting task ${task.id}, so it is still waiting on your decision. Accept it, reject it with a reason, cancel it, or ask a person about it with ask_user.`,
+    })),
   ];
 
   const started = await deps.startRun(tx, {
@@ -1546,9 +1703,12 @@ async function deliverPlannerWake(
   // The worker ceiling is a worker's answer and never a planner's, and
   // it is folded in here so the wake stays held rather than being
   // stamped as delivered by a run that does not exist.
-  if (started === "busy" || started === "gone" || started === SWARM_FULL || "outOfCompute" in started) {
+  if (started !== "busy" && started !== "gone" && started !== SWARM_FULL && "outOfCompute" in started) {
+    refusals.push({ refusal: started.outOfCompute, cap: started.cap ?? "plan" });
     return null;
   }
+  if (started === "busy" || started === "gone" || started === SWARM_FULL) return null;
+  await resumeFromPlanLimit(tx, swarm, events, now);
 
   for (const message of pending) {
     await tx
@@ -1559,7 +1719,7 @@ async function deliverPlannerWake(
   for (const task of news) {
     /*
      * A leaf that already carries a latch is back because the planner
-     * it was handed to never finished its turn (PLANNER_NOT_TOLD let it
+     * it was handed to never decided it (PLANNER_NOT_TOLD let it
      * through for that reason alone). Said on the node first, so its
      * log reads as what happened: handed over, lost, handed over again.
      */
@@ -1570,16 +1730,21 @@ async function deliverPlannerWake(
         taskId: task.id,
         kind: "review_interrupted",
         runId: previousReviewer,
-        detail: { note: "The planner reviewing this ended before it decided, so a new planner is reviewing it." },
+        detail: {
+          note:
+            endedAs.get(previousReviewer) === "succeeded"
+              ? "The planner reviewing this finished its turn without deciding, so it is being handed over again."
+              : "The planner reviewing this ended before it decided, so a new planner is reviewing it.",
+        },
       });
     }
     await tx
       .update(swarmTasks)
       // Which run was told, as well as when: PLANNER_NOT_TOLD reads a
       // leaf as not told again once that run failed or was cancelled,
-      // because a planner that never finished its turn never read this.
-      // A re-tell is counted, so the same news is lost and handed over
-      // at most MAX_PLANNER_RETELLS times (see PLANNER_NOT_TOLD).
+      // or finished without deciding it, because such a planner never
+      // dealt with this. A re-tell is counted, so the same news is
+      // handed over at most MAX_PLANNER_RETELLS times.
       .set({
         flags: {
           ...task.flags,
@@ -1611,6 +1776,171 @@ async function deliverPlannerWake(
   return started.id;
 }
 
+/** How many of this swarm's latest planner runs failed in a row. */
+async function failedPlannerStreak(tx: Tx, swarmId: string): Promise<number> {
+  const recent = await tx
+    .select({ status: agentRuns.status })
+    .from(agentRuns)
+    .where(and(eq(agentRuns.swarmId, swarmId), eq(agentRuns.role, "planner")))
+    .orderBy(desc(agentRuns.queuedAt), desc(agentRuns.id))
+    .limit(MAX_PLANNER_RETELLS + 1);
+  let streak = 0;
+  for (const run of recent) {
+    if (run.status !== "failed") break;
+    streak += 1;
+  }
+  return streak;
+}
+
+/**
+ * Raises attention on a leaf whose report has been handed to a planner
+ * as many times as it will be, and is still undecided.
+ *
+ * PLANNER_NOT_TOLD stops finding such a leaf once its re-tells are
+ * spent, which is right (a planner that will not decide is not woken
+ * forever) and was silent: the leaf sat "working" with its report and
+ * the swarm sat "running" with nothing moving. Attention is what turns
+ * the swarm's headline to blocked, so the board says a person has to
+ * accept, retry, or cancel it. Once: a leaf whose attention is already
+ * set is not found again.
+ */
+async function flagUndecidedLeaves(
+  tx: Tx,
+  swarm: typeof swarms.$inferSelect,
+  tasks: Task[],
+  events: BoardEvent[],
+  now: Date,
+): Promise<void> {
+  if (swarmIsOver(swarm.status) || swarm.status === "draft") return;
+  const stuck = await tx
+    .update(swarmTasks)
+    .set({ attention: "failed", updatedAt: now })
+    .where(and(eq(swarmTasks.swarmId, swarm.id), PLANNER_RETELLS_EXHAUSTED))
+    .returning({ id: swarmTasks.id, flags: swarmTasks.flags });
+  for (const row of stuck) {
+    await tx.insert(swarmTaskEvents).values({
+      taskId: row.id,
+      kind: "attention_raised",
+      detail: {
+        reason: "planner_undecided",
+        retells: retellCount(row.flags),
+        note: "The planner was handed this report several times and never accepted or rejected it. Accept, retry, or cancel it.",
+      },
+    });
+    const task = tasks.find((candidate) => candidate.id === row.id);
+    if (task) task.attention = "failed";
+    events.push({
+      type: "swarm_task_updated",
+      projectId: swarm.projectId,
+      swarmId: swarm.id,
+      taskId: row.id,
+      status: "working",
+    });
+  }
+}
+
+/** Whether the swarm is paused waiting for its plan's hours, the one pause nobody chose. */
+function pausedOnPlanLimit(swarm: typeof swarms.$inferSelect): boolean {
+  return swarm.status === "paused" && swarm.pausedReason === "plan_limit";
+}
+
+/**
+ * Takes a swarm out of a plan limit pause once something started.
+ *
+ * The spawn step writes this itself for a worker; a planner or a
+ * resolver started on a paused swarm needs the same, or the board goes
+ * on saying the team is out of hours while the agent works. Only the
+ * plan limit: a person's pause and the endings are not this step's.
+ */
+async function resumeFromPlanLimit(
+  tx: Tx,
+  swarm: typeof swarms.$inferSelect,
+  events: BoardEvent[],
+  now: Date,
+): Promise<void> {
+  if (!pausedOnPlanLimit(swarm)) return;
+  await tx
+    .update(swarms)
+    .set({ status: "running", pausedReason: null, updatedAt: now })
+    .where(and(eq(swarms.id, swarm.id), eq(swarms.status, "paused"), eq(swarms.pausedReason, "plan_limit")));
+  swarm.status = "running";
+  swarm.pausedReason = null;
+  events.push({ type: "swarm_updated", projectId: swarm.projectId, swarmId: swarm.id, status: "running" });
+}
+
+/**
+ * Tells the planner about open leaves once the swarm has nothing else
+ * to do.
+ *
+ * create_task and split_task make open leaves, and the spawn step only
+ * starts assigned ones. Open is deliberate: it is a leaf nobody has
+ * approved yet (the planner assigns what should run, and Start or
+ * Resume approves what it left open in a saved plan), so the tick does
+ * not start one by itself. What was missing is anyone hearing about
+ * it. A planner that ended its turn with leaves open left a started
+ * swarm "running" with work in its tree, nothing that would ever start
+ * it, and no event coming, because Start had been pressed already.
+ *
+ * So once the swarm is otherwise idle (no agent of any kind running,
+ * nothing in the merge queue, no leaf assigned or in flight), the
+ * planner is told which leaves are still open, in a notice the wake
+ * folds into its next turn, and decides: assign, cancel, or ask a
+ * person. Once per leaf, latched on the leaf, so a planner that leaves
+ * one open on purpose is not woken about it every tick. While anything
+ * moves an open leaf may be the planner holding work back until it has
+ * seen a result, which is its call, so nothing is said.
+ */
+async function noticeIdleOpenLeaves(
+  tx: Tx,
+  swarm: typeof swarms.$inferSelect,
+  tasks: Task[],
+  now: Date,
+): Promise<void> {
+  if (swarm.status !== "running" && swarm.status !== "blocked") return;
+  const open = tasks.filter(
+    (task) =>
+      task.nodeType === "leaf" &&
+      task.status === "open" &&
+      task.attention === null &&
+      typeof task.flags[OPEN_NOTICED_FLAG] !== "string",
+  );
+  if (open.length === 0) return;
+  if (
+    tasks.some(
+      (task) =>
+        task.nodeType === "leaf" &&
+        (task.status === "assigned" || task.status === "working" || task.status === "landed"),
+    )
+  ) {
+    return;
+  }
+  if (await swarmHasActiveRun(tx as unknown as Db, swarm.id)) return;
+  const [landing] = await tx
+    .select({ id: swarmLandings.id })
+    .from(swarmLandings)
+    .where(and(eq(swarmLandings.swarmId, swarm.id), inArray(swarmLandings.status, ["queued", "landing", "conflicted"])))
+    .limit(1);
+  if (landing) return;
+
+  await tx.insert(swarmMessages).values({
+    swarmId: swarm.id,
+    source: "system",
+    text: [
+      `Nothing in this swarm is running, and ${open.length === 1 ? "this task is" : "these tasks are"} still open, so no agent will start on ${open.length === 1 ? "it" : "them"} until you assign ${open.length === 1 ? "it" : "them"}:`,
+      ...open.map((task) => `Task ${task.id}, titled:\n${quoteUntrusted(task.title)}`),
+      "Assign the ones that should run now, cancel the ones that should not, or ask_user if a person has to decide. Anything you leave open stays open.",
+    ].join("\n"),
+  });
+  for (const task of open) {
+    const flags = { ...task.flags, [OPEN_NOTICED_FLAG]: now.toISOString() };
+    await tx.update(swarmTasks).set({ flags }).where(eq(swarmTasks.id, task.id));
+    task.flags = flags;
+  }
+}
+
+/** Where an open leaf records that the planner was told it was waiting. */
+const OPEN_NOTICED_FLAG = "openNoticedAt";
+
 /** The agent the planner runs as, chosen when the swarm was created. */
 async function plannerProfileFor(_tx: Tx, swarm: typeof swarms.$inferSelect): Promise<string | null> {
   return swarm.plannerProfileId;
@@ -1630,6 +1960,29 @@ interface SpawnResult {
   refusal: string | null;
   /** Which ceiling refused, so step five knows which ending this is. */
   cap: "plan" | "budget" | null;
+}
+
+/** A ceiling that refused a planner, a sub planner or a resolver. */
+interface ComputeRefusal {
+  refusal: string;
+  cap: "plan" | "budget";
+}
+
+/**
+ * The spawn step's answer, with the other roles' refusals folded in.
+ *
+ * Only for a swarm that spawns at all (see spawnsFrom), so a refusal
+ * means here what a worker's means: the swarm pauses on the plan's
+ * hours or ends on its budget once nothing is running. A planning
+ * swarm is left alone, because a pause it could leave by spawning
+ * would start workers on a plan nobody approved; an ended one keeps
+ * its ending. The worker's own refusal is the first word when there is
+ * one, because it is the one written on a leaf.
+ */
+function withRefusals(swarm: typeof swarms.$inferSelect, spawned: SpawnResult, refusals: ComputeRefusal[]): SpawnResult {
+  if (spawned.refusal || refusals.length === 0 || !spawnsFrom(swarm)) return spawned;
+  const first = refusals.find((refusal) => refusal.cap === "budget") ?? refusals[0]!;
+  return { ...spawned, refusal: first.refusal, cap: first.cap };
 }
 
 /**
@@ -1740,8 +2093,17 @@ async function spawnWorkers(
    * what was marked, and two opinions about how deep a plan may go is
    * how they come to differ.
    */
-  const delegatedRunIds = await spawnSubPlanners(tx, swarm, tasks, deps, events, now);
-  runIds.push(...delegatedRunIds);
+  const delegated = await spawnSubPlanners(tx, swarm, tasks, deps, events, now);
+  runIds.push(...delegated.runIds);
+  /*
+   * A sub planner a ceiling refused is reported here only when no leaf
+   * reports one below: the leaf is where the sentence belongs, but a
+   * swarm whose only waiting work was a plan node used to sit "running"
+   * with nothing starting and nothing saying why.
+   */
+  const quiet: SpawnResult = delegated.refusal
+    ? { runIds, refusal: delegated.refusal.refusal, cap: delegated.refusal.cap }
+    : { runIds, refusal: null, cap: null };
 
   const byId = new Map(tasks.map((task) => [task.id, task]));
   const ready = tasks.filter(
@@ -1750,7 +2112,10 @@ async function spawnWorkers(
       !(task.flags as { startingOver?: boolean }).startingOver &&
       !isDocumentAssembly(task) && leafAncestorsDone(task, byId),
   );
-  if (ready.length === 0) return { runIds, refusal: null, cap: null };
+  if (ready.length === 0) {
+    if (runIds.length > 0) await leaveStall(tx, swarm, events, now);
+    return quiet;
+  }
 
   const swarmWorker = await workerProfileFor(tx, swarm);
 
@@ -1889,16 +2254,25 @@ async function spawnWorkers(
    * would start, and the board would go on saying the swarm was out of
    * money while its agents worked.
    */
-  if (runIds.length > 0 && swarm.status !== "running" && swarm.status !== "blocked") {
-    await tx
-      .update(swarms)
-      .set({ status: "running", pausedReason: null, updatedAt: now })
-      .where(eq(swarms.id, swarm.id));
-    swarm.status = "running";
-    swarm.pausedReason = null;
-    events.push({ type: "swarm_updated", projectId: swarm.projectId, swarmId: swarm.id, status: "running" });
-  }
-  return { runIds, refusal: null, cap: null };
+  if (runIds.length > 0) await leaveStall(tx, swarm, events, now);
+  return quiet;
+}
+
+/** Moves a stalled swarm that just started something back to running. See above. */
+async function leaveStall(
+  tx: Tx,
+  swarm: typeof swarms.$inferSelect,
+  events: BoardEvent[],
+  now: Date,
+): Promise<void> {
+  if (swarm.status === "running" || swarm.status === "blocked") return;
+  await tx
+    .update(swarms)
+    .set({ status: "running", pausedReason: null, updatedAt: now })
+    .where(eq(swarms.id, swarm.id));
+  swarm.status = "running";
+  swarm.pausedReason = null;
+  events.push({ type: "swarm_updated", projectId: swarm.projectId, swarmId: swarm.id, status: "running" });
 }
 
 
@@ -1914,9 +2288,9 @@ async function spawnWorkers(
  * being asked for is a plan, and a swarm that pairs a strong
  * planner with a cheap worker means exactly that.
  *
- * A refusal is quiet. The node keeps its place and starts when the
- * swarm has room, the same way a leaf does, and the ceiling that
- * refused it is already being reported by the leaf that hit it.
+ * A refusal writes nothing on the node. The node keeps its place and
+ * starts when the swarm has room, the same way a leaf does, and the
+ * ceiling that refused it is returned so the swarm's status says it.
  */
 async function spawnSubPlanners(
   tx: Tx,
@@ -1925,14 +2299,14 @@ async function spawnSubPlanners(
   deps: SwarmTickDeps,
   events: BoardEvent[],
   now: Date,
-): Promise<string[]> {
+): Promise<{ runIds: string[]; refusal: ComputeRefusal | null }> {
   const handed = tasks.filter((task) => task.nodeType === "plan" && task.status === "assigned");
-  if (handed.length === 0) return [];
+  if (handed.length === 0) return { runIds: [], refusal: null };
 
   const profileId = await plannerProfileFor(tx, swarm);
   // Nothing to run a planner as. The node keeps its place, and starts
   // the moment a planner agent is set in the swarm's settings.
-  if (!profileId) return [];
+  if (!profileId) return { runIds: [], refusal: null };
 
   const runIds: string[] = [];
   for (const task of handed) {
@@ -1954,12 +2328,14 @@ async function spawnSubPlanners(
     if (started === "busy") continue;
     if (started === "gone") break;
     /*
-     * A ceiling refused it. Left to the leaf spawn below to report,
-     * which is where the sentence about it belongs: a person reading
-     * the board wants one node saying the swarm is out of money, not
-     * every node that was waiting.
+     * A ceiling refused it. Left to the leaf spawn below to write on a
+     * leaf, which is where the sentence about it belongs: a person
+     * reading the board wants one node saying the swarm is out of
+     * money, not every node that was waiting.
      */
-    if ("outOfCompute" in started) break;
+    if ("outOfCompute" in started) {
+      return { runIds, refusal: { refusal: started.outOfCompute, cap: started.cap ?? "plan" } };
+    }
 
     await tx
       .update(swarmTasks)
@@ -1983,7 +2359,7 @@ async function spawnSubPlanners(
       status: "working",
     });
   }
-  return runIds;
+  return { runIds, refusal: null };
 }
 
 /* ------------------------------------------------------------------ *
@@ -2026,6 +2402,7 @@ async function advanceLandingQueue(
   events: BoardEvent[],
   now: Date,
   canStartAgents: boolean,
+  refusals: ComputeRefusal[],
 ): Promise<LandingStep> {
   const byId = new Map(tasks.map((task) => [task.id, task]));
   const resolverRunIds: string[] = [];
@@ -2036,17 +2413,25 @@ async function advanceLandingQueue(
     .orderBy(asc(swarmLandings.position), asc(swarmLandings.createdAt));
 
   /**
-   * A landing for work somebody withdrew has nothing left to land.
+   * A landing for work nobody is waiting to land has nothing left to
+   * land.
    *
    * Conflicted as well as queued, because a conflicted row holds the
    * queue: a leaf cancelled while its branch was in conflict would
    * otherwise stop every landing behind it with nothing left that could
    * ever settle it.
+   *
+   * And not only a withdrawn leaf. A row is the planner's acceptance of
+   * one branch, so it stands only while that acceptance does: a leaf a
+   * person retried (back to assigned, a new attempt coming), marked
+   * done, or that lost its acceptance some other way would otherwise
+   * land a branch nobody accepted, or overwrite a person's decision
+   * with the landing's. See landingStillWanted.
    */
   for (const landing of queue) {
     if (landing.status !== "queued" && landing.status !== "conflicted") continue;
     const task = byId.get(landing.taskId);
-    if (task && task.status !== "cancelled") continue;
+    if (task && landingStillWanted(task)) continue;
     await tx
       .update(swarmLandings)
       .set({ status: "cancelled", endedAt: now, updatedAt: now })
@@ -2055,10 +2440,80 @@ async function advanceLandingQueue(
   }
 
   const inFlight = queue.find((landing) => landing.status === "landing");
-  if (inFlight) return { landing: { id: inFlight.id, promoted: false }, resolverRunIds };
+  if (inFlight) {
+    /*
+     * A landing whose job is gone. The row says "landing" for as long
+     * as nothing finishes it, and the partial unique index refuses
+     * every other landing in this swarm meanwhile; a job that pg-boss
+     * gave up on (it threw past its retries, or expired with a process
+     * that died) left exactly that, until a reboot's
+     * resumeClaimedLandings. Past the job's own expiry the claim is
+     * taken again and the job sent again. Running it twice is safe: the
+     * branch moves by compare and swap, and every outcome is written
+     * through claimOutcome, which a second writer loses.
+     *
+     * Counted as an attempt, so a landing whose job dies every time
+     * fails after the same five a moved branch gets, rather than being
+     * tried every few minutes forever.
+     */
+    const stale = inFlight.startedAt !== null && inFlight.startedAt.getTime() <= now.getTime() - LANDING_STALE_MS;
+    if (!stale || !deps.startLanding) return { landing: { id: inFlight.id, promoted: false }, resolverRunIds };
+    if (inFlight.attempt >= MAX_LANDING_ATTEMPTS) {
+      await failStaleLanding(tx, swarm, inFlight, byId.get(inFlight.taskId), events, now);
+      return { landing: null, resolverRunIds };
+    }
+    const [reclaimed] = await tx
+      .update(swarmLandings)
+      .set({ startedAt: now, attempt: inFlight.attempt + 1, updatedAt: now })
+      .where(
+        and(
+          eq(swarmLandings.id, inFlight.id),
+          eq(swarmLandings.status, "landing"),
+          eq(swarmLandings.attempt, inFlight.attempt),
+        ),
+      )
+      .returning({ id: swarmLandings.id });
+    if (!reclaimed) return { landing: { id: inFlight.id, promoted: false }, resolverRunIds };
+    await deps.startLanding(tx, inFlight.id);
+    return { landing: { id: inFlight.id, promoted: true }, resolverRunIds };
+  }
 
   const conflicts = queue.filter((landing) => landing.status === "conflicted");
   for (const landing of conflicts) {
+    /**
+     * A conflict whose resolver never started its agent. The machine it
+     * was given could not be made, or went away before the agent ran,
+     * which is the sandbox's failure and not the resolver's: it did not
+     * try the conflict, so it is not the conflict's one try. The row
+     * stays conflicted with nobody on it, and the step below puts
+     * another resolver on it, as many times as a worker whose machine
+     * failed is started again.
+     */
+    if (landing.resolverRunId) {
+      const [resolver] = await tx
+        .select({ status: agentRuns.status, error: agentRuns.error })
+        .from(agentRuns)
+        .where(eq(agentRuns.id, landing.resolverRunId))
+        .limit(1);
+      const task = byId.get(landing.taskId);
+      const restarts = resolverRestarts(task?.flags);
+      if (resolver && failedBeforeAgentStarted(resolver) && task && restarts < MAX_SANDBOX_RESTARTS) {
+        const flags = { ...task.flags, [RESOLVER_RESTARTS_FLAG]: restarts + 1 };
+        await tx
+          .update(swarmLandings)
+          .set({ resolverRunId: null, updatedAt: now })
+          .where(and(eq(swarmLandings.id, landing.id), eq(swarmLandings.status, "conflicted")));
+        await tx.update(swarmTasks).set({ flags, updatedAt: now }).where(eq(swarmTasks.id, task.id));
+        await tx.insert(swarmTaskEvents).values({
+          taskId: task.id,
+          kind: "note",
+          runId: landing.resolverRunId,
+          detail: { reason: "sandbox", resolver: "restarting", restart: restarts + 1, of: MAX_SANDBOX_RESTARTS, error: resolver.error },
+        });
+        task.flags = flags;
+        landing.resolverRunId = null;
+      }
+    }
     /**
      * A conflict with nobody on it. Either an agent can be started on
      * it now, or this is a conflict nothing will ever resolve and the
@@ -2070,7 +2525,7 @@ async function advanceLandingQueue(
       // The queue still moves. Only the agent that would reconcile a
       // conflict waits, for the same reason a worker is not spawned.
       if (!canStartAgents) continue;
-      const runId = await startResolver(tx, swarm, landing, byId.get(landing.taskId), deps, events, now);
+      const runId = await startResolver(tx, swarm, landing, byId.get(landing.taskId), deps, events, now, refusals);
       if (runId) resolverRunIds.push(runId);
       continue;
     }
@@ -2117,12 +2572,16 @@ async function advanceLandingQueue(
    * cannot reach is no reason to stop the whole queue. A dependent
    * leaf cannot be queued behind its dependency, because it only
    * starts once that one has landed.
+   *
+   * With a little grace: the backoff was written by one host's clock
+   * and the tick that ends it is fired by the database's, so a tick a
+   * second early would otherwise find the row not yet due and leave it
+   * for whatever ticks next.
    */
   const next = queue.find(
     (landing) =>
       landing.status === "queued" &&
-      byId.get(landing.taskId)?.status !== "cancelled" &&
-      (!landing.notBefore || landing.notBefore <= now),
+      (!landing.notBefore || landing.notBefore.getTime() <= now.getTime() + LANDING_BACKOFF_GRACE_MS),
   );
   // Nothing performs landings in this deployment yet. Promoting the row
   // would move it into a state nothing takes it out of, so the queue is
@@ -2135,6 +2594,77 @@ async function advanceLandingQueue(
     .where(eq(swarmLandings.id, next.id));
   await deps.startLanding(tx, next.id);
   return { landing: { id: next.id, promoted: true }, resolverRunIds };
+}
+
+/**
+ * How long a landing may say "landing" before its job is presumed
+ * gone: the land job's expiry (pg-boss's fifteen minute default, which
+ * the queue does not change) and five minutes on top.
+ */
+const LANDING_STALE_MS = 20 * 60_000;
+
+/** How early a tick may arrive for a landing's backoff and still promote it. */
+const LANDING_BACKOFF_GRACE_MS = 5_000;
+
+/** Where a leaf counts resolvers whose machine could not be made. */
+const RESOLVER_RESTARTS_FLAG = "resolverRestarts";
+
+function resolverRestarts(flags: unknown): number {
+  const value = typeof flags === "object" && flags !== null ? (flags as Record<string, unknown>)[RESOLVER_RESTARTS_FLAG] : 0;
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
+
+/**
+ * Whether a merge queue row is still wanted by its leaf.
+ *
+ * The row is the planner's acceptance of a branch, so it stands while
+ * the leaf is accepted and still in flight ("working" until it lands),
+ * or "landed", which is where a person's merge queue retry puts it.
+ * A leaf that went back to assigned (retried or started over), was
+ * marked done or cancelled by a person, or failed has moved on, and a
+ * landing for it would land a branch nobody accepted.
+ */
+function landingStillWanted(task: Task): boolean {
+  if (task.status === "landed") return true;
+  return task.status === "working" && task.flags.accepted === true;
+}
+
+/**
+ * Fails a landing whose job kept dying, from the tick, the way the
+ * landing would fail itself once its attempts are spent.
+ */
+async function failStaleLanding(
+  tx: Tx,
+  swarm: typeof swarms.$inferSelect,
+  landing: typeof swarmLandings.$inferSelect,
+  task: Task | undefined,
+  events: BoardEvent[],
+  now: Date,
+): Promise<void> {
+  const reason = `the merge queue started this landing ${landing.attempt} times and it never finished.`;
+  const [failed] = await tx
+    .update(swarmLandings)
+    .set({ status: "failed", error: reason, errorCode: "attempts_exhausted", endedAt: now, updatedAt: now })
+    .where(and(eq(swarmLandings.id, landing.id), eq(swarmLandings.status, "landing")))
+    .returning({ id: swarmLandings.id });
+  if (!failed || !task || task.status === "done" || task.status === "cancelled") return;
+  await handLeafToPlanner(tx, {
+    task,
+    status: "failed",
+    attention: "failed",
+    flags: { landingError: reason, landingErrorCode: "attempts_exhausted" },
+    detail: { landingError: reason, landingErrorCode: "attempts_exhausted" },
+    now,
+  });
+  task.status = "failed";
+  task.attention = "failed";
+  events.push({
+    type: "swarm_task_updated",
+    projectId: swarm.projectId,
+    swarmId: swarm.id,
+    taskId: task.id,
+    status: "failed",
+  });
 }
 
 /**
@@ -2159,6 +2689,7 @@ async function startResolver(
   deps: SwarmTickDeps,
   events: BoardEvent[],
   now: Date,
+  refusals: ComputeRefusal[],
 ): Promise<string | null> {
   // A row whose leaf is gone is the cancel sweep's, not this one's.
   if (!task || task.status === "cancelled") return null;
@@ -2172,6 +2703,7 @@ async function startResolver(
       .set({
         status: "failed",
         error: [landing.error, "", reason].filter((line) => line !== null).join("\n"),
+        errorCode: "conflict_unresolved",
         endedAt: now,
         updatedAt: now,
       })
@@ -2180,8 +2712,8 @@ async function startResolver(
       task,
       status: "failed",
       attention: "conflict",
-      flags: { landingError: reason },
-      detail: { landingError: reason },
+      flags: { landingError: reason, landingErrorCode: "conflict_unresolved" },
+      detail: { landingError: reason, landingErrorCode: "conflict_unresolved" },
       now,
     });
     // The rows this tick's later steps read, and the row the queue
@@ -2214,9 +2746,14 @@ async function startResolver(
   // a resolver asked for while every slot is taken is asked for again
   // on the next tick, which is the whole point of starting it from the
   // reconciler rather than from the landing that conflicted.
-  if (started === "busy" || started === "gone" || started === SWARM_FULL || "outOfCompute" in started) {
+  if (started !== "busy" && started !== "gone" && started !== SWARM_FULL && "outOfCompute" in started) {
+    // Asked for again next pass, and said on the swarm meanwhile: a
+    // conflict waiting on the plan's hours holds the whole queue.
+    refusals.push({ refusal: started.outOfCompute, cap: started.cap ?? "plan" });
     return null;
   }
+  if (started === "busy" || started === "gone" || started === SWARM_FULL) return null;
+  await resumeFromPlanLimit(tx, swarm, events, now);
 
   await tx
     .update(swarmLandings)
@@ -2516,15 +3053,7 @@ export async function tickAllLiveSwarms(ctx: AppContext): Promise<number> {
    * active statuses registered nothing, so a deploy in the half hour
    * after a team ran out of hours stranded the swarm for good.
    */
-  const live = await ctx.db
-    .select({ id: swarms.id })
-    .from(swarms)
-    .where(
-      or(
-        inArray(swarms.status, [...ACTIVE_SWARM_STATUSES]),
-        and(eq(swarms.status, "paused"), eq(swarms.pausedReason, "plan_limit")),
-      ),
-    );
+  const live = await ctx.db.select({ id: swarms.id }).from(swarms).where(WATCHED_SWARMS);
   for (const row of live) await enqueueSwarmTick(ctx, row.id);
   return live.length;
 }

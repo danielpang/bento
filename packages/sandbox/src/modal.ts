@@ -3,6 +3,7 @@ import { WORKSPACE_ARTIFACT_DIR } from "@bento/core";
 import { AGENT_BINARIES, TOOLCHAIN_VERSION, agentToolchainScript } from "./agent-toolchain.js";
 import {
   execTimeoutMessage,
+  SandboxImageLost,
   type ExecChunk,
   type ExecOptions,
   type ProvisionSpec,
@@ -451,9 +452,7 @@ export class ModalDriver implements SandboxDriver {
     const dead = await this.deadBox(api, handle.externalId);
     if (dead) image = await dead.experimentalGetExitSnapshot().catch(() => null);
     if (!image && handle.imageRef) image = await api.imageFromId(handle.imageRef);
-    if (!image) {
-      throw new Error(`sandbox ${handle.externalId} is hibernated and no snapshot of its workspace survives`);
-    }
+    if (!image) throw new SandboxImageLost(handle.externalId);
     const workspaceKey = handle.externalId.startsWith("bento-")
       ? handle.externalId.slice("bento-".length)
       : handle.externalId;

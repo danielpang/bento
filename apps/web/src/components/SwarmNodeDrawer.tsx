@@ -3,12 +3,21 @@ import * as Tabs from "@radix-ui/react-tabs";
 import { Markdown } from "./Markdown.js";
 import { CompletionRing } from "./CompletionRing.js";
 import { useDismissable } from "./ui.js";
-import { attentionNote, diagramAttentionWords, diagramTaskTone, diagramTaskWords, isAttention } from "../swarm/status.js";
+import {
+  attentionNote,
+  diagramAttentionWords,
+  diagramTaskTone,
+  diagramTaskWords,
+  isAttention,
+  taskActionRefusal,
+  type TaskAction,
+} from "../swarm/status.js";
 import { formatCompletion, type SwarmNode } from "../swarm/layout.js";
 import { cappedUsd, formatUsd } from "../swarm/money.js";
 import { formatElapsed } from "../swarm/time.js";
 import { MERGE_QUEUE_FAILURE, landingFailureWords } from "../swarm/failures.js";
-import type { SwarmNodeDetail, SwarmTask, SwarmTaskEvent } from "../swarm/types.js";
+import { checksFailedAfterLanding } from "../swarm/waiting.js";
+import type { SwarmNodeDetail, SwarmStatus, SwarmTask, SwarmTaskEvent } from "../swarm/types.js";
 
 /**
  * One node, opened.
@@ -45,6 +54,8 @@ export function SwarmNodeDrawer({
   transcript,
   busy,
   actionError,
+  swarmStatus,
+  startBlocker = null,
 }: {
   task: SwarmTask;
   /** The rolled up figures for this node, from the shared model. */
@@ -100,18 +111,52 @@ export function SwarmNodeDrawer({
   transcript?: ReactNode;
   busy?: boolean;
   actionError?: string;
+  /**
+   * The swarm's own status, which decides some of what the routes
+   * accept: a done or stopped swarm's tasks change only through a
+   * reopen. Absent reads as a swarm at work, which is what a fixture
+   * that builds a node by hand means.
+   */
+  swarmStatus?: SwarmStatus;
+  /**
+   * Why an assigned leaf has not started, when the board can tell (a
+   * prerequisite, a paused swarm, no worker agent). See `leafStartBlocker`.
+   */
+  startBlocker?: string | null;
 }) {
   const panel = useDismissable<HTMLElement>(onClose);
   const [confirming, setConfirming] = useState(false);
   const [confirmingStartOver, setConfirmingStartOver] = useState(false);
   const [tab, setTab] = useState("overview");
   const mergeQueueFailure = task.nodeType === "leaf" && typeof task.flags.landingError === "string";
+  // A conflict the resolver could not settle fails the leaf with the
+  // conflict on it and no landing error: the resolver already had its
+  // turn, so "an agent will try to resolve it" is no longer true.
+  const conflictFailed = task.nodeType === "leaf" && task.status === "failed" && !mergeQueueFailure &&
+    typeof (task.flags as { conflict?: unknown }).conflict === "string";
+  // Sent back because the swarm's branch failed its checks after this
+  // branch landed: the worker did not fail, and nobody has to retry it.
+  const checksFailed = checksFailedAfterLanding(task);
+  const failedPlan = task.nodeType === "plan" && task.status === "failed" && !node.agentActive;
   const attention = isAttention(node.attention);
-  const note = task.nodeType === "plan" && task.status === "failed" && !node.agentActive ? null
+  const note = failedPlan ? null
     : diagramAttentionWords(task.status, task.nodeType, node.attention, node.agentActive);
-  const longNote = mergeQueueFailure ? null : task.nodeType === "plan" && task.status === "failed" && !node.agentActive
-    ? "A task below this plan failed. Open it to fix or retry it."
-    : attentionNote(node.attention);
+  /*
+   * The sentence under the header. The cases above are said whatever
+   * the attention flag holds, because each of them is the one thing a
+   * person opening this node needs to know and the flag's own sentence
+   * (a worker failed, a resolver will try) would be wrong about it.
+   */
+  const statusNote = failedPlan
+    ? node.childIds.length === 0
+      ? "The planner for this part stopped without writing any tasks. Add a task to it by hand, or cancel it."
+      : "A task below this plan failed. Open it to fix or retry it."
+    : checksFailed
+      ? "This task's branch landed, and the swarm's checks then failed. A new attempt starts automatically, with the failure as its instructions."
+      : conflictFailed
+        ? "This branch conflicts with the swarm's branch, and the agent put on the conflict could not resolve it. Retry the task to start it over from the swarm's branch."
+        : null;
+  const longNote = mergeQueueFailure ? null : statusNote ?? (attention ? attentionNote(node.attention) : null);
   const retries = Number((task.flags as { retries?: unknown }).retries ?? 0);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(task.description);
@@ -130,35 +175,67 @@ export function SwarmNodeDrawer({
   const commits = detail ? detail.commits : task.commits;
   const events = detail?.events ?? [];
   const runs = detail?.runs ?? [];
-  const canFixForward = !!onFixForward && task.nodeType === "leaf" && task.status === "failed" && !mergeQueueFailure;
-  const canMarkDone = !!onMarkDone && task.nodeType === "leaf" && task.status !== "done";
+  /*
+   * What the swarm's own state allows, as the routes decide it. Hidden
+   * rather than offered and refused, with the reason said once below.
+   */
+  const hiddenBySwarm: string[] = [];
+  const allowed = (action: TaskAction, offered: boolean): boolean => {
+    if (!offered) return false;
+    const refused = taskActionRefusal(swarmStatus, action);
+    if (refused && !hiddenBySwarm.includes(refused)) hiddenBySwarm.push(refused);
+    return refused === null;
+  };
+  const canFixForward = allowed("retry", !!onFixForward && task.nodeType === "leaf" && task.status === "failed" && !mergeQueueFailure);
+  const canMarkDone = allowed("markDone", !!onMarkDone && task.nodeType === "leaf" && task.status !== "done");
   // Starting over is already under way: nothing else is offered until it is done.
   const startingOver = (task.flags as { startingOver?: unknown }).startingOver === true;
-  const canRetry = !!onRetry && task.nodeType === "leaf" && !mergeQueueFailure && !startingOver &&
-    !["cancelled", "done", "landed"].includes(task.status);
-  const canRetryLanding = !!onRetryLanding && mergeQueueFailure;
+  const canRetry = allowed("retry", !!onRetry && task.nodeType === "leaf" && !mergeQueueFailure && !startingOver &&
+    !["cancelled", "done", "landed"].includes(task.status));
+  // Only what the landing retry route would take, by its own predicate,
+  // which the server answers per task. A drawer rule of its own offered
+  // the button on leaves the route then refused.
+  const canRetryLanding = allowed("retryLanding", !!onRetryLanding && task.canRetryLanding === true);
   const onGitHub = Object.keys((task.flags as { pushedHeads?: Record<string, string> }).pushedHeads ?? {}).length > 0;
   const landingFailure = landingFailureWords(task.flags.landingErrorCode) ?? MERGE_QUEUE_FAILURE;
-  const canStartOver = !!onStartOver && task.nodeType === "leaf" && task.status === "failed" && !startingOver;
+  // Starting over is the way out of anything that went wrong with a
+  // leaf, so it is offered whatever state the leaf is stuck in. Only a
+  // finished or withdrawn leaf has nothing to start over.
+  const canStartOver = allowed("retry", !!onStartOver && task.nodeType === "leaf" && !startingOver &&
+    !["cancelled", "done"].includes(task.status));
   const canEdit = !!onEdit;
-  const canSplit = !!onSplit && task.nodeType === "leaf" && task.status !== "done";
-  const canAdd = !!onAddTask && task.status !== "done" && task.status !== "cancelled";
-  const canCancel = !!onCancel && task.status !== "cancelled";
-  const workerActive = task.nodeType === "leaf" && task.status === "working";
-  const primaryAction = canStartOver ? "startOver"
+  // The route's own refusals (splitLeaf): a plan node, a leaf an agent
+  // is on or whose branch is in the queue, a finished one, and one that
+  // already has dependent work under it.
+  const canSplit = allowed("split", !!onSplit && task.nodeType === "leaf" && node.childIds.length === 0 &&
+    !["done", "working", "landed"].includes(task.status));
+  const canAdd = allowed("add", !!onAddTask && task.status !== "done" && task.status !== "cancelled");
+  const canCancel = allowed("cancel", !!onCancel && task.status !== "cancelled");
+  // A leaf that reported, or whose branch was accepted, is "working" on
+  // the row while no worker is: its agent finished. One whose agent is
+  // still in the sandbox is working whatever else is on it.
+  const workerActive = task.nodeType === "leaf" && task.status === "working" && (node.agentActive || node.landing === null);
+  // A branch that has not landed, which marking the task done gives up.
+  const unlandedBranch = task.nodeType === "leaf" && (node.landing !== null || task.status === "landed");
+  const assignedWaiting = task.nodeType === "leaf" && task.status === "assigned" && !task.assignedRunId && !startingOver;
+  const primaryAction = canStartOver && task.status === "failed" ? "startOver"
     : canRetryLanding ? "landing"
     : canFixForward ? "fix"
     : (task.status === "failed" || (task.status === "assigned" && task.assignedRunId)) && canRetry ? "retry"
     : workerActive ? null : canAdd && task.nodeType === "plan" ? "add" : canEdit ? "edit" : canRetry ? "retry" : null;
-  const hasMoreActions = canMarkDone || (canRetry && primaryAction !== "retry") ||
+  const hasMoreActions = canMarkDone || (canStartOver && primaryAction !== "startOver") || (canRetry && primaryAction !== "retry") ||
     (canRetryLanding && primaryAction !== "landing") || (canFixForward && primaryAction !== "fix") ||
     (canEdit && primaryAction !== "edit") || canSplit || (canAdd && primaryAction !== "add") ||
     canCancel || (!!onReassign && task.nodeType === "leaf" && agents.length > 0);
   const nextStep = startingOver
     ? "Restarting. The old sandbox is being removed, then a new agent starts on a fresh branch from the swarm's."
     : mergeQueueFailure ? landingFailure
-    : task.nodeType === "leaf" && task.status === "landed"
+    : task.nodeType === "leaf" && node.landing === "waiting"
       ? "Waiting to land. If the sandbox holding this branch is asleep, Bento starts it first, which can take a minute."
+    : task.nodeType === "leaf" && node.landing === "review" && !node.agentActive
+      ? "Waiting for the planner to review the report."
+    : checksFailed ? "A new attempt starts when a worker is free."
+    : assignedWaiting && startBlocker ? startBlocker
     : primaryAction === "startOver" ? "Start this task over in a new sandbox, or open More actions for other options."
     : primaryAction === "fix" ? "Tell the worker what to change."
     : primaryAction === "retry" ? (task.status === "assigned" ? "Start a new worker attempt." : null)
@@ -188,8 +265,8 @@ export function SwarmNodeDrawer({
         <div className="feature-topline">
           <span className="feature-kicker">{task.nodeType === "leaf" ? "Swarm task" : "Plan node"}</span>
           <span className="status swarm-node-header-status">
-            <span className="dot" data-state={diagramTaskTone(task.status, task.nodeType, node.agentActive)} />
-            {diagramTaskWords(task.status, task.nodeType, node.agentActive)}
+            <span className="dot" data-state={diagramTaskTone(task.status, task.nodeType, node.agentActive, node.landing)} />
+            {diagramTaskWords(task.status, task.nodeType, node.agentActive, node.landing)}
           </span>
           <button className="btn btn-ghost feature-close" onClick={onClose} aria-label="Close" title="Close (Esc)">
             <span aria-hidden="true">×</span>
@@ -228,7 +305,7 @@ export function SwarmNodeDrawer({
          * somebody who clicked a yellow node actually came for, and
          * without it every reason reads the same.
          */}
-        {attention && longNote && (
+        {longNote && (
           <p className="swarm-attention-note" role="status">
             {longNote}
           </p>
@@ -240,6 +317,8 @@ export function SwarmNodeDrawer({
             {nextStep && <span>{nextStep}</span>}
           </div>
           {actionError && <p className="error-box" role="alert">{actionError}</p>}
+          {/* What the swarm's state takes off this list, said once. */}
+          {hiddenBySwarm.length > 0 && <p className="muted swarm-node-swarm-note">{hiddenBySwarm[0]}</p>}
           {primaryAction && (
             <div className="action-grid">
               <button className="btn btn-primary" type="button" disabled={busy} onClick={runPrimaryAction}>
@@ -277,6 +356,11 @@ export function SwarmNodeDrawer({
             <details className="feature-more-actions">
               <summary>More actions</summary>
               <div className="action-grid">
+                {canStartOver && primaryAction !== "startOver" && (
+                  <button className="btn" type="button" disabled={busy} title="Stop the agent, discard this task's sandbox and branch, and start a new agent on it in a new sandbox." onClick={() => setConfirmingStartOver(true)}>
+                    {retries > 0 ? `Retry task (${retries} so far)` : "Retry task"}
+                  </button>
+                )}
                 {canMarkDone && (
                   <button className="btn" type="button" disabled={busy} onClick={() => setConfirming(true)}>Mark done</button>
                 )}
@@ -292,8 +376,8 @@ export function SwarmNodeDrawer({
                 )}
                 {canRetry && primaryAction !== "retry" && (
                   <button className="btn" type="button" disabled={busy} title={canStartOver
-                    ? "Put this task back in the queue in the same sandbox, keeping the work on its branch. The agent on it stops, and its report is cleared."
-                    : "Put this task back in the queue. The agent on it stops, and its report is cleared."} onClick={() => onRetry?.(task.id)}>
+                    ? "Put this task back in the queue in the same sandbox, keeping the work on its branch. The agent on it stops, its report is cleared, and its branch leaves the merge queue."
+                    : "Put this task back in the queue. The agent on it stops, its report is cleared, and its branch leaves the merge queue."} onClick={() => onRetry?.(task.id)}>
                     {canStartOver ? "Retry in the same sandbox" : retries > 0 ? `Retry (${retries} so far)` : "Retry"}
                   </button>
                 )}
@@ -327,7 +411,11 @@ export function SwarmNodeDrawer({
                 </div>
               )}
               {task.nodeType !== "leaf" && <p className="muted">A plan node is finished by its own tasks finishing.</p>}
-              {canMarkDone && <p className="muted">Marking this done stops its worker and counts it as finished.</p>}
+              {canMarkDone && (
+                <p className="muted">
+                  Marking this done stops its worker and counts it as finished.{unlandedBranch ? " Its branch is not landed." : ""}
+                </p>
+              )}
             </details>
           )}
 
@@ -598,8 +686,9 @@ export function SwarmNodeDrawer({
       {confirmingStartOver && (
         <div className="swarm-confirm" role="alertdialog" aria-label="Retry this task">
           <p>
-            Retrying starts this task over. Its sandbox is removed, and a new agent in a new sandbox does
-            the work again on a fresh branch from the swarm&apos;s.
+            Retrying starts this task over. Any agent on it is stopped, its branch leaves the merge queue,
+            its sandbox is removed, and a new agent in a new sandbox does the work again on a fresh branch
+            from the swarm&apos;s.
             {onGitHub ? " The previous attempt's branch on GitHub is replaced by the new one." : ""}
           </p>
           <div className="actions">
@@ -622,8 +711,7 @@ export function SwarmNodeDrawer({
       {confirming && (
         <div className="swarm-confirm" role="alertdialog" aria-label="Mark this task done">
           <p>
-            Marking this done counts its weight towards every plan above it, and towards the
-            swarm&apos;s own ring.
+            {markDoneConfirmText(unlandedBranch)}
           </p>
           <div className="actions">
             <button className="btn btn-ghost" onClick={() => setConfirming(false)}>
@@ -644,6 +732,19 @@ export function SwarmNodeDrawer({
     </aside>
     </Tabs.Root>
   );
+}
+
+/**
+ * What confirming Mark done says. A leaf whose branch has not landed
+ * (reported, accepted and queued, or failed to land) is told so: the
+ * route takes the branch out of the merge queue, and a person who read
+ * "counts it as finished" could fairly expect the work to arrive.
+ */
+export function markDoneConfirmText(unlandedBranch: boolean): string {
+  const counts = "Marking this done counts its weight towards every plan above it, and towards the swarm's own ring.";
+  return unlandedBranch
+    ? `${counts} This task's branch has not landed on the swarm's branch, and it will not be: marking it done takes it out of the merge queue.`
+    : counts;
 }
 
 /** The heading for one node event, in words rather than in its enum. */

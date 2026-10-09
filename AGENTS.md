@@ -366,6 +366,87 @@ task over by itself once (`autoStartedOver`) when its sandbox failed past
 or could not be started, before the planner is told. The plain retry
 continues in the same machine on the same branch.
 
+"Retry task" is the way out of anything, so the console offers it on
+every leaf that is not done or cancelled, whatever it is stuck in. It
+takes the task's branch out of the merge queue (`withdrawTaskLandings`),
+and waits only for a landing moving that branch this moment. Every
+retry clears what was said about the last attempt (`accepted`, the
+landing failure), because the next one is judged on its own report.
+And an accept puts a task's failed or withdrawn landing row back at the
+end of the queue (`requeuedLanding`): accept once looked only for a
+row, found the failed one, and queued nothing, so a leaf whose landing
+failed and whose retry the planner then accepted sat "working" with
+nothing to land it and a merge queue retry that refused it.
+
+## A swarm's machine is reaped only once the swarm is over, and never rebuilt without its work
+
+Swarm 7a33f51d lost three landed tasks this way: a worker failure
+briefly made the swarm "failed", a reap of its machine was queued, the
+swarm was retried, and the reap ran a second after the planner's turn
+ended and destroyed the live sprite. The next planner run found the row
+destroyed, Fly refused the new sprite, `auto` fell back to Modal, and the
+swarm went on from a fresh clone without saying so.
+
+So `reapSwarmSandbox` locks the swarm row and destroys only when the
+swarm is gone, done or cancelled (`swarmReleasesMachine`), archived, or
+past `FAILED_SWARM_MACHINE_GRACE_MS` in an ending a person can still
+resume (failed, budget_exhausted, timed_out). A swarm live again keeps
+its machine, quietly. It also waits for a landing in flight. And a
+swarm machine that is gone is never made again as a fresh clone once
+the swarm has landed work: it is restored from GitHub
+(`swarmRestoreBundles`), or the run fails as `SWARM_BRANCH_LOST_MESSAGE`,
+unbilled, captured as `swarm_branch_lost`, and not restarted by the
+coordinator, because another start would find the same nothing. A
+worker is refused the same way rather than cut from the base branch.
+
+A row that says live is not proof. Before a planner trusts it (once
+there is landed work), before a landing exports from it, and before a
+worker reads the swarm's branch, `wakeSwarmSandbox` asks the provider:
+a Modal box that stopped is booted from its exit snapshot or image, and
+one with no snapshot left (`SandboxImageLost`) has its row marked
+destroyed and throws `SandboxGone`; a sprite whose `exists` says no is
+treated the same, while a lookup that errors is not. Every reader that
+uses a ready machine stamps `lastUsedAt` as it reads, and hibernation's
+`finish` aborts inside the warm window, so a machine is never stopped
+under a reader. A Modal row "busy" with nothing active goes back to
+ready rather than re-arming forever. Every destroy passes the row's
+`imageRef`, or the hibernation image outlives the machine and bills.
+
+## Every live swarm is reconciled every minute, and nothing waits on an event that will not come
+
+Ticks used to come only from events (a run ending, a landing, a route)
+and boot, so any state with nothing in flight stayed frozen until a
+person acted. The watchdog now ticks every swarm in `WATCHED_SWARMS`
+once a minute under the swarm's singleton key. On top of that, each
+stall found in production or by audit has its own exit:
+
+- A planner whose turn succeeded without deciding a reported leaf is
+  told again (`PLANNER_NOT_TOLD`), up to `MAX_PLANNER_RETELLS`, then the
+  leaf is flagged for a person (`planner_undecided`).
+- Open leaves left when the swarm has nothing else to do are listed to
+  the planner once (`openNoticedAt`); open still means "not approved",
+  so they are not assigned for it.
+- A planner, sub planner or resolver refused for plan limits or budget
+  pauses or ends the swarm the way a worker refusal does.
+- A queued run whose job was lost is sent again after ten minutes
+  (`requeueStrandedRuns`, on runner.reap), and a landing stuck in
+  "landing" past the job's expiry is claimed again.
+- Swarm messages delivered to a planner run that failed or was
+  cancelled go back to queued.
+- A start over beside a failed sibling counts as in flight, and
+  reactivates a failed swarm.
+- A landing outcome never overrides a person who marked the leaf done or
+  cancelled it meanwhile, and the queue only promotes branches still
+  accepted. Every handover to failed or assigned clears `accepted`.
+- A resolver whose sandbox failed before its agent started does not use
+  up the conflict's one try.
+
+The console reads the same rules: `landingRetryRefusal` decides "Retry
+merge queue" on both sides (`canRetryLanding`), every retry, mark done
+and cancel withdraw the task's landings first, the drawer hides what the
+swarm's status refuses (`taskActionRefusal`), and an idle node or swarm
+says what it waits on.
+
 ## A swarm's branches are on GitHub as soon as there is anything on them
 
 The swarm's machine used to hold the only copy of every landed task until

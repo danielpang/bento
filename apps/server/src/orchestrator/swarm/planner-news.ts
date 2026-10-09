@@ -67,6 +67,15 @@ export const PLANNER_LATCH_CLEARED = {
  * At most MAX_PLANNER_RETELLS times per piece of news. A leaf whose news
  * was lost that often waits for a person, as every leaf did before this.
  *
+ * And told means decided. A planner that finished its turn but neither
+ * accepted nor rejected a leaf's report (nor asked a person about it)
+ * left the leaf "working" with its report, accepted by nobody, and every
+ * later tick read it as told: the swarm waited, again, on a decision
+ * nobody was ever going to make. Such a leaf is handed over again, said
+ * as undecided in the wake, under the same bound. Only a report: a
+ * failed leaf a planner chose to leave failed is a decision, and is how
+ * a plan gives work up.
+ *
  * A cancelled planner's news is found here too, but deliverPlannerWake
  * does not start a planner for it alone: a person who stopped the
  * planner chose to, and the news rides along with the next wake that
@@ -100,10 +109,58 @@ export const PLANNER_NOT_TOLD = sql`(
           when (${swarmTasks.flags} ->> 'plannerToldBy') ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
           then (${swarmTasks.flags} ->> 'plannerToldBy')::uuid
         end)
-        and ${agentRuns.status} in ('failed', 'cancelled')
+        and (
+          ${agentRuns.status} in ('failed', 'cancelled')
+          or (
+            ${agentRuns.status} = 'succeeded'
+            and ${swarmTasks.status} = 'working'
+            and ${swarmTasks.report} is not null
+            and ${swarmTasks.attention} is distinct from 'question'
+          )
+        )
     )
   )
 )`;
+
+/**
+ * A leaf whose news has been handed over MAX_PLANNER_RETELLS times and
+ * is still waiting on a decision: a report nobody accepted or rejected,
+ * from a planner run that is over. The filter above stops finding it,
+ * so this is the leaf a person has to decide about, and the tick raises
+ * its attention so the board says so rather than nothing.
+ */
+export const PLANNER_RETELLS_EXHAUSTED = sql`(
+  ${swarmTasks.nodeType} = 'leaf'
+  and ${swarmTasks.status} = 'working'
+  and ${swarmTasks.report} is not null
+  and ${swarmTasks.attention} is null
+  and coalesce((${swarmTasks.flags} ->> 'accepted'), '') <> 'true'
+  and coalesce((${swarmTasks.flags} ->> 'plannerToldAt'), '') <> ''
+  and (case when jsonb_typeof(${swarmTasks.flags} -> 'plannerRetells') = 'number'
+    then (${swarmTasks.flags} ->> 'plannerRetells')::numeric else 0 end) >= ${MAX_PLANNER_RETELLS}
+  and exists (
+    select 1 from ${agentRuns}
+    where ${agentRuns.id} = (case
+        when (${swarmTasks.flags} ->> 'plannerToldBy') ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        then (${swarmTasks.flags} ->> 'plannerToldBy')::uuid
+      end)
+      and ${agentRuns.status} in ('succeeded', 'failed', 'cancelled')
+  )
+)`;
+
+/**
+ * The planner's verdict, which goes whenever a leaf is moved back to
+ * failed or assigned. An `accepted` left on a leaf that failed to land
+ * hid it from PLANNER_NOT_TOLD (an accepted leaf is the merge queue's),
+ * made the planner's reject refuse it as "already accepted", and read
+ * on the board as a branch waiting to land.
+ */
+export const ACCEPTANCE_CLEARED = { accepted: undefined, acceptNote: undefined } as const;
+
+/** The leaf as read, minus the verdict, for a caller that rewrites its flags from it. */
+export function withoutAcceptance<T extends { flags: Record<string, unknown> }>(task: T): T {
+  return { ...task, flags: { ...task.flags, ...ACCEPTANCE_CLEARED } };
+}
 
 export interface LeafHandover {
   /** The leaf as it was read: its current status, and its flags. */
@@ -144,7 +201,13 @@ export async function handLeafToPlanner(tx: TaskWriter, hand: LeafHandover): Pro
        * The leaf's news is new, so whatever the planner was told before
        * is not this.
        */
-      flags: { ...hand.task.flags, ...hand.flags, ...PLANNER_LATCH_CLEARED },
+      flags: {
+        ...hand.task.flags,
+        ...hand.flags,
+        // Back to failed or assigned is the verdict undone as well.
+        ...(hand.status === "failed" || hand.status === "assigned" ? ACCEPTANCE_CLEARED : {}),
+        ...PLANNER_LATCH_CLEARED,
+      },
       updatedAt: hand.now,
     })
     .where(eq(swarmTasks.id, hand.task.id));
