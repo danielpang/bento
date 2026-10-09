@@ -37,7 +37,7 @@ import { queueSwarmTaskSandboxReap } from "../reap-sandbox.js";
 import { queueSwarmSlackNotify } from "../slack-notify.js";
 import { swarmBranchName, swarmWorkspaceKey } from "./sandbox.js";
 import { driverForSandbox } from "../sandbox-driver.js";
-import { wakeSwarmSandbox } from "../hibernate-sandbox.js";
+import { SandboxGone, wakeSwarmSandbox } from "../hibernate-sandbox.js";
 import { enqueueSwarmPush, remoteBranchBundles } from "./remote-branches.js";
 import { enqueueTaskStartOver } from "./start-over.js";
 import { retryLeaf } from "./task-actions.js";
@@ -488,6 +488,29 @@ async function landingSandboxHandles(
   swarm: typeof swarms.$inferSelect,
   task: typeof swarmTasks.$inferSelect,
 ): Promise<RemoteHandles | { missing: "swarm" | "worker" }> {
+  /*
+   * A row can say a machine is there when it is not: a sprite deleted
+   * outside Bento, a Modal box stopped with no snapshot left. Waking it
+   * finds that out and marks the row destroyed, and reading the rows
+   * once more takes the paths a machine that is gone already has: a
+   * worker's branch from GitHub, or the swarm's machine missing. Once,
+   * because a second pass can only find rows the first one marked.
+   */
+  try {
+    return await landingSandboxHandlesFromRows(ctx, swarm, task);
+  } catch (err) {
+    if (!(err instanceof LandingWakeFailed) || !(err.cause instanceof SandboxGone)) throw err;
+    console.warn(`landing for task ${task.id} found a machine gone; reading its sandboxes again`);
+    return landingSandboxHandlesFromRows(ctx, swarm, task);
+  }
+}
+
+/** One reading of the rows for landingSandboxHandles. */
+async function landingSandboxHandlesFromRows(
+  ctx: AppContext,
+  swarm: typeof swarms.$inferSelect,
+  task: typeof swarmTasks.$inferSelect,
+): Promise<RemoteHandles | { missing: "swarm" | "worker" }> {
   if (!swarm.sandboxId) return { missing: "swarm" };
   const [swarmSandbox] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, swarm.sandboxId)).limit(1);
   const workerRows = await ctx.db.select().from(sandboxes).where(eq(sandboxes.swarmTaskId, task.id));
@@ -530,13 +553,15 @@ async function landingSandboxHandles(
    * landing retried by hand an hour later finds both machines that
    * way. So each is woken here, before either is exec'd into.
    */
-  try {
-    await Promise.all([
-      wakeSwarmSandbox(ctx, swarmSandbox, swarm, swarm.plannerProfileId),
-      wakeSwarmSandbox(ctx, workerSandbox, swarm, task.agentProfileId ?? swarm.workerProfileId),
-    ]);
-  } catch (err) {
-    throw new LandingWakeFailed(err);
+  // Both settle before either failure is read, so a second reading of
+  // the rows never races a wake still in flight from the first.
+  const woken = await Promise.allSettled([
+    wakeSwarmSandbox(ctx, swarmSandbox, swarm, swarm.plannerProfileId),
+    wakeSwarmSandbox(ctx, workerSandbox, swarm, task.agentProfileId ?? swarm.workerProfileId),
+  ]);
+  const failures = woken.flatMap((result) => (result.status === "rejected" ? [result.reason as unknown] : []));
+  if (failures.length > 0) {
+    throw new LandingWakeFailed(failures.find((reason) => reason instanceof SandboxGone) ?? failures[0]);
   }
   const workerDriver = driverForSandbox(ctx.drivers, workerSandbox);
   const workerHandle: SandboxHandle = {

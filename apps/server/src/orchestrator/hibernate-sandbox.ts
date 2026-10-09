@@ -1,6 +1,13 @@
 import { and, eq, gt, inArray, isNull, ne, sql } from "drizzle-orm";
 import { agentProfiles, agentRuns, sandboxes, swarmLandings, swarms } from "@bento/db";
-import { ModalDriver, MODAL_REPO_PREPARE_TIMEOUT_MS, MODAL_WARM_WINDOW_MS, type SandboxHandle } from "@bento/sandbox";
+import {
+  ModalDriver,
+  MODAL_REPO_PREPARE_TIMEOUT_MS,
+  MODAL_WARM_WINDOW_MS,
+  SandboxImageLost,
+  type SandboxDriver,
+  type SandboxHandle,
+} from "@bento/sandbox";
 import type { AppContext } from "../context.js";
 import { driverForSandbox } from "./sandbox-driver.js";
 import { modalNetworkForProject, organizationRestrictsNetwork } from "./sandbox-network.js";
@@ -197,6 +204,30 @@ export async function hibernateSandbox(ctx: AppContext, sandboxId: string): Prom
   const [row] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, sandboxId)).limit(1);
   if (!row) return;
   const active = await workspaceHasActiveRun(ctx.db, row);
+  /*
+   * Busy with nothing running in it: the finish that would have moved
+   * the row to ready never did (a run closed by a path that skips it,
+   * a process that died between the two writes). Re-arming on "busy"
+   * alone did so every five minutes forever, and the machine ran to
+   * Modal's cap and started again. Nothing is using it, so it is
+   * ready from now and gets a whole warm window, as a finish gives.
+   */
+  if (row.provider === "modal" && row.status === "busy" && !active) {
+    const [released] = await ctx.db
+      .update(sandboxes)
+      .set({ status: "ready", lastUsedAt: new Date() })
+      .where(and(eq(sandboxes.id, row.id), eq(sandboxes.status, "busy")))
+      .returning({ id: sandboxes.id });
+    if (released) {
+      console.log(`sandbox ${row.externalId} was busy with no run in it; ready again`);
+      await armModalHibernation(ctx, row.id);
+      return;
+    }
+    // Something else moved the row first. Whatever it is now, the
+    // next job decides with fresh eyes.
+    await armModalHibernation(ctx, row.id);
+    return;
+  }
   if (hibernateShouldSkip(row, active) || shouldRearmHibernation(row, active)) {
     if (shouldRearmHibernation(row, active)) await armModalHibernation(ctx, row.id);
     return;
@@ -232,12 +263,16 @@ export async function hibernateSandbox(ctx: AppContext, sandboxId: string): Prom
           }
           await tx.execute(sql`select id from sandboxes where id = ${row.id} for update`);
           const [current] = await tx
-            .select({ status: sandboxes.status })
+            .select({ status: sandboxes.status, lastUsedAt: sandboxes.lastUsedAt })
             .from(sandboxes)
             .where(eq(sandboxes.id, row.id))
             .limit(1);
           const stillActive = await workspaceHasActiveRun(tx, row);
           if (!current || current.status !== "ready" || stillActive) return;
+          // Something read from the machine during the snapshot (a
+          // worker start, a landing, a push stamp the row as they
+          // begin), so its warm window starts again from there.
+          if (warmWindowLeftMs(current.lastUsedAt) > 0) return;
           const imageId = await apply();
           const [updated] = await tx
             .update(sandboxes)
@@ -256,13 +291,63 @@ export async function hibernateSandbox(ctx: AppContext, sandboxId: string): Prom
   );
   if (result.committed) return;
   const [after] = await ctx.db
-    .select({ status: sandboxes.status, provider: sandboxes.provider })
+    .select({ status: sandboxes.status, provider: sandboxes.provider, lastUsedAt: sandboxes.lastUsedAt })
     .from(sandboxes)
     .where(eq(sandboxes.id, row.id))
     .limit(1);
   if (after && after.provider === "modal" && after.status !== "hibernated" && after.status !== "destroyed") {
-    await armModalHibernation(ctx, row.id);
+    await armModalHibernation(ctx, row.id, warmWindowLeftMs(after.lastUsedAt) || MODAL_WARM_WINDOW_MS);
   }
+}
+
+/**
+ * The machine a row names is gone for good, and the row now says so.
+ *
+ * Thrown by the wake paths when the provider answered that the machine
+ * is not there (a sprite that no longer exists) or that nothing of it
+ * can be booted again (a Modal box that stopped with no snapshot left).
+ * A lookup that failed is never this: a machine marked destroyed while
+ * it still exists is a branch nobody can reach and a machine nobody is
+ * looking for. The caller reads its rows again and takes the path it
+ * already has for a machine that is gone: a worker's pushed branch, the
+ * swarm's branch from GitHub, or a refusal that says the work is lost.
+ */
+export class SandboxGone extends Error {
+  readonly sandboxId: string;
+  readonly externalId: string;
+
+  constructor(row: { id: string; externalId: string }, message?: string, cause?: unknown) {
+    super(message ?? `sandbox ${row.externalId} no longer exists`, cause === undefined ? undefined : { cause });
+    this.name = "SandboxGone";
+    this.sandboxId = row.id;
+    this.externalId = row.externalId;
+  }
+}
+
+/**
+ * Marks a row destroyed because its machine is gone, only if the row
+ * still names the machine that was found gone. The swarm's own row is
+ * reused by an upsert when its machine is made again, so a row that
+ * moved on meanwhile names a new machine and is left alone.
+ */
+async function markSandboxGone(
+  ctx: AppContext,
+  row: Pick<typeof sandboxes.$inferSelect, "id" | "status" | "externalId" | "provider">,
+): Promise<boolean> {
+  const [updated] = await ctx.db
+    .update(sandboxes)
+    .set({ status: "destroyed" })
+    .where(
+      and(
+        eq(sandboxes.id, row.id),
+        eq(sandboxes.status, row.status),
+        eq(sandboxes.externalId, row.externalId),
+        eq(sandboxes.provider, row.provider),
+      ),
+    )
+    .returning({ id: sandboxes.id });
+  if (updated) console.warn(`sandbox ${row.externalId} is gone; its row now says destroyed`);
+  return Boolean(updated);
 }
 
 /**
@@ -282,7 +367,8 @@ export async function hibernateSandbox(ctx: AppContext, sandboxId: string): Prom
  * through markSandboxAwake. `network` is what the machine's runs would
  * have been given, because a run in the warm window reuses it as it
  * is. A row reaped while the machine was booting has the new machine
- * destroyed again, because nothing else would ever find it.
+ * destroyed again, because nothing else would ever find it. A machine
+ * with no snapshot left to boot from is gone, and its row says so.
  */
 export async function wakeHibernatedSandbox(
   ctx: AppContext,
@@ -292,14 +378,7 @@ export async function wakeHibernatedSandbox(
   if (row.status !== "hibernated") return;
   const driver = driverForSandbox(ctx.drivers, row);
   if (!driver.wake) return;
-  const handle: SandboxHandle = {
-    externalId: row.externalId,
-    provider: driver.provider,
-    workdir: row.workdir,
-    ...(row.imageRef ? { imageRef: row.imageRef } : {}),
-    ...network,
-  };
-  const woke = await driver.wake(handle, { organizationId: row.organizationId });
+  const woke = await wakeOrMarkGone(ctx, driver, row, network);
   const awake = await markSandboxAwake(ctx.db, ctx, row.id, woke.imageRef);
   if (awake) return;
   const [current] = await ctx.db
@@ -312,7 +391,114 @@ export async function wakeHibernatedSandbox(
   if (woke.booted) {
     await driver.destroy({ externalId: row.externalId, provider: driver.provider, workdir: row.workdir });
   }
-  throw new Error(`sandbox ${row.externalId} was reaped while it was being started`);
+  throw new SandboxGone(row, `sandbox ${row.externalId} was reaped while it was being started`);
+}
+
+/**
+ * Asks a driver that boots machines to make sure this one is running.
+ * A machine with nothing left to boot from has its row marked
+ * destroyed, and SandboxGone says so; any other failure is thrown as
+ * it came, because a provider that blinked is not a machine that is
+ * gone.
+ */
+async function wakeOrMarkGone(
+  ctx: AppContext,
+  driver: SandboxDriver,
+  row: typeof sandboxes.$inferSelect,
+  network: Pick<SandboxHandle, "network" | "allowedHosts">,
+): Promise<{ booted: boolean; imageRef?: string }> {
+  const handle: SandboxHandle = {
+    externalId: row.externalId,
+    provider: driver.provider,
+    workdir: row.workdir,
+    ...(row.imageRef ? { imageRef: row.imageRef } : {}),
+    ...network,
+  };
+  try {
+    return await driver.wake!(handle, { organizationId: row.organizationId });
+  } catch (err) {
+    if (!(err instanceof SandboxImageLost)) throw err;
+    await markSandboxGone(ctx, row);
+    throw new SandboxGone(row, err.message, err);
+  }
+}
+
+/**
+ * A row that says ready or busy, on a driver that boots machines,
+ * whose machine may have stopped underneath it: Modal ends every
+ * sandbox at its 24 hour cap, and a box can be terminated outside
+ * Bento. The row would say live forever and every exec would fail.
+ *
+ * The driver answers cheaply when the box is running. When it had
+ * stopped, it is booted from its exit snapshot or its stored image,
+ * the row records the image and is ready again, and the hibernation
+ * schedule is armed so the booted machine is not left to the cap.
+ */
+async function wakeStoppedSandbox(
+  ctx: AppContext,
+  driver: SandboxDriver,
+  row: typeof sandboxes.$inferSelect,
+  network: Pick<SandboxHandle, "network" | "allowedHosts">,
+): Promise<void> {
+  const woke = await wakeOrMarkGone(ctx, driver, row, network);
+  if (!woke.booted) return;
+  const [updated] = await ctx.db
+    .update(sandboxes)
+    .set({ status: "ready", lastUsedAt: new Date(), ...(woke.imageRef ? { imageRef: woke.imageRef } : {}) })
+    .where(and(eq(sandboxes.id, row.id), inArray(sandboxes.status, ["ready", "busy"])))
+    .returning({ provider: sandboxes.provider });
+  if (updated) {
+    console.log(`sandbox ${row.externalId} had stopped; booted it again from its snapshot`);
+    if (updated.provider === "modal") await armModalHibernation(ctx, row.id);
+    return;
+  }
+  const [current] = await ctx.db
+    .select({ status: sandboxes.status })
+    .from(sandboxes)
+    .where(eq(sandboxes.id, row.id))
+    .limit(1);
+  if (current && current.status !== "destroyed") return;
+  await driver.destroy({ externalId: row.externalId, provider: driver.provider, workdir: row.workdir });
+  throw new SandboxGone(row, `sandbox ${row.externalId} was reaped while it was being started`);
+}
+
+/**
+ * On a driver whose machines wake on their own (a sprite), whether the
+ * machine is there at all. Only a definite "no" marks the row: a
+ * lookup that failed leaves it, and the exec that follows says what
+ * went wrong.
+ */
+async function confirmSandboxExists(
+  ctx: AppContext,
+  driver: SandboxDriver,
+  row: typeof sandboxes.$inferSelect,
+): Promise<void> {
+  if (!driver.exists || driver.workspace !== "clone") return;
+  let present: boolean;
+  try {
+    present = await driver.exists({ externalId: row.externalId, provider: driver.provider, workdir: row.workdir });
+  } catch (err) {
+    console.warn(`could not ask whether sandbox ${row.externalId} exists:`, err);
+    return;
+  }
+  if (present) return;
+  await markSandboxGone(ctx, row);
+  throw new SandboxGone(row);
+}
+
+/**
+ * A row that is about to be read from, stamped as used now, so the
+ * hibernation job does not stop the machine under the read: its
+ * finish, under the row's lock, leaves a machine whose warm window
+ * this restarted. False when the row was no longer ready.
+ */
+async function touchReadySandbox(ctx: AppContext, sandboxId: string): Promise<boolean> {
+  const [updated] = await ctx.db
+    .update(sandboxes)
+    .set({ lastUsedAt: new Date() })
+    .where(and(eq(sandboxes.id, sandboxId), eq(sandboxes.status, "ready")))
+    .returning({ id: sandboxes.id });
+  return Boolean(updated);
 }
 
 /**
@@ -341,14 +527,26 @@ export async function markSandboxAwake(
 }
 
 /**
- * Wakes a swarm's machine, or one of its workers', when it is
- * hibernated, with the network its own runs get.
+ * Makes sure a swarm's machine, or one of its workers', is there and
+ * running before something that is not a run reads from it, with the
+ * network its own runs get.
+ *
+ * On a driver that boots machines (Modal), a hibernated machine is
+ * woken, and so is a ready or busy one whose box stopped underneath
+ * its row. A ready row is stamped as used first, so the hibernation
+ * job does not stop it during the read; one that was hibernated just
+ * before the stamp is woken instead. On a driver whose machines wake
+ * on their own (a sprite), the machine is only asked to exist.
+ * Either way, a machine that is gone for good is marked destroyed and
+ * SandboxGone is thrown, so the caller can take its gone path rather
+ * than exec into nothing.
  *
  * `profileId` is the agent whose runs use the machine: the planner's
  * for the swarm's own, the leaf's for a worker's. An organization
  * that restricts the network has its allowlist built from that
- * agent's hosts, as provision would; with no such agent the machine
- * is not booted at all, rather than booted with the network open.
+ * agent's hosts, as provision would; with no such agent a hibernated
+ * machine is not booted at all, rather than booted with the network
+ * open, and a running one is used as it is.
  */
 export async function wakeSwarmSandbox(
   ctx: AppContext,
@@ -356,9 +554,48 @@ export async function wakeSwarmSandbox(
   swarm: Pick<typeof swarms.$inferSelect, "projectId" | "organizationId">,
   profileId: string | null,
 ): Promise<void> {
-  // A sprite wakes on its own when exec'd into; only a driver that
-  // has to boot the machine again is asked to.
-  if (row.status !== "hibernated" || !driverForSandbox(ctx.drivers, row).wake) return;
+  if (row.status === "destroyed") throw new SandboxGone(row);
+  // A run is making this machine; there is nothing to wake yet.
+  if (row.status === "provisioning") return;
+  const driver = driverForSandbox(ctx.drivers, row);
+  if (!driver.wake) {
+    await confirmSandboxExists(ctx, driver, row);
+    return;
+  }
+  let current = row;
+  if (current.status === "ready" && !(await touchReadySandbox(ctx, current.id))) {
+    const [reread] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, row.id)).limit(1);
+    if (!reread || reread.status === "destroyed") throw new SandboxGone(row);
+    current = reread;
+  }
+  const network = await swarmSandboxNetwork(ctx, swarm, profileId);
+  if (!network) {
+    if (current.status === "hibernated") {
+      throw new Error(
+        `sandbox ${current.externalId} is hibernated, and the agent it was made for is gone, so it cannot be started with this organization's network restriction.`,
+      );
+    }
+    return;
+  }
+  if (current.status === "hibernated") {
+    await wakeHibernatedSandbox(ctx, current, network);
+    return;
+  }
+  if (current.status === "ready" || current.status === "busy") {
+    await wakeStoppedSandbox(ctx, driver, current, network);
+  }
+}
+
+/**
+ * The network a swarm machine's own runs get, or null when it cannot
+ * be built: the organization restricts the network and the agent the
+ * machine was made for is gone.
+ */
+async function swarmSandboxNetwork(
+  ctx: AppContext,
+  swarm: Pick<typeof swarms.$inferSelect, "projectId" | "organizationId">,
+  profileId: string | null,
+): Promise<Pick<SandboxHandle, "network" | "allowedHosts"> | null> {
   const [profile] = profileId
     ? await ctx.db
         .select({ cli: agentProfiles.cli, model: agentProfiles.model })
@@ -366,16 +603,14 @@ export async function wakeSwarmSandbox(
         .where(eq(agentProfiles.id, profileId))
         .limit(1)
     : [];
-  let network: Pick<SandboxHandle, "network" | "allowedHosts"> = {};
   if (profile) {
-    network = await modalNetworkForProject(ctx, swarm.projectId, swarm.organizationId, profile.cli, profile.model);
-  } else if (await organizationRestrictsNetwork(ctx, swarm.organizationId)) {
-    throw new Error(
-      `sandbox ${row.externalId} is hibernated, and the agent it was made for is gone, so it cannot be started with this organization's network restriction.`,
-    );
+    return modalNetworkForProject(ctx, swarm.projectId, swarm.organizationId, profile.cli, profile.model);
   }
-  await wakeHibernatedSandbox(ctx, row, network);
+  return (await organizationRestrictsNetwork(ctx, swarm.organizationId)) ? null : {};
 }
+
+/** A tag that can be compared with a uuid column. A swarm's is its workspace key, which cannot. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * Running Modal sandboxes with no live row.
@@ -384,6 +619,12 @@ export async function wakeSwarmSandbox(
  * a machine still up under it is being billed with nobody looking.
  * The row is matched by the machine's name, so a swarm sandbox is
  * kept the same way a card's is.
+ *
+ * Each machine is its own attempt. A swarm's tag is `swarm-<id>`, and
+ * comparing that with the feature id column threw, which ended the
+ * sweep at the first swarm machine and the nightly job with it, before
+ * it reached the swarm reaper. One machine that cannot be judged is
+ * logged and the rest still are.
  */
 export async function sweepOrphanModalSandboxes(ctx: AppContext): Promise<void> {
   const driver = ctx.drivers.get("modal");
@@ -399,44 +640,56 @@ export async function sweepOrphanModalSandboxes(ctx: AppContext): Promise<void> 
   for (const item of running) {
     const featureId = item.tags.bento_feature;
     if (!featureId) continue;
+    try {
+      await sweepOrphanModalSandbox(ctx, driver, item, featureId);
+    } catch (err) {
+      console.warn(`could not sweep Modal sandbox ${item.externalId}:`, err);
+      ctx.analytics?.captureException(err, null, null, {
+        source: "modal_sweep",
+        sandbox: item.externalId,
+      });
+    }
+  }
+}
+
+/** One machine of the sweep: destroyed only when nothing live points at it. */
+async function sweepOrphanModalSandbox(
+  ctx: AppContext,
+  driver: ModalDriver,
+  item: { externalId: string; tags: Record<string, string> },
+  featureId: string,
+): Promise<void> {
+  if (UUID.test(featureId)) {
     const [activeRun] = await ctx.db
       .select({ id: agentRuns.id })
       .from(agentRuns)
       .where(and(eq(agentRuns.featureId, featureId), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)))
       .limit(1);
-    if (activeRun) continue;
-    // A swarm's tag is its workspace key, not a feature id, so the
-    // check above cannot see it. A run that still points at this
-    // machine is spared the same way, including one whose row was
-    // marked destroyed while the machine was still coming up.
-    const [activeOnMachine] = await ctx.db
-      .select({ id: agentRuns.id })
-      .from(agentRuns)
-      .innerJoin(sandboxes, eq(sandboxes.id, agentRuns.sandboxId))
-      .where(and(eq(sandboxes.externalId, item.externalId), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)))
-      .limit(1);
-    if (activeOnMachine) continue;
-    const created = Number(item.tags.bento_created ?? "0");
-    if (Number.isFinite(created) && created > 0 && Date.now() - created < MODAL_SWEEP_GRACE_MS) continue;
-    const [live] = await ctx.db
-      .select({ id: sandboxes.id })
-      .from(sandboxes)
-      .where(and(eq(sandboxes.externalId, item.externalId), ne(sandboxes.status, "destroyed")))
-      .limit(1);
-    if (live) continue;
-    try {
-      await driver.destroy({
-        externalId: item.externalId,
-        provider: "modal",
-        workdir: "/workspace",
-      });
-      console.log(`destroyed orphan Modal sandbox ${item.externalId}`);
-    } catch (err) {
-      console.warn(`could not destroy orphan Modal sandbox ${item.externalId}:`, err);
-      ctx.analytics?.captureException(err, null, null, {
-        feature_id: featureId,
-        source: "modal_sweep",
-      });
-    }
+    if (activeRun) return;
   }
+  // A swarm's tag is its workspace key, not a feature id, so the
+  // check above cannot see it. A run that still points at this
+  // machine is spared the same way, including one whose row was
+  // marked destroyed while the machine was still coming up.
+  const [activeOnMachine] = await ctx.db
+    .select({ id: agentRuns.id })
+    .from(agentRuns)
+    .innerJoin(sandboxes, eq(sandboxes.id, agentRuns.sandboxId))
+    .where(and(eq(sandboxes.externalId, item.externalId), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)))
+    .limit(1);
+  if (activeOnMachine) return;
+  const created = Number(item.tags.bento_created ?? "0");
+  if (Number.isFinite(created) && created > 0 && Date.now() - created < MODAL_SWEEP_GRACE_MS) return;
+  const [live] = await ctx.db
+    .select({ id: sandboxes.id })
+    .from(sandboxes)
+    .where(and(eq(sandboxes.externalId, item.externalId), ne(sandboxes.status, "destroyed")))
+    .limit(1);
+  if (live) return;
+  await driver.destroy({
+    externalId: item.externalId,
+    provider: "modal",
+    workdir: "/workspace",
+  });
+  console.log(`destroyed orphan Modal sandbox ${item.externalId}`);
 }

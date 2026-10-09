@@ -51,6 +51,16 @@ export const RESTART_BEFORE_AGENT_PREFIX = "Bento restarted before the agent sta
 export const PREVIOUS_AGENT_RUNNING_PREFIX =
   "An agent from an earlier run of this task is still running in its sandbox and could not be stopped";
 
+/**
+ * How a run record reads when the swarm's machine was lost with tasks
+ * already landed on its branch, and GitHub has no copy to make it
+ * again from. The run is refused before any machine is made, because a
+ * fresh clone would be a branch without that work, and nothing after
+ * it could tell.
+ */
+export const SWARM_BRANCH_LOST_MESSAGE =
+  "The swarm's branch was lost with its sandbox and is not on GitHub, so its landed tasks cannot be restored. Start the swarm again.";
+
 export const UNBILLED_REASONS: readonly UnbilledReason[] = [
   {
     id: "sandbox-unavailable",
@@ -102,6 +112,11 @@ export const UNBILLED_REASONS: readonly UnbilledReason[] = [
     id: "previous-agent-running",
     summary: "An earlier run's agent was still in the task's sandbox and could not be stopped, so no second agent ran.",
     match: { kind: "prefix", text: PREVIOUS_AGENT_RUNNING_PREFIX },
+  },
+  {
+    id: "swarm-branch-lost",
+    summary: "The swarm's branch was lost with its sandbox and could not be restored, so no agent ran.",
+    match: { kind: "prefix", text: SWARM_BRANCH_LOST_MESSAGE },
   },
 ];
 

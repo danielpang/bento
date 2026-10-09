@@ -112,16 +112,19 @@ function swarmIsOver(status: (typeof swarms.$inferSelect)["status"]): boolean {
 /**
  * Whether a swarm that ended this way is finished with its machine.
  *
- * Every ending but "failed". A failed swarm is the one a person picks
- * up again from the same branch, by retrying a leaf or a landing, and
- * that branch has never been pushed: the swarm's machine is the only
- * copy of every leaf that already landed. Reaping it on failure turned
- * a landing retry into "the swarm's sandbox is gone" and lost the
- * landed work with it. Archiving or deleting the swarm still reaps it,
- * and a Modal machine hibernates on its own meanwhile.
+ * Only "done" and "cancelled". Every other ending is one a person
+ * picks up again from the same branch: a failed swarm by retrying a
+ * leaf or a landing, and a swarm that ran out of budget or time by
+ * raising the ceiling, which spawnsFrom resumes. The swarm's machine
+ * holds that branch, and whatever GitHub has no copy of is lost with
+ * it: reaping on failure turned a landing retry into "the swarm's
+ * sandbox is gone" and lost the landed work. Archiving or deleting the
+ * swarm still reaps it, the sweep takes one nobody has touched past
+ * FAILED_SWARM_MACHINE_GRACE_MS, and a Modal machine hibernates on its
+ * own meanwhile.
  */
 export function swarmReleasesMachine(status: (typeof swarms.$inferSelect)["status"]): boolean {
-  return swarmIsOver(status) && status !== "failed";
+  return swarmIsOver(status) && (status === "done" || status === "cancelled");
 }
 
 /** Whether any swarm on this deployment has work a tick would act on. */

@@ -18,7 +18,7 @@ import {
   swarms,
   type Db,
 } from "@bento/db";
-import { LocalProcessDriver, WorktreeManager, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
+import { LocalProcessDriver, SandboxImageLost, WorktreeManager, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
 import { singleDriver } from "../sandbox-driver.js";
 import type { AppContext } from "../../context.js";
 import { EventBus, type BoardEvent } from "../../events.js";
@@ -1181,4 +1181,95 @@ test("a project with no configured landing check lands without a swarm sandbox",
   const landing = await queueLanding(fx.swarm.id, fx.task.id, fx.branch);
   const result = await withLocalDriver(() => performLanding(ctx, landing.id));
   assert.equal(result?.status, "landed");
+});
+
+/**
+ * A row that says ready while its machine is gone (a sprite deleted
+ * outside Bento, a Modal box stopped with no snapshot left) used to be
+ * exec'd into until the landing ran out of attempts. The wake now
+ * finds out, marks the row, and the landing reads its rows again and
+ * takes the path a machine that is gone already has.
+ */
+test("a landing that finds the swarm's sprite gone under a ready row says the swarm's machine is gone", async () => {
+  const { fx, swarmSandbox, workerSandbox } = await hibernatedPair("sprite-vanished");
+  await db
+    .update(sandboxes)
+    .set({ provider: "sprite", status: "ready", imageRef: null })
+    .where(eq(sandboxes.swarmId, fx.swarm.id));
+  await commitIn(fx.workerTree, fx.task.id, "v.txt", "vanished\n", "add v");
+  const landing = await queueLanding(fx.swarm.id, fx.task.id, fx.branch);
+  const exported: string[] = [];
+  const original = ctx.drivers;
+  ctx.drivers = singleDriver({
+    provider: "sprite",
+    workspace: "clone",
+    async exists(handle: SandboxHandle) {
+      return handle.externalId !== swarmSandbox.externalId;
+    },
+    async exportRepository(handle: SandboxHandle) {
+      exported.push(handle.externalId);
+      throw new Error(`sandbox ${handle.externalId} is not running`);
+    },
+    async importRepository() {
+      throw new Error("never reached");
+    },
+    async provision() {
+      throw new Error("unused");
+    },
+    async destroy() {},
+  } as unknown as SandboxDriver);
+  try {
+    const result = await performLanding(ctx, landing.id);
+    assert.equal(result?.status, "failed");
+    assert.match(result?.reason ?? "", /the swarm's sandbox is gone/);
+    assert.equal((await landingRow(landing.id))?.errorCode, "swarm_sandbox_gone");
+    assert.deepEqual(exported, [], "nothing is exec'd into a machine that is not there");
+    const [swarmRow] = await db.select().from(sandboxes).where(eq(sandboxes.id, swarmSandbox.id));
+    const [workerRow] = await db.select().from(sandboxes).where(eq(sandboxes.id, workerSandbox.id));
+    assert.equal(swarmRow?.status, "destroyed", "the row says what the provider said");
+    assert.equal(workerRow?.status, "ready", "and only that row");
+  } finally {
+    ctx.drivers = original;
+  }
+});
+
+test("a landing that finds the worker's Modal box gone with no snapshot reads the worker's branch elsewhere", async () => {
+  const { fx, swarmSandbox, workerSandbox } = await hibernatedPair("modal-vanished");
+  await db.update(sandboxes).set({ status: "ready" }).where(eq(sandboxes.swarmId, fx.swarm.id));
+  await commitIn(fx.workerTree, fx.task.id, "m.txt", "vanished\n", "add m");
+  const landing = await queueLanding(fx.swarm.id, fx.task.id, fx.branch);
+  const original = ctx.drivers;
+  ctx.drivers = singleDriver({
+    provider: "modal",
+    workspace: "clone",
+    async wake(handle: SandboxHandle) {
+      if (handle.externalId === workerSandbox.externalId) throw new SandboxImageLost(handle.externalId);
+      return { booted: false };
+    },
+    async exportRepository() {
+      throw new Error("never reached");
+    },
+    async importRepository() {
+      throw new Error("never reached");
+    },
+    async provision() {
+      throw new Error("unused");
+    },
+    async destroy() {},
+  } as unknown as SandboxDriver);
+  try {
+    const result = await performLanding(ctx, landing.id);
+    // Nothing was pushed for this task, so GitHub has nothing either:
+    // the landing says the task's machine is gone, rather than asking
+    // a provider to start a box that cannot be started, five times.
+    assert.equal(result?.status, "failed");
+    assert.match(result?.reason ?? "", /this task's sandbox is gone/);
+    assert.equal((await landingRow(landing.id))?.errorCode, "task_sandbox_gone");
+    const [workerRow] = await db.select().from(sandboxes).where(eq(sandboxes.id, workerSandbox.id));
+    const [swarmRow] = await db.select().from(sandboxes).where(eq(sandboxes.id, swarmSandbox.id));
+    assert.equal(workerRow?.status, "destroyed");
+    assert.equal(swarmRow?.status, "ready");
+  } finally {
+    ctx.drivers = original;
+  }
 });
