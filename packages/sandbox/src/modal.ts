@@ -3,6 +3,7 @@ import { WORKSPACE_ARTIFACT_DIR } from "@bento/core";
 import { AGENT_BINARIES, TOOLCHAIN_VERSION, agentToolchainScript } from "./agent-toolchain.js";
 import {
   execTimeoutMessage,
+  SandboxImageLost,
   type ExecChunk,
   type ExecOptions,
   type ProvisionSpec,
@@ -424,6 +425,54 @@ export class ModalDriver implements SandboxDriver {
       this.remembered.set(handle.externalId, box);
     }
     await box.mountImage(handle.workdir, image);
+  }
+
+  /**
+   * Starts a hibernated machine again under its own name, from the
+   * newest image of its workspace: the exit snapshot of the stopped
+   * box when this process can still see one, else the hibernation
+   * image on the row. Never a fresh toolchain image, because the
+   * caller wants the branches that only the snapshot holds.
+   *
+   * The network is the one provision would have given it, for the
+   * reason restore takes it: the next run in the warm window reuses
+   * this machine as it is.
+   */
+  async wake(
+    handle: SandboxHandle,
+    options: { organizationId?: string | null } = {},
+  ): Promise<{ booted: boolean; imageRef?: string }> {
+    const api = await this.api();
+    if (await this.runningBox(api, handle.externalId)) return { booted: false };
+    const allowlist = modalOutboundAllowlist({
+      ...(handle.network ? { network: handle.network } : {}),
+      ...(handle.allowedHosts ? { allowedHosts: handle.allowedHosts } : {}),
+    });
+    let image: ModalImageRef | null = null;
+    const dead = await this.deadBox(api, handle.externalId);
+    if (dead) image = await dead.experimentalGetExitSnapshot().catch(() => null);
+    if (!image && handle.imageRef) image = await api.imageFromId(handle.imageRef);
+    if (!image) throw new SandboxImageLost(handle.externalId);
+    const workspaceKey = handle.externalId.startsWith("bento-")
+      ? handle.externalId.slice("bento-".length)
+      : handle.externalId;
+    let box: ModalBox;
+    try {
+      box = await this.createNamed(api, image, this.createParams(handle.externalId, {
+        tags: this.sandboxTags(workspaceKey, options.organizationId ?? undefined),
+        ...(allowlist ? { outboundDomainAllowlist: allowlist } : {}),
+      }));
+    } catch (err) {
+      // A run's provision, or another wake, booted it first.
+      if (await this.runningBox(api, handle.externalId)) return { booted: false };
+      throw err;
+    }
+    this.remembered.set(handle.externalId, box);
+    if (image.imageId === handle.imageRef) return { booted: true };
+    // Booted from the exit snapshot, which supersedes the stored
+    // image. The row records the new one, and the old one is nobody's.
+    if (handle.imageRef) await api.deleteImage(handle.imageRef).catch(() => {});
+    return { booted: true, imageRef: image.imageId };
   }
 
   async exportRepository(

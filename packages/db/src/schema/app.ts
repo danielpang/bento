@@ -547,6 +547,19 @@ export const agentRuns = pgTable(
     .references(() => agentProfiles.id, { onDelete: "cascade" }),
   sandboxId: uuid("sandbox_id").references(() => sandboxes.id),
   /**
+   * The sandbox provider that ran this run ("sprite", "modal",
+   * "docker", "local-process", or what a runner reported), after any
+   * "auto" fallback.
+   *
+   * Recorded on the run because the sandboxes row cannot answer it
+   * later: a machine made again for the same owner rewrites that row,
+   * so a swarm whose machine went from a sprite to Modal and back
+   * holds one row naming whichever came last. Null until the run
+   * provisions, on a run whose provisioning failed, and on runs from
+   * before the column, which were not backfilled for that reason.
+   */
+  sandboxProvider: text("sandbox_provider"),
+  /**
    * Who asked for this run.
    *
    * Compute is pooled across a team, so "one person used it all" is a
@@ -695,6 +708,13 @@ export const agentRuns = pgTable(
   billable: boolean("billable").notNull().default(true),
   },
   (t) => [
+    /**
+     * One agent working a swarm task at a time, whatever its role. The
+     * backstop to startRunIfIdle's check under the swarm lock.
+     */
+    uniqueIndex("agent_runs_one_active_per_swarm_task_idx")
+      .on(t.swarmTaskId)
+      .where(sql`${t.swarmTaskId} is not null and ${t.status} in ('queued', 'starting', 'running')`),
     // "This card's runs, newest first" is the shape of every
     // conversation, resume, and session query; without this it is a
     // table scan per ask.
@@ -1773,6 +1793,14 @@ export const swarms = pgTable(
      */
     startedBy: text("started_by").references(() => user.id, { onDelete: "set null" }),
     /** Set when a finished swarm is put away. The rows stay. */
+    /**
+     * The commit Bento last pushed to the swarm's branch on GitHub, per
+     * repository url. The branch goes to the remote after every landing
+     * so a lost machine loses nothing, and this is the lease each later
+     * push holds: a push that finds anything else there refuses rather
+     * than overwrite a person's commits.
+     */
+    pushedHeads: jsonb("pushed_heads").$type<Record<string, string>>().notNull().default({}),
     archivedAt: timestamp("archived_at", { withTimezone: true }),
     /** Drives "pick up where you left off" without touching updatedAt. */
     lastOpenedAt: timestamp("last_opened_at", { withTimezone: true }),
@@ -1997,6 +2025,16 @@ export const swarmLandings = pgTable(
     /** How many times this branch has been tried. */
     attempt: integer("attempt").notNull().default(0),
     error: text("error"),
+    /**
+     * Why a failed landing failed, as a stable word the console and the
+     * analytics both read: the sentence in `error` is for people.
+     */
+    errorCode: text("error_code"),
+    /**
+     * A queued landing waiting out a backoff is not promoted before
+     * this. Null is "whenever it reaches the front".
+     */
+    notBefore: timestamp("not_before", { withTimezone: true }),
     startedAt: timestamp("started_at", { withTimezone: true }),
     endedAt: timestamp("ended_at", { withTimezone: true }),
     ...timestamps,

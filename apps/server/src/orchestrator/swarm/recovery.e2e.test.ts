@@ -16,9 +16,16 @@ import {
 import { LocalProcessDriver, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
 import { singleDriver } from "../sandbox-driver.js";
 import type { AppContext } from "../../context.js";
+import { FakeJobQueue } from "../../jobs/index.js";
 import { EventBus, type BoardEvent } from "../../events.js";
 import { loadEnv } from "../../env.js";
-import { reapStalledRuns, recoverInterruptedRuns } from "../run-executor.js";
+import {
+  markCancelled,
+  QUEUED_RUN_REQUEUE_MIN,
+  reapStalledRuns,
+  recoverInterruptedRuns,
+  requeueStrandedRuns,
+} from "../run-executor.js";
 import { unbilledReason } from "../../unbilled-reasons.js";
 import {
   enqueueSwarmTick,
@@ -47,9 +54,10 @@ const PROFILE = "22222222-2222-2222-2222-222222222222";
 let pool: ReturnType<typeof createPool>;
 let db: Db;
 let ctx: AppContext;
-let queued: { queue: string; data: unknown; options?: unknown }[];
-let workers: string[];
-let stopped: string[];
+let jobs: FakeJobQueue;
+let queued: FakeJobQueue["sent"];
+let workers: FakeJobQueue["worked"];
+let stopped: FakeJobQueue["offWorked"];
 let emitted: BoardEvent[];
 
 before(async () => {
@@ -72,9 +80,10 @@ before(async () => {
     [PROFILE],
   );
 
-  queued = [];
-  workers = [];
-  stopped = [];
+  jobs = new FakeJobQueue();
+  queued = jobs.sent;
+  workers = jobs.worked;
+  stopped = jobs.offWorked;
   emitted = [];
   const bus = new EventBus();
   bus.onBoardEvent(PROJECT, (event) => emitted.push(event));
@@ -88,20 +97,7 @@ before(async () => {
     liveInputs: new Map(),
     draining: false,
     userId: "u1",
-    boss: {
-      send: async (queue: string, data: unknown, options?: unknown) => {
-        queued.push({ queue, data, options });
-        return "job";
-      },
-      work: async (queue: string) => {
-        workers.push(queue);
-        return "worker";
-      },
-      offWork: async (queue: string) => {
-        stopped.push(queue);
-      },
-      notifyWorker: () => {},
-    } as unknown as AppContext["boss"],
+    jobs,
   } as unknown as AppContext;
 });
 
@@ -115,7 +111,7 @@ beforeEach(async () => {
   workers.length = 0;
   stopped.length = 0;
   emitted.length = 0;
-  // The worker registry is keyed by the boss, and this file has one:
+  // The worker registry is keyed by the queue, and this file has one:
   // clear it so each test sees a process that has not started it.
   await stopSwarmTickWorker(ctx);
   stopped.length = 0;
@@ -149,6 +145,7 @@ test("a swarm run the restart stranded is closed, and its swarm is told", async 
       prompt: "",
       status: "running",
       executor: "server",
+      agentStartedAt: new Date(),
     })
     .returning();
 
@@ -174,6 +171,32 @@ test("a swarm run the restart stranded is closed, and its swarm is told", async 
   const board = emitted.find((event) => event.type === "swarm_task_updated");
   assert.ok(board, "the board is told too");
   assert.equal("taskId" in board! ? board.taskId : null, task!.id);
+});
+
+test("a swarm run a restart cut off before its agent started is not billed, and reads as the sandbox's", async () => {
+  const swarm = await makeSwarm();
+  const [task] = await db.insert(swarmTasks).values({ swarmId: swarm.id, title: "leaf" }).returning();
+  const [orphan] = await db
+    .insert(agentRuns)
+    .values({
+      type: "swarm",
+      swarmId: swarm.id,
+      swarmTaskId: task!.id,
+      role: "worker",
+      agentProfileId: PROFILE,
+      prompt: "",
+      status: "running",
+      executor: "server",
+    })
+    .returning();
+
+  await recoverInterruptedRuns(ctx);
+
+  const [closed] = await db.select().from(agentRuns).where(eq(agentRuns.id, orphan!.id));
+  assert.equal(closed!.status, "failed");
+  assert.equal(closed!.error, "Bento restarted before the agent started, so no agent ran.");
+  assert.equal(closed!.billable, false);
+  assert.equal(unbilledReason(closed!.error)?.id, "restart-before-agent", "so the coordinator restarts it like any sandbox failure");
 });
 
 /** A server run that started `minutesAgo`, with these transcript lines, each that long ago too. */
@@ -458,10 +481,7 @@ test("every swarm still working gets one tick at boot", async () => {
   }
   // Coalesced by swarm, so a burst cannot become a tick per event.
   for (const job of queued.filter((job) => job.queue === "swarm.tick")) {
-    assert.equal(
-      (job.options as { singletonKey?: string }).singletonKey,
-      (job.data as { swarmId: string }).swarmId,
-    );
+    assert.equal(job.opts?.coalesceKey, (job.data as { swarmId: string }).swarmId);
   }
 });
 
@@ -519,36 +539,37 @@ test("the worker stops once the last swarm settles", async () => {
  * The window between deciding to stop and having stopped.
  *
  * Starting the worker and stopping it are two steps each: mark the
- * boss, then talk to pg-boss. A tick that arrived in between saw a
+ * queue, then talk to it. A tick that arrived in between saw a
  * mark that no longer had a worker behind it, or registered one the
  * stop then took away, and either way the job sat in the queue until
  * something else started a swarm. Driven rather than argued about: the
  * stop is held open, a tick is enqueued into the gap, and the order
- * the boss was actually called in is the assertion.
+ * the queue was actually called in is the assertion.
  */
 test("a tick enqueued while the worker is stopping waits for the stop rather than racing it", async () => {
   const calls: string[] = [];
   let releaseOffWork: (() => void) | null = null;
+  const holdingJobs = new FakeJobQueue();
+  // Only the tick worker's lifecycle is under test. enqueueSwarmTick
+  // also starts the watchdog, whose work/offWork would otherwise show
+  // up as a second "work" after send.
+  holdingJobs.work = async (queue) => {
+    if (queue === "swarm.tick") calls.push("work");
+  };
+  holdingJobs.offWork = async (queue) => {
+    if (queue !== "swarm.tick") return;
+    calls.push("offWork:start");
+    await new Promise<void>((resolve) => {
+      releaseOffWork = resolve;
+    });
+    calls.push("offWork:end");
+  };
+  holdingJobs.send = async () => {
+    calls.push("send");
+  };
   const holding = {
     ...ctx,
-    boss: {
-      work: async () => {
-        calls.push("work");
-        return "worker";
-      },
-      offWork: async () => {
-        calls.push("offWork:start");
-        await new Promise<void>((resolve) => {
-          releaseOffWork = resolve;
-        });
-        calls.push("offWork:end");
-      },
-      send: async () => {
-        calls.push("send");
-        return "job";
-      },
-      notifyWorker: () => {},
-    },
+    jobs: holdingJobs,
   } as unknown as AppContext;
 
   const swarm = await makeSwarm("running");
@@ -585,5 +606,88 @@ test("a worker does not stop while a swarm is still live", async () => {
 
   await db.update(swarms).set({ status: "done" }).where(eq(swarms.id, swarm.id));
   assert.equal(await stopSwarmTickWorkerIfIdle(ctx), true);
-  assert.deepEqual(stopped, ["swarm.tick"]);
+  assert.deepEqual(
+    stopped.filter((queue) => queue === "swarm.tick"),
+    ["swarm.tick"],
+  );
+});
+
+/**
+ * A queued row is only a run once a job carries it. One whose job was
+ * lost waited for the next boot, and a swarm whose planner or worker it
+ * was waited with it.
+ */
+test("a run left queued with its job lost is sent again, and a run just queued is not", async () => {
+  const swarm = await makeSwarm();
+  const [stranded] = await db
+    .insert(agentRuns)
+    .values({
+      type: "swarm",
+      swarmId: swarm.id,
+      role: "planner",
+      agentProfileId: PROFILE,
+      prompt: "",
+      status: "queued",
+      executor: "server",
+      queuedAt: new Date(Date.now() - (QUEUED_RUN_REQUEUE_MIN + 5) * 60_000),
+    })
+    .returning();
+  const [fresh] = await db
+    .insert(agentRuns)
+    .values({ type: "swarm", swarmId: swarm.id, role: "worker", agentProfileId: PROFILE, prompt: "", status: "queued", executor: "server" })
+    .returning();
+
+  const sent = await requeueStrandedRuns(ctx);
+  assert.deepEqual(sent, [stranded!.id]);
+  const jobs = queued.filter((job) => job.queue === "run.execute").map((job) => (job.data as { runId: string }).runId);
+  assert.deepEqual(jobs, [stranded!.id], "a run still within an ordinary wait for a worker is left to its job");
+  assert.ok(!jobs.includes(fresh!.id));
+  assert.equal(
+    (await db.select().from(agentRuns).where(eq(agentRuns.id, stranded!.id)))[0]!.status,
+    "queued",
+    "nothing about the row changes: the claim is the executor's compare and set",
+  );
+});
+
+/** A cancel is a terminal path too, and not every caller of it settles. */
+test("a swarm run that is cancelled ticks its swarm", async () => {
+  const swarm = await makeSwarm();
+  const [run] = await db
+    .insert(agentRuns)
+    .values({ type: "swarm", swarmId: swarm.id, role: "planner", agentProfileId: PROFILE, prompt: "", status: "running", executor: "server" })
+    .returning();
+  await markCancelled(ctx, run!.id);
+  assert.equal((await db.select().from(agentRuns).where(eq(agentRuns.id, run!.id)))[0]!.status, "cancelled");
+  assert.ok(
+    queued.some((job) => job.queue === "swarm.tick" && (job.data as { swarmId: string }).swarmId === swarm.id),
+    "the reconciler hears the planner stopped",
+  );
+});
+
+/**
+ * Closing an interrupted run reads its subject, and a subject that
+ * could not be read used to end the path there: the run closed and the
+ * swarm never heard.
+ */
+test("an interrupted run whose subject cannot be read still ticks its swarm", async () => {
+  const swarm = await makeSwarm();
+  // A run describeRunSubject refuses: its agent has since moved to
+  // another organization than its swarm's.
+  await pool.query(
+    `insert into identity.organization (id,name,slug) values ('org-elsewhere','E','org-elsewhere') on conflict do nothing`,
+  );
+  const moved = "55555555-5555-5555-5555-555555555555";
+  await pool.query(
+    `insert into agent_profiles (id,owner_id,organization_id,name,cli,model) values ($1,'u1',null,'M','fake','fake-1') on conflict (id) do update set organization_id = null`,
+    [moved],
+  );
+  const stalled = await stalledRun(swarm.id, 46, [{ minutesAgo: 44, payload: system("Starting a sandbox") }], moved);
+  await pool.query(`update agent_profiles set organization_id = 'org-elsewhere' where id = $1`, [moved]);
+
+  const closed = await reapStalledRuns(ctx);
+  assert.deepEqual(closed, [stalled.id]);
+  assert.ok(
+    queued.some((job) => job.queue === "swarm.tick" && (job.data as { swarmId: string }).swarmId === swarm.id),
+    "its swarm is ticked anyway",
+  );
 });

@@ -14,7 +14,7 @@ import {
 } from "@bento/db";
 import type { AppContext } from "../context.js";
 import { driverForSandbox } from "../orchestrator/sandbox-driver.js";
-import { cancelTaskTree, reactivateSwarmForRetry, retryLeaf, splitLeaf } from "../orchestrator/swarm/task-actions.js";
+import { cancelTaskTree, reactivateSwarmForRetry, requeuedLanding, retryLeaf, splitLeaf } from "../orchestrator/swarm/task-actions.js";
 import type { BoardEvent } from "../events.js";
 import { ACTIVE_RUN_STATUSES } from "../orchestrator/start-run.js";
 import { quoteUntrusted } from "../orchestrator/swarm/planner-prompt.js";
@@ -892,6 +892,34 @@ async function accept(
   const task = await requireTask(ctx, caller, args.taskId);
   if (task.nodeType !== "leaf") throw new ToolRefusal(`task ${task.id} is a plan node; there is nothing to accept.`);
   if (!task.report) throw new ToolRefusal(`task ${task.id} has not reported yet, so there is nothing to accept.`);
+  if (task.status === "cancelled" || task.status === "done") {
+    throw new ToolRefusal(`task ${task.id} is ${task.status}, so there is nothing left to accept.`);
+  }
+  /*
+   * Not while an agent is on it. report is a tool call, not the end of
+   * a turn: a worker can report and keep committing, and a branch
+   * accepted then is landed as it stood halfway through. The wake
+   * waits for the run to end before it hands a report over; an accept
+   * made from an earlier look at the tree has to wait the same way.
+   */
+  const [active] = await ctx.db
+    .select({ id: agentRuns.id })
+    .from(agentRuns)
+    .where(and(eq(agentRuns.swarmTaskId, task.id), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)))
+    .limit(1);
+  if (active) {
+    throw new ToolRefusal(
+      `an agent is still working task ${task.id}, so its branch may still change. Wait for its run to end; you are told when it does.`,
+    );
+  }
+  /*
+   * A failed leaf keeps its report, and accepting it is the planner
+   * deciding the work is good after all (a landing that failed for a
+   * reason it has dealt with, a worker that stopped after reporting).
+   * It goes back to working, which is what an accepted leaf waiting to
+   * land is, with the failure's marks taken off.
+   */
+  const revived = task.status === "failed";
 
   await ctx.db.transaction(async (tx) => {
     /**
@@ -910,37 +938,69 @@ async function accept(
       .update(swarmTasks)
       .set({
         attention: null,
-        flags: { ...task.flags, accepted: true, ...(args.note ? { acceptNote: args.note } : {}) },
+        ...(revived ? { status: "working" as const, endedAt: null } : {}),
+        flags: {
+          ...task.flags,
+          ...(revived ? { workerStopped: undefined, conflict: undefined } : {}),
+          // A failure of an earlier attempt's landing is not this one's.
+          landingError: undefined,
+          landingErrorCode: undefined,
+          accepted: true,
+          ...(args.note ? { acceptNote: args.note } : {}),
+        },
         updatedAt: new Date(),
       })
       .where(eq(swarmTasks.id, task.id));
+    if (revived) {
+      await tx.insert(swarmTaskEvents).values({
+        taskId: task.id,
+        kind: "status_changed",
+        fromStatus: "failed",
+        toStatus: "working",
+        runId: caller.runId,
+        detail: { accepted: true, note: "The planner accepted this after it failed, so it goes back to the merge queue." },
+      });
+    }
     await tx.insert(swarmTaskEvents).values({
       taskId: task.id,
       kind: "note",
       runId: caller.runId,
       detail: { accepted: true, ...(args.note ? { note: args.note } : {}) },
     });
-    // Accepted work joins the merge queue. One row per task, so
-    // accepting twice does not queue the branch twice.
-    const [queued] = await tx
-      .select({ id: swarmLandings.id })
+    /*
+     * Accepted work joins the merge queue. One live row per task, so
+     * accepting twice does not queue the branch twice. A row that
+     * already ended without landing (it failed, or the queue dropped it
+     * when the leaf went back to be worked) is this acceptance's row
+     * again: back to queued, at the back of the line, with its old
+     * attempt's marks cleared. A landed one is left alone.
+     */
+    const rows = await tx
+      .select({ id: swarmLandings.id, status: swarmLandings.status })
       .from(swarmLandings)
       .where(and(eq(swarmLandings.swarmId, caller.swarmId), eq(swarmLandings.taskId, task.id)))
-      .limit(1);
-    if (!queued) {
-      const [position] = await tx
-        .select({ next: sql<number>`coalesce(max(${swarmLandings.position}), -1) + 1` })
-        .from(swarmLandings)
-        .where(eq(swarmLandings.swarmId, caller.swarmId));
-      await tx.insert(swarmLandings).values({
-        swarmId: caller.swarmId,
-        taskId: task.id,
-        branchName: task.branchName,
-        position: position?.next ?? 0,
-      });
+      .orderBy(desc(swarmLandings.createdAt));
+    if (rows.some((row) => row.status !== "failed" && row.status !== "cancelled")) return;
+    const [position] = await tx
+      .select({ next: sql<number>`coalesce(max(${swarmLandings.position}), -1) + 1` })
+      .from(swarmLandings)
+      .where(eq(swarmLandings.swarmId, caller.swarmId));
+    const previous = rows[0];
+    if (previous) {
+      await tx
+        .update(swarmLandings)
+        .set(requeuedLanding(task.branchName, position?.next ?? 0, new Date()))
+        .where(and(eq(swarmLandings.id, previous.id), eq(swarmLandings.status, previous.status)));
+      return;
     }
+    await tx.insert(swarmLandings).values({
+      swarmId: caller.swarmId,
+      taskId: task.id,
+      branchName: task.branchName,
+      position: position?.next ?? 0,
+    });
   });
-  events.push(taskEvent(caller, task.id, task.status));
+  events.push(taskEvent(caller, task.id, revived ? "working" : task.status));
   return `Accepted ${task.id}. Its branch is in the merge queue, which lands one branch at a time onto the swarm's branch. The leaf is done once it has landed, and you are told if it does not.`;
 }
 

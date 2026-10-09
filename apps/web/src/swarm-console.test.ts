@@ -12,7 +12,7 @@ import { SwarmTree } from "./components/SwarmTree.js";
 import { SwarmOutline } from "./components/SwarmOutline.js";
 import { SwarmNodeDrawer } from "./components/SwarmNodeDrawer.js";
 import { SwarmRunOutput, SwarmRunOutputDrawer, SwarmWorkerOutputDrawer } from "./components/SwarmRunOutput.js";
-import { SwarmArtifacts, SwarmPage, SwarmPlanBrief, WorkerStepper } from "./components/SwarmPage.js";
+import { stackedPullRequests, SwarmArtifacts, SwarmPage, SwarmPlanBrief, WorkerStepper } from "./components/SwarmPage.js";
 import { ceilingRefusal, reopenEffectLines } from "./components/ReopenDialog.js";
 import {
   DEFAULT_RUN_SETTINGS,
@@ -26,7 +26,11 @@ import { memoryStorage } from "./swarm/view-state.js";
 import { canReopen } from "./swarm/status.js";
 import { seedSwarms } from "./swarm/fixtures.js";
 import { buildSwarmModel } from "./swarm/layout.js";
-import type { SwarmLanding, SwarmPlannerRun, SwarmStatus, SwarmSummary, SwarmTask } from "./swarm/types.js";
+import type { SwarmDetail, SwarmLanding, SwarmPlannerRun, SwarmStatus, SwarmSummary, SwarmTask } from "./swarm/types.js";
+import { markDoneConfirmText } from "./components/SwarmNodeDrawer.js";
+import { backoffMinutes } from "./components/MergeQueue.js";
+import { checksFailedAfterLanding, idleWords, leafStartBlocker } from "./swarm/waiting.js";
+import { taskActionRefusal } from "./swarm/status.js";
 import { readFileSync, readdirSync } from "node:fs";
 
 /**
@@ -671,8 +675,36 @@ test("a failed worker card offers fix forward and shows earlier attempts", () =>
   assert.equal((html.match(/View output/g) ?? []).length, 2);
 });
 
+test("a worker attempt names its sandbox provider to a beta tester only", () => {
+  const failed = { ...tasks().find((row) => row.id === "slow")!, status: "failed" as const };
+  const model = buildSwarmModel([failed], { now: NOW });
+  const drawer = (enabled: boolean) =>
+    renderToStaticMarkup(
+      createElement(BetaTestersScope, {
+        enabled,
+        children: createElement(SwarmNodeDrawer, {
+          task: failed,
+          node: model.byId.get("slow")!,
+          detail: { taskId: "slow", commits: [], events: [], runs: [
+            { id: "run-new", status: "failed", queuedAt: "2026-01-02T00:00:00.000Z", startedAt: null, endedAt: null, error: "stopped", sandboxProvider: "modal" },
+            { id: "run-mid", status: "failed", queuedAt: "2026-01-01T12:00:00.000Z", startedAt: null, endedAt: null, error: null, sandboxProvider: "sprite" },
+            { id: "run-old", status: "succeeded", queuedAt: "2026-01-01T00:00:00.000Z", startedAt: null, endedAt: null, error: null, sandboxProvider: null },
+          ] },
+          onClose: () => {},
+        }),
+      }),
+    );
+  const tester = drawer(true);
+  assert.equal((tester.match(/<span class="muted">Modal<\/span>/g) ?? []).length, 1);
+  assert.equal((tester.match(/<span class="muted">Fly sprite<\/span>/g) ?? []).length, 1);
+  assertNoDashes(tester, "the attempts list");
+  const everyoneElse = drawer(false);
+  assert.doesNotMatch(everyoneElse, /Fly sprite|>Modal</);
+  assert.match(everyoneElse, /Attempt 3/);
+});
+
 test("a merge queue failure keeps its worker report and offers to retry landing", () => {
-  const failed = { ...tasks().find((row) => row.id === "slow")!, status: "failed" as const,
+  const failed = { ...tasks().find((row) => row.id === "slow")!, status: "failed" as const, canRetryLanding: true,
     flags: { landingError: "fatal: checkout is on a detached HEAD" }, report: "Worker completed the feature." };
   const model = buildSwarmModel([failed], { now: NOW });
   const html = renderToStaticMarkup(createElement(SwarmNodeDrawer, {
@@ -687,6 +719,55 @@ test("a merge queue failure keeps its worker report and offers to retry landing"
   assert.match(html, /Technical details/);
   assert.doesNotMatch(html, /Retry worker|Fix forward/);
   assert.doesNotMatch(html, /This swarm worker failed/);
+});
+
+test("any failed leaf leads with starting the task over, and keeps the other ways back", () => {
+  const landing = { ...tasks().find((row) => row.id === "slow")!, status: "failed" as const, canRetryLanding: true,
+    flags: { landingError: "the swarm or worker sandbox is unavailable" } };
+  const landingModel = buildSwarmModel([landing], { now: NOW });
+  const landingHtml = renderToStaticMarkup(createElement(SwarmNodeDrawer, {
+    task: landing, node: landingModel.byId.get("slow")!, onClose: () => {},
+    onStartOver: () => {}, onRetryLanding: () => {}, onRetry: () => {}, onFixForward: () => {},
+  }));
+  assert.match(landingHtml, /class="btn btn-primary"[^>]*>Retry task</, "a merge queue failure is retried as a new attempt");
+  assert.match(landingHtml, /Retry merge queue/, "landing the same branch again is still there");
+
+  const worker = { ...tasks().find((row) => row.id === "slow")!, status: "failed" as const, flags: {} };
+  const workerModel = buildSwarmModel([worker], { now: NOW });
+  const workerHtml = renderToStaticMarkup(createElement(SwarmNodeDrawer, {
+    task: worker, node: workerModel.byId.get("slow")!, onClose: () => {},
+    onStartOver: () => {}, onRetry: () => {}, onFixForward: () => {},
+  }));
+  assert.match(workerHtml, /class="btn btn-primary"[^>]*>Retry task</);
+  assert.match(workerHtml, /Fix forward/);
+  assert.match(workerHtml, /Retry in the same sandbox/);
+});
+
+test("a finished leaf stuck waiting on the merge queue reads as such, and can still be started over", () => {
+  // Production's shape: accepted, still "working" on the row, its landing
+  // failed. It used to read "pending" with only a merge queue retry.
+  const stuck = { ...tasks().find((row) => row.id === "slow")!, status: "working" as const, assignedRunId: null,
+    canRetryLanding: true, flags: { accepted: true, landingError: "the swarm or worker sandbox is unavailable" } };
+  const stuckModel = buildSwarmModel([stuck], { now: NOW, runningTaskIds: new Set() });
+  const stuckHtml = renderToStaticMarkup(createElement(SwarmNodeDrawer, {
+    task: stuck, node: stuckModel.byId.get("slow")!, onClose: () => {},
+    onStartOver: () => {}, onRetryLanding: () => {}, onRetry: () => {},
+  }));
+  assert.match(stuckHtml, /landing failed/);
+  assert.doesNotMatch(stuckHtml, /pending/);
+  assert.match(stuckHtml, /Retry merge queue/);
+  assert.match(stuckHtml, />Retry task</, "starting over is there whatever the leaf is stuck in");
+
+  const waiting = { ...stuck, canRetryLanding: false, flags: { accepted: true } };
+  const waitingModel = buildSwarmModel([waiting], { now: NOW, runningTaskIds: new Set() });
+  const waitingHtml = renderToStaticMarkup(createElement(SwarmNodeDrawer, {
+    task: waiting, node: waitingModel.byId.get("slow")!, onClose: () => {},
+    onStartOver: () => {}, onRetry: () => {},
+  }));
+  assert.match(waitingHtml, /waiting to land/);
+  assert.match(waitingHtml, /Waiting to land\./);
+  assert.doesNotMatch(waitingHtml, /Waiting for an agent to start/);
+  assert.match(waitingHtml, />Retry task</);
 });
 
 test("a failed plan drawer calls the recoverable parent stalled", () => {
@@ -855,13 +936,19 @@ test("a swarm's settings open on what it is set to now, and round trip unchanged
 function pageHtml(mode: "local" | "multi", status?: SwarmStatus, options: {
   plannerStatus?: SwarmPlannerRun["status"];
   approveAllLeaves?: boolean;
+  /** Anything else on the detail, applied last. */
+  extra?: (detail: SwarmDetail) => Partial<SwarmDetail>;
 } = {}) {
   const seeded = seedSwarms("p1", NOW).find((entry) => entry.swarm.id === "sw-checkout")!;
-  const detail = {
+  const base: SwarmDetail = {
     ...seeded,
     agentTimeMs: 7_260_000,
     ...(status ? { swarm: { ...seeded.swarm, status } } : {}),
     ...(options.approveAllLeaves ? { tasks: seeded.tasks.map((task) => task.nodeType === "leaf" && task.status === "open" ? { ...task, status: "assigned" as const } : task) } : {}),
+  };
+  const detail = {
+    ...base,
+    ...(options.extra ? options.extra(base) : {}),
     ...(options.plannerStatus ? { plannerRun: {
       id: "planner-1", status: options.plannerStatus, error: null, agent: null,
       queuedAt: new Date(NOW).toISOString(), startedAt: null, endedAt: null,
@@ -881,7 +968,7 @@ function pageHtml(mode: "local" | "multi", status?: SwarmStatus, options: {
         onPause: () => {},
         onResume: () => {},
         onStop: () => {},
-        onCreatePullRequest: () => {},
+        onPublish: () => {},
         onReopen: () => {},
         onDelete: () => {},
         onArchive: () => {},
@@ -907,10 +994,59 @@ test("the header carries the ring, branch, agent time and controls", () => {
   assert.match(html, /approve the plan to start ready workers/);
   assert.match(html, />Stop swarm<\/button>/);
   assert.match(html, />Delete swarm<\/button>/);
-  assert.match(html, />Create PR<\/button>/);
+  assert.doesNotMatch(html, /One pull request/, "a swarm still working offers no pull request yet");
   assert.match(html, /aria-label="One more worker"/);
   assert.match(html, /aria-label="One fewer worker"/);
   assertNoDashes(html, "the swarm header");
+});
+
+test("a finished swarm offers one pull request or one per task, and a failed one says how long its sandbox is kept", () => {
+  const done = pageHtml("multi", "done");
+  assert.match(done, />One pull request<\/button>/);
+  assert.match(done, />One per task, stacked<\/button>/);
+  assert.match(done, /Every branch is on GitHub/);
+  assertNoDashes(done, "the publish choice");
+
+  const failed = pageHtml("multi", "failed");
+  assert.doesNotMatch(failed, /One pull request/);
+  assertNoDashes(failed, "the failed swarm header");
+});
+
+test("stacked pull requests are read off the tasks, with their addresses checked", () => {
+  const prs = stackedPullRequests([
+    { id: "a", title: "Cart", flags: { pullRequests: { "https://github.com/acme/app": { number: 7, url: "https://github.com/acme/app/pull/7" } } } },
+    { id: "b", title: "Totals", flags: { pullRequests: { "https://github.com/acme/app": { number: 8, url: "javascript:alert(1)" } } } },
+    { id: "c", title: "Not published", flags: {} },
+  ] as unknown as Parameters<typeof stackedPullRequests>[0]);
+  assert.deepEqual(prs.map((pr) => [pr.title, pr.number, pr.url]), [
+    ["Cart", 7, "https://github.com/acme/app/pull/7"],
+    ["Totals", 8, null],
+  ]);
+});
+
+test("a task being started over says so, and a landing failure is named by its code", () => {
+  const base = tasks().find((row) => row.id === "slow")!;
+  const restarting = {
+    ...base,
+    status: "assigned" as const,
+    branchName: "swarm/checkout-slow",
+    flags: { startingOver: true, pushedHeads: { "https://github.com/acme/app": "abc" } },
+  };
+  const restartingHtml = renderToStaticMarkup(createElement(SwarmNodeDrawer, {
+    task: restarting, node: buildSwarmModel([restarting], { now: NOW }).byId.get("slow")!, onClose: () => {},
+    onStartOver: () => {}, onRetry: () => {},
+  }));
+  assert.match(restartingHtml, /Restarting\. The old sandbox is being removed/);
+  assert.match(restartingHtml, />On GitHub</);
+  assert.doesNotMatch(restartingHtml, />Retry (task|worker)/, "nothing else is offered while it is already happening");
+
+  const failed = { ...base, status: "failed" as const, flags: { landingError: "raw words", landingErrorCode: "wake_failed" } };
+  const failedHtml = renderToStaticMarkup(createElement(SwarmNodeDrawer, {
+    task: failed, node: buildSwarmModel([failed], { now: NOW }).byId.get("slow")!, onClose: () => {},
+    onStartOver: () => {}, onRetryLanding: () => {},
+  }));
+  assert.match(failedHtml, /The sandbox holding this branch could not be started\./);
+  assertNoDashes(failedHtml, "the landing failure");
 });
 
 test("disabled worker controls explain the limit on hover", () => {
@@ -1396,4 +1532,208 @@ test("the brief opens with the goal and a button that folds it, and nothing of t
   // This swarm has a plan and a planner that stopped, so what it waits
   // on is approval of the saved plan; that sentence is on the page.
   assert.ok(folded.includes("Review the diagram, then approve the plan to start ready workers."), "what the swarm waits on a person for is never folded away");
+});
+
+/* ---------------------------------------------------------------- *
+ * The drawer, the header and the merge queue offer what the routes
+ * accept, and say what each node is actually waiting on.
+ * ---------------------------------------------------------------- */
+
+/** A node shaped like the "slow" leaf, with whatever a test needs on it. */
+function node(id: string, extra: Partial<SwarmTask> = {}): SwarmTask {
+  const slow = tasks().find((row) => row.id === "slow")!;
+  return { ...slow, id, title: id, assignedRunId: null, attention: "none", flags: {}, startedAt: null, ...extra };
+}
+
+function drawerHtml(task: SwarmTask, all: SwarmTask[] = [task], extra: Record<string, unknown> = {}) {
+  const model = buildSwarmModel(all, { now: NOW, runningTaskIds: new Set() });
+  return renderToStaticMarkup(createElement(SwarmNodeDrawer, {
+    task, node: model.byId.get(task.id)!, onClose: () => {},
+    onStartOver: () => {}, onRetry: () => {}, onRetryLanding: () => {}, onFixForward: () => {},
+    onMarkDone: () => {}, onCancel: () => {}, onSplit: () => {}, onAddTask: () => {}, onEdit: () => {},
+    ...extra,
+  }));
+}
+
+test("the drawer offers a merge queue retry only where the route would take it", () => {
+  // The production shape: a landing error on the row, and a route that
+  // answered "This task has no failed merge queue entry to retry."
+  const refused = node("t", { status: "failed", flags: { landingError: "gone" }, canRetryLanding: false });
+  assert.doesNotMatch(drawerHtml(refused), /Retry merge queue/);
+  const taken = { ...refused, canRetryLanding: true };
+  assert.match(drawerHtml(taken), /Retry merge queue/);
+  // A conflict the resolver gave up on carries no landing error, and the
+  // route still takes it.
+  const conflict = node("c", { status: "failed", attention: "conflict", flags: { conflict: "CONFLICT in a.ts" }, canRetryLanding: true });
+  assert.match(drawerHtml(conflict), /Retry merge queue/);
+});
+
+test("a reported leaf waits for the planner's review rather than reading as pending", () => {
+  const reported = node("r", { status: "working", report: "Implemented it." });
+  const html = drawerHtml(reported);
+  assert.match(html, /waiting for review/);
+  assert.match(html, /Waiting for the planner to review the report\./);
+  assert.doesNotMatch(html, /pending/);
+  assert.doesNotMatch(html, /Waiting for an agent to start/);
+  // With its agent still in the sandbox it is working, whatever it reported.
+  const model = buildSwarmModel([reported], { now: NOW, runningTaskIds: new Set(["r"]) });
+  const live = renderToStaticMarkup(createElement(SwarmNodeDrawer, { task: reported, node: model.byId.get("r")!, onClose: () => {} }));
+  assert.doesNotMatch(live, /waiting for review/);
+});
+
+test("a failed leaf is never waiting to land, and a conflict the resolver gave up on says it already tried", () => {
+  const model = buildSwarmModel([node("f", { status: "failed", flags: { accepted: true } })], { now: NOW });
+  assert.equal(model.byId.get("f")!.landing, null, "an acceptance left from an earlier attempt is not this failure's");
+
+  const conflict = node("c", { status: "failed", attention: "conflict", flags: { conflict: "CONFLICT in a.ts" } });
+  const html = drawerHtml(conflict);
+  assert.doesNotMatch(html, /waiting to land/);
+  assert.match(html, /could not resolve it/);
+  assert.doesNotMatch(html, /An agent will try to resolve the conflict/);
+  assertNoDashes(html, "a conflict failure");
+});
+
+test("a task sent back after the swarm's checks failed does not blame its worker", () => {
+  const sentBack = node("s", {
+    status: "assigned", attention: "failed",
+    flags: { rejection: "Your branch was accepted and landed onto the swarm's branch, and the swarm's branch then failed its checks.\n\nnpm test failed" },
+  });
+  assert.equal(checksFailedAfterLanding(sentBack), true);
+  const html = drawerHtml(sentBack);
+  assert.match(html, /the swarm&#x27;s checks then failed/);
+  assert.match(html, /A new attempt starts automatically/);
+  assert.doesNotMatch(html, /The worker failed/);
+});
+
+test("a failed plan node with nothing under it says its planner wrote no tasks", () => {
+  const plan = node("p", { nodeType: "plan", status: "failed", attention: "failed" });
+  const html = drawerHtml(plan);
+  assert.match(html, /stopped without writing any tasks/);
+  assert.doesNotMatch(html, /A task below this plan failed/);
+  assert.match(html, /class="btn btn-primary"[^>]*>Add task</, "adding a task is what the server allows on it");
+  const withChild = drawerHtml(plan, [plan, node("child", { parentId: "p", status: "failed" })]);
+  assert.match(withChild, /A task below this plan failed/);
+});
+
+test("an assigned leaf that will not start says why, when the console can tell", () => {
+  const swarm = { status: "running" as SwarmStatus, settings: { workerProfileId: "agent-worker" } as SwarmDetail["swarm"]["settings"] };
+  const first = node("first", { status: "working", title: "Build the API" });
+  const second = node("second", { status: "assigned", parentId: "first", parentRelation: "depends_on" });
+  assert.match(leafStartBlocker(second, [first, second], swarm)!, /Waiting for "Build the API" to finish first\. It is in progress\./);
+  const ready = node("ready", { status: "assigned" });
+  assert.equal(leafStartBlocker(ready, [ready], swarm), null);
+  assert.match(leafStartBlocker(ready, [ready], { ...swarm, status: "paused" })!, /The swarm is paused/);
+  assert.match(leafStartBlocker(ready, [ready], { ...swarm, settings: { ...swarm.settings, workerProfileId: null } })!, /no worker agent/);
+  assert.equal(leafStartBlocker({ ...ready, agentProfileId: "agent-x" }, [ready], { ...swarm, settings: { ...swarm.settings, workerProfileId: null } }), null,
+    "a leaf with an agent of its own does not need the swarm's");
+
+  const html = drawerHtml(second, [first, second], { startBlocker: leafStartBlocker(second, [first, second], swarm) });
+  assert.match(html, /Waiting for &quot;Build the API&quot; to finish first/);
+  assertNoDashes(html, "a blocked leaf");
+});
+
+test("split is offered only where the route would split", () => {
+  for (const status of ["working", "landed", "done"] as const) {
+    assert.doesNotMatch(drawerHtml(node("x", { status })), /Split task/, status);
+  }
+  assert.match(drawerHtml(node("x", { status: "failed" })), /Split task/);
+  const parent = node("parent", { status: "failed" });
+  assert.doesNotMatch(drawerHtml(parent, [parent, node("dep", { parentId: "parent", parentRelation: "depends_on" })]), /Split task/,
+    "a leaf with dependent work under it is not split");
+});
+
+test("the drawer hides what a finished swarm's routes refuse, and says why once", () => {
+  const failed = node("f", { status: "failed" });
+  const done = drawerHtml(failed, [failed], { swarmStatus: "done" });
+  assert.doesNotMatch(done, />Retry task<|Retry worker|Retry in the same sandbox|Cancel task|Split task|Add dependent task|Fix forward/);
+  assert.match(done, />Mark done</, "the done route still takes it");
+  assert.match(done, /This swarm is done\. Add a follow up to change its work\./);
+
+  const stopped = drawerHtml(failed, [failed], { swarmStatus: "stopped" });
+  assert.doesNotMatch(stopped, />Retry task<|Mark done|Cancel task|Split task/);
+  assert.match(stopped, /This swarm was stopped/);
+
+  // A failed swarm is the one a person unsticks: retry, cancel and split
+  // are taken there, and only adding work waits for a follow up.
+  const failing = drawerHtml(failed, [failed], { swarmStatus: "failed" });
+  assert.match(failing, />Retry task</);
+  assert.match(failing, /Cancel task/);
+  assert.match(failing, /Split task/);
+  assert.doesNotMatch(failing, /Add dependent task/);
+  assert.equal(taskActionRefusal("failed", "cancel"), null);
+  assert.equal(taskActionRefusal("failed", "split"), null);
+  assert.match(taskActionRefusal("failed", "add")!, /follow up/);
+  assert.equal(taskActionRefusal("done", "markDone"), null);
+  assert.equal(taskActionRefusal("running", "retry"), null);
+  assertNoDashes(done + stopped + failing, "the drawer on a finished swarm");
+});
+
+test("marking an accepted leaf done says its branch will not be landed", () => {
+  assert.match(markDoneConfirmText(true), /will not be: marking it done takes it out of the merge queue/);
+  assert.doesNotMatch(markDoneConfirmText(false), /merge queue/);
+  const accepted = drawerHtml(node("a", { status: "working", report: "done", flags: { accepted: true } }));
+  assert.match(accepted, /Its branch is not landed\./);
+  assert.doesNotMatch(drawerHtml(node("b", { status: "failed" })), /Its branch is not landed/);
+  assertNoDashes(markDoneConfirmText(true), "the mark done confirmation");
+});
+
+test("a swarm stopped by a ceiling offers raising it, not Approve plan or Resume", () => {
+  for (const [status, label] of [["budget_exhausted", "Raise budget"], ["timed_out", "Raise time limit"]] as const) {
+    const html = pageHtml("multi", status);
+    assert.match(html, new RegExp(`class="btn btn-primary swarm-main-action"[^>]*>${label}</button>`), status);
+    assert.doesNotMatch(html, />Approve plan<|>Resume work</, status);
+    assert.match(html, />Add follow up<\/button>/, status);
+    assert.match(html, />Archive<\/button>/, status);
+    assertNoDashes(html, status);
+  }
+});
+
+test("a waiting swarm says so and can be paused, and an idle running swarm says what it waits on", () => {
+  const waiting = pageHtml("multi", "waiting", { approveAllLeaves: true });
+  assert.match(waiting, /This swarm is waiting for you/);
+  assert.match(waiting, />Pause work<\/button>/);
+
+  const idleTasks = [
+    node("rev", { status: "working", report: "Implemented it." }),
+    node("bad", { status: "failed" }),
+    node("first", { status: "working", report: null, assignedRunId: null }),
+    node("held", { status: "assigned", parentId: "first", parentRelation: "depends_on" }),
+  ];
+  const idle = pageHtml("multi", "running", { extra: () => ({ tasks: idleTasks, landings: [], activeRunCount: 0 }) });
+  assert.match(idle, /No agent is running right now: 1 report is waiting for the planner to review it; 1 failed task can be retried from its drawer; 1 task is waiting for a task it depends on\./);
+  assertNoDashes(idle, "the idle header");
+
+  const busy = pageHtml("multi", "running", { extra: () => ({ tasks: idleTasks, landings: [], activeRunCount: 1 }) });
+  assert.doesNotMatch(busy, /No agent is running/);
+  const swarm = { ...seedSwarms("p1", NOW)[0]!.swarm, status: "running" as SwarmStatus };
+  assert.equal(idleWords({ swarm, tasks: idleTasks, activeRunCount: 0, landings: [landing({ status: "landing" })] }), null,
+    "a branch landing is the swarm at work");
+});
+
+test("a failed merge queue row offers its own retry where the route would take it", () => {
+  const all = [node("t-1", { status: "failed", flags: { landingError: "x" }, canRetryLanding: true }), node("t-2", { status: "failed", canRetryLanding: false })];
+  const rows = [
+    landing({ id: "a", taskId: "t-1", status: "failed", endedAt: "2026-01-01T10:00:00.000Z" }),
+    landing({ id: "b", taskId: "t-2", status: "failed", endedAt: "2026-01-01T09:00:00.000Z" }),
+  ];
+  const html = renderToStaticMarkup(createElement(MergeQueue, { landings: rows, tasks: all, onRetryLanding: () => {} }));
+  assert.equal(html.match(/>Retry merge queue</g)?.length, 1, "only the row the route would take");
+  const closed = renderToStaticMarkup(createElement(MergeQueue, { landings: rows, tasks: all, onRetryLanding: () => {}, swarmStatus: "done" }));
+  assert.doesNotMatch(closed, /Retry merge queue/, "a done swarm's queue is closed");
+});
+
+test("a withdrawn row says why, and a queued row waiting out a backoff says how long", () => {
+  const html = renderToStaticMarkup(createElement(MergeQueue, {
+    now: NOW,
+    tasks: tasks(),
+    landings: [
+      landing({ id: "w", status: "cancelled", endedAt: "2026-01-01T10:00:00.000Z" }),
+      landing({ id: "q", status: "queued", notBefore: new Date(NOW + 4.5 * 60_000).toISOString() }),
+    ],
+  }));
+  assert.match(html, /Withdrawn\. This branch left the queue when its task was retried, marked done or cancelled, or the swarm was stopped\./);
+  assert.match(html, /The next one is in about 5 minutes\./);
+  assert.equal(backoffMinutes(new Date(NOW - 1000).toISOString(), NOW), null, "a backoff that has passed is no wait");
+  assert.equal(backoffMinutes(null, NOW), null);
+  assertNoDashes(html, "the merge queue notes");
 });

@@ -22,6 +22,7 @@ import {
 import { WorktreeManager, type SandboxDriver } from "@bento/sandbox";
 import { singleDriver } from "../sandbox-driver.js";
 import type { AppContext } from "../../context.js";
+import { FakeJobQueue } from "../../jobs/index.js";
 import { EventBus, type BoardEvent } from "../../events.js";
 import { loadEnv } from "../../env.js";
 import type { NewRun } from "../start-run.js";
@@ -171,13 +172,7 @@ before(async () => {
     userId: "u1",
     worktrees: new WorktreeManager(dataDir),
     drivers: singleDriver({ provider: "docker", workspace: "host" } as unknown as SandboxDriver),
-    boss: {
-      send: async () => "job",
-      work: async () => "worker",
-      offWork: async () => {},
-      notifyWorker: () => {},
-    },
-    runWorkers: [],
+    jobs: new FakeJobQueue(),
   } as unknown as AppContext;
   bus.onBoardEvent(PROJECT, (event) => emitted.push(event));
 });

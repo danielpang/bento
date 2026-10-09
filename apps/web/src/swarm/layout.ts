@@ -83,6 +83,13 @@ export interface SwarmNode {
    * and neither is a run that is still queued or starting.
    */
   agentActive: boolean;
+  /**
+   * Where a finished leaf's work is: reported and waiting for the
+   * planner's review, accepted and waiting to land, or failed to land.
+   * Null for anything else. Without it a leaf whose agent had finished
+   * read as "pending", as if its agent had not started.
+   */
+  landing: NodeLanding;
   /** Derived, not copied: see `attentionFor`. */
   attention: TaskAttention;
   weight: number;
@@ -284,6 +291,7 @@ export function buildSwarmModel(tasks: SwarmTask[], options: ModelOptions = {}):
       nodeType: task.nodeType,
       status: task.status,
       agentActive,
+      landing: nodeLanding(task),
       attention: attentionFor(task, now, longRunMs, live ? { active: agentActive, startedAt: agentStartedAt } : undefined),
       weight: Number.isFinite(task.weight) && task.weight > 0 ? task.weight : 1,
       ownCost: task.cost,
@@ -564,6 +572,32 @@ function round(n: number): number {
   return Math.round(n * 100) / 100;
 }
 
+export type NodeLanding = "waiting" | "failed" | "review" | null;
+
+/**
+ * Where a leaf's finished work is, when its row's status does not say.
+ *
+ * "failed" when its landing failed, "waiting" once the planner
+ * accepted it and its branch is in the merge queue, and "review" when
+ * its worker reported and the planner has not accepted it yet. A
+ * failed leaf is never "waiting": an acceptance left on a leaf whose
+ * next attempt failed is about the attempt before, and read as waiting
+ * to land it hid the failure.
+ */
+export function nodeLanding(task: {
+  nodeType: NodeType;
+  status: TaskStatus;
+  report?: string | null;
+  flags?: Record<string, unknown> | null;
+}): NodeLanding {
+  if (task.nodeType !== "leaf" || (task.status !== "working" && task.status !== "landed" && task.status !== "failed")) return null;
+  if (typeof task.flags?.landingError === "string") return "failed";
+  if (task.status === "failed") return null;
+  if (task.status === "landed" || task.flags?.accepted === true) return "waiting";
+  if (typeof task.report === "string" && task.report.trim() !== "") return "review";
+  return null;
+}
+
 /** One row of the outline: the same node, read as a list rather than a tree. */
 export interface OutlineRow {
   id: string;
@@ -573,6 +607,7 @@ export interface OutlineRow {
   nodeType: NodeType;
   status: TaskStatus;
   agentActive: boolean;
+  landing: NodeLanding;
   attention: TaskAttention;
   completion: number;
   cost: SwarmSpend;
@@ -605,6 +640,7 @@ export function outlineRows(model: SwarmModel): OutlineRow[] {
     nodeType: node.nodeType,
     status: node.status,
     agentActive: node.agentActive,
+    landing: node.landing,
     attention: node.attention,
     completion: node.completion,
     cost: node.cost,

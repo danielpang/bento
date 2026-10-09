@@ -49,6 +49,26 @@ export type ProvisionPhase = "acquire" | "install" | "checkout" | "cleanup";
 export type ProvisionBlame = "provider" | "project";
 
 /**
+ * A machine that cannot be started again because nothing of its
+ * workspace survives: it is not running, and neither an exit snapshot
+ * nor the stored image is there to boot it from.
+ *
+ * Its own class because the caller does something different with it
+ * than with a provider that blinked: the row that says the machine is
+ * there is wrong for good, and the branches it held have to come from
+ * somewhere else. A lookup that failed is never this.
+ */
+export class SandboxImageLost extends Error {
+  readonly externalId: string;
+
+  constructor(externalId: string) {
+    super(`sandbox ${externalId} is not running and no snapshot of its workspace survives`);
+    this.name = "SandboxImageLost";
+    this.externalId = externalId;
+  }
+}
+
+/**
  * A provision failure that says which phase it died in and whose
  * fault it is, for the caller deciding whether another provider is
  * worth asking. The message is the cause's, and the cause's stdout
@@ -381,6 +401,20 @@ export interface SandboxDriver {
    */
   snapshot?(handle: SandboxHandle, label: string): Promise<string>;
   restore?(handle: SandboxHandle, snapshotId: string): Promise<void>;
+  /**
+   * Boots a hibernated machine again from its hibernation image, so a
+   * caller that is not a run (the merge queue, a worker reading the
+   * swarm's branch) can exec in it. `booted` is false when one was
+   * already running. `imageRef` is the image it was booted from when
+   * that is not the one on the handle, for the row to record. Throws
+   * when no image of the workspace survives, because a fresh machine
+   * has none of the branches the caller came for. Absent on drivers
+   * whose machines wake on their own.
+   */
+  wake?(
+    handle: SandboxHandle,
+    options?: { organizationId?: string | null },
+  ): Promise<{ booted: boolean; imageRef?: string }>;
   /**
    * Exports committed work without putting a remote credential inside
    * the sandbox. Drivers whose repositories live on the host do not

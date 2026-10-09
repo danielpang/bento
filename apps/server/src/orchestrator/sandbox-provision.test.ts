@@ -13,7 +13,7 @@ import { loadEnv } from "../env.js";
 import { SecretBox } from "../secrets.js";
 import { recordingAnalytics } from "../test-analytics.js";
 import { singleDriver } from "./sandbox-driver.js";
-import { SANDBOX_PROVISIONED_EVENT } from "./sandbox-metrics.js";
+import { SANDBOX_PROVISIONED_EVENT, SANDBOX_PROVISION_FAILED_EVENT } from "./sandbox-metrics.js";
 import {
   SANDBOX_UNAVAILABLE_MESSAGE,
   SandboxProvisionError,
@@ -118,6 +118,11 @@ function provisionEvents() {
   return analytics.events.filter((e) => e.event === SANDBOX_PROVISIONED_EVENT);
 }
 
+/** The run a helper provision is for, as the executor would name it. */
+function runFor(featureId: string) {
+  return { id: `run-${featureId}`, role: "stage", type: "pipeline" as const };
+}
+
 async function provisionOn(
   featureId: string,
   driver: SandboxDriver,
@@ -138,6 +143,7 @@ async function provisionOn(
     authMounts: [],
     restrictNetwork,
     owner: { featureId },
+    run: runFor(featureId),
     say: async (text) => {
       said.push(text);
     },
@@ -172,6 +178,9 @@ test("auto lands on the sprite when Fly answers, and says so in the metric", asy
     fell_back: false,
     attempts: 1,
     project_id: projectId,
+    run_id: `run-${featureId}`,
+    role: "stage",
+    run_type: "pipeline",
     feature_id: featureId,
   });
 });
@@ -211,6 +220,9 @@ test("auto falls back to Modal when the sprite cannot be provisioned", async () 
     fell_back: true,
     attempts: 2,
     project_id: projectId,
+    run_id: `run-${featureId}`,
+    role: "stage",
+    run_type: "pipeline",
     feature_id: featureId,
   });
   const fallbackErrors = analytics.exceptions.slice(exceptionsBefore);
@@ -322,6 +334,7 @@ test("a card whose machine predates the lock keeps its open network, and says so
     authMounts: [],
     restrictNetwork: true,
     owner: { featureId },
+    run: null,
     say: async (text) => {
       said.push(text);
     },
@@ -416,6 +429,7 @@ test("a clone URL the server cannot reach fails the run before any provider is a
       authMounts: [],
       restrictNetwork: false,
       owner: { featureId },
+      run: null,
       say: async (text) => {
         said.push(text);
       },
@@ -424,6 +438,15 @@ test("a clone URL the server cannot reach fails the run before any provider is a
   );
   assert.deepEqual(asked, [], "no machine is made for a repository nobody can reach");
   assert.deepEqual(said, []);
+  const finals = analytics.events.filter(
+    (e) => e.event === SANDBOX_PROVISION_FAILED_EVENT && e.properties?.feature_id === featureId,
+  );
+  assert.equal(finals.length, 1, "it still counts as a provision that got no machine");
+  assert.equal(finals[0]?.properties?.kind, "final");
+  assert.equal(finals[0]?.properties?.phase, "preflight");
+  assert.equal(finals[0]?.properties?.blame, "project");
+  assert.equal(finals[0]?.properties?.attempts, 0);
+  assert.equal(finals[0]?.properties?.provider, "sprite", "named by the provider it would have asked first");
 });
 
 test("a clone URL the server can reach passes the check and the drivers are asked", async () => {
@@ -447,6 +470,7 @@ test("a clone URL the server can reach passes the check and the drivers are aske
     authMounts: [],
     restrictNetwork: false,
     owner: { featureId },
+    run: null,
     say: async () => {},
   });
   assert.equal(result.driver, sprite);
@@ -462,6 +486,13 @@ test("a locked network with no driver that honors it refuses before asking any",
 
   await assert.rejects(provisionOn(featureId, sprite, [other], said, true), /without network access/);
   assert.deepEqual(asked, []);
+  const finals = analytics.events.filter(
+    (e) => e.event === SANDBOX_PROVISION_FAILED_EVENT && e.properties?.feature_id === featureId,
+  );
+  assert.equal(finals.length, 1);
+  assert.equal(finals[0]?.properties?.phase, "preflight");
+  assert.equal(finals[0]?.properties?.blame, "policy");
+  assert.equal(finals[0]?.properties?.attempts, 0);
 });
 
 test("a sprite that failed is destroyed by name when the loop moves on to Modal, whatever the failure", async () => {
@@ -538,6 +569,7 @@ test("a transcript that cannot be written does not stop the fallback", async () 
     authMounts: [],
     restrictNetwork: false,
     owner: { featureId },
+    run: null,
     say: async () => {
       throw new Error("messages insert failed");
     },
@@ -560,4 +592,251 @@ test("a fallback of another workspace shape is not tried", async () => {
     return true;
   });
   assert.deepEqual(asked, ["sprite"]);
+});
+
+function failedEvents() {
+  return analytics.events.filter((e) => e.event === SANDBOX_PROVISION_FAILED_EVENT);
+}
+
+/** Every property value of an event, as one string a secret could hide in. */
+function propertyText(event: { properties?: Record<string, unknown> | undefined }): string {
+  return JSON.stringify(event.properties ?? {});
+}
+
+test("a sprite that auto moved on from is one failed attempt, marked as a fallback, and no final", async () => {
+  const featureId = await seedFeature("Failed event, fallback");
+  const asked: string[] = [];
+  const said: string[] = [];
+  // A message with a URL and a token in it, the way a control plane
+  // error can carry one. Neither may reach the analytics event.
+  const leaky = new ProvisionFailure(
+    "sprite",
+    "acquire",
+    "provider",
+    new Error('Failed to create sprite (status 429) at https://api.sprites.dev/v1?token=sk-secret-123: {"error":"concurrent_sprite_limit_exceeded"}'),
+  );
+  const sprite = stubDriver("sprite", asked, { fail: leaky });
+  const modal = stubDriver("modal", asked, { restricted: true });
+  const before = failedEvents().length;
+
+  const result = await provisionOn(featureId, sprite, [modal], said);
+  assert.equal(result.driver, modal);
+
+  const events = failedEvents().slice(before);
+  assert.equal(events.length, 1);
+  assert.equal(events[0]?.userId, ctx.userId);
+  assert.deepEqual(events[0]?.properties, {
+    kind: "attempt",
+    provider: "sprite",
+    selection: "auto",
+    phase: "acquire",
+    blame: "provider",
+    error_kind: "capacity",
+    error_name: "Error",
+    attempts: 1,
+    fell_back: true,
+    next_provider: "modal",
+    project_id: projectId,
+    run_id: `run-${featureId}`,
+    role: "stage",
+    run_type: "pipeline",
+    feature_id: featureId,
+  });
+  assert.doesNotMatch(propertyText(events[0]!), /sk-secret|https?:|sprites\.dev/);
+  // The transcript still names no provider.
+  assert.deepEqual(said, ["Failed to provision sandbox, retrying."]);
+});
+
+test("when every provider fails, each attempt is an event and the end is one final event", async () => {
+  const featureId = await seedFeature("Failed event, all down");
+  const asked: string[] = [];
+  const said: string[] = [];
+  const sprite = stubDriver("sprite", asked, { fail: new Error("sprite failed with token ghp_abcdef") });
+  const modal = stubDriver("modal", asked, {
+    fail: new ProvisionFailure("modal", "create", "provider", new TypeError("modal failed at https://modal.example")),
+    restricted: true,
+  });
+  const before = failedEvents().length;
+
+  await assert.rejects(provisionOn(featureId, sprite, [modal], said), SandboxProvisionError);
+
+  const events = failedEvents().slice(before);
+  assert.deepEqual(
+    events.map((e) => [e.properties?.kind, e.properties?.provider, e.properties?.attempts, e.properties?.fell_back]),
+    [
+      ["attempt", "sprite", 1, true],
+      ["attempt", "modal", 2, false],
+      ["final", "modal", 2, undefined],
+    ],
+  );
+  assert.equal(events[0]?.properties?.next_provider, "modal");
+  assert.equal(events[0]?.properties?.phase, undefined, "an untagged failure has no phase");
+  assert.equal(events[1]?.properties?.next_provider, undefined);
+  assert.deepEqual(events[2]?.properties, {
+    kind: "final",
+    provider: "modal",
+    selection: "auto",
+    phase: "create",
+    blame: "provider",
+    error_kind: "other",
+    error_name: "TypeError",
+    attempts: 2,
+    project_id: projectId,
+    run_id: `run-${featureId}`,
+    role: "stage",
+    run_type: "pipeline",
+    feature_id: featureId,
+  });
+  for (const event of events) assert.doesNotMatch(propertyText(event), /ghp_|https?:|modal\.example/);
+});
+
+test("a project failure is one attempt and a final, both blamed on the project", async () => {
+  const featureId = await seedFeature("Failed event, project's fault");
+  const asked: string[] = [];
+  const said: string[] = [];
+  const refused = new ProvisionFailure("sprite", "checkout", "project", new Error("exit code 128"));
+  const sprite = stubDriver("sprite", asked, { fail: refused });
+  const modal = stubDriver("modal", asked, { restricted: true });
+  const before = failedEvents().length;
+
+  await assert.rejects(provisionOn(featureId, sprite, [modal], said), SandboxProvisionError);
+
+  const events = failedEvents().slice(before);
+  assert.deepEqual(events.map((e) => e.properties?.kind), ["attempt", "final"]);
+  for (const event of events) {
+    assert.equal(event.properties?.provider, "sprite");
+    assert.equal(event.properties?.phase, "checkout");
+    assert.equal(event.properties?.blame, "project");
+  }
+  assert.equal(events[0]?.properties?.fell_back, false);
+});
+
+test("a swarm run's provision names its run, role and board in the events", async () => {
+  const featureId = await seedFeature("Swarm-shaped run");
+  const asked: string[] = [];
+  const swarmRun = { id: randomUUID(), role: "worker", type: "swarm" as const };
+  const sprite = stubDriver("sprite", asked, { fail: new Error("sprite failed") });
+  const modal = stubDriver("modal", asked, { restricted: true });
+  const provisionedBefore = provisionEvents().length;
+  const failedBefore = failedEvents().length;
+
+  await provisionWorkspace(ctx, {
+    driver: sprite,
+    fallbackDrivers: [modal],
+    selection: "auto",
+    projectId,
+    organizationId: null,
+    workspaceKey: featureId,
+    branch: `bento/${featureId}`,
+    repoRows: [],
+    authMounts: [],
+    restrictNetwork: false,
+    owner: { featureId },
+    run: swarmRun,
+    say: async () => {},
+  });
+
+  const provisioned = provisionEvents().slice(provisionedBefore);
+  assert.equal(provisioned[0]?.properties?.run_id, swarmRun.id);
+  assert.equal(provisioned[0]?.properties?.role, "worker");
+  assert.equal(provisioned[0]?.properties?.run_type, "swarm");
+  assert.equal(provisioned[0]?.properties?.provider, "modal");
+  const failed = failedEvents().slice(failedBefore);
+  assert.equal(failed[0]?.properties?.run_id, swarmRun.id);
+  assert.equal(failed[0]?.properties?.run_type, "swarm");
+});
+
+test("a provision no run asked for leaves the run properties out", async () => {
+  const featureId = await seedFeature("No run");
+  const asked: string[] = [];
+  const sprite = stubDriver("sprite", asked);
+  const before = provisionEvents().length;
+
+  await provisionWorkspace(ctx, {
+    driver: sprite,
+    fallbackDrivers: [],
+    selection: "project",
+    projectId,
+    organizationId: null,
+    workspaceKey: featureId,
+    branch: `bento/${featureId}`,
+    repoRows: [],
+    authMounts: [],
+    restrictNetwork: false,
+    owner: { featureId },
+    run: null,
+    say: async () => {},
+  });
+
+  const [event] = provisionEvents().slice(before);
+  assert.ok(event);
+  assert.equal("run_id" in (event.properties ?? {}), false);
+  assert.equal("role" in (event.properties ?? {}), false);
+  assert.equal("run_type" in (event.properties ?? {}), false);
+});
+
+test("a provision refused for two repositories on one checkout is a preflight final, blamed on the project", async () => {
+  const featureId = await seedFeature("Two repos, one checkout");
+  const asked: string[] = [];
+  const rows = await ctx.db
+    .insert(repositories)
+    .values([
+      { projectId, name: "twin-a", localPath: "/same/checkout", defaultBranch: "main", position: 10 },
+      { projectId, name: "twin-b", localPath: "/same/checkout", defaultBranch: "main", position: 11 },
+    ])
+    .returning();
+  await assert.rejects(
+    provisionWorkspace(ctx, {
+      driver: stubDriver("sprite", asked),
+      selection: "auto",
+      projectId,
+      organizationId: null,
+      workspaceKey: featureId,
+      branch: `bento/${featureId}`,
+      repoRows: rows,
+      authMounts: [],
+      restrictNetwork: false,
+      owner: { featureId },
+      run: runFor(featureId),
+      say: async () => {},
+    }),
+    /use the same checkout/,
+  );
+  assert.deepEqual(asked, []);
+  const finals = failedEvents().filter((e) => e.properties?.feature_id === featureId);
+  assert.equal(finals.length, 1);
+  assert.equal(finals[0]?.properties?.kind, "final");
+  assert.equal(finals[0]?.properties?.phase, "preflight");
+  assert.equal(finals[0]?.properties?.blame, "project");
+  assert.equal(finals[0]?.properties?.run_id, runFor(featureId).id, "named by its run");
+});
+
+test("a locked team's preflight refusal names the lockable provider it would have asked, not the sprite", async () => {
+  const featureId = await seedFeature("Locked and unreachable");
+  const asked: string[] = [];
+  const [row] = await ctx.db
+    .insert(repositories)
+    .values({ projectId, name: "locked-ghost", localPath: "/nowhere/locked", repoUrl: "file:///nonexistent/locked.git", defaultBranch: "main", position: 12 })
+    .returning();
+  await assert.rejects(
+    provisionWorkspace(ctx, {
+      driver: stubDriver("sprite", asked),
+      fallbackDrivers: [stubDriver("modal", asked, { restricted: true })],
+      selection: "auto",
+      projectId,
+      organizationId: null,
+      workspaceKey: featureId,
+      branch: `bento/${featureId}`,
+      repoRows: [row!],
+      authMounts: [],
+      restrictNetwork: true,
+      owner: { featureId },
+      run: runFor(featureId),
+      say: async () => {},
+    }),
+    /cannot be reached/,
+  );
+  const finals = failedEvents().filter((e) => e.properties?.feature_id === featureId);
+  assert.equal(finals.length, 1);
+  assert.equal(finals[0]?.properties?.provider, "modal");
 });

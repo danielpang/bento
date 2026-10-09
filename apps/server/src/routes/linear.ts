@@ -442,7 +442,7 @@ export function linearRoutes(ctx: AppContext) {
     if (!access.ok) return c.json({ error: "not found" }, 404);
     const connection = await linearConnectionRow(ctx, access.organizationId);
     if (!connection) return c.json({ error: "connect Linear first" }, 409);
-    await ctx.boss.send("linear.backlog-sync", { organizationId: access.organizationId });
+    await ctx.jobs.send("linear.backlog-sync", { organizationId: access.organizationId });
     return c.json({ ok: true });
   });
 

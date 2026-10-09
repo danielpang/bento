@@ -23,6 +23,7 @@ import path from "node:path";
 import PgBoss from "pg-boss";
 import pg from "pg";
 import { createApp } from "./app.js";
+import { PgBossQueue } from "./jobs/index.js";
 import { DiskArtifactStore } from "./artifact-store.js";
 import { SecretBox } from "./secrets.js";
 import { createAuth } from "./auth.js";
@@ -76,7 +77,7 @@ before(async () => {
     env,
     db,
     pool,
-    boss,
+    jobs: new PgBossQueue(boss),
     bus: new EventBus(),
     drivers: singleDriver(new LocalProcessDriver()),
     worktrees: new WorktreeManager(dataDir),
@@ -97,7 +98,7 @@ before(async () => {
 });
 
 after(async () => {
-  await ctx.boss.stop({ close: true, timeout: 1000 });
+  await ctx.jobs.stop();
   await ctx.pool.end();
 });
 

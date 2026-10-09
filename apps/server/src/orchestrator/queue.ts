@@ -51,7 +51,7 @@ export const RUN_WORKER_POLL_SECONDS = 30;
  * database is about to be busy anyway. A context without workers (a
  * viewer's machine, a test that never registered jobs) just queues.
  */
-export async function enqueueRun(ctx: Pick<AppContext, "boss" | "runWorkers">, runId: string): Promise<void> {
-  await ctx.boss.send("run.execute", { runId });
-  for (const id of ctx.runWorkers ?? []) ctx.boss.notifyWorker(id);
+export async function enqueueRun(ctx: Pick<AppContext, "jobs">, runId: string): Promise<void> {
+  await ctx.jobs.send("run.execute", { runId });
+  ctx.jobs.wake("run.execute");
 }

@@ -462,7 +462,7 @@ export async function queueLinearIssueCreate(
       .where(eq(projects.id, feature.projectId))
       .limit(1);
     if (!project?.linearCreateIssues) return;
-    await ctx.boss.send("linear.create-issue", { featureId: feature.id });
+    await ctx.jobs.send("linear.create-issue", { featureId: feature.id });
   } catch (err) {
     // Filing the issue must never cost someone the card they just made.
     console.error(`linear.create-issue enqueue for ${feature.id} failed:`, err);
@@ -481,7 +481,7 @@ export async function queueLinearOutbound(
       .where(eq(linearIssueLinks.featureId, event.featureId))
       .limit(1);
     if (!link || link.pending) return;
-    await ctx.boss.send("linear.outbound", {
+    await ctx.jobs.send("linear.outbound", {
       featureId: event.featureId,
       toStatus: event.toStatus ?? null,
       toStageId: event.toStageId ?? null,
@@ -494,68 +494,54 @@ export async function queueLinearOutbound(
 }
 
 export async function registerLinearJobs(ctx: AppContext): Promise<void> {
-  await ctx.boss.createQueue("linear.backlog-sync");
-  await ctx.boss.createQueue("linear.inbound");
-  await ctx.boss.createQueue("linear.outbound");
-  await ctx.boss.createQueue("linear.create-issue");
-
-  await ctx.boss.work<{ organizationId: string | null }>("linear.backlog-sync", async (jobs) => {
-    for (const job of jobs) {
-      try {
-        await syncLinearBacklog(ctx, job.data.organizationId);
-      } catch (err) {
-        console.error("linear.backlog-sync failed:", err);
-        ctx.analytics?.captureException(err, null, null, { queue: "linear.backlog-sync" });
-        throw err;
-      }
+  await ctx.jobs.work<{ organizationId: string | null }>("linear.backlog-sync", {}, async (data) => {
+    try {
+      await syncLinearBacklog(ctx, data.organizationId);
+    } catch (err) {
+      console.error("linear.backlog-sync failed:", err);
+      ctx.analytics?.captureException(err, null, null, { queue: "linear.backlog-sync" });
+      throw err;
     }
   });
 
   // Webhook fallback: deployments Linear cannot reach still converge.
-  await ctx.boss.createQueue("linear.sweep");
-  await ctx.boss.schedule("linear.sweep", "*/15 * * * *");
-  await ctx.boss.work("linear.sweep", captureJobErrors(ctx.analytics, "linear.sweep", async () => {
+  await ctx.jobs.schedule("linear.sweep", "linear.sweep", "*/15 * * * *");
+  await ctx.jobs.work("linear.sweep", {}, captureJobErrors(ctx.analytics, "linear.sweep", async () => {
     for (const organizationId of await linearConnectedOrgs(ctx)) {
-      await ctx.boss.send("linear.backlog-sync", { organizationId });
+      await ctx.jobs.send("linear.backlog-sync", { organizationId });
     }
   }));
 
   // A person just changed an issue in Linear, or a card on the board.
   // Same two second pace as gate.evaluate; the backlog sweep above can
   // wait for the slow default.
-  await ctx.boss.work<Parameters<typeof handleLinearInbound>[1]>("linear.inbound", { pollingIntervalSeconds: INTERACTIVE_POLL_SECONDS }, async (jobs) => {
-    for (const job of jobs) {
-      try {
-        await handleLinearInbound(ctx, job.data);
-      } catch (err) {
-        console.error("linear.inbound failed:", err);
-        ctx.analytics?.captureException(err, null, null, { queue: "linear.inbound" });
-        throw err;
-      }
+  await ctx.jobs.work<Parameters<typeof handleLinearInbound>[1]>("linear.inbound", { pollingIntervalSeconds: INTERACTIVE_POLL_SECONDS }, async (data) => {
+    try {
+      await handleLinearInbound(ctx, data);
+    } catch (err) {
+      console.error("linear.inbound failed:", err);
+      ctx.analytics?.captureException(err, null, null, { queue: "linear.inbound" });
+      throw err;
     }
   });
 
-  await ctx.boss.work<Parameters<typeof handleLinearIssueCreate>[1]>("linear.create-issue", { pollingIntervalSeconds: INTERACTIVE_POLL_SECONDS }, async (jobs) => {
-    for (const job of jobs) {
-      try {
-        await handleLinearIssueCreate(ctx, job.data);
-      } catch (err) {
-        console.error(`linear.create-issue ${job.data.featureId} failed:`, err);
-        ctx.analytics?.captureException(err, null, null, { queue: "linear.create-issue", feature_id: job.data.featureId });
-        throw err;
-      }
+  await ctx.jobs.work<Parameters<typeof handleLinearIssueCreate>[1]>("linear.create-issue", { pollingIntervalSeconds: INTERACTIVE_POLL_SECONDS }, async (data) => {
+    try {
+      await handleLinearIssueCreate(ctx, data);
+    } catch (err) {
+      console.error(`linear.create-issue ${data.featureId} failed:`, err);
+      ctx.analytics?.captureException(err, null, null, { queue: "linear.create-issue", feature_id: data.featureId });
+      throw err;
     }
   });
 
-  await ctx.boss.work<Parameters<typeof handleLinearOutbound>[1]>("linear.outbound", { pollingIntervalSeconds: INTERACTIVE_POLL_SECONDS }, async (jobs) => {
-    for (const job of jobs) {
-      try {
-        await handleLinearOutbound(ctx, job.data);
-      } catch (err) {
-        console.error(`linear.outbound ${job.data.featureId} failed:`, err);
-        ctx.analytics?.captureException(err, null, null, { queue: "linear.outbound", feature_id: job.data.featureId });
-        throw err;
-      }
+  await ctx.jobs.work<Parameters<typeof handleLinearOutbound>[1]>("linear.outbound", { pollingIntervalSeconds: INTERACTIVE_POLL_SECONDS }, async (data) => {
+    try {
+      await handleLinearOutbound(ctx, data);
+    } catch (err) {
+      console.error(`linear.outbound ${data.featureId} failed:`, err);
+      ctx.analytics?.captureException(err, null, null, { queue: "linear.outbound", feature_id: data.featureId });
+      throw err;
     }
   });
 }

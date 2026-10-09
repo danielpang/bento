@@ -25,6 +25,7 @@ import { LocalProcessDriver, WorktreeManager } from "@bento/sandbox";
 import { singleDriver } from "./orchestrator/sandbox-driver.js";
 import type { LinearWebhookIssue } from "@bento/linear";
 import { createApp } from "./app.js";
+import { PgBossQueue } from "./jobs/index.js";
 import { DiskArtifactStore } from "./artifact-store.js";
 import { SecretBox } from "./secrets.js";
 import { ensureLocalUser, type AppContext } from "./context.js";
@@ -88,7 +89,7 @@ before(async () => {
     env,
     db,
     pool,
-    boss,
+    jobs: new PgBossQueue(boss),
     bus: new EventBus(),
     drivers: singleDriver(new LocalProcessDriver()),
     worktrees: new WorktreeManager(dataDir),
@@ -100,9 +101,6 @@ before(async () => {
     userId,
   };
   await registerLinearJobs(ctx);
-  // A stage with no agent asks for a gate evaluation, the way the real
-  // server's queue is ready for.
-  await ctx.boss.createQueue("gate.evaluate");
   app = createApp(ctx);
 
   globalThis.fetch = stubLinear();
@@ -126,7 +124,7 @@ before(async () => {
 
 after(async () => {
   globalThis.fetch = originalFetch;
-  await ctx.boss.stop({ close: true, timeout: 1000 });
+  await ctx.jobs.stop();
   await ctx.pool.end();
 });
 

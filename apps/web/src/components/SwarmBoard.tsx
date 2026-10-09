@@ -12,6 +12,7 @@ import { SwarmPage } from "./SwarmPage.js";
 import { SwarmPageSkeleton } from "./Skeleton.js";
 import { swarmApi, type SwarmAgent } from "../swarm/client.js";
 import { createModelCache } from "../swarm/layout.js";
+import { leafStartBlocker } from "../swarm/waiting.js";
 import type { ModeSurfaces } from "../swarm/plan.js";
 import type {
   NewSwarmInput,
@@ -442,6 +443,8 @@ export function SwarmBoard({
             onRetryPlanner: () => selectedId && act(() => swarmApi.retryPlanner(selectedId)),
             onStop: () => selectedId && act(() => swarmApi.stopSwarm(selectedId)),
             onReleaseBranch: () => selectedId && act(() => swarmApi.releaseSwarmBranch(selectedId)),
+            onRetryLanding: (taskId) => selectedId && act(() => swarmApi.retryLanding(selectedId, taskId), true),
+            onPublish: (mode) => selectedId && act(() => swarmApi.publishSwarm(selectedId, mode)),
             onReopen: () => setReopening(true),
             onDelete: () => selectedId && setDeleting({ id: selectedId, name: detail.swarm.name }),
             onArchive: () => selectedId && act(() => swarmApi.archiveSwarm(selectedId)),
@@ -475,6 +478,8 @@ export function SwarmBoard({
           {...(node?.taskId === task.id ? { detail: node } : {})}
           busy={busy}
           actionError={taskActionError}
+          swarmStatus={detail?.swarm.status}
+          startBlocker={detail ? leafStartBlocker(task, detail.tasks, detail.swarm) : null}
           onClose={() => { setTaskActionError(""); setTaskId(null); }}
           // act reloads the detail, so the rings above the node move
           // as soon as the reconciler has rolled the finish up.
@@ -482,6 +487,7 @@ export function SwarmBoard({
           agents={agents}
           onRetry={(id) => selectedId && act(() => swarmApi.retryTask(selectedId, id), true)}
           onRetryLanding={(id) => selectedId && act(() => swarmApi.retryLanding(selectedId, id), true)}
+          onStartOver={(id) => selectedId && act(() => swarmApi.startTaskOver(selectedId, id), true)}
           onFixForward={(id, reason) => selectedId && act(() => swarmApi.retryTask(selectedId, id, reason), true)}
           onOpenRun={(runId) => {
             setWorkerOutput({ runId, taskTitle: task.title });

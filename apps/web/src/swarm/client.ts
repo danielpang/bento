@@ -113,6 +113,18 @@ export interface SwarmApi {
    * for saying the wrong thing fails again against the same words.
    */
   retryTask(swarmId: string, taskId: string, reason?: string): Promise<void>;
+  /**
+   * Starts a leaf over: its sandbox and branch are discarded, and a new
+   * agent in a new sandbox does the work again from the swarm's branch.
+   * The answer to any failure, a merge queue failure included.
+   */
+  startTaskOver(swarmId: string, taskId: string): Promise<void>;
+  /**
+   * Opens the pull requests of a finished swarm. "combined" is one pull
+   * request of the swarm's branch, every task merged in order; "stacked"
+   * is one per landed task, each against the task before it.
+   */
+  publishSwarm(swarmId: string, mode: "combined" | "stacked"): Promise<void>;
   retryLanding(swarmId: string, taskId: string): Promise<void>;
   cancelTask(swarmId: string, taskId: string): Promise<void>;
   splitTask(swarmId: string, taskId: string, children: { title: string; description?: string }[]): Promise<void>;
@@ -446,11 +458,34 @@ export function fixtureSwarmApi(clock: () => number = () => Date.now()): Fixture
         );
       });
     },
+    publishSwarm(swarmId, mode) {
+      const detail = find(swarmId);
+      if (detail && mode === "combined") {
+        detail.pullRequests = [...detail.pullRequests, {
+          id: `pr-${swarmId}`,
+          repoUrl: "github.com/acme/storefront",
+          number: 4200 + detail.pullRequests.length,
+          url: "https://github.com/acme/storefront/pull/4200",
+          headSha: null,
+        }];
+      }
+      return Promise.resolve();
+    },
+    startTaskOver(swarmId, taskId) {
+      return mutate(swarmId, (detail) => {
+        detail.tasks = detail.tasks.map((task) => {
+          if (task.id !== taskId) return task;
+          const retries = Number((task.flags as { retries?: unknown }).retries ?? 0);
+          return { ...task, status: "assigned", attention: "none", report: null, endedAt: null,
+            flags: { ...task.flags, landingError: undefined, retries: retries + 1 } };
+        });
+      });
+    },
     retryLanding(swarmId, taskId) {
       return mutate(swarmId, (detail) => {
         detail.swarm.status = "running";
         detail.tasks = detail.tasks.map((task) => task.id === taskId
-          ? { ...task, status: "landed", attention: "none", flags: { ...task.flags, landingError: undefined } }
+          ? { ...task, status: "landed", attention: "none", canRetryLanding: false, flags: { ...task.flags, landingError: undefined } }
           : task);
         detail.landings = detail.landings.map((landing) => landing.taskId === taskId && landing.status === "failed"
           ? { ...landing, status: "queued", error: null }
@@ -603,6 +638,8 @@ export interface WireSwarm {
   archivedAt: string | null;
   lastOpenedAt: string | null;
   createdAt: string;
+  /** When the row last changed: what a failed swarm's machine grace is counted from. */
+  updatedAt?: string | null;
 }
 
 export interface WireSwarmRow extends WireSwarm {
@@ -633,6 +670,8 @@ export interface WireTask {
   followUpInstruction?: string | null;
   startedAt: string | null;
   endedAt: string | null;
+  /** The landing retry route's own answer for this task. Absent from an older server. */
+  canRetryLanding?: boolean;
 }
 
 /** One row of the merge queue, as the detail sends it. */
@@ -644,7 +683,9 @@ export interface WireLanding {
   status: "queued" | "landing" | "landed" | "conflicted" | "failed" | "cancelled";
   attempt: number;
   error: string | null;
+  errorCode?: string | null;
   resolverRunId: string | null;
+  notBefore?: string | null;
   startedAt: string | null;
   endedAt: string | null;
 }
@@ -709,7 +750,15 @@ export interface WireNode {
     runId: string | null;
     detail: Record<string, unknown> | null;
   }[];
-  runs?: { id: string; status: string; queuedAt: string; startedAt: string | null; endedAt: string | null; error: string | null }[];
+  runs?: {
+    id: string;
+    status: string;
+    queuedAt: string;
+    startedAt: string | null;
+    endedAt: string | null;
+    error: string | null;
+    sandboxProvider?: string | null;
+  }[];
 }
 
 /** One pull request a finished swarm opened, as the detail sends it. */
@@ -742,12 +791,23 @@ const number = (value: string | null | undefined): number =>
  *
  * Two rows differ. A swarm the server calls blocked is one waiting for
  * a person, which is what "waiting" means here; a cancelled one is
- * stopped. A swarm paused because it ran out of budget says so, which
- * is a different sentence and a different button from a swarm somebody
- * paused by hand.
+ * stopped.
+ *
+ * The two ceilings are their own words. They used to fall through to
+ * "planning", so a swarm out of money offered "Approve plan", whose
+ * start put it back to running until the next tick ended it again.
+ * Raising the ceiling is what moves one, and the header says so.
+ *
+ * A row paused for its budget is an older server's way of saying the
+ * same thing, and nothing writes it now. It stays "paused", because
+ * resuming is what moves that row: the start route takes a paused
+ * swarm, and the next tick ends it properly if the budget still stands.
+ * The header's sentence still names the budget.
  */
 export function swarmStatusOf(row: { status: string; pausedReason: Swarm["pausedReason"] }): SwarmStatus {
-  if (row.status === "paused") return row.pausedReason === "budget" ? "budget_exhausted" : "paused";
+  if (row.status === "paused") return "paused";
+  if (row.status === "budget_exhausted") return "budget_exhausted";
+  if (row.status === "timed_out") return "timed_out";
   if (row.status === "cancelled") return "stopped";
   if (row.status === "done") return "done";
   if (row.status === "failed") return "failed";
@@ -842,6 +902,7 @@ export function toTask(row: WireTask): SwarmTask {
     startedAt: row.startedAt,
     endedAt: row.endedAt,
     commits: [],
+    canRetryLanding: row.canRetryLanding === true,
   };
 }
 
@@ -890,6 +951,7 @@ export function toSwarm(row: WireSwarm, workersActive = 0): Swarm {
     startedAt: null,
     endedAt: null,
     createdAt: row.createdAt,
+    updatedAt: row.updatedAt ?? null,
     archivedAt: row.archivedAt,
     lastOpenedAt: row.lastOpenedAt,
     // A planner's question reaches the board as attention on the node
@@ -1050,6 +1112,12 @@ export function httpSwarmApi(
     async retryTask(swarmId, taskId, reason) {
       await post(`/api/swarms/${swarmId}/tasks/${taskId}/retry`, reason ? { reason } : {});
     },
+    async publishSwarm(swarmId, mode) {
+      await post(`/api/swarms/${swarmId}/publish`, { mode });
+    },
+    async startTaskOver(swarmId, taskId) {
+      await post(`/api/swarms/${swarmId}/tasks/${taskId}/retry`, { fresh: true });
+    },
     async retryLanding(swarmId, taskId) {
       await post(`/api/swarms/${swarmId}/tasks/${taskId}/landing/retry`);
     },
@@ -1129,6 +1197,7 @@ export function toDetail(detail: WireDetail): SwarmDetail {
     pullRequests: (detail.pullRequests ?? []).map(toPullRequest),
     planSources: (detail.planSources ?? []).map((row) => toPlanSource(row, detail.swarm.id)),
     ...agentsInSandbox(detail),
+    activeRunCount: detail.activeRuns.length,
   };
 }
 
@@ -1137,8 +1206,10 @@ export function toDetail(detail: WireDetail): SwarmDetail {
  *
  * Status `running` is that moment: the executor sets it as it execs
  * the agent, after provisioning and setup. A queued or starting run
- * is not in the list. A planner has no task of its own, so its run
- * is said on the root, which is where the long-run clock says it.
+ * is not in the list. A planner has no task of its own, so its run is
+ * on no node: it used to be painted on the first top level task, and
+ * a flat plan's first leaf then read "working" while only the planner
+ * ran. The planner's own row above the plan says it is at work.
  *
  * The clock is the agent start, and the claim time only when that
  * stamp was never written. Two agents on one node keep the earlier
@@ -1149,14 +1220,11 @@ export function agentsInSandbox(detail: Pick<WireDetail, "tasks" | "activeRuns">
   runningTaskIds: string[];
   agentStartedAt: Record<string, string>;
 } {
-  const rootId = detail.tasks
-    .filter((task) => task.parentId === null)
-    .sort((a, b) => a.position - b.position)[0]?.id ?? null;
   const runningTaskIds: string[] = [];
   const agentStartedAt: Record<string, string> = {};
   for (const run of detail.activeRuns) {
     if (run.status !== "running") continue;
-    const taskId = run.swarmTaskId ?? rootId;
+    const taskId = run.swarmTaskId;
     if (!taskId) continue;
     if (!runningTaskIds.includes(taskId)) runningTaskIds.push(taskId);
     const clock = run.agentStartedAt ?? run.startedAt ?? null;
@@ -1254,7 +1322,9 @@ function toLanding(landing: WireLanding): SwarmLanding {
     status: landing.status,
     attempt: landing.attempt,
     error: landing.error,
+    errorCode: landing.errorCode ?? null,
     resolverRunId: landing.resolverRunId,
+    notBefore: landing.notBefore ?? null,
     startedAt: landing.startedAt,
     endedAt: landing.endedAt,
   };

@@ -20,6 +20,7 @@ import {
 } from "./swarm/sandbox.js";
 import { workerBranchName } from "./swarm/branches.js";
 import { enqueueSwarmTick } from "./swarm/coordinator.js";
+import { enqueueSwarmPush } from "./swarm/remote-branches.js";
 import type { PipelineRun } from "./pipeline-run.js";
 
 /**
@@ -163,7 +164,7 @@ async function pipelineSubject(
         text,
       }),
     settle: async (context) => {
-      await context.boss.send("gate.evaluate", { featureId: feature.id });
+      await context.jobs.send("gate.evaluate", { featureId: feature.id });
     },
   };
 }
@@ -262,6 +263,13 @@ async function swarmSubject(
       // reason enqueueRun exists: the one door is what holds the
       // singleton key and, now, what makes sure a worker is running to
       // read the job.
+      //
+      // And the task's branch goes to GitHub first, whatever the run's
+      // outcome: a failed attempt's commits are still work, and the
+      // machine holding them can be gone by the time anybody asks.
+      if (task && (run.role === "worker" || run.role === "resolver")) {
+        await enqueueSwarmPush(context, { kind: "task", taskId: task.id });
+      }
       await enqueueSwarmTick(context, swarm.id);
     },
   };
