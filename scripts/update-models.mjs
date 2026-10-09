@@ -4,10 +4,10 @@
  *
  * The catalog is committed rather than fetched at runtime: a board that
  * cannot reach the internet still has to offer a model list, and one
- * fetch in CI beats one per server machine. .github/workflows/models.yml
- * runs this nightly and opens a pull request when the list changed, so
- * a new model lands with the next deploy. Each run rewrites the snapshot
- * wholesale, which is also how a model a provider has sunset drops out.
+ * fetch beats one per server machine. Run `pnpm models:update` and ship
+ * the diff when a provider has released or sunset a model. A new model
+ * lands with the next deploy. Each run rewrites the snapshot wholesale,
+ * which is also how a model a provider has sunset drops out.
  *
  * Only providers whose credentials Bento can actually store are
  * included. Offering a model that no stored key can authenticate would
@@ -258,8 +258,7 @@ export const GATEWAY_CATALOG: readonly CatalogProvider[] = ${JSON.stringify(cata
 /**
  * Writes a snapshot only when its models changed. The header carries
  * the date it was taken, so rewriting an unchanged list would still
- * leave a diff, and the nightly workflow (models.yml) would open a pull
- * request every night that changes nothing but the date.
+ * leave a diff that is nothing but the date.
  */
 async function writeIfChanged(file, body) {
   const withoutDate = (text) => text.replace(/^\/\/ Snapshot taken .*$/m, "");
