@@ -426,6 +426,49 @@ export class ModalDriver implements SandboxDriver {
     await box.mountImage(handle.workdir, image);
   }
 
+  /**
+   * Starts a hibernated machine again under its own name, from the
+   * newest image of its workspace: the exit snapshot of the stopped
+   * box when this process can still see one, else the hibernation
+   * image on the row. Never a fresh toolchain image, because the
+   * caller wants the branches that only the snapshot holds.
+   *
+   * The network is the one provision would have given it, for the
+   * reason restore takes it: the next run in the warm window reuses
+   * this machine as it is.
+   */
+  async wake(handle: SandboxHandle): Promise<boolean> {
+    const api = await this.api();
+    if (await this.runningBox(api, handle.externalId)) return false;
+    const allowlist = modalOutboundAllowlist({
+      ...(handle.network ? { network: handle.network } : {}),
+      ...(handle.allowedHosts ? { allowedHosts: handle.allowedHosts } : {}),
+    });
+    let image: ModalImageRef | null = null;
+    const dead = await this.deadBox(api, handle.externalId);
+    if (dead) image = await dead.experimentalGetExitSnapshot().catch(() => null);
+    if (!image && handle.imageRef) image = await api.imageFromId(handle.imageRef);
+    if (!image) {
+      throw new Error(`sandbox ${handle.externalId} is hibernated and no snapshot of its workspace survives`);
+    }
+    const workspaceKey = handle.externalId.startsWith("bento-")
+      ? handle.externalId.slice("bento-".length)
+      : handle.externalId;
+    let box: ModalBox;
+    try {
+      box = await this.createNamed(api, image, this.createParams(handle.externalId, {
+        tags: this.sandboxTags(workspaceKey, undefined),
+        ...(allowlist ? { outboundDomainAllowlist: allowlist } : {}),
+      }));
+    } catch (err) {
+      // A run's provision, or another wake, booted it first.
+      if (await this.runningBox(api, handle.externalId)) return false;
+      throw err;
+    }
+    this.remembered.set(handle.externalId, box);
+    return true;
+  }
+
   async exportRepository(
     handle: SandboxHandle,
     repositoryName: string,

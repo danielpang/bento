@@ -1,6 +1,6 @@
 import { and, eq, inArray, isNull, ne, sql } from "drizzle-orm";
 import { agentRuns, sandboxes } from "@bento/db";
-import { ModalDriver, MODAL_REPO_PREPARE_TIMEOUT_MS, MODAL_WARM_WINDOW_MS } from "@bento/sandbox";
+import { ModalDriver, MODAL_REPO_PREPARE_TIMEOUT_MS, MODAL_WARM_WINDOW_MS, type SandboxHandle } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
 import { driverForSandbox } from "./sandbox-driver.js";
 import { ACTIVE_RUN_STATUSES } from "./start-run.js";
@@ -23,12 +23,32 @@ export { MODAL_WARM_WINDOW_MS };
 export const MODAL_SWEEP_GRACE_MS = 2 * MODAL_REPO_PREPARE_TIMEOUT_MS + 15 * 60 * 1000;
 
 /** Queue a hibernation after the warm window. A duplicate job is safe: the worker skips a row that is already hibernated. */
-export async function armModalHibernation(ctx: AppContext, sandboxId: string): Promise<void> {
+export async function armModalHibernation(
+  ctx: AppContext,
+  sandboxId: string,
+  delayMs: number = MODAL_WARM_WINDOW_MS,
+): Promise<void> {
   await ctx.boss.send(
     HIBERNATE_SANDBOX_QUEUE,
     { sandboxId },
-    { startAfter: new Date(Date.now() + MODAL_WARM_WINDOW_MS) },
+    { startAfter: new Date(Date.now() + delayMs) },
   );
+}
+
+/**
+ * How much of the warm window this row still has, counted from the
+ * last time something used the machine. Zero once it has passed, or
+ * when nothing ever stamped the row.
+ *
+ * Asked because a job is not armed only by the finish it belongs to.
+ * A job that found a run still going arms another, five minutes from
+ * whenever it happened to fire, and that one can land seconds after
+ * the run ends. Production saw a swarm worker hibernated thirty five
+ * seconds after it reported, while its branch was waiting to land.
+ */
+export function warmWindowLeftMs(lastUsedAt: Date | null, now: number = Date.now()): number {
+  if (!lastUsedAt) return 0;
+  return Math.max(0, lastUsedAt.getTime() + MODAL_WARM_WINDOW_MS - now);
 }
 
 /**
@@ -151,6 +171,11 @@ export async function hibernateSandbox(ctx: AppContext, sandboxId: string): Prom
     if (shouldRearmHibernation(row, active)) await armModalHibernation(ctx, row.id);
     return;
   }
+  const warmLeft = warmWindowLeftMs(row.lastUsedAt);
+  if (warmLeft > 0) {
+    await armModalHibernation(ctx, row.id, warmLeft);
+    return;
+  }
 
   const driver = driverForSandbox(ctx.drivers, row);
   if (!(driver instanceof ModalDriver)) return;
@@ -208,6 +233,46 @@ export async function hibernateSandbox(ctx: AppContext, sandboxId: string): Prom
   if (after && after.provider === "modal" && after.status !== "hibernated" && after.status !== "destroyed") {
     await armModalHibernation(ctx, row.id);
   }
+}
+
+/**
+ * Boots a hibernated machine again for something that is not a run.
+ *
+ * The merge queue reads a worker's branch out of the worker's machine
+ * and lands it in the swarm's, and a new worker reads the swarm's
+ * branch out of the swarm's machine. Either can find the machine
+ * hibernated: a planner that takes longer than the warm window to
+ * review a report, a landing a person retries an hour later. Reading
+ * the row as "not destroyed" and exec'ing into it failed with "is not
+ * running", which the landing took for a moved branch until it ran
+ * out of attempts.
+ *
+ * The row goes back to ready with a fresh hibernation armed, the way
+ * a rollback that boots a machine leaves it, so the machine is not
+ * left running to the 24 hour cap. `network` is what the machine's
+ * runs would have been given, because a run in the warm window
+ * reuses it as it is.
+ */
+export async function wakeHibernatedSandbox(
+  ctx: AppContext,
+  row: typeof sandboxes.$inferSelect,
+  network: Pick<SandboxHandle, "network" | "allowedHosts">,
+): Promise<void> {
+  if (row.status !== "hibernated") return;
+  const driver = driverForSandbox(ctx.drivers, row);
+  if (!driver.wake) return;
+  await driver.wake({
+    externalId: row.externalId,
+    provider: driver.provider,
+    workdir: row.workdir,
+    ...(row.imageRef ? { imageRef: row.imageRef } : {}),
+    ...network,
+  });
+  await ctx.db
+    .update(sandboxes)
+    .set({ status: "ready", lastUsedAt: new Date() })
+    .where(and(eq(sandboxes.id, row.id), eq(sandboxes.status, "hibernated")));
+  if (row.provider === "modal") await armModalHibernation(ctx, row.id);
 }
 
 /**

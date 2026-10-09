@@ -107,6 +107,21 @@ function swarmIsOver(status: (typeof swarms.$inferSelect)["status"]): boolean {
   );
 }
 
+/**
+ * Whether a swarm that ended this way is finished with its machine.
+ *
+ * Every ending but "failed". A failed swarm is the one a person picks
+ * up again from the same branch, by retrying a leaf or a landing, and
+ * that branch has never been pushed: the swarm's machine is the only
+ * copy of every leaf that already landed. Reaping it on failure turned
+ * a landing retry into "the swarm's sandbox is gone" and lost the
+ * landed work with it. Archiving or deleting the swarm still reaps it,
+ * and a Modal machine hibernates on its own meanwhile.
+ */
+export function swarmReleasesMachine(status: (typeof swarms.$inferSelect)["status"]): boolean {
+  return swarmIsOver(status) && status !== "failed";
+}
+
 /** Whether any swarm on this deployment has work a tick would act on. */
 export async function hasActiveSwarms(ctx: Pick<AppContext, "db">): Promise<boolean> {
   const [row] = await ctx.db
@@ -409,7 +424,8 @@ export async function tickSwarm(
      * status, which is deliberate: publishing twice would open a second
      * pull request, and reaping twice is no rows.
      *
-     * Not while a run is still in flight. A failed tree wakes its
+     * Never for a failed swarm (swarmReleasesMachine says why), and
+     * not while a run is still in flight. A tree that ends can wake its
      * planner in this same tick, and that run works in this machine.
      * Every later tick would ask for the machine again, the job would
      * refuse, and each refusal would be recorded as an error for as
@@ -418,7 +434,7 @@ export async function tickSwarm(
      * flight. A job that loses the race and finds a run anyway asks
      * again later rather than failing.
      */
-    if (swarmIsOver(result.status) && !(await swarmHasActiveRun(ctx.db, swarmId))) {
+    if (swarmReleasesMachine(result.status) && !(await swarmHasActiveRun(ctx.db, swarmId))) {
       await queueSwarmSandboxReap(ctx, swarmId);
     }
   }

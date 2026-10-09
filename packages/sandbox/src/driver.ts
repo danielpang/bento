@@ -382,6 +382,16 @@ export interface SandboxDriver {
   snapshot?(handle: SandboxHandle, label: string): Promise<string>;
   restore?(handle: SandboxHandle, snapshotId: string): Promise<void>;
   /**
+   * Boots a hibernated machine again from its hibernation image, so a
+   * caller that is not a run (the merge queue, a worker reading the
+   * swarm's branch) can exec in it. True when a machine was booted,
+   * false when one was already running. Throws when no image of the
+   * workspace survives, because a fresh machine has none of the
+   * branches the caller came for. Absent on drivers whose machines
+   * wake on their own.
+   */
+  wake?(handle: SandboxHandle): Promise<boolean>;
+  /**
    * Exports committed work without putting a remote credential inside
    * the sandbox. Drivers whose repositories live on the host do not
    * need this; publishing can read their worktrees directly.

@@ -31,6 +31,7 @@ import { queueSwarmTaskSandboxReap } from "../reap-sandbox.js";
 import { queueSwarmSlackNotify } from "../slack-notify.js";
 import { swarmBranchName, swarmWorkspaceKey } from "./sandbox.js";
 import { driverForSandbox } from "../sandbox-driver.js";
+import { wakeSwarmSandbox } from "../run-executor.js";
 
 /**
  * The merge queue's other half: what actually happens when a landing
@@ -207,10 +208,10 @@ export async function performLanding(ctx: AppContext, landingId: string): Promis
 
   const landed: string[] = [];
   const problems: { repo: string; outcome: LandFailure }[] = [];
-  let remoteHandles: Awaited<ReturnType<typeof landingSandboxHandles>> = null;
+  let remoteHandles: Awaited<ReturnType<typeof landingSandboxHandles>> | null = null;
   if (clone) {
     try {
-      remoteHandles = await landingSandboxHandles(ctx, swarm.sandboxId, task.id);
+      remoteHandles = await landingSandboxHandles(ctx, swarm, task);
     } catch (err) {
       return finish(
         ctx,
@@ -220,18 +221,21 @@ export async function performLanding(ctx: AppContext, landingId: string): Promis
         task,
       );
     }
-  }
-  if (clone && !remoteHandles) {
-    return finish(
-      ctx,
-      landing,
-      "failed",
-      "the swarm or worker sandbox is unavailable, so Bento cannot read the branch that is waiting to land.",
-      task,
-    );
+    if ("missing" in remoteHandles) {
+      return finish(
+        ctx,
+        landing,
+        "failed",
+        remoteHandles.missing === "swarm"
+          ? "the swarm's sandbox is gone, so Bento has no copy of the swarm's branch to land this onto."
+          : "this task's sandbox is gone, so Bento cannot read the branch that is waiting to land.",
+        task,
+      );
+    }
   }
   if (
     remoteHandles &&
+    !("missing" in remoteHandles) &&
     (!landingDriver?.exportRepository || !landingDriver.importRepository || !remoteHandles.workerDriver.exportRepository)
   ) {
     return finish(
@@ -254,7 +258,7 @@ export async function performLanding(ctx: AppContext, landingId: string): Promis
      * retry starts again from the top, where the repositories that did
      * land read as "already an ancestor" and cost nothing.
      */
-    const outcome = remoteHandles
+    const outcome = remoteHandles && !("missing" in remoteHandles)
       ? await landSandboxBranch({ swarm: landingDriver!, worker: remoteHandles.workerDriver }, {
           repoName: repo.name,
           baseBranch: repo.defaultBranch,
@@ -359,14 +363,26 @@ async function landingDriverFor(ctx: AppContext, swarmSandboxId: string | null):
  */
 async function landingSandboxHandles(
   ctx: AppContext,
-  swarmSandboxId: string | null,
-  taskId: string,
-): Promise<{ swarm: SandboxHandle; worker: SandboxHandle; workerDriver: SandboxDriver } | null> {
-  if (!swarmSandboxId) return null;
-  const [swarmSandbox] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, swarmSandboxId)).limit(1);
-  const workerRows = await ctx.db.select().from(sandboxes).where(eq(sandboxes.swarmTaskId, taskId));
+  swarm: typeof swarms.$inferSelect,
+  task: typeof swarmTasks.$inferSelect,
+): Promise<
+  { swarm: SandboxHandle; worker: SandboxHandle; workerDriver: SandboxDriver } | { missing: "swarm" | "worker" }
+> {
+  if (!swarm.sandboxId) return { missing: "swarm" };
+  const [swarmSandbox] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, swarm.sandboxId)).limit(1);
+  const workerRows = await ctx.db.select().from(sandboxes).where(eq(sandboxes.swarmTaskId, task.id));
   const workerSandbox = workerRows.find((row) => row.status !== "destroyed");
-  if (!swarmSandbox || swarmSandbox.status === "destroyed" || !workerSandbox) return null;
+  if (!swarmSandbox || swarmSandbox.status === "destroyed") return { missing: "swarm" };
+  if (!workerSandbox) return { missing: "worker" };
+  /**
+   * A hibernated machine is still the branch, only asleep. A worker
+   * whose report the planner took longer than the warm window to
+   * accept is hibernated by the time its landing comes up, and a
+   * landing retried by hand an hour later finds both machines that
+   * way. So each is woken here, before either is exec'd into.
+   */
+  await wakeSwarmSandbox(ctx, swarmSandbox, swarm, swarm.plannerProfileId);
+  await wakeSwarmSandbox(ctx, workerSandbox, swarm, task.agentProfileId ?? swarm.workerProfileId);
   return {
     swarm: {
       externalId: swarmSandbox.externalId,

@@ -107,7 +107,7 @@ import { shouldIncludeStageNotes, shouldShareAgentAuth } from "../settings.js";
 import { captureRunQueueDepth } from "./queue-snapshot.js";
 import { ACTIVE_RUN_STATUSES, projectHasRepositories, startRunIfIdle } from "./start-run.js";
 import { enqueueRun, INTERACTIVE_POLL_SECONDS, QUEUE_POLL_SECONDS, RUN_WORKER_POLL_SECONDS } from "./queue.js";
-import { HIBERNATE_SANDBOX_QUEUE, MODAL_SWEEP_QUEUE, scheduleModalHibernation, hibernateSandbox, sweepOrphanModalSandboxes } from "./hibernate-sandbox.js";
+import { HIBERNATE_SANDBOX_QUEUE, MODAL_SWEEP_QUEUE, scheduleModalHibernation, hibernateSandbox, sweepOrphanModalSandboxes, wakeHibernatedSandbox } from "./hibernate-sandbox.js";
 import { modalRunHosts } from "./modal-hosts.js";
 import { pipelineAgentBinaries } from "./pipeline-agents.js";
 import { appendRunEvent } from "./transcript.js";
@@ -1877,12 +1877,51 @@ async function swarmBranchBundles(
   if (!swarm.sandboxId) return new Map();
   const [row] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, swarm.sandboxId)).limit(1);
   if (!row || row.status === "destroyed") return new Map();
+  await wakeSwarmSandbox(ctx, row, swarm, swarm.plannerProfileId);
   return exportSwarmBranch(
     driverForSandbox(ctx.drivers, row),
     { externalId: row.externalId, provider: row.provider, workdir: row.workdir },
     repoRows.map((repo) => ({ name: repo.name, defaultBranch: repo.defaultBranch })),
     swarm.branchName ?? swarmBranchName(swarm.slug),
   );
+}
+
+/**
+ * Wakes a swarm's machine, or one of its workers', when it is
+ * hibernated, with the network its own runs get.
+ *
+ * `profileId` is the agent whose runs use the machine: the planner's
+ * for the swarm's own, the leaf's for a worker's. An organization
+ * that restricts the network has its allowlist built from that
+ * agent's hosts, as provision would; with no such agent the machine
+ * is not booted at all, rather than booted with the network open.
+ */
+export async function wakeSwarmSandbox(
+  ctx: AppContext,
+  row: typeof sandboxes.$inferSelect,
+  swarm: Pick<typeof swarms.$inferSelect, "projectId" | "organizationId">,
+  profileId: string | null,
+): Promise<void> {
+  // A sprite wakes on its own when exec'd into; only a driver that
+  // has to boot the machine again is asked to.
+  if (row.status !== "hibernated" || !driverForSandbox(ctx.drivers, row).wake) return;
+  let network: Pick<SandboxHandle, "network" | "allowedHosts"> = {};
+  if (await organizationRestrictsNetwork(ctx, swarm.organizationId)) {
+    const [profile] = profileId
+      ? await ctx.db
+          .select({ cli: agentProfiles.cli, model: agentProfiles.model })
+          .from(agentProfiles)
+          .where(eq(agentProfiles.id, profileId))
+          .limit(1)
+      : [];
+    if (!profile) {
+      throw new Error(
+        `sandbox ${row.externalId} is hibernated, and the agent it was made for is gone, so it cannot be started with this organization's network restriction.`,
+      );
+    }
+    network = await modalNetworkForProject(ctx, swarm.projectId, swarm.organizationId, profile.cli, profile.model);
+  }
+  await wakeHibernatedSandbox(ctx, row, network);
 }
 
 /** Whether the planner has written the design note a worker is told to read. */
