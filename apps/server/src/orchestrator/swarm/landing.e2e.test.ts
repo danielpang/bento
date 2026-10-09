@@ -14,6 +14,7 @@ import {
   runMigrations,
   sandboxes,
   swarmLandings,
+  swarmTaskEvents,
   swarmTasks,
   swarms,
   type Db,
@@ -157,7 +158,15 @@ async function swarmWithLeaf(slug: string) {
 
   const [task] = await db
     .insert(swarmTasks)
-    .values({ swarmId: swarm!.id, title: "Add the empty cart state", status: "working", report: "did it" })
+    .values({
+      swarmId: swarm!.id,
+      title: "Add the empty cart state",
+      status: "working",
+      report: "did it",
+      // Accepted and told, as a leaf in the merge queue always is: the
+      // queue drops a row whose leaf is no longer accepted.
+      flags: { accepted: true, plannerToldAt: "2026-01-01T00:00:00.000Z" },
+    })
     .returning();
   const branch = workerBranchName(`swarm/${slug}`, task!.id);
   await db.update(swarmTasks).set({ branchName: branch }).where(eq(swarmTasks.id, task!.id));
@@ -1271,5 +1280,144 @@ test("a landing that finds the worker's Modal box gone with no snapshot reads th
     assert.equal(swarmRow?.status, "ready");
   } finally {
     ctx.drivers = original;
+  }
+});
+
+/* ---------------------------------------------------------------- */
+
+/**
+ * A landing reads its leaf once, at its start, and can take minutes. A
+ * person who marked the leaf done meanwhile had their decision written
+ * over by the outcome: a conflict put a done leaf back in conflict and
+ * held the queue for a resolver nobody wanted.
+ */
+test("a landing outcome on a leaf a person marked done meanwhile leaves the leaf as they left it", async () => {
+  const fx = await swarmWithLeaf("person-done");
+  await commitIn(fx.swarmTree, "00000000-0000-0000-0000-000000000000", "shared.txt", "one\nOTHER\nthree\n", "other leaf");
+  await commitIn(fx.workerTree, fx.task.id, "shared.txt", "one\nMINE\nthree\n", "my leaf");
+  const landing = await queueLanding(fx.swarm.id, fx.task.id, fx.branch);
+  await db.update(swarmTasks).set({ status: "done", attention: null }).where(eq(swarmTasks.id, fx.task.id));
+
+  const result = await performLanding(ctx, landing.id);
+  assert.equal(result?.status, "cancelled", "no resolver is asked for a leaf nobody is waiting on");
+  assert.equal((await landingRow(landing.id))!.status, "cancelled");
+  const task = await taskRow(fx.task.id);
+  assert.equal(task!.status, "done");
+  assert.equal(task!.attention, null, "the conflict is not written on a finished leaf");
+});
+
+test("a branch that lands on a leaf a person marked done is recorded, and the leaf is not touched", async () => {
+  const fx = await swarmWithLeaf("person-done-landed");
+  await commitIn(fx.workerTree, fx.task.id, "k.txt", "from k\n", "add k");
+  const landing = await queueLanding(fx.swarm.id, fx.task.id, fx.branch);
+  const endedAt = new Date("2026-01-02T00:00:00.000Z");
+  await db.update(swarmTasks).set({ status: "done", endedAt }).where(eq(swarmTasks.id, fx.task.id));
+
+  const result = await performLanding(ctx, landing.id);
+  assert.equal(result?.status, "landed", "the branch did land, and the row says so");
+  const task = await taskRow(fx.task.id);
+  assert.equal(task!.status, "done");
+  assert.equal(task!.endedAt?.toISOString(), endedAt.toISOString(), "the person's ending stands");
+  const log = await db.select().from(swarmTaskEvents).where(eq(swarmTaskEvents.taskId, fx.task.id));
+  assert.ok(!log.some((event) => event.kind === "landed"), "and the leaf's log does not say the landing finished it");
+});
+
+/** Every handover that fails a leaf takes the planner's acceptance with it, and says it in the merge queue's words. */
+test("a leaf whose conflict could not be resolved loses its acceptance and carries the merge queue's code", async () => {
+  const fx = await swarmWithLeaf("unresolved");
+  await commitIn(fx.swarmTree, "00000000-0000-0000-0000-000000000000", "shared.txt", "one\nOTHER\nthree\n", "other leaf");
+  await commitIn(fx.workerTree, fx.task.id, "shared.txt", "one\nMINE\nthree\n", "my leaf");
+  const [resolver] = await db
+    .insert(agentRuns)
+    .values({ type: "swarm", swarmId: fx.swarm.id, swarmTaskId: fx.task.id, role: "resolver", agentProfileId: PROFILE, prompt: "", status: "succeeded" })
+    .returning();
+  const [landing] = await db
+    .insert(swarmLandings)
+    .values({ swarmId: fx.swarm.id, taskId: fx.task.id, branchName: fx.branch, status: "landing", attempt: 2, resolverRunId: resolver!.id })
+    .returning();
+
+  const result = await performLanding(ctx, landing!.id);
+  assert.equal(result?.status, "failed");
+  const task = await taskRow(fx.task.id);
+  const flags = task!.flags as { accepted?: boolean; landingError?: string; landingErrorCode?: string };
+  assert.equal(task!.status, "failed");
+  assert.equal(flags.accepted, undefined, "a failed leaf is not one the planner has accepted");
+  assert.equal(flags.landingErrorCode, "conflict_unresolved");
+  assert.match(flags.landingError ?? "", /conflict|CONFLICT|shared\.txt/i);
+});
+
+/** A project that spans nothing fails the landing, and the leaf, and the planner hears of it. */
+test("a landing in a project with no repositories fails its leaf rather than only its row", async () => {
+  const project = "33333333-3333-3333-3333-333333333333";
+  await pool.query(
+    `insert into projects (id,owner_id,organization_id,name,default_branch) values ($1,'u1',null,'Empty','main') on conflict do nothing`,
+    [project],
+  );
+  const [swarm] = await db
+    .insert(swarms)
+    .values({ projectId: project, slug: "no-repos", title: "S", plannerProfileId: PROFILE, workerProfileId: PROFILE, workerIsolation: "worktree", status: "running" })
+    .returning();
+  const [task] = await db
+    .insert(swarmTasks)
+    .values({ swarmId: swarm!.id, title: "T", status: "working", report: "r", flags: { accepted: true, plannerToldAt: "2026-01-01T00:00:00.000Z" } })
+    .returning();
+  const landing = await queueLanding(swarm!.id, task!.id, "swarm/no-repos/t");
+
+  const result = await performLanding(ctx, landing.id);
+  assert.equal(result?.status, "failed");
+  const row = await taskRow(task!.id);
+  assert.equal(row!.status, "failed", "the leaf is told, not only the row");
+  assert.equal((row!.flags as { landingErrorCode?: string }).landingErrorCode, "no_repositories");
+  assert.equal(plannerToldAt(row!), undefined, "and the planner will hear of it");
+});
+
+/**
+ * The backoff's tick was keyed by the swarm on a queue that drops a
+ * send whose key is already waiting, so a second landing backing off
+ * meanwhile never had a tick of its own.
+ */
+test("two landings backing off in one swarm each get the tick that ends their wait", async () => {
+  const fx = await swarmWithLeaf("backoffs");
+  await commitIn(fx.workerTree, fx.task.id, "j.txt", "from j\n", "add j");
+  const [second] = await db
+    .insert(swarmTasks)
+    .values({ swarmId: fx.swarm.id, title: "second", status: "working", report: "r", flags: { accepted: true, plannerToldAt: "2026-01-01T00:00:00.000Z" } })
+    .returning();
+  const secondBranch = workerBranchName("swarm/backoffs", second!.id);
+  await db.update(swarmTasks).set({ branchName: secondBranch }).where(eq(swarmTasks.id, second!.id));
+  await git(repoPath, ["branch", secondBranch, "swarm/backoffs"]);
+  const secondTree = ctx.worktrees.worktreePath(swarmTaskWorkspaceKey(fx.swarm.id, second!.id), "app");
+  await mkdir(path.dirname(secondTree), { recursive: true });
+  await git(repoPath, ["worktree", "add", "--quiet", secondTree, secondBranch]);
+  await commitIn(secondTree, second!.id, "l.txt", "from l\n", "add l");
+
+  const sends: { queue: string; options?: { singletonKey?: string; startAfter?: Date } }[] = [];
+  const boss = ctx.boss as unknown as { send: (queue: string, data: unknown, options?: unknown) => Promise<string> };
+  const real = boss.send;
+  boss.send = async (queue, data, options) => {
+    sends.push({ queue, options: options as { singletonKey?: string; startAfter?: Date } });
+    return real(queue, data);
+  };
+  const lock = path.join(await gitDirOf(fx.swarmTree), "index.lock");
+  await writeFile(lock, "");
+  try {
+    const first = await queueLanding(fx.swarm.id, fx.task.id, fx.branch, 0);
+    assert.equal((await performLanding(ctx, first.id))?.status, "queued");
+    const other = await queueLanding(fx.swarm.id, second!.id, secondBranch, 1);
+    assert.equal((await performLanding(ctx, other.id))?.status, "queued");
+
+    const backoffs = sends.filter((send) => send.queue === "swarm.tick" && send.options?.startAfter);
+    assert.equal(backoffs.length, 2, "one tick per wait");
+    assert.notEqual(backoffs[0]!.options!.singletonKey, backoffs[1]!.options!.singletonKey, "under keys that cannot swallow each other");
+    for (const [index, id] of [first.id, other.id].entries()) {
+      const row = await landingRow(id);
+      assert.ok(
+        backoffs[index]!.options!.startAfter!.getTime() >= row!.notBefore!.getTime(),
+        "and none fires before the row it is for is due",
+      );
+    }
+  } finally {
+    boss.send = real;
+    await rm(lock, { force: true });
   }
 });

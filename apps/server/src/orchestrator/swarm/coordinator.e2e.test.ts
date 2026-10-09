@@ -31,6 +31,8 @@ import {
 import { DOCUMENT_ASSEMBLY_FLAG } from "./deliverable.js";
 import { applyRunCharge } from "./ledger.js";
 import { MAX_PLANNER_RETELLS } from "./planner-news.js";
+import { MAX_LANDING_ATTEMPTS } from "./landing.js";
+import { performTaskStartOver } from "./start-over.js";
 
 /**
  * The coordinator, against a real database and a stubbed run starter.
@@ -194,6 +196,14 @@ async function makeTask(
     .returning();
   return task!;
 }
+
+/**
+ * A leaf the planner accepted, waiting for its landing: still working,
+ * told, and accepted. A merge queue row stands only while its leaf is
+ * that (see landingStillWanted), so a fixture with a "done" leaf in the
+ * queue now reads as a person having finished it.
+ */
+const ACCEPTED = { accepted: true, plannerToldAt: "2026-01-01T00:00:00.000Z" };
 
 const read = async (taskId: string) =>
   (await db.select().from(swarmTasks).where(eq(swarmTasks.id, taskId)))[0]!;
@@ -710,7 +720,7 @@ test("every run a tick starts is queued for the executor, and none is left sitti
 
 test("the landing queue keeps one in flight and drops what was withdrawn", async () => {
   const swarm = await makeSwarm({ status: "running" });
-  const done = await makeTask(swarm.id, { title: "landed", status: "done" });
+  const done = await makeTask(swarm.id, { title: "accepted", status: "working", report: "r", flags: ACCEPTED });
   const dropped = await makeTask(swarm.id, { title: "withdrawn", status: "cancelled" });
   await db.insert(swarmLandings).values([
     { swarmId: swarm.id, taskId: done.id, position: 0, branchName: "swarm/x/1" },
@@ -758,7 +768,7 @@ test("a landing waiting out its backoff lets the one behind it go first", async 
 
 test("a conflict whose resolver has finished is tried again, rather than holding forever", async () => {
   const swarm = await makeSwarm({ status: "running" });
-  const stuck = await makeTask(swarm.id, { title: "stuck", status: "working", report: "did it" });
+  const stuck = await makeTask(swarm.id, { title: "stuck", status: "working", report: "did it", flags: ACCEPTED });
   const [resolver] = await db
     .insert(agentRuns)
     .values({
@@ -823,9 +833,9 @@ test("a conflict with nobody on it has an agent put on it, every pass until one 
     title: "stuck",
     status: "working",
     report: "did it",
-    flags: { plannerToldAt: "2026-01-01T00:00:00.000Z" },
+    flags: ACCEPTED,
   });
-  const waiting = await makeTask(swarm.id, { title: "waiting", status: "done" });
+  const waiting = await makeTask(swarm.id, { title: "waiting", status: "working", report: "r", flags: ACCEPTED });
   const [landing] = await db
     .insert(swarmLandings)
     .values({ swarmId: swarm.id, taskId: stuck.id, position: 0, status: "conflicted", error: "CONFLICT in one file" })
@@ -866,8 +876,8 @@ test("a conflict nothing could ever resolve fails the leaf and lets the queue mo
    * queue and puts the leaf in front of the planner.
    */
   const swarm = await makeSwarm({ status: "running", workerProfileId: null });
-  const stuck = await makeTask(swarm.id, { title: "stuck", status: "working", report: "did it", position: 0 });
-  const waiting = await makeTask(swarm.id, { title: "waiting", status: "done", position: 1 });
+  const stuck = await makeTask(swarm.id, { title: "stuck", status: "working", report: "did it", position: 0, flags: ACCEPTED });
+  const waiting = await makeTask(swarm.id, { title: "waiting", status: "working", report: "r", position: 1, flags: ACCEPTED });
   const [blocked] = await db
     .insert(swarmLandings)
     .values({ swarmId: swarm.id, taskId: stuck.id, position: 0, status: "conflicted", error: "CONFLICT in one file" })
@@ -907,7 +917,7 @@ test("a promotion whose job could not be sent gives the claim back", async () =>
    * restart. So a send that throws puts the row back.
    */
   const swarm = await makeSwarm({ status: "running" });
-  const done = await makeTask(swarm.id, { title: "ready to land", status: "done" });
+  const done = await makeTask(swarm.id, { title: "ready to land", status: "working", report: "r", flags: ACCEPTED });
   const [landing] = await db
     .insert(swarmLandings)
     .values({ swarmId: swarm.id, taskId: done.id, position: 0 })
@@ -937,8 +947,8 @@ test("a promotion whose job could not be sent gives the claim back", async () =>
 
 test("a conflict holds the queue rather than letting the next branch overtake it", async () => {
   const swarm = await makeSwarm({ status: "running" });
-  const stuck = await makeTask(swarm.id, { title: "stuck", status: "done" });
-  const waiting = await makeTask(swarm.id, { title: "waiting", status: "done" });
+  const stuck = await makeTask(swarm.id, { title: "stuck", status: "working", report: "r", flags: ACCEPTED });
+  const waiting = await makeTask(swarm.id, { title: "waiting", status: "working", report: "r", flags: ACCEPTED });
   await db.insert(swarmLandings).values([
     { swarmId: swarm.id, taskId: stuck.id, position: 0, status: "conflicted" },
     { swarmId: swarm.id, taskId: waiting.id, position: 1 },
@@ -1324,10 +1334,19 @@ test("a report handed to a planner that never finished its turn is handed to the
   assert.equal(interrupted[0]!.runId, firstPlanner);
   assert.equal(log.filter((event) => event.kind === "review_requested").length, 2);
 
-  // A planner that finished its turn did read it, whatever it decided.
+  /*
+   * A planner that finished its turn and decided is not told again. (One
+   * that finished without deciding is: see "a planner that finished its
+   * turn without deciding a report is told again".)
+   */
+  const decided = await read(leaf.id);
+  await db
+    .update(swarmTasks)
+    .set({ flags: { ...decided.flags, accepted: true } })
+    .where(eq(swarmTasks.id, leaf.id));
   await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.id, second!.plannerRunId!));
   const afterSuccess = await tickSwarm(ctx, swarm.id, starter());
-  assert.equal(afterSuccess?.plannerRunId, null, "told once per planner that finished");
+  assert.equal(afterSuccess?.plannerRunId, null, "told once per planner that decided");
 });
 
 test("lost news is handed over at most MAX_PLANNER_RETELLS times", async () => {
@@ -1410,6 +1429,9 @@ test("a planner restarted after its machine failed takes over the leaves it was 
   assert.equal(row.flags.plannerToldBy, restarted.plannerRunId, "the leaf now names the restarted run");
   assert.equal(row.flags.plannerRetells, undefined, "a restart is not a re-tell");
 
+  // The restarted planner decides; the failed run it replaced is not
+  // read as a lost handover.
+  await db.update(swarmTasks).set({ flags: { ...row.flags, accepted: true } }).where(eq(swarmTasks.id, leaf.id));
   await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.id, restarted.plannerRunId));
   const after = await tickSwarm(ctx, swarm.id, starter());
   assert.equal(after?.plannerRunId, null, "nobody is told a second time");
@@ -1574,15 +1596,19 @@ test("the planner is warned once when less than one run's worth of budget is lef
 
   const first = await tickSwarm(ctx, swarm.id, starter());
   assert.ok(first?.plannerRunId, "the warning is delivered as a planner turn");
-  const notices = await db.select().from(swarmMessages).where(eq(swarmMessages.swarmId, swarm.id));
+  // The open leaf, with nothing running, earns a notice of its own.
+  const notices = (await db.select().from(swarmMessages).where(eq(swarmMessages.swarmId, swarm.id)))
+    .filter((message) => /budget/.test(message.text));
   assert.equal(notices.length, 1);
   assert.equal(notices[0]!.source, "system", "Bento's own words, not a person's");
-  assert.match(notices[0]!.text, /budget/);
   assert.ok((await readSwarm(swarm.id)).budgetWarnedAt, "and the latch is set");
 
   await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.swarmId, swarm.id));
   await tickSwarm(ctx, swarm.id, starter());
-  const after = await db.select().from(swarmMessages).where(eq(swarmMessages.swarmId, swarm.id));
+  // The open leaf now earns its own notice once nothing is running;
+  // only the budget's are counted here.
+  const after = (await db.select().from(swarmMessages).where(eq(swarmMessages.swarmId, swarm.id)))
+    .filter((message) => /budget/.test(message.text));
   assert.equal(after.length, 1, "one budget, one warning");
 });
 
@@ -2017,4 +2043,429 @@ test("a check is not added to a tree that is still being worked", async () => {
   await tickSwarm(ctx, swarm.id, starter());
   const titles = (await db.select().from(swarmTasks).where(eq(swarmTasks.swarmId, swarm.id))).map((r) => r.title);
   assert.ok(!titles.includes("Final check"));
+});
+
+/* ------------------------------------------------------------------ *
+ * Stalls that had no event to end them.
+ * ------------------------------------------------------------------ */
+
+/**
+ * A planner that finished its turn and neither accepted nor rejected a
+ * report left the leaf "working" with its report, and every later tick
+ * read it as told. It is handed over again, said as undecided, and past
+ * the bound the board asks a person.
+ */
+test("a planner that finished its turn without deciding a report is told again, and then a person is asked", async () => {
+  const swarm = await makeSwarm({ status: "running" });
+  const leaf = await makeTask(swarm.id, { title: "reported", status: "working", report: "commit abc" });
+
+  const first = await tickSwarm(ctx, swarm.id, starter());
+  assert.ok(first?.plannerRunId);
+  let previous = first.plannerRunId;
+  for (let retell = 1; retell <= MAX_PLANNER_RETELLS; retell++) {
+    await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.id, previous));
+    const deps = starter();
+    const again = await tickSwarm(ctx, swarm.id, deps);
+    assert.ok(again?.plannerRunId, `undecided handover ${retell} wakes a planner`);
+    const prompt = deps.calls.find((call) => call.role === "planner")!.prompt!;
+    assert.match(prompt, new RegExp(`without accepting or rejecting task ${leaf.id}`), "the wake says it was left undecided");
+    assert.match(prompt, /commit abc/, "with the report again");
+    previous = again.plannerRunId;
+  }
+  assert.equal((await read(leaf.id)).flags.plannerRetells, MAX_PLANNER_RETELLS);
+  const interrupted = (await db.select().from(swarmTaskEvents).where(eq(swarmTaskEvents.taskId, leaf.id))).filter(
+    (event) => event.kind === "review_interrupted",
+  );
+  assert.match(String((interrupted[0]?.detail as { note?: string })?.note), /without deciding/);
+
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.id, previous));
+  const exhausted = await tickSwarm(ctx, swarm.id, starter());
+  assert.equal(exhausted?.plannerRunId, null, "a planner that will not decide is not woken forever");
+  const row = await read(leaf.id);
+  assert.equal(row.status, "working", "the report is still there to accept");
+  assert.equal(row.attention, "failed", "and the board says a person has to decide");
+  assert.equal(exhausted?.status, "blocked");
+  const raised = (await db.select().from(swarmTaskEvents).where(eq(swarmTaskEvents.taskId, leaf.id))).filter(
+    (event) => event.kind === "attention_raised",
+  );
+  assert.equal(raised.length, 1);
+  assert.equal((raised[0]!.detail as { reason?: string }).reason, "planner_undecided");
+
+  await tickSwarm(ctx, swarm.id, starter());
+  const again = (await db.select().from(swarmTaskEvents).where(eq(swarmTaskEvents.taskId, leaf.id))).filter(
+    (event) => event.kind === "attention_raised",
+  );
+  assert.equal(again.length, 1, "said once");
+});
+
+test("a report the planner asked a person about is not handed over again", async () => {
+  const swarm = await makeSwarm({ status: "running" });
+  const leaf = await makeTask(swarm.id, { title: "reported", status: "working", report: "r" });
+  const first = await tickSwarm(ctx, swarm.id, starter());
+  await db.update(swarmTasks).set({ attention: "question" }).where(eq(swarmTasks.id, leaf.id));
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.id, first!.plannerRunId!));
+  const after = await tickSwarm(ctx, swarm.id, starter());
+  assert.equal(after?.plannerRunId, null, "waiting on a person is a decision");
+});
+
+/**
+ * create_task and split_task make open leaves, and nothing starts an
+ * open leaf. A started swarm whose planner left one open sat "running"
+ * with nothing that would ever start it.
+ */
+test("open leaves a planner left behind are put to it once the swarm is idle, once", async () => {
+  const swarm = await makeSwarm({ status: "running" });
+  const busy = await makeTask(swarm.id, { title: "busy", status: "working" });
+  const run = await runOn(swarm.id, busy.id, "running");
+  const open = await makeTask(swarm.id, { title: "left open", status: "open" });
+
+  const whileBusy = await tickSwarm(ctx, swarm.id, starter());
+  assert.equal(whileBusy?.plannerRunId, null, "while anything moves, an open leaf may be held back on purpose");
+  assert.equal((await db.select().from(swarmMessages).where(eq(swarmMessages.swarmId, swarm.id))).length, 0);
+
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.id, run.id));
+  await db.update(swarmTasks).set({ status: "done" }).where(eq(swarmTasks.id, busy.id));
+  const deps = starter();
+  const idle = await tickSwarm(ctx, swarm.id, deps);
+  assert.ok(idle?.plannerRunId, "the planner is told");
+  const prompt = deps.calls.find((call) => call.role === "planner")!.prompt!;
+  assert.match(prompt, new RegExp(`Task ${open.id}`));
+  assert.match(prompt, /still open/);
+  assert.equal((await read(open.id)).status, "open", "an open leaf is not approved by the tick");
+  assert.equal(deps.calls.filter((call) => call.role === "worker").length, 0);
+
+  // The planner ends its turn leaving it open, deliberately.
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.id, idle.plannerRunId));
+  const later = await tickSwarm(ctx, swarm.id, starter());
+  assert.equal(later?.plannerRunId, null, "told once per leaf");
+});
+
+/**
+ * A ceiling that refused the planner, a sub planner or a resolver used
+ * to say nothing: only a worker's refusal paused the swarm.
+ */
+test("a planner the plan limit refused pauses the swarm, and the next wake takes it out of the pause", async () => {
+  const swarm = await makeSwarm({ status: "running" });
+  await makeTask(swarm.id, { title: "reported", status: "working", report: "r" });
+
+  const refused = await tickSwarm(ctx, swarm.id, starter([{ outOfCompute: "this team has used its agent hours.", cap: "plan" }]));
+  assert.equal(refused?.plannerRunId, null);
+  assert.equal(refused?.status, "paused");
+  assert.equal((await readSwarm(swarm.id)).pausedReason, "plan_limit");
+
+  const resumed = await tickSwarm(ctx, swarm.id, starter());
+  assert.ok(resumed?.plannerRunId, "the paused swarm still asks the door for its planner");
+  const row = await readSwarm(swarm.id);
+  assert.equal(row.status, "running");
+  assert.equal(row.pausedReason, null);
+});
+
+test("a planner refused by the swarm's budget ends it on its budget", async () => {
+  const swarm = await makeSwarm({ status: "running" });
+  await makeTask(swarm.id, { title: "reported", status: "working", report: "r" });
+  const refused = await tickSwarm(ctx, swarm.id, starter([{ outOfCompute: "this swarm has spent its budget.", cap: "budget" }]));
+  assert.equal(refused?.status, "budget_exhausted");
+  assert.equal((await readSwarm(swarm.id)).pausedReason, "budget");
+});
+
+test("a resolver or a sub planner the plan limit refused pauses the swarm too", async () => {
+  const conflicted = await makeSwarm({ status: "running" });
+  const stuck = await makeTask(conflicted.id, { title: "stuck", status: "working", report: "r", flags: ACCEPTED });
+  await db.insert(swarmLandings).values({ swarmId: conflicted.id, taskId: stuck.id, position: 0, status: "conflicted", error: "CONFLICT" });
+  const resolver = await tickSwarm(ctx, conflicted.id, starter([{ outOfCompute: "out of hours", cap: "plan" }]));
+  assert.equal(resolver?.status, "paused", "a conflict waiting on hours holds the whole queue");
+
+  const delegated = await makeSwarm({ status: "running" });
+  await makeTask(delegated.id, { title: "plan this part", nodeType: "plan", status: "assigned" });
+  const subplanner = await tickSwarm(ctx, delegated.id, starter([{ outOfCompute: "out of hours", cap: "plan" }]));
+  assert.equal(subplanner?.status, "paused");
+});
+
+test("a planning swarm is not paused by a refused planner, which would start an unapproved plan", async () => {
+  const swarm = await makeSwarm({ status: "planning" });
+  await swarmMessage(swarm.id, "please plan");
+  const refused = await tickSwarm(ctx, swarm.id, starter([{ outOfCompute: "out of hours", cap: "plan" }]));
+  assert.equal(refused?.status, "planning");
+});
+
+async function swarmMessage(swarmId: string, text: string) {
+  const [message] = await db.insert(swarmMessages).values({ swarmId, text, userId: "u1", source: "person" }).returning();
+  return message!;
+}
+
+/**
+ * A message handed to a planner that then failed or was stopped was
+ * marked sent to it and never read by anybody.
+ */
+test("a message handed to a planner that failed goes to the next one", async () => {
+  const swarm = await makeSwarm({ status: "running" });
+  const message = await swarmMessage(swarm.id, "please also cover the empty cart");
+  const first = await tickSwarm(ctx, swarm.id, starter());
+  assert.ok(first?.plannerRunId);
+  await db.update(agentRuns).set({ status: "failed", error: "the agent exited 1" }).where(eq(agentRuns.id, first.plannerRunId));
+
+  const deps = starter();
+  const second = await tickSwarm(ctx, swarm.id, deps);
+  assert.ok(second?.plannerRunId, "the message wakes the next planner");
+  assert.match(deps.calls.find((call) => call.role === "planner")!.prompt!, /empty cart/);
+  const [row] = await db.select().from(swarmMessages).where(eq(swarmMessages.id, message.id));
+  assert.equal(row!.status, "sent");
+  assert.equal(row!.runId, second.plannerRunId);
+});
+
+test("a message handed to a planner a person stopped rides along with the next wake", async () => {
+  const swarm = await makeSwarm({ status: "running" });
+  const message = await swarmMessage(swarm.id, "please also cover the empty cart");
+  const first = await tickSwarm(ctx, swarm.id, starter());
+  await db.update(agentRuns).set({ status: "cancelled" }).where(eq(agentRuns.id, first!.plannerRunId!));
+
+  const stopped = await tickSwarm(ctx, swarm.id, starter());
+  assert.equal(stopped?.plannerRunId, null, "a stop is a choice: the message does not restart the planner");
+  const [held] = await db.select().from(swarmMessages).where(eq(swarmMessages.id, message.id));
+  assert.equal(held!.status, "queued", "but it is back in the queue");
+
+  await makeTask(swarm.id, { title: "reported", status: "working", report: "r" });
+  const deps = starter();
+  const next = await tickSwarm(ctx, swarm.id, deps);
+  assert.ok(next?.plannerRunId);
+  assert.match(deps.calls.find((call) => call.role === "planner")!.prompt!, /empty cart/, "and goes with the next wake");
+});
+
+test("a planner that fails every turn is not woken forever by a message it never read", async () => {
+  const swarm = await makeSwarm({ status: "running" });
+  const message = await swarmMessage(swarm.id, "hello");
+  const planners: string[] = [];
+  for (let turn = 0; turn < MAX_PLANNER_RETELLS; turn++) {
+    const result = await tickSwarm(ctx, swarm.id, starter());
+    assert.ok(result?.plannerRunId, `turn ${turn + 1} wakes a planner`);
+    planners.push(result.plannerRunId);
+    await db.update(agentRuns).set({ status: "failed", error: "auth failed" }).where(eq(agentRuns.id, result.plannerRunId));
+  }
+  const exhausted = await tickSwarm(ctx, swarm.id, starter());
+  assert.equal(exhausted?.plannerRunId, null);
+  const [row] = await db.select().from(swarmMessages).where(eq(swarmMessages.id, message.id));
+  assert.equal(row!.status, "queued", "it waits for the next wake something else causes");
+});
+
+test("a planner restarted after its machine failed carries the messages it was handed", async () => {
+  const swarm = await makeSwarm({ status: "running" });
+  const message = await swarmMessage(swarm.id, "hello");
+  const first = await tickSwarm(ctx, swarm.id, starter());
+  await db.update(agentRuns).set({ status: "failed", error: NO_MACHINE }).where(eq(agentRuns.id, first!.plannerRunId!));
+
+  const restarted = await tickSwarm(ctx, swarm.id, starter());
+  assert.ok(restarted?.plannerRunId);
+  const [row] = await db.select().from(swarmMessages).where(eq(swarmMessages.id, message.id));
+  assert.equal(row!.status, "sent", "the restart reruns the same prompt, so the message is in it");
+  assert.equal(row!.runId, restarted.plannerRunId);
+});
+
+/**
+ * A task starting over is "assigned" with nothing allowed to start it
+ * until its old machine is gone. Beside a failed sibling, the rollup
+ * called that "failed", and a failed swarm spawns nothing.
+ */
+test("a task starting over beside a failed sibling keeps the swarm running", async () => {
+  const swarm = await makeSwarm({ status: "running" });
+  await makeTask(swarm.id, {
+    title: "failed sibling",
+    status: "failed",
+    attention: "failed",
+    flags: { plannerToldAt: "2026-01-01T00:00:00.000Z" },
+  });
+  await makeTask(swarm.id, { title: "starting over", status: "assigned", flags: { startingOver: true } });
+  const result = await tickSwarm(ctx, swarm.id, starter());
+  assert.notEqual(result?.status, "failed", "work in flight is not a failed swarm");
+  assert.notEqual((await readSwarm(swarm.id)).status, "failed");
+});
+
+test("a start over that finds its swarm failed puts it back to work", async () => {
+  const swarm = await makeSwarm({ status: "failed" });
+  await makeTask(swarm.id, {
+    title: "failed sibling",
+    status: "failed",
+    attention: "failed",
+    flags: { plannerToldAt: "2026-01-01T00:00:00.000Z" },
+  });
+  const leaf = await makeTask(swarm.id, { title: "starting over", status: "assigned", flags: { startingOver: true } });
+  const original = ctx.worktrees;
+  (ctx as { worktrees: unknown }).worktrees = { removeWorkspace: async () => {} };
+  try {
+    await performTaskStartOver(ctx, leaf.id);
+  } finally {
+    (ctx as { worktrees: unknown }).worktrees = original;
+  }
+  assert.equal((await readSwarm(swarm.id)).status, "running");
+  assert.equal((await read(leaf.id)).flags.startingOver, undefined);
+
+  const deps = starter();
+  await tickSwarm(ctx, swarm.id, deps);
+  assert.equal((await read(leaf.id)).status, "working", "and the task it cleared starts");
+});
+
+test("a start over Bento began by itself does not resume a swarm a person paused", async () => {
+  const swarm = await makeSwarm({ status: "paused", pausedReason: "manual" });
+  const leaf = await makeTask(swarm.id, { title: "starting over", status: "assigned", flags: { startingOver: true } });
+  const original = ctx.worktrees;
+  (ctx as { worktrees: unknown }).worktrees = { removeWorkspace: async () => {} };
+  try {
+    await performTaskStartOver(ctx, leaf.id);
+  } finally {
+    (ctx as { worktrees: unknown }).worktrees = original;
+  }
+  assert.equal((await readSwarm(swarm.id)).status, "paused");
+});
+
+/**
+ * A merge queue row is the planner's acceptance of a branch. A leaf a
+ * person retried or marked done is no longer that, and its old branch
+ * must not land over the person.
+ */
+test("a merge queue row whose leaf is no longer accepted is dropped rather than landed", async () => {
+  const swarm = await makeSwarm({ status: "running" });
+  const retried = await makeTask(swarm.id, { title: "retried", status: "assigned", position: 0 });
+  const finished = await makeTask(swarm.id, { title: "marked done", status: "done", position: 1 });
+  const accepted = await makeTask(swarm.id, { title: "accepted", status: "working", report: "r", flags: ACCEPTED, position: 2 });
+  await db.insert(swarmLandings).values([
+    { swarmId: swarm.id, taskId: retried.id, position: 0 },
+    { swarmId: swarm.id, taskId: finished.id, position: 1 },
+    { swarmId: swarm.id, taskId: accepted.id, position: 2 },
+  ]);
+  const landed: string[] = [];
+  const deps = { ...starter(), startLanding: async (_tx: unknown, id: string) => void landed.push(id) };
+  await tickSwarm(ctx, swarm.id, deps as unknown as SwarmTickDeps);
+  const rows = await db.select().from(swarmLandings).where(eq(swarmLandings.swarmId, swarm.id));
+  const byTask = new Map(rows.map((row) => [row.taskId, row]));
+  assert.equal(byTask.get(retried.id)!.status, "cancelled", "a retried leaf's old branch is not landed");
+  assert.equal(byTask.get(finished.id)!.status, "cancelled", "a person's done is not overridden");
+  assert.equal(byTask.get(accepted.id)!.status, "landing");
+  assert.deepEqual(landed, [byTask.get(accepted.id)!.id]);
+  assert.equal((await read(finished.id)).status, "done");
+});
+
+/** A tick a moment early, by one clock or the other, still promotes a landing whose wait is over. */
+test("a landing whose backoff ends within the grace is promoted", async () => {
+  const swarm = await makeSwarm({ status: "running" });
+  const leaf = await makeTask(swarm.id, { title: "backing off", status: "working", report: "r", flags: ACCEPTED });
+  await db.insert(swarmLandings).values({ swarmId: swarm.id, taskId: leaf.id, position: 0, notBefore: new Date(Date.now() + 2_000) });
+  const landed: string[] = [];
+  const deps = { ...starter(), startLanding: async (_tx: unknown, id: string) => void landed.push(id) };
+  await tickSwarm(ctx, swarm.id, deps as unknown as SwarmTickDeps);
+  assert.equal(landed.length, 1);
+});
+
+/**
+ * A landing whose job pg-boss gave up on stayed "landing", and the
+ * partial unique index held the whole queue behind it until a reboot.
+ */
+test("a landing whose job is gone is sent again once its claim is stale", async () => {
+  const swarm = await makeSwarm({ status: "running" });
+  const leaf = await makeTask(swarm.id, { title: "landing", status: "working", report: "r", flags: ACCEPTED });
+  const [landing] = await db
+    .insert(swarmLandings)
+    .values({ swarmId: swarm.id, taskId: leaf.id, position: 0, status: "landing", attempt: 1, startedAt: new Date() })
+    .returning();
+  const landed: string[] = [];
+  const deps = { ...starter(), startLanding: async (_tx: unknown, id: string) => void landed.push(id) };
+
+  const fresh = await tickSwarm(ctx, swarm.id, deps as unknown as SwarmTickDeps);
+  assert.equal(fresh?.landingPromoted, false, "a landing still within its job's life is left to its job");
+  assert.deepEqual(landed, []);
+
+  await db.update(swarmLandings).set({ startedAt: new Date(Date.now() - 30 * 60_000) }).where(eq(swarmLandings.id, landing!.id));
+  queued.length = 0;
+  const stale = await tickSwarm(ctx, swarm.id, deps as unknown as SwarmTickDeps);
+  assert.equal(stale?.landingPromoted, true);
+  assert.deepEqual(landed, [landing!.id]);
+  assert.ok(queued.some((job) => job.queue === "swarm.land"), "the job is sent again");
+  const [row] = await db.select().from(swarmLandings).where(eq(swarmLandings.id, landing!.id));
+  assert.equal(row!.status, "landing");
+  assert.equal(row!.attempt, 2, "counted as an attempt");
+  assert.ok(row!.startedAt!.getTime() > Date.now() - 60_000, "and the claim is renewed, so the next tick does not send it again");
+});
+
+test("a landing whose job keeps dying fails once its attempts are spent, and the planner is told", async () => {
+  const swarm = await makeSwarm({ status: "running" });
+  const leaf = await makeTask(swarm.id, { title: "landing", status: "working", report: "r", flags: ACCEPTED });
+  const [landing] = await db
+    .insert(swarmLandings)
+    .values({
+      swarmId: swarm.id,
+      taskId: leaf.id,
+      position: 0,
+      status: "landing",
+      attempt: MAX_LANDING_ATTEMPTS,
+      startedAt: new Date(Date.now() - 30 * 60_000),
+    })
+    .returning();
+  const deps = { ...starter(), startLanding: async () => {} };
+  await tickSwarm(ctx, swarm.id, deps as unknown as SwarmTickDeps);
+  const [row] = await db.select().from(swarmLandings).where(eq(swarmLandings.id, landing!.id));
+  assert.equal(row!.status, "failed");
+  assert.equal(row!.errorCode, "attempts_exhausted");
+  const task = await read(leaf.id);
+  assert.equal(task.status, "failed");
+  assert.equal(task.flags.accepted, undefined, "the acceptance goes with the failure");
+  assert.equal(task.flags.landingErrorCode, "attempts_exhausted");
+  // The wake runs before the queue in a tick, so the next one hands it over.
+  const told = await tickSwarm(ctx, swarm.id, starter());
+  assert.ok(told?.plannerRunId, "the planner is told");
+});
+
+/**
+ * A resolver whose machine was never made did not try the conflict, and
+ * used to count as its one try: the leaf failed on the next landing.
+ */
+test("a resolver whose machine was never made is not the conflict's one try", async () => {
+  const swarm = await makeSwarm({ status: "running" });
+  const leaf = await makeTask(swarm.id, { title: "conflicted", status: "working", report: "r", flags: ACCEPTED });
+  const [dead] = await db
+    .insert(agentRuns)
+    .values({
+      type: "swarm",
+      swarmId: swarm.id,
+      swarmTaskId: leaf.id,
+      role: "resolver",
+      agentProfileId: PROFILE,
+      prompt: "",
+      status: "failed",
+      error: NO_MACHINE,
+    })
+    .returning();
+  const [landing] = await db
+    .insert(swarmLandings)
+    .values({ swarmId: swarm.id, taskId: leaf.id, position: 0, status: "conflicted", error: "CONFLICT", resolverRunId: dead!.id })
+    .returning();
+
+  const deps = { ...starter(), startLanding: async () => {} };
+  const result = await tickSwarm(ctx, swarm.id, deps as unknown as SwarmTickDeps);
+  assert.equal(result?.resolverRunIds.length, 1, "another resolver is put on it");
+  const [row] = await db.select().from(swarmLandings).where(eq(swarmLandings.id, landing!.id));
+  assert.equal(row!.status, "conflicted", "still the conflict, not a landing that already had its try");
+  assert.equal(row!.resolverRunId, result!.resolverRunIds[0]);
+  assert.equal((await read(leaf.id)).flags.resolverRestarts, 1);
+});
+
+test("a resolver whose machine keeps failing is counted as the try once its restarts are spent", async () => {
+  const swarm = await makeSwarm({ status: "running" });
+  const leaf = await makeTask(swarm.id, {
+    title: "conflicted",
+    status: "working",
+    report: "r",
+    flags: { ...ACCEPTED, resolverRestarts: MAX_SANDBOX_RESTARTS },
+  });
+  const [dead] = await db
+    .insert(agentRuns)
+    .values({ type: "swarm", swarmId: swarm.id, swarmTaskId: leaf.id, role: "resolver", agentProfileId: PROFILE, prompt: "", status: "failed", error: NO_MACHINE })
+    .returning();
+  const [landing] = await db
+    .insert(swarmLandings)
+    .values({ swarmId: swarm.id, taskId: leaf.id, position: 0, status: "conflicted", error: "CONFLICT", resolverRunId: dead!.id })
+    .returning();
+  const deps = { ...starter(), startLanding: async () => {} };
+  const result = await tickSwarm(ctx, swarm.id, deps as unknown as SwarmTickDeps);
+  assert.deepEqual(result?.resolverRunIds, []);
+  const [row] = await db.select().from(swarmLandings).where(eq(swarmLandings.id, landing!.id));
+  assert.equal(row!.status, "landing", "tried again as before, where a second conflict fails the leaf");
+  assert.equal(row!.resolverRunId, dead!.id);
 });

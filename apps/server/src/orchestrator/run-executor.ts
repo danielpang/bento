@@ -125,7 +125,7 @@ import { REAP_SANDBOX_QUEUE, reapFinishedSandboxes, reapFinishedSwarmSandboxes, 
 import { latestConversationRun, resolveFollowUpRun } from "./stage-agent.js";
 import { asPipelineRun, isPipelineRun, type PipelineRun } from "./pipeline-run.js";
 import { describeRunSubject, type RunSubject } from "./run-subject.js";
-import { SWARM_TICK_QUEUE, tickAllLiveSwarms } from "./swarm/coordinator.js";
+import { enqueueSwarmTick, SWARM_TICK_QUEUE, tickAllLiveSwarms } from "./swarm/coordinator.js";
 import { SWARM_LAND_QUEUE, resumeClaimedLandings } from "./swarm/landing.js";
 import { SWARM_PUSH_QUEUE, ensureSwarmPushWorker, remoteBranchBundles } from "./swarm/remote-branches.js";
 import { SWARM_START_OVER_QUEUE } from "./swarm/start-over.js";
@@ -2649,6 +2649,20 @@ export async function markCancelled(ctx: AppContext, runId: string): Promise<voi
   ctx.bus.emitRunDone(runId, "cancelled");
   await requeueUndelivered(ctx.db, runId);
   await deliverQueuedMessage(ctx, runId);
+  /*
+   * A swarm hears about it through a tick, as from every other way a
+   * run ends. Not every caller settles after this (the executor's own
+   * abort path does not), and a swarm whose planner was stopped and
+   * whose tick never came sat with that planner's news and messages
+   * until something else happened to tick it. The tick is keyed by the
+   * swarm, so a caller that also settles costs nothing extra.
+   */
+  if (closed.swarmId) {
+    await enqueueSwarmTick(ctx, closed.swarmId).catch((err: unknown) => {
+      console.warn(`could not tick swarm ${closed.swarmId} after cancelling run ${runId}:`, err);
+      ctx.analytics?.captureException(err, null, null, { run_id: runId, source: "swarm_tick" });
+    });
+  }
 }
 
 /**
@@ -2853,7 +2867,17 @@ async function failRunAsInterrupted(
    * tell.
    */
   const subject = await describeRunSubject(ctx, run).catch(() => null);
-  if (!subject) return;
+  if (!subject) {
+    /*
+     * Its swarm is still there to tell when only something the subject
+     * reads went (its profile, its project's checkout rows): a tick
+     * reads the swarm's rows, not the run's, and without it the run's
+     * end went unheard and the swarm waited on a run that was over. A
+     * swarm that is gone too makes this a tick that finds nothing.
+     */
+    if (run.swarmId) await enqueueSwarmTick(ctx, run.swarmId);
+    return;
+  }
   subject.emitBoard("failed");
   if (subject.kind === "pipeline") {
     await requeueUndelivered(ctx.db, run.id);
@@ -2960,6 +2984,51 @@ export async function reapStalledRuns(ctx: AppContext, stallMin: number = STALLE
   }
   if (closed.length > 0) console.warn(`closed ${closed.length} run(s) that stalled before their agent started`);
   return closed;
+}
+
+/**
+ * Minutes a server run may sit queued before its run.execute job is
+ * presumed lost and sent again.
+ *
+ * Longer than any wait for a free run worker a deployment ordinarily
+ * has, so the common case sends nothing, and short against a swarm
+ * that would otherwise wait for a reboot.
+ */
+export const QUEUED_RUN_REQUEUE_MIN = 10;
+
+/**
+ * Sends run.execute again for server runs that have sat queued too long.
+ *
+ * A queued row is only a run once a job carries it, and a job can be
+ * lost: a send that failed after its transaction committed, a job that
+ * pg-boss expired or archived while every worker was busy. Boot used to
+ * be the only place that asked again (requeueWaitingRuns), so such a
+ * run waited for the next deploy, and a swarm whose planner or worker
+ * it was waited with it: an active run holds the planner's slot and the
+ * swarm's ceiling alike.
+ *
+ * Safe to send twice. executeRun claims the run with a compare and set
+ * from queued to starting, so of every job carrying one run exactly one
+ * runs the agent, and the rest read a run that is no longer queued and
+ * stop. Measured on the database's clock, against its own queued_at.
+ */
+export async function requeueStrandedRuns(
+  ctx: AppContext,
+  afterMin: number = QUEUED_RUN_REQUEUE_MIN,
+): Promise<string[]> {
+  const stranded = await ctx.db
+    .select({ id: agentRuns.id })
+    .from(agentRuns)
+    .where(
+      and(
+        eq(agentRuns.executor, "server"),
+        eq(agentRuns.status, "queued"),
+        sql`${agentRuns.queuedAt} < now() - make_interval(mins => ${afterMin})`,
+      ),
+    );
+  for (const row of stranded) await enqueueRun(ctx, row.id);
+  if (stranded.length > 0) console.warn(`sent ${stranded.length} run(s) that had waited queued with no worker on them again`);
+  return stranded.map((row) => row.id);
 }
 
 /**
@@ -3483,6 +3552,8 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
     // rather than a new one, because every scheduled job is a query a
     // poll on a database that should be allowed to sleep.
     await reapStalledRuns(ctx);
+    // And runs that never got that far: queued, with their job lost.
+    await requeueStrandedRuns(ctx);
   }));
 
   /**
