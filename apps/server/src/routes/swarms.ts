@@ -31,6 +31,7 @@ import {
 } from "../access.js";
 import type { AppContext } from "../context.js";
 import type { BoardEvent } from "../events.js";
+import { runsForCaller } from "../feature-flags.js";
 import { actor } from "../middleware/actor.js";
 import { deferAfterCommit, deferOnRollback, tenantDb as db } from "../middleware/tenant.js";
 import { queueSwarmSandboxReap, reapSwarmSandbox } from "../orchestrator/reap-sandbox.js";
@@ -1762,6 +1763,7 @@ export function swarmRoutes(ctx: AppContext) {
           startedAt: agentRuns.startedAt,
           endedAt: agentRuns.endedAt,
           error: agentRuns.error,
+          sandboxProvider: agentRuns.sandboxProvider,
         })
         .from(agentRuns)
         .where(and(eq(agentRuns.swarmTaskId, task.id), eq(agentRuns.role, "worker")))
@@ -1769,7 +1771,12 @@ export function swarmRoutes(ctx: AppContext) {
 
       const commits = await taskCommits(ctx, c, swarm, task);
       const retryable = await landingRetryableTasks(ctx, c, swarm, [task]);
-      return c.json({ task: { ...task, canRetryLanding: retryable.has(task.id) }, events, runs, commits });
+      return c.json({
+        task: { ...task, canRetryLanding: retryable.has(task.id) },
+        events,
+        runs: await runsForCaller(ctx, c, runs),
+        commits,
+      });
     })
     /**
      * Marks a leaf done, because a person says so.

@@ -136,8 +136,7 @@ test("a sandbox whose agent came up reports the wait from queueing, in slices on
   const { analytics, events } = recordingAnalytics();
 
   reportSandboxReady(analytics, {
-    runId: "run-1",
-    role: "stage",
+    run: { id: "run-1", role: "stage", type: "pipeline" },
     provider: "sprite",
     selection: "auto",
     origin: "new",
@@ -163,8 +162,9 @@ test("a sandbox whose agent came up reports the wait from queueing, in slices on
     sandbox_origin: "new",
     provider: "sprite",
     selection: "auto",
-    role: "stage",
     run_id: "run-1",
+    role: "stage",
+    run_type: "pipeline",
     project_id: "project-1",
     feature_id: "feature-1",
     stage_id: "stage-1",
@@ -174,8 +174,7 @@ test("a sandbox whose agent came up reports the wait from queueing, in slices on
 test("a swarm's machine names its swarm, and a runner's leaves out what it did not say", () => {
   const { analytics, events } = recordingAnalytics();
   reportSandboxReady(analytics, {
-    runId: "run-2",
-    role: "worker",
+    run: { id: "run-2", role: "worker", type: "swarm" },
     provider: "modal",
     selection: "existing",
     origin: "restored",
@@ -188,8 +187,7 @@ test("a swarm's machine names its swarm, and a runner's leaves out what it did n
     owner: { swarmId: "swarm-1", swarmTaskId: "task-1" },
   });
   reportSandboxReady(analytics, {
-    runId: "run-3",
-    role: "stage",
+    run: { id: "run-3", role: "stage", type: "pipeline" },
     provider: "runner",
     origin: "new",
     queueWaitMs: 10,
@@ -209,8 +207,9 @@ test("a swarm's machine names its swarm, and a runner's leaves out what it did n
     sandbox_origin: "restored",
     provider: "modal",
     selection: "existing",
-    role: "worker",
     run_id: "run-2",
+    role: "worker",
+    run_type: "swarm",
     project_id: "project-1",
     swarm_id: "swarm-1",
     swarm_task_id: "task-1",
@@ -220,8 +219,9 @@ test("a swarm's machine names its swarm, and a runner's leaves out what it did n
     queue_wait_ms: 10,
     sandbox_origin: "new",
     provider: "runner",
-    role: "stage",
     run_id: "run-3",
+    role: "stage",
+    run_type: "pipeline",
     project_id: "project-1",
     feature_id: "feature-1",
     stage_id: "stage-1",
@@ -231,8 +231,7 @@ test("a swarm's machine names its swarm, and a runner's leaves out what it did n
 test("a clock that went backwards never reports a negative wait, and a throw stays inside", () => {
   const { analytics, events } = recordingAnalytics();
   reportSandboxReady(analytics, {
-    runId: "run-4",
-    role: "stage",
+    run: { id: "run-4", role: "stage", type: "pipeline" },
     provider: "sprite",
     origin: "new",
     queueWaitMs: -10_000,
@@ -257,8 +256,7 @@ test("a clock that went backwards never reports a negative wait, and a throw sta
         async shutdown() {},
       },
       {
-        runId: "run-5",
-        role: "stage",
+        run: { id: "run-5", role: "stage", type: "pipeline" },
         provider: "sprite",
         origin: "new",
         queueWaitMs: 1,

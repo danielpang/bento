@@ -11,6 +11,8 @@ import {
   withProviderOutageErrors,
   type ChatItem,
 } from "./components/AgentSession.js";
+import { BetaTestersScope } from "./beta.js";
+import { sandboxProviderWords } from "./sandbox-provider.js";
 
 const client = {} as unknown as BentoClient;
 const originalStorage = (globalThis as { localStorage?: Storage }).localStorage;
@@ -210,6 +212,42 @@ test("the run picker wears a CSS status dot, not a colour emoji", () => {
     assert.doesNotMatch(html, /\u{1F535}/u);
     assert.doesNotMatch(html, /⚪/);
   });
+});
+
+test("a beta tester sees which sandbox provider ran the run, in plain words", () => {
+  withStorage(storageWithout(), () => {
+    const sessionWith = (enabled: boolean, sandboxProvider: string | null) =>
+      renderToStaticMarkup(
+        createElement(BetaTestersScope, {
+          enabled,
+          children: createElement(AgentSession, {
+            client,
+            featureId: "f1",
+            runs: [{ ...run("succeeded"), sandboxProvider }],
+            profiles: [profile()],
+            finished: false,
+            onChanged() {},
+          }),
+        }),
+      );
+    assert.match(sessionWith(true, "sprite"), /class="chat-run"><span>Claude · [^<]* · [^<]*Fly sprite<\/span>/);
+    assert.match(sessionWith(true, "modal"), / · Modal<\/span>/);
+    // Everyone else sees no provider at all: the console never names one.
+    assert.doesNotMatch(sessionWith(false, "sprite"), /Fly sprite|sprite/i);
+    // A run that never provisioned says nothing rather than "unknown".
+    assert.doesNotMatch(sessionWith(true, null), /Fly sprite|Modal|Docker|Local process|unknown/);
+  });
+});
+
+test("a provider's plain words cover every driver, and pass anything else through", () => {
+  assert.equal(sandboxProviderWords("sprite"), "Fly sprite");
+  assert.equal(sandboxProviderWords("modal"), "Modal");
+  assert.equal(sandboxProviderWords("docker"), "Docker");
+  assert.equal(sandboxProviderWords("local-process"), "Local process");
+  assert.equal(sandboxProviderWords("runner-vm"), "runner-vm");
+  assert.equal(sandboxProviderWords(null), null);
+  assert.equal(sandboxProviderWords(undefined), null);
+  assert.equal(sandboxProviderWords(""), null);
 });
 
 test("a failed run's picker trigger wears the failed dot", () => {

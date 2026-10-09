@@ -37,7 +37,7 @@ import { actor } from "../middleware/actor.js";
 import { canAccessProject, getAccessibleFeature } from "../access.js";
 import { driverForSandbox, SandboxDriverUnavailable } from "../orchestrator/sandbox-driver.js";
 import { childCount, parentRefusal, relatedGroup } from "../feature-tree.js";
-import { getBetaTester } from "../feature-flags.js";
+import { getBetaTester, runsForCaller } from "../feature-flags.js";
 import {
   advanceFeature,
   evaluateFeatureGate,
@@ -450,7 +450,7 @@ export function featureRoutes(ctx: AppContext) {
       const history = await featurePullRequestHistory(db(c, ctx), feature);
       return c.json({
         ...(withUrl ?? feature),
-        runs,
+        runs: await runsForCaller(ctx, c, runs),
         pullRequests: pullRequests.map((pr) => ({
           // A repository removed from the project leaves its pull
           // request behind, so the name falls back to the address it

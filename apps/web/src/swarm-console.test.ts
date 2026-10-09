@@ -675,6 +675,34 @@ test("a failed worker card offers fix forward and shows earlier attempts", () =>
   assert.equal((html.match(/View output/g) ?? []).length, 2);
 });
 
+test("a worker attempt names its sandbox provider to a beta tester only", () => {
+  const failed = { ...tasks().find((row) => row.id === "slow")!, status: "failed" as const };
+  const model = buildSwarmModel([failed], { now: NOW });
+  const drawer = (enabled: boolean) =>
+    renderToStaticMarkup(
+      createElement(BetaTestersScope, {
+        enabled,
+        children: createElement(SwarmNodeDrawer, {
+          task: failed,
+          node: model.byId.get("slow")!,
+          detail: { taskId: "slow", commits: [], events: [], runs: [
+            { id: "run-new", status: "failed", queuedAt: "2026-01-02T00:00:00.000Z", startedAt: null, endedAt: null, error: "stopped", sandboxProvider: "modal" },
+            { id: "run-mid", status: "failed", queuedAt: "2026-01-01T12:00:00.000Z", startedAt: null, endedAt: null, error: null, sandboxProvider: "sprite" },
+            { id: "run-old", status: "succeeded", queuedAt: "2026-01-01T00:00:00.000Z", startedAt: null, endedAt: null, error: null, sandboxProvider: null },
+          ] },
+          onClose: () => {},
+        }),
+      }),
+    );
+  const tester = drawer(true);
+  assert.equal((tester.match(/<span class="muted">Modal<\/span>/g) ?? []).length, 1);
+  assert.equal((tester.match(/<span class="muted">Fly sprite<\/span>/g) ?? []).length, 1);
+  assertNoDashes(tester, "the attempts list");
+  const everyoneElse = drawer(false);
+  assert.doesNotMatch(everyoneElse, /Fly sprite|>Modal</);
+  assert.match(everyoneElse, /Attempt 3/);
+});
+
 test("a merge queue failure keeps its worker report and offers to retry landing", () => {
   const failed = { ...tasks().find((row) => row.id === "slow")!, status: "failed" as const, canRetryLanding: true,
     flags: { landingError: "fatal: checkout is on a detached HEAD" }, report: "Worker completed the feature." };

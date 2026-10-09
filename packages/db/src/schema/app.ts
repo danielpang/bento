@@ -547,6 +547,19 @@ export const agentRuns = pgTable(
     .references(() => agentProfiles.id, { onDelete: "cascade" }),
   sandboxId: uuid("sandbox_id").references(() => sandboxes.id),
   /**
+   * The sandbox provider that ran this run ("sprite", "modal",
+   * "docker", "local-process", or what a runner reported), after any
+   * "auto" fallback.
+   *
+   * Recorded on the run because the sandboxes row cannot answer it
+   * later: a machine made again for the same owner rewrites that row,
+   * so a swarm whose machine went from a sprite to Modal and back
+   * holds one row naming whichever came last. Null until the run
+   * provisions, on a run whose provisioning failed, and on runs from
+   * before the column, which were not backfilled for that reason.
+   */
+  sandboxProvider: text("sandbox_provider"),
+  /**
    * Who asked for this run.
    *
    * Compute is pooled across a team, so "one person used it all" is a

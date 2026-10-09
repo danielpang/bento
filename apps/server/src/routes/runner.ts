@@ -313,21 +313,27 @@ export function runnerRoutes(ctx: AppContext) {
          * Both slices are the database's arithmetic on its own
          * stamps, so the runner's clock never enters them. The
          * machine itself is the runner's, so the provider and whether
-         * it made one are whatever the runner said.
+         * it made one are whatever the runner said, and that provider
+         * is recorded on the run the way the server's own executor
+         * records its own. An older runner says nothing, and the run
+         * keeps no provider rather than a guessed one.
          */
+        const sandbox = c.req.valid("json").sandbox;
         const [timing] = await db(c, ctx)
           .update(agentRuns)
-          .set({ status: "running", agentStartedAt: sql`now()` })
+          .set({
+            status: "running",
+            agentStartedAt: sql`now()`,
+            ...(sandbox ? { sandboxProvider: sandbox.provider } : {}),
+          })
           .where(eq(agentRuns.id, runId))
           .returning({
             queueWaitMs: sql<number>`(extract(epoch from (${agentRuns.startedAt} - ${agentRuns.queuedAt})) * 1000)::float8`,
             sinceClaimMs: sql<number>`(extract(epoch from (now() - ${agentRuns.startedAt})) * 1000)::float8`,
           });
-        const sandbox = c.req.valid("json").sandbox;
         if (timing && owner) {
           reportSandboxReady(ctx.analytics, {
-            runId,
-            role: run.role,
+            run: { id: runId, role: run.role, type: run.type },
             provider: sandbox?.provider ?? "runner",
             origin: sandboxOrigin({ createdSandbox: sandbox?.createdSandbox }),
             queueWaitMs: timing.queueWaitMs,

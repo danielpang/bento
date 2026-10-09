@@ -1,6 +1,8 @@
 import { Fragment, useState, type ReactNode } from "react";
 import * as Tabs from "@radix-ui/react-tabs";
 import { Markdown } from "./Markdown.js";
+import { BetaOnly } from "../beta.js";
+import { sandboxProviderWords } from "../sandbox-provider.js";
 import { CompletionRing } from "./CompletionRing.js";
 import { useDismissable } from "./ui.js";
 import {
@@ -626,6 +628,7 @@ export function SwarmNodeDrawer({
                     <strong>Attempt {runs.length - index}</strong>
                     <span className="status"><span className="dot" data-state={run.status === "succeeded" ? "succeeded" : run.status === "failed" ? "failed" : "running"} />{run.status}</span>
                     <time dateTime={run.queuedAt}>{new Date(run.queuedAt).toLocaleString()}</time>
+                    <SandboxProviderNote provider={run.sandboxProvider} />
                   </div>
                   {run.error && <p className="swarm-attempt-error">{run.error}</p>}
                   {onOpenRun && <button className="swarm-output-link" type="button" onClick={() => onOpenRun(run.id)}>View output</button>}
@@ -731,6 +734,17 @@ export function SwarmNodeDrawer({
       )}
     </aside>
     </Tabs.Root>
+  );
+}
+
+/** The provider an attempt ran on, for beta testers: an operator's detail, see sandbox-provider.ts. */
+function SandboxProviderNote({ provider }: { provider: string | null | undefined }) {
+  const words = sandboxProviderWords(provider);
+  if (!words) return null;
+  return (
+    <BetaOnly>
+      <span className="muted">{words}</span>
+    </BetaOnly>
   );
 }
 
