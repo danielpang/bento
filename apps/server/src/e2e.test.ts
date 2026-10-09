@@ -1977,8 +1977,20 @@ test("a run records its session id at init, not only at the end", { timeout: 60_
     seen && !TERMINAL_STATUSES.includes(seen.status),
     "and it is there while the run is still working, when a crash could still lose it",
   );
-  // No need to sit out the slow run once the point is proven.
-  await app.request(`/api/runs/${running!.id}/cancel`, { method: "POST" });
+  // No need to sit out the slow run once the point is proven. Cancelled
+  // as someone who is not a beta tester, whose answer leaves out the
+  // provider the way every whole run row does for them.
+  const flags = ctx.featureFlags;
+  ctx.featureFlags = new FeatureFlags(null, false);
+  try {
+    const cancelled = await json<Record<string, unknown>>(
+      await app.request(`/api/runs/${running!.id}/cancel`, { method: "POST" }),
+    );
+    assert.equal(cancelled.id, running!.id);
+    assert.equal("sandboxProvider" in cancelled, false, "the cancel route leaves the provider out");
+  } finally {
+    ctx.featureFlags = flags;
+  }
   await waitForRun(running!.id);
 });
 

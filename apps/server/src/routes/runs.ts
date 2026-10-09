@@ -145,8 +145,9 @@ export function runRoutes(ctx: AppContext) {
         runId: run.id,
         status: "cancelled",
       });
-      const [updated] = await db(c, ctx).select().from(agentRuns).where(eq(agentRuns.id, run.id));
-      return c.json(updated);
+      const updated = await db(c, ctx).select().from(agentRuns).where(eq(agentRuns.id, run.id));
+      const [visible] = await runsForCaller(ctx, c, updated);
+      return c.json(visible);
     })
     /**
      * Undoes a run by restoring the sandbox to the snapshot taken before

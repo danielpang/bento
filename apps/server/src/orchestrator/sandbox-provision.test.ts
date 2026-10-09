@@ -774,3 +774,69 @@ test("a provision no run asked for leaves the run properties out", async () => {
   assert.equal("role" in (event.properties ?? {}), false);
   assert.equal("run_type" in (event.properties ?? {}), false);
 });
+
+test("a provision refused for two repositories on one checkout is a preflight final, blamed on the project", async () => {
+  const featureId = await seedFeature("Two repos, one checkout");
+  const asked: string[] = [];
+  const rows = await ctx.db
+    .insert(repositories)
+    .values([
+      { projectId, name: "twin-a", localPath: "/same/checkout", defaultBranch: "main", position: 10 },
+      { projectId, name: "twin-b", localPath: "/same/checkout", defaultBranch: "main", position: 11 },
+    ])
+    .returning();
+  await assert.rejects(
+    provisionWorkspace(ctx, {
+      driver: stubDriver("sprite", asked),
+      selection: "auto",
+      projectId,
+      organizationId: null,
+      workspaceKey: featureId,
+      branch: `bento/${featureId}`,
+      repoRows: rows,
+      authMounts: [],
+      restrictNetwork: false,
+      owner: { featureId },
+      run: runFor(featureId),
+      say: async () => {},
+    }),
+    /use the same checkout/,
+  );
+  assert.deepEqual(asked, []);
+  const finals = failedEvents().filter((e) => e.properties?.feature_id === featureId);
+  assert.equal(finals.length, 1);
+  assert.equal(finals[0]?.properties?.kind, "final");
+  assert.equal(finals[0]?.properties?.phase, "preflight");
+  assert.equal(finals[0]?.properties?.blame, "project");
+  assert.equal(finals[0]?.properties?.run_id, runFor(featureId).id, "named by its run");
+});
+
+test("a locked team's preflight refusal names the lockable provider it would have asked, not the sprite", async () => {
+  const featureId = await seedFeature("Locked and unreachable");
+  const asked: string[] = [];
+  const [row] = await ctx.db
+    .insert(repositories)
+    .values({ projectId, name: "locked-ghost", localPath: "/nowhere/locked", repoUrl: "file:///nonexistent/locked.git", defaultBranch: "main", position: 12 })
+    .returning();
+  await assert.rejects(
+    provisionWorkspace(ctx, {
+      driver: stubDriver("sprite", asked),
+      fallbackDrivers: [stubDriver("modal", asked, { restricted: true })],
+      selection: "auto",
+      projectId,
+      organizationId: null,
+      workspaceKey: featureId,
+      branch: `bento/${featureId}`,
+      repoRows: [row!],
+      authMounts: [],
+      restrictNetwork: true,
+      owner: { featureId },
+      run: runFor(featureId),
+      say: async () => {},
+    }),
+    /cannot be reached/,
+  );
+  const finals = failedEvents().filter((e) => e.properties?.feature_id === featureId);
+  assert.equal(finals.length, 1);
+  assert.equal(finals[0]?.properties?.provider, "modal");
+});

@@ -194,7 +194,6 @@ export async function provisionWorkspace(
   input: ProvisionWorkspaceInput,
 ): Promise<ProvisionedWorkspace> {
   const { repoRows, branch, workspaceKey, driver } = input;
-  const publisher = await githubConnectionFor(ctx, input.organizationId);
   /**
    * Every driver that may make this machine, first choice first. A
    * fallback of another workspace shape is left out rather than tried:
@@ -206,6 +205,46 @@ export async function provisionWorkspace(
     ...(input.fallbackDrivers ?? []).filter((d) => d.workspace === driver.workspace && d !== driver),
   ];
 
+  /** What every provision event says about this provision, whatever happened to it. */
+  const eventBase = {
+    selection: input.selection ?? "default",
+    projectId: input.projectId,
+    organizationId: input.organizationId,
+    userId: input.startedBy ?? null,
+    owner: input.owner,
+    run: input.run,
+  };
+
+  /*
+   * A provision refused before any provider is asked still ends without
+   * a machine, so it is a `final` too, with no attempts and the phase
+   * "preflight", named by the provider the run would have asked first
+   * (a locked team's first lockable driver, else the caller's).
+   */
+  const firstAsked = (input.restrictNetwork ? candidates.find((d) => d.supportsRestrictedNetwork) : undefined) ?? driver;
+  const refusedBeforeAsking = (err: unknown, blame?: "project" | "policy"): void =>
+    reportSandboxProvisionFailed(ctx.analytics, {
+      ...eventBase,
+      kind: "final",
+      provider: firstAsked.provider,
+      phase: "preflight",
+      blame,
+      errorKind: sandboxErrorKind(err),
+      errorName: errorClassName(err),
+      attempts: 0,
+    });
+  /** Runs one preflight step, counting its refusal as a final before rethrowing it. */
+  const preflight = async <T>(step: () => T | Promise<T>, blame?: "project" | "policy"): Promise<T> => {
+    try {
+      return await step();
+    } catch (err) {
+      refusedBeforeAsking(err, blame);
+      throw err;
+    }
+  };
+
+  const publisher = await preflight(() => githubConnectionFor(ctx, input.organizationId));
+
   /**
    * Two repositories pointing at one checkout would have their
    * worktrees fight over the same .git, so the run stops here with a
@@ -213,10 +252,12 @@ export async function provisionWorkspace(
    */
   const duplicateRepos = duplicateRepositoryLocation(repoRows);
   if (duplicateRepos) {
-    throw new Error(
+    const refused = new Error(
       `Repositories ${duplicateRepos[0].name} and ${duplicateRepos[1].name} use the same checkout. ` +
         "Remove one under Settings, Repositories, then run again.",
     );
+    refusedBeforeAsking(refused, "project");
+    throw refused;
   }
 
   /**
@@ -229,13 +270,17 @@ export async function provisionWorkspace(
    * to provision the machine and find out at the merge queue.
    */
   const shape = isolationRefusal(input.workerIsolation ?? "sandbox", driver.workspace);
-  if (shape) throw new Error(shape);
+  if (shape) {
+    const refused = new Error(shape);
+    refusedBeforeAsking(refused, "policy");
+    throw refused;
+  }
 
   const restarted = new Set(input.restartedRepoUrls ?? []);
   const prepared: PreparedRepository[] =
     driver.workspace === "clone"
       ? repoRows.map((r) => ({ name: r.name, localPath: r.localPath, worktreePath: "" }))
-      : await ctx.worktrees.ensureAll(
+      : await preflight(() => ctx.worktrees.ensureAll(
           repoRows.map((r) => ({
             name: r.name,
             localPath: r.localPath,
@@ -249,7 +294,7 @@ export async function provisionWorkspace(
           workspaceKey,
           branch,
           { branchChanged: restarted.size > 0 },
-        );
+        ));
 
   /**
    * A worktree's .git is a file naming the source repository's .git
@@ -277,11 +322,9 @@ export async function provisionWorkspace(
     for (const row of repoRows) {
       if (!row.repoUrl) continue;
       const repoId = row.githubRepoId ? Number(row.githubRepoId) : undefined;
-      const seed = await createRepositorySeed(
-        publisher,
-        row.repoUrl,
-        Number.isSafeInteger(repoId) ? repoId : undefined,
-        row.defaultBranch,
+      const repoUrl = row.repoUrl;
+      const seed = await preflight(() =>
+        createRepositorySeed(publisher, repoUrl, Number.isSafeInteger(repoId) ? repoId : undefined, row.defaultBranch),
       );
       seedBundles.set(row.id, seed.bundle);
       seedBaseBranches.set(row.id, seed.baseBranch);
@@ -296,34 +339,8 @@ export async function provisionWorkspace(
    * repository with a seed bundle was just read from GitHub to make
    * it, so it is proven already; the rest are asked for their HEAD.
    */
-  /*
-   * A provision refused before any provider is asked still ends without
-   * a machine, so it is a `final` too, with no attempts and the phase
-   * "preflight", named by the provider the run would have asked first.
-   */
-  const refusedBeforeAsking = (err: unknown, blame: "project" | "policy"): void =>
-    reportSandboxProvisionFailed(ctx.analytics, {
-      kind: "final",
-      provider: driver.provider,
-      selection: input.selection ?? "default",
-      phase: "preflight",
-      blame,
-      errorKind: sandboxErrorKind(err),
-      errorName: errorClassName(err),
-      attempts: 0,
-      projectId: input.projectId,
-      organizationId: input.organizationId,
-      userId: input.startedBy ?? null,
-      owner: input.owner,
-      run: input.run,
-    });
   if (driver.workspace === "clone") {
-    try {
-      await verifyCloneUrls(repoRows.filter((r) => r.repoUrl && !seedBundles.has(r.id)));
-    } catch (err) {
-      refusedBeforeAsking(err, "project");
-      throw err;
-    }
+    await preflight(() => verifyCloneUrls(repoRows.filter((r) => r.repoUrl && !seedBundles.has(r.id))), "project");
   }
 
   /**
@@ -444,17 +461,12 @@ export async function provisionWorkspace(
        * records it below and in the caller.
        */
       const failedEvent = {
+        ...eventBase,
         provider: candidate.provider,
-        selection: input.selection ?? "default",
         phase: failure.phase,
         blame: failure.blame,
         errorKind: sandboxErrorKind(reason),
         errorName: errorClassName(reason),
-        projectId: input.projectId,
-        organizationId: input.organizationId,
-        userId: input.startedBy ?? null,
-        owner: input.owner,
-        run: input.run,
       };
       reportSandboxProvisionFailed(ctx.analytics, {
         ...failedEvent,
@@ -533,15 +545,10 @@ export async function provisionWorkspace(
       .returning();
 
     reportSandboxProvisioned(ctx.analytics, {
+      ...eventBase,
       provider: handle.provider,
-      selection: input.selection ?? "default",
       fellBackFrom,
       attempts,
-      projectId: input.projectId,
-      organizationId: input.organizationId,
-      userId: input.startedBy ?? null,
-      owner: input.owner,
-      run: input.run,
     });
 
     return {
@@ -555,17 +562,12 @@ export async function provisionWorkspace(
     // The provision ends without a machine here too: the run fails and
     // a machine it made is destroyed below, so it counts as a final.
     reportSandboxProvisionFailed(ctx.analytics, {
+      ...eventBase,
       kind: "final",
       provider: handle.provider,
-      selection: input.selection ?? "default",
       errorKind: sandboxErrorKind(err),
       errorName: errorClassName(err),
       attempts,
-      projectId: input.projectId,
-      organizationId: input.organizationId,
-      userId: input.startedBy ?? null,
-      owner: input.owner,
-      run: input.run,
     });
     // A machine this attempt created, and then failed to record, would
     // bill with nobody looking.
