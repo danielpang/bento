@@ -291,6 +291,56 @@ test("restore of a stopped sandbox uses the same allowlist as provision", async 
   assert.ok(stopped.creates[0]?.tags.bento_created);
 });
 
+test("wake boots a hibernated sandbox from its image, with the run's allowlist", async () => {
+  const env = fake({ running: false });
+  const woke = await driver(env.api).wake(
+    {
+      externalId: "bento-swarm-1-task",
+      provider: "modal",
+      workdir: "/workspace",
+      imageRef: "im-hibernated",
+      network: "restricted",
+      allowedHosts: ["https://api.anthropic.com"],
+    },
+    { organizationId: "org-1" },
+  );
+  assert.deepEqual(woke, { booted: true }, "booted from the stored image, so the row keeps it");
+  assert.equal(env.creates[0]?.tags.bento_org, "org-1");
+  assert.deepEqual(env.deleted, []);
+  assert.deepEqual(env.images, ["im-hibernated"]);
+  assert.equal(env.creates[0]?.name, "bento-swarm-1-task");
+  assert.equal(env.creates[0]?.tags.bento_feature, "swarm-1-task");
+  assert.deepEqual(env.creates[0]?.outboundDomainAllowlist, ["api.anthropic.com"]);
+  assert.equal(env.toolchainCalls, 0);
+});
+
+test("wake prefers the exit snapshot and leaves a running sandbox alone", async () => {
+  const stopped = fake({ running: false });
+  stopped.api.fromName = async () => stopped.box;
+  stopped.box.poll = async () => 1;
+  stopped.box.experimentalGetExitSnapshot = async () => ({ imageId: "im-exit" });
+  const woke = await driver(stopped.api).wake({ externalId: "bento-x", provider: "modal", workdir: "/workspace", imageRef: "im-old" });
+  assert.deepEqual(stopped.images, ["im-exit"]);
+  assert.deepEqual(woke, { booted: true, imageRef: "im-exit" }, "the row is told which image it now has");
+  assert.deepEqual(stopped.deleted, ["im-old"], "and the image it superseded is not left in storage");
+
+  const running = fake();
+  const again = await driver(running.api).wake({ externalId: "bento-x", provider: "modal", workdir: "/workspace" });
+  assert.deepEqual(again, { booted: false });
+  assert.equal(running.creates.length, 0);
+});
+
+test("wake refuses rather than boot a fresh clone when no snapshot survives", async () => {
+  const gone = fake({ running: false });
+  gone.api.imageFromId = async () => null;
+  await assert.rejects(
+    driver(gone.api).wake({ externalId: "bento-x", provider: "modal", workdir: "/workspace", imageRef: "im-gone" }),
+    /no snapshot of its workspace survives/,
+  );
+  assert.equal(gone.creates.length, 0);
+  assert.equal(gone.toolchainCalls, 0);
+});
+
 test("a failed clone after create terminates the new sandbox", async () => {
   const env = fake({ running: false });
   let terminated = 0;

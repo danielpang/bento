@@ -29,6 +29,7 @@ import {
   type Db,
 } from "@bento/db";
 import { LocalProcessDriver, WorktreeManager, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
+import { performTaskStartOver } from "../orchestrator/swarm/start-over.js";
 import { singleDriver } from "../orchestrator/sandbox-driver.js";
 import { createApp } from "../app.js";
 import { DiskArtifactStore } from "../artifact-store.js";
@@ -1505,6 +1506,67 @@ test("retrying a leaf puts it back in the queue and clears the attempt that fail
     queued.some((job) => job.queue === "swarm.tick" && (job.data as { swarmId: string }).swarmId === swarm.id),
     "and the reconciler was woken to spawn on it",
   );
+});
+
+test("starting a leaf over discards its machine, and a merge queue failure with it", async () => {
+  const swarm = await createSwarm();
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.swarmId, swarm.id));
+  const tree = await treeOf(swarm.id);
+  await db
+    .update(swarmTasks)
+    .set({
+      status: "failed",
+      attention: "failed",
+      branchName: "swarm/s-start-over",
+      flags: { landingError: "the swarm or worker sandbox is unavailable", retries: 2 },
+    })
+    .where(eq(swarmTasks.id, tree.first.id));
+  await db.insert(sandboxes).values({
+    projectId,
+    swarmId: swarm.id,
+    swarmTaskId: tree.first.id,
+    provider: "docker",
+    externalId: "bento-swarm-start-over-leaf",
+    status: "hibernated",
+  });
+  const destroyed: string[] = [];
+  const realDestroy = ctx.drivers.default.destroy.bind(ctx.drivers.default);
+  ctx.drivers.default.destroy = async (handle: SandboxHandle) => void destroyed.push(handle.externalId);
+  try {
+    const res = await post(`/api/swarms/${swarm.id}/tasks/${tree.first.id}/retry`, { fresh: true });
+    assert.equal(res.status, 200, await res.clone().text());
+    assert.deepEqual(destroyed, [], "the request does not wait on the provider");
+    assert.equal(((await readTask(tree.first.id)).flags as { startingOver?: boolean }).startingOver, true, "it reads as restarting");
+    assert.ok(queued.some((job) => job.queue === "swarm.task-start-over"));
+    await performTaskStartOver(ctx, tree.first.id);
+  } finally {
+    ctx.drivers.default.destroy = realDestroy;
+  }
+
+  assert.deepEqual(destroyed, ["bento-swarm-start-over-leaf"], "the job takes the old machine and its branch down");
+  assert.equal(((await readTask(tree.first.id)).flags as { startingOver?: boolean }).startingOver, undefined);
+  const [machine] = await db.select().from(sandboxes).where(eq(sandboxes.swarmTaskId, tree.first.id));
+  assert.equal(machine?.status, "destroyed", "so the next worker gets a new one");
+  const after = await readTask(tree.first.id);
+  assert.equal(after.status, "assigned");
+  assert.equal((after.flags as { landingError?: string }).landingError, undefined, "the merge queue failure was the old attempt's");
+  assert.equal((after.flags as { retries?: number }).retries, 3);
+});
+
+test("a leaf can still be started over after the swarm's machine is gone", async () => {
+  const swarm = await createSwarm();
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.swarmId, swarm.id));
+  const tree = await treeOf(swarm.id);
+  await db.update(swarmTasks).set({ status: "failed", attention: "failed" }).where(eq(swarmTasks.id, tree.first.id));
+  const [machine] = await db
+    .insert(sandboxes)
+    .values({ projectId, swarmId: swarm.id, provider: "modal", externalId: "bento-swarm-gone", status: "destroyed" })
+    .returning();
+  await db.update(swarms).set({ sandboxId: machine!.id }).where(eq(swarms.id, swarm.id));
+
+  const res = await post(`/api/swarms/${swarm.id}/tasks/${tree.first.id}/retry`, { fresh: true });
+  assert.equal(res.status, 200, await res.clone().text());
+  assert.equal((await readTask(tree.first.id)).status, "assigned", "its next worker starts from what GitHub holds");
 });
 
 test("fix forward keeps earlier worker runs on the task and gives the next attempt a reason", async () => {

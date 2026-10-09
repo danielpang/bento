@@ -35,6 +35,13 @@ export const SANDBOX_GONE_AGENT_PREFIX = "The sandbox for this run no longer exi
  * reaper and read by the rule below, like the two above.
  */
 export const SANDBOX_STALLED_AGENT_PREFIX = "The sandbox stopped responding before the agent started";
+/**
+ * How a run record opens when an agent from an earlier run of the same
+ * task was still running in the task's machine and could not be
+ * stopped, so this run's agent was never started beside it.
+ */
+export const PREVIOUS_AGENT_RUNNING_PREFIX =
+  "An agent from an earlier run of this task is still running in its sandbox and could not be stopped";
 
 export const UNBILLED_REASONS: readonly UnbilledReason[] = [
   {
@@ -77,6 +84,11 @@ export const UNBILLED_REASONS: readonly UnbilledReason[] = [
     id: "sandbox-stalled",
     summary: "The sandbox stopped answering before the agent was launched, so no agent ran.",
     match: { kind: "prefix", text: SANDBOX_STALLED_AGENT_PREFIX },
+  },
+  {
+    id: "previous-agent-running",
+    summary: "An earlier run's agent was still in the task's sandbox and could not be stopped, so no second agent ran.",
+    match: { kind: "prefix", text: PREVIOUS_AGENT_RUNNING_PREFIX },
   },
 ];
 

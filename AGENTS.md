@@ -316,7 +316,80 @@ that ends a swarm asks for its machine only once no run is active: a failed leaf
 the planner in the tick that marks the swarm failed, and that run
 works in the swarm's own machine, so asking on every tick made every
 poll of the reap queue an exception for as long as the planner kept
-working.
+working. A swarm that ended "failed" never asks at all: its branch has
+never been pushed, the machine is the only copy of every leaf that
+landed, and a failed swarm is the one a person retries a leaf or a
+landing on. Archiving or deleting it reaps it, and so does the sweep
+(at boot and nightly) once it has sat untouched for
+`FAILED_SWARM_MACHINE_GRACE_MS`, a week, because a sprite bills its
+storage for as long as it exists.
+
+A hibernated machine is still the branch. The merge queue and a new
+worker both read branches out of other machines, and either can find
+that machine hibernated (a planner slower than the warm window, a
+landing retried an hour later). They wake it through
+`wakeSwarmSandbox`, which boots it from its snapshot with the network
+its own runs get, records the image it booted from, and puts it back
+on the hibernation schedule; a landing in flight counts as activity,
+so its checks are never stopped under it, and a machine that could
+not be started sends the landing back to the queue rather than
+failing it.
+Exec'ing into the row as if it were running failed as "is not
+running", which the landing read as a moved branch until it ran out of
+attempts. A hibernation job also waits out the warm window from the
+row's `lastUsedAt`, because a job armed again while a run was going can
+fire seconds after that run ends.
+
+A swarm task has one agent at a time, whatever its role. `insertSwarmRun`
+refuses any run naming a task that already has a queued, starting, or
+running run, and the partial unique index
+`agent_runs_one_active_per_swarm_task_idx` refuses it in the database
+if a path ever skips that lock. The rows are not the whole story: a
+restart that could not reattach closes its run and leaves the agent
+running in the machine. So before a task run launches in a machine it
+did not just make, `stopLeftoverAgent` attaches to any agent of the
+same command, aborts it, and confirms it is gone; one that cannot be
+stopped fails the new run as `PREVIOUS_AGENT_RUNNING_PREFIX`, which is
+unbilled, rather than putting a second agent on the branch.
+
+Retrying a failed leaf has two meanings. "Retry task" (the retry route
+with `fresh: true`) starts it over: the agent stops, the task is marked
+`startingOver`, and a job on `swarm.task-start-over` takes its machine
+down through `discardSwarmTaskWork` (on a host driver it also deletes the
+branch from the checkout) before the coordinator, which skips a task
+so marked, puts a new agent on it cut from the swarm's branch. Done in
+the request, a slow provider timed the request out after the agent was
+already stopped. Every tick re-queues the job for any task still marked,
+so a job a restart lost is not a task stuck restarting. Bento starts a
+task over by itself once (`autoStartedOver`) when its sandbox failed past
+`MAX_SANDBOX_RESTARTS` or its landing failed because a machine was gone
+or could not be started, before the planner is told. The plain retry
+continues in the same machine on the same branch.
+
+## A swarm's branches are on GitHub as soon as there is anything on them
+
+The swarm's machine used to hold the only copy of every landed task until
+the swarm finished, and a reaped machine lost them all. Now
+`swarm/remote-branches.ts` pushes, through the retried `swarm.push`
+queue: a worker's (or resolver's) branch when its run ends, failed runs
+included, from the subject's `settle`; and after every landing, the
+swarm's branch plus the landed task's branch set to the swarm's head at
+that landing (`landedHeads` on the task), so task N's branch is exactly
+task N-1's plus task N. A push holds a lease against the commit Bento
+last pushed (`swarms.pushed_heads`, the task's `pushedHeads`) and refuses
+when anything else is on the branch, and the combined publish reads the
+same lease. A project with no GitHub connection or no remote is left as
+it was. A machine that is gone is rebuilt from those pushes:
+`remoteBranchBundles` reads a branch back as a bundle, the swarm's own
+machine is made again on it (`swarmRestoreBundles`), a worker whose
+swarm machine is gone starts from it, and a landing whose worker machine
+is gone lands the worker's pushed branch.
+
+Nothing opens a pull request when a swarm finishes. A person chooses on
+the swarm's header, through `POST /api/swarms/:id/publish`: `combined`
+is one pull request of the swarm's branch, `stacked` is one per landed
+task, each against the task that landed before it, recorded on the task
+as `pullRequests`.
 
 ## Starting a run goes through startRunIfIdle, never a bare insert
 

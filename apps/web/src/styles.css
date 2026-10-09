@@ -9686,6 +9686,42 @@ a.hours-person-name:hover {
   color: var(--brand);
 }
 
+/*
+ * What happens next to a finished or failed swarm's work: the choice of
+ * pull requests once it is done, and how long a failed one's sandbox
+ * is kept. On the page's own margins, under the goal.
+ */
+.swarm-publish {
+  margin: 14px 36px 0;
+  padding: 14px 20px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--panel) 87%, var(--bg));
+}
+
+.swarm-publish p {
+  margin: 0 0 10px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.swarm-publish .actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.swarm-grace-note {
+  margin: 10px 36px 0;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.swarm-prs {
+  padding: 10px 36px 0;
+}
+
 .swarm-brief-copy p {
   max-width: 74ch;
   margin: 5px 0 0;

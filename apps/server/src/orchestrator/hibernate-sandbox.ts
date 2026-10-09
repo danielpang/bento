@@ -1,9 +1,16 @@
-import { and, eq, inArray, isNull, ne, sql } from "drizzle-orm";
-import { agentRuns, sandboxes } from "@bento/db";
-import { ModalDriver, MODAL_REPO_PREPARE_TIMEOUT_MS, MODAL_WARM_WINDOW_MS } from "@bento/sandbox";
+import { and, eq, gt, inArray, isNull, ne, sql } from "drizzle-orm";
+import { agentProfiles, agentRuns, sandboxes, swarmLandings, swarms } from "@bento/db";
+import { ModalDriver, MODAL_REPO_PREPARE_TIMEOUT_MS, MODAL_WARM_WINDOW_MS, type SandboxHandle } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
 import { driverForSandbox } from "./sandbox-driver.js";
+import { modalNetworkForProject, organizationRestrictsNetwork } from "./sandbox-network.js";
 import { ACTIVE_RUN_STATUSES } from "./start-run.js";
+
+/**
+ * How long a landing in flight counts as using its machines. A real
+ * landing, checks included, finishes well inside it.
+ */
+export const LANDING_ACTIVITY_MAX_MS = 30 * 60 * 1000;
 
 /** Queued when a Modal run finishes. Fires after the warm window. */
 export const HIBERNATE_SANDBOX_QUEUE = "sandbox.hibernate";
@@ -23,12 +30,32 @@ export { MODAL_WARM_WINDOW_MS };
 export const MODAL_SWEEP_GRACE_MS = 2 * MODAL_REPO_PREPARE_TIMEOUT_MS + 15 * 60 * 1000;
 
 /** Queue a hibernation after the warm window. A duplicate job is safe: the worker skips a row that is already hibernated. */
-export async function armModalHibernation(ctx: AppContext, sandboxId: string): Promise<void> {
+export async function armModalHibernation(
+  ctx: AppContext,
+  sandboxId: string,
+  delayMs: number = MODAL_WARM_WINDOW_MS,
+): Promise<void> {
   await ctx.boss.send(
     HIBERNATE_SANDBOX_QUEUE,
     { sandboxId },
-    { startAfter: new Date(Date.now() + MODAL_WARM_WINDOW_MS) },
+    { startAfter: new Date(Date.now() + delayMs) },
   );
+}
+
+/**
+ * How much of the warm window this row still has, counted from the
+ * last time something used the machine. Zero once it has passed, or
+ * when nothing ever stamped the row.
+ *
+ * Asked because a job is not armed only by the finish it belongs to.
+ * A job that found a run still going arms another, five minutes from
+ * whenever it happened to fire, and that one can land seconds after
+ * the run ends. Production saw a swarm worker hibernated thirty five
+ * seconds after it reported, while its branch was waiting to land.
+ */
+export function warmWindowLeftMs(lastUsedAt: Date | null, now: number = Date.now()): number {
+  if (!lastUsedAt) return 0;
+  return Math.max(0, lastUsedAt.getTime() + MODAL_WARM_WINDOW_MS - now);
 }
 
 /**
@@ -51,6 +78,7 @@ function shouldRearmHibernation(
  * A card is matched by its feature. A swarm is matched by the swarm,
  * and a worker by its task, so hibernating one leaf does not wait on
  * the planner and hibernating the planner does not wait on a leaf.
+ * A swarm's machines also count a landing that is being performed.
  */
 async function workspaceHasActiveRun(
   db: { select: AppContext["db"]["select"] },
@@ -76,7 +104,29 @@ async function workspaceHasActiveRun(
         ),
       )
       .limit(1);
-    return rows.length > 0;
+    if (rows.length > 0) return true;
+    /*
+     * A landing in flight is using the machine as much as a run is:
+     * it exports from the worker's, imports into the swarm's, and runs
+     * the swarm's checks there, which can outlast the warm window. A
+     * landing that woke the machine would otherwise have it stopped
+     * under its own checks.
+     */
+    const landings = await db
+      .select({ id: swarmLandings.id })
+      .from(swarmLandings)
+      .where(
+        and(
+          eq(swarmLandings.swarmId, row.swarmId),
+          eq(swarmLandings.status, "landing"),
+          // A row whose job died says "landing" forever. Past this it
+          // is not keeping anybody's machine awake until the 24 hour cap.
+          gt(swarmLandings.startedAt, new Date(Date.now() - LANDING_ACTIVITY_MAX_MS)),
+          ...(row.swarmTaskId ? [eq(swarmLandings.taskId, row.swarmTaskId)] : []),
+        ),
+      )
+      .limit(1);
+    return landings.length > 0;
   }
   return false;
 }
@@ -151,6 +201,11 @@ export async function hibernateSandbox(ctx: AppContext, sandboxId: string): Prom
     if (shouldRearmHibernation(row, active)) await armModalHibernation(ctx, row.id);
     return;
   }
+  const warmLeft = warmWindowLeftMs(row.lastUsedAt);
+  if (warmLeft > 0) {
+    await armModalHibernation(ctx, row.id, warmLeft);
+    return;
+  }
 
   const driver = driverForSandbox(ctx.drivers, row);
   if (!(driver instanceof ModalDriver)) return;
@@ -208,6 +263,118 @@ export async function hibernateSandbox(ctx: AppContext, sandboxId: string): Prom
   if (after && after.provider === "modal" && after.status !== "hibernated" && after.status !== "destroyed") {
     await armModalHibernation(ctx, row.id);
   }
+}
+
+/**
+ * Boots a hibernated machine again for something that is not a run.
+ *
+ * The merge queue reads a worker's branch out of the worker's machine
+ * and lands it in the swarm's, and a new worker reads the swarm's
+ * branch out of the swarm's machine. Either can find the machine
+ * hibernated: a planner that takes longer than the warm window to
+ * review a report, a landing a person retries an hour later. Reading
+ * the row as "not destroyed" and exec'ing into it failed with "is not
+ * running", which the landing took for a moved branch until it ran
+ * out of attempts.
+ *
+ * The row records the image the machine was booted from, which the
+ * driver may have taken over the stored one, and goes back to ready
+ * through markSandboxAwake. `network` is what the machine's runs would
+ * have been given, because a run in the warm window reuses it as it
+ * is. A row reaped while the machine was booting has the new machine
+ * destroyed again, because nothing else would ever find it.
+ */
+export async function wakeHibernatedSandbox(
+  ctx: AppContext,
+  row: typeof sandboxes.$inferSelect,
+  network: Pick<SandboxHandle, "network" | "allowedHosts">,
+): Promise<void> {
+  if (row.status !== "hibernated") return;
+  const driver = driverForSandbox(ctx.drivers, row);
+  if (!driver.wake) return;
+  const handle: SandboxHandle = {
+    externalId: row.externalId,
+    provider: driver.provider,
+    workdir: row.workdir,
+    ...(row.imageRef ? { imageRef: row.imageRef } : {}),
+    ...network,
+  };
+  const woke = await driver.wake(handle, { organizationId: row.organizationId });
+  const awake = await markSandboxAwake(ctx.db, ctx, row.id, woke.imageRef);
+  if (awake) return;
+  const [current] = await ctx.db
+    .select({ status: sandboxes.status })
+    .from(sandboxes)
+    .where(eq(sandboxes.id, row.id))
+    .limit(1);
+  // Ready or busy: a run's provision got there first and owns it now.
+  if (current && current.status !== "destroyed") return;
+  if (woke.booted) {
+    await driver.destroy({ externalId: row.externalId, provider: driver.provider, workdir: row.workdir });
+  }
+  throw new Error(`sandbox ${row.externalId} was reaped while it was being started`);
+}
+
+/**
+ * A hibernated row whose machine was booted again outside a run.
+ *
+ * Ready, stamped, and on the hibernation schedule, which is where a
+ * run that just finished leaves a machine, so a booted machine is not
+ * left running to the 24 hour cap. False when the row was no longer
+ * hibernated, so the caller can tell a reap or a run took it first.
+ * `db` is the caller's, which for a route is its tenant transaction.
+ */
+export async function markSandboxAwake(
+  db: Pick<AppContext["db"], "update">,
+  ctx: AppContext,
+  sandboxId: string,
+  imageRef?: string,
+): Promise<boolean> {
+  const [updated] = await db
+    .update(sandboxes)
+    .set({ status: "ready", lastUsedAt: new Date(), ...(imageRef ? { imageRef } : {}) })
+    .where(and(eq(sandboxes.id, sandboxId), eq(sandboxes.status, "hibernated")))
+    .returning({ provider: sandboxes.provider });
+  if (!updated) return false;
+  if (updated.provider === "modal") await armModalHibernation(ctx, sandboxId);
+  return true;
+}
+
+/**
+ * Wakes a swarm's machine, or one of its workers', when it is
+ * hibernated, with the network its own runs get.
+ *
+ * `profileId` is the agent whose runs use the machine: the planner's
+ * for the swarm's own, the leaf's for a worker's. An organization
+ * that restricts the network has its allowlist built from that
+ * agent's hosts, as provision would; with no such agent the machine
+ * is not booted at all, rather than booted with the network open.
+ */
+export async function wakeSwarmSandbox(
+  ctx: AppContext,
+  row: typeof sandboxes.$inferSelect,
+  swarm: Pick<typeof swarms.$inferSelect, "projectId" | "organizationId">,
+  profileId: string | null,
+): Promise<void> {
+  // A sprite wakes on its own when exec'd into; only a driver that
+  // has to boot the machine again is asked to.
+  if (row.status !== "hibernated" || !driverForSandbox(ctx.drivers, row).wake) return;
+  const [profile] = profileId
+    ? await ctx.db
+        .select({ cli: agentProfiles.cli, model: agentProfiles.model })
+        .from(agentProfiles)
+        .where(eq(agentProfiles.id, profileId))
+        .limit(1)
+    : [];
+  let network: Pick<SandboxHandle, "network" | "allowedHosts"> = {};
+  if (profile) {
+    network = await modalNetworkForProject(ctx, swarm.projectId, swarm.organizationId, profile.cli, profile.model);
+  } else if (await organizationRestrictsNetwork(ctx, swarm.organizationId)) {
+    throw new Error(
+      `sandbox ${row.externalId} is hibernated, and the agent it was made for is gone, so it cannot be started with this organization's network restriction.`,
+    );
+  }
+  await wakeHibernatedSandbox(ctx, row, network);
 }
 
 /**

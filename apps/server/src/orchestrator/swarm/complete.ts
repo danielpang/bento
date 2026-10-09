@@ -1,4 +1,4 @@
-import { and, asc, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, sql } from "drizzle-orm";
 import {
   repositories,
   runArtifacts,
@@ -8,7 +8,7 @@ import {
   swarmTasks,
   swarms,
 } from "@bento/db";
-import type { GitHubPublisher } from "@bento/github";
+import { parseRepoUrl, type GitHubPublisher } from "@bento/github";
 import type { SandboxDriver, SandboxHandle } from "@bento/sandbox";
 import { captureJobErrors } from "../../analytics.js";
 import type { AppContext } from "../../context.js";
@@ -17,6 +17,8 @@ import { SWARM_DESIGN_PATH } from "./design-document.js";
 import { publishSwarmBranches, type PublishableRepository, type PublishedPullRequest } from "../publish.js";
 import { QUEUE_POLL_SECONDS } from "../queue.js";
 import { swarmBranchName, swarmWorkspaceKey } from "./sandbox.js";
+import { workerBranchName } from "./branches.js";
+import { pushSwarmBranch } from "./remote-branches.js";
 import { driverForSandbox } from "../sandbox-driver.js";
 
 /**
@@ -82,11 +84,11 @@ export async function ensureSwarmPublishWorker(ctx: AppContext): Promise<void> {
   if (publishWorkers.has(ctx.boss)) return;
   publishWorkers.add(ctx.boss);
   try {
-    await ctx.boss.work<{ swarmId: string }>(
+    await ctx.boss.work<{ swarmId: string; mode?: SwarmPublishMode }>(
       SWARM_PUBLISH_QUEUE,
       { batchSize: 1, pollingIntervalSeconds: QUEUE_POLL_SECONDS },
       captureJobErrors(ctx.analytics, SWARM_PUBLISH_QUEUE, async (jobs) => {
-        for (const job of jobs) await publishFinishedSwarm(ctx, job.data.swarmId);
+        for (const job of jobs) await publishFinishedSwarm(ctx, job.data.swarmId, job.data.mode ?? "combined");
       }),
     );
   } catch (err) {
@@ -106,10 +108,22 @@ export async function ensureSwarmPublishWorker(ctx: AppContext): Promise<void> {
  * settles again does not queue two publishes that race each other onto
  * the same branch.
  */
-export async function enqueueSwarmPublish(ctx: AppContext, swarmId: string): Promise<void> {
+export async function enqueueSwarmPublish(
+  ctx: AppContext,
+  swarmId: string,
+  mode: SwarmPublishMode = "combined",
+): Promise<void> {
   await ensureSwarmPublishWorker(ctx);
-  await ctx.boss.send(SWARM_PUBLISH_QUEUE, { swarmId }, { singletonKey: swarmId });
+  await ctx.boss.send(SWARM_PUBLISH_QUEUE, { swarmId, mode }, { singletonKey: `${swarmId}:${mode}` });
 }
+
+/**
+ * The two ways a finished swarm becomes pull requests, which a person
+ * picks once the swarm is done: one pull request of the swarm's branch,
+ * every task merged in the order it landed, or one per task, stacked,
+ * each against the task that landed before it.
+ */
+export type SwarmPublishMode = "combined" | "stacked";
 
 /**
  * Pushes a finished swarm's branch and opens its pull requests.
@@ -122,6 +136,7 @@ export async function enqueueSwarmPublish(ctx: AppContext, swarmId: string): Pro
 export async function publishFinishedSwarm(
   ctx: AppContext,
   swarmId: string,
+  mode: SwarmPublishMode = "combined",
 ): Promise<SwarmPublishResult | null> {
   const [swarm] = await ctx.db.select().from(swarms).where(eq(swarms.id, swarmId)).limit(1);
   if (!swarm) return null;
@@ -145,7 +160,128 @@ export async function publishFinishedSwarm(
         "no GitHub connection is configured, so the swarm's branch was not pushed. It is in the repository, and publishing again after connecting GitHub opens the pull requests.",
     };
   }
-  return publishSwarmCompletion(ctx, swarm, publisher);
+  return mode === "stacked"
+    ? publishStackedPullRequests(ctx, swarm, publisher)
+    : publishSwarmCompletion(ctx, swarm, publisher);
+}
+
+type StackFlags = {
+  landedHeads?: Record<string, string>;
+  pushedHeads?: Record<string, string>;
+  pullRequests?: Record<string, { number: number; url: string }>;
+};
+
+/**
+ * One pull request per landed task, each against the one before it.
+ *
+ * Every landing pushed the task's branch as the swarm's head at that
+ * moment, so task N's branch is task N-1's plus task N, and a pull
+ * request of N against N-1 shows exactly what task N changed. Merging
+ * them bottom up merges the swarm. A repository a task did not touch
+ * is not part of that repository's stack.
+ *
+ * A landed branch whose push never happened is pushed first, from the
+ * swarm's machine, so a stack is never opened against a branch GitHub
+ * does not have. Safe to run twice: ensurePullRequest finds the pull
+ * request it opened the first time.
+ */
+export async function publishStackedPullRequests(
+  ctx: AppContext,
+  swarm: typeof swarms.$inferSelect,
+  publisher: GitHubPublisher,
+  options: { remoteUrl?: (owner: string, repo: string) => string } = {},
+): Promise<SwarmPublishResult> {
+  const repoRows = await ctx.db
+    .select()
+    .from(repositories)
+    .where(eq(repositories.projectId, swarm.projectId))
+    .orderBy(asc(repositories.position));
+  const order = await ctx.db
+    .select({ taskId: swarmLandings.taskId })
+    .from(swarmLandings)
+    .where(and(eq(swarmLandings.swarmId, swarm.id), eq(swarmLandings.status, "landed")))
+    .orderBy(asc(swarmLandings.endedAt));
+  const landedTasks = [];
+  for (const { taskId } of order) {
+    const [task] = await ctx.db.select().from(swarmTasks).where(eq(swarmTasks.id, taskId)).limit(1);
+    if (task && Object.keys((task.flags as StackFlags).landedHeads ?? {}).length > 0) landedTasks.push(task);
+  }
+  if (landedTasks.length === 0) {
+    return { published: [], failures: [], skipped: "no task landed with changes, so there is nothing to stack" };
+  }
+
+  const swarmBranch = swarm.branchName ?? swarmBranchName(swarm.slug);
+  const published: PublishedPullRequest[] = [];
+  const failures: { name: string; reason: string }[] = [];
+
+  // Anything landed and not yet on GitHub goes there first.
+  for (const task of landedTasks) {
+    const flags = task.flags as StackFlags;
+    const missing = repoRows.some(
+      (repo) => repo.repoUrl && flags.landedHeads?.[repo.name] && !flags.pushedHeads?.[repo.repoUrl],
+    );
+    if (missing) await pushSwarmBranch(ctx, swarm.id, task.id, { publisher, ...options });
+  }
+
+  for (const repo of repoRows) {
+    const parsed = repo.repoUrl ? parseRepoUrl(repo.repoUrl) : null;
+    if (!repo.repoUrl || !parsed) continue;
+    const inThisRepo = [];
+    for (const original of landedTasks) {
+      const [task] = await ctx.db.select().from(swarmTasks).where(eq(swarmTasks.id, original.id)).limit(1);
+      if (task && (task.flags as StackFlags).landedHeads?.[repo.name]) inThisRepo.push(task);
+    }
+    let base = repo.defaultBranch;
+    for (const [index, task] of inThisRepo.entries()) {
+      const head = task.branchName ?? workerBranchName(swarmBranch, task.id);
+      try {
+        const pr = await publisher.ensurePullRequest({
+          owner: parsed.owner,
+          repo: parsed.repo,
+          head,
+          base,
+          title: task.title,
+          body: stackedPullRequestBody({ swarm, task, index, total: inThisRepo.length, base }),
+        });
+        await ctx.db
+          .update(swarmTasks)
+          .set({
+            flags: sql`jsonb_set(coalesce(${swarmTasks.flags}, '{}'::jsonb), '{pullRequests}', coalesce(${swarmTasks.flags}->'pullRequests', '{}'::jsonb) || ${JSON.stringify({ [repo.repoUrl]: { number: pr.prNumber, url: pr.url } })}::jsonb)`,
+          })
+          .where(eq(swarmTasks.id, task.id));
+        published.push({ name: repo.name, repoUrl: repo.repoUrl, prNumber: pr.prNumber, url: pr.url });
+      } catch (err) {
+        // The rest of the stack sits on this one, so it stops here.
+        failures.push({ name: `${repo.name} (${task.title})`, reason: err instanceof Error ? err.message : String(err) });
+        break;
+      }
+      base = head;
+    }
+  }
+  for (const failure of failures) console.error(`swarm ${swarm.id}: could not open a stacked pull request for ${failure.name}: ${failure.reason}`);
+  if (published.length > 0) {
+    ctx.bus.emitBoardEvent({ type: "swarm_updated", projectId: swarm.projectId, swarmId: swarm.id });
+  }
+  return { published, failures, skipped: null };
+}
+
+function stackedPullRequestBody(input: {
+  swarm: typeof swarms.$inferSelect;
+  task: typeof swarmTasks.$inferSelect;
+  index: number;
+  total: number;
+  base: string;
+}): string {
+  const lines = [
+    `Part ${input.index + 1} of ${input.total} of the swarm "${input.swarm.title}".`,
+    "",
+    input.index === 0
+      ? `This is the bottom of the stack. Merge it first, then the next part.`
+      : `Stacked on \`${input.base}\`: this shows only this task's changes. Merge the parts below it first.`,
+  ];
+  if (input.task.description.trim()) lines.push("", "## Task", "", input.task.description.trim());
+  if (input.task.report?.trim()) lines.push("", "## What the agent reported", "", input.task.report.trim());
+  return lines.join("\n");
 }
 
 /**

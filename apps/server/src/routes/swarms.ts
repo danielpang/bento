@@ -34,6 +34,8 @@ import type { BoardEvent } from "../events.js";
 import { actor } from "../middleware/actor.js";
 import { deferAfterCommit, deferOnRollback, tenantDb as db } from "../middleware/tenant.js";
 import { queueSwarmSandboxReap, reapSwarmSandbox } from "../orchestrator/reap-sandbox.js";
+import { enqueueTaskStartOver } from "../orchestrator/swarm/start-over.js";
+import { enqueueSwarmPublish } from "../orchestrator/swarm/complete.js";
 import { driverForProject, driverForSandbox } from "../orchestrator/sandbox-driver.js";
 import { markCancelled } from "../orchestrator/run-executor.js";
 import { enqueueSwarmTick } from "../orchestrator/swarm/coordinator.js";
@@ -788,6 +790,7 @@ export function swarmRoutes(ctx: AppContext) {
         status: swarmLandings.status,
         attempt: swarmLandings.attempt,
         error: swarmLandings.error,
+        errorCode: swarmLandings.errorCode,
         resolverRunId: swarmLandings.resolverRunId,
         startedAt: swarmLandings.startedAt,
         endedAt: swarmLandings.endedAt,
@@ -1143,6 +1146,28 @@ export function swarmRoutes(ctx: AppContext) {
      * same two refusals: there is no second door with its own idea of
      * when a swarm may run.
      */
+    /**
+     * Opens the pull requests of a finished swarm, in the shape a
+     * person chose: "combined", one pull request of the swarm's branch
+     * with every task merged in order, or "stacked", one per landed task
+     * against the task before it. The branches are already on GitHub
+     * (pushed as the swarm went), so this only asks GitHub for the
+     * pull requests, through the publish queue, which retries.
+     */
+    .post("/:id/publish", async (c) => {
+      const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
+      if (!swarm) return c.json({ error: "not found" }, 404);
+      const refusal = await requireSwarms(ctx, c, swarm.organizationId);
+      if (refusal) return c.json(refusal.body, refusal.status);
+      const body = await c.req.json().catch(() => ({}));
+      const parsed = z.object({ mode: z.enum(["combined", "stacked"]) }).safeParse(body);
+      if (!parsed.success) return c.json({ error: "Choose combined or stacked pull requests." }, 400);
+      if (swarm.status !== "done") {
+        return c.json({ error: "Pull requests open once the swarm is done." }, 409);
+      }
+      deferAfterCommit(c, () => enqueueSwarmPublish(ctx, swarm.id, parsed.data.mode));
+      return c.json({ mode: parsed.data.mode, status: "queued" }, 202);
+    })
     .post("/:id/planner/retry", async (c) => {
       const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
       if (!swarm) return c.json({ error: "not found" }, 404);
@@ -1824,8 +1849,11 @@ export function swarmRoutes(ctx: AppContext) {
       if ("refusal" in found) return found.refusal;
       const { swarm, task } = found;
       const body = await c.req.json().catch(() => ({}));
-      const parsed = z.object({ reason: z.string().trim().min(1).max(4000).optional() }).safeParse(body);
+      const parsed = z
+        .object({ reason: z.string().trim().min(1).max(4000).optional(), fresh: z.boolean().optional() })
+        .safeParse(body);
       if (!parsed.success) return c.json({ error: "Invalid retry request" }, 400);
+      const fresh = parsed.data.fresh === true;
       const finished = swarm.status === "failed" ? null : finishedTaskMutationRefusal(c, swarm);
       if (finished) return finished;
 
@@ -1847,12 +1875,28 @@ export function swarmRoutes(ctx: AppContext) {
        * agent on a branch the first one is still committing to, which
        * is the one thing the merge queue cannot sort out afterwards.
        */
+      /*
+       * Starting over is cut from the swarm's branch. With the swarm's
+       * machine gone, that branch is read back from GitHub, where every
+       * landing pushed it; a swarm that never pushed (no GitHub) starts
+       * the task from the base branch, which the console says before a
+       * person confirms.
+       */
       await stopRunsOnTask(ctx, c, task.id);
-      const retried = await retryLeaf(db(c, ctx), { task, actorUserId: actor(c), ...(parsed.data.reason ? { reason: parsed.data.reason } : {}) });
+      const retried = await retryLeaf(db(c, ctx), {
+        task,
+        actorUserId: actor(c),
+        ...(parsed.data.reason ? { reason: parsed.data.reason } : {}),
+        ...(fresh ? { fresh: true } : {}),
+      });
       if ("refused" in retried) return c.json({ error: retried.refused, code: "NOT_A_LEAF" }, 409);
       if (await reactivateSwarmForRetry(db(c, ctx), swarm.id)) {
         saySwarmChanged(ctx, c, swarm, "running");
       }
+      // Starting over takes the old machine down in a job, not in this
+      // request: a slow provider would time the request out with the
+      // agent already stopped. The task reads "Restarting" until then.
+      if (fresh) deferAfterCommit(c, () => enqueueTaskStartOver(ctx, task.id));
       deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
       return c.json(retried);
     })
@@ -1874,14 +1918,14 @@ export function swarmRoutes(ctx: AppContext) {
       const now = new Date();
       const retried = await db(c, ctx).transaction(async (tx) => {
         const [row] = await tx.update(swarmLandings)
-          .set({ status: "queued", error: null, startedAt: null, endedAt: null, updatedAt: now })
+          .set({ status: "queued", error: null, errorCode: null, notBefore: null, startedAt: null, endedAt: null, updatedAt: now })
           .where(and(eq(swarmLandings.id, landing.id), eq(swarmLandings.status, "failed")))
           .returning({ id: swarmLandings.id });
         if (!row) return false;
         await tx.update(swarmTasks)
           .set({
             status: "landed", attention: null, updatedAt: now,
-            flags: { ...task.flags, landingError: undefined, plannerToldAt: now.toISOString(), plannerToldBy: undefined, plannerRetells: undefined },
+            flags: { ...task.flags, landingError: undefined, landingErrorCode: undefined, plannerToldAt: now.toISOString(), plannerToldBy: undefined, plannerRetells: undefined },
           })
           .where(and(eq(swarmTasks.id, task.id), eq(swarmTasks.status, "failed")));
         await reactivateSwarmForRetry(tx as unknown as Db, swarm.id);

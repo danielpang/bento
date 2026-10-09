@@ -23,7 +23,9 @@ import { swarmHasActiveRun } from "./reopen.js";
 import { ACTIVE_RUN_STATUSES, projectHasRepositories, SWARM_FULL, startRunIfIdle, type NewRun, type OutOfCompute } from "../start-run.js";
 import { plannerWakeMessage, type PlannerWakeItem } from "./planner-prompt.js";
 import { enqueueLanding } from "./landing.js";
-import { enqueueSwarmPublish } from "./complete.js";
+import { enqueueSwarmPush } from "./remote-branches.js";
+import { resumeStartOvers } from "./start-over.js";
+import { retryLeaf } from "./task-actions.js";
 import { ensureFinalCheck, isFinalCheck } from "./final-check.js";
 import {
   assembleSwarmDocumentInSandbox,
@@ -105,6 +107,21 @@ function swarmIsOver(status: (typeof swarms.$inferSelect)["status"]): boolean {
     status === "budget_exhausted" ||
     status === "timed_out"
   );
+}
+
+/**
+ * Whether a swarm that ended this way is finished with its machine.
+ *
+ * Every ending but "failed". A failed swarm is the one a person picks
+ * up again from the same branch, by retrying a leaf or a landing, and
+ * that branch has never been pushed: the swarm's machine is the only
+ * copy of every leaf that already landed. Reaping it on failure turned
+ * a landing retry into "the swarm's sandbox is gone" and lost the
+ * landed work with it. Archiving or deleting the swarm still reaps it,
+ * and a Modal machine hibernates on its own meanwhile.
+ */
+export function swarmReleasesMachine(status: (typeof swarms.$inferSelect)["status"]): boolean {
+  return swarmIsOver(status) && status !== "failed";
 }
 
 /** Whether any swarm on this deployment has work a tick would act on. */
@@ -363,6 +380,8 @@ export async function tickSwarm(
         throw err;
       }
     }
+    // Every task waiting to start over has its job; one a restart lost is asked for again.
+    await resumeStartOvers(ctx, swarmId);
     /*
      * Assembly touches git and may talk to a remote sandbox, so it is
      * outside the transaction. Its assigned task is the durable claim:
@@ -375,17 +394,20 @@ export async function tickSwarm(
       return executed ? tickSwarm(ctx, swarmId, deps) : result;
     }
     /**
-     * A swarm that just finished has one thing left to do, and it is
-     * the only thing in a swarm that leaves Bento: push the branch and
-     * open the pull requests.
-     *
-     * On its own queue rather than inline, because it clones, pushes
-     * and talks to GitHub, and the tick worker runs one job at a time
-     * for every swarm on the deployment. After the commit, because the
-     * job reads the swarm's status and refuses anything but "done".
+     * A swarm that just finished has its branch pushed once more, on
+     * the push queue rather than inline, because it clones, pushes and
+     * talks to GitHub, and the tick worker runs one job at a time for
+     * every swarm on the deployment. The pull requests are a person's
+     * choice now (POST /api/swarms/:id/publish), so nothing opens one.
+     */
+    /*
+     * Pushed, not published: the branch goes to GitHub (it has been
+     * going after every landing; this catches anything since), and the
+     * pull requests wait for a person to choose one for the swarm or
+     * one per task.
      */
     if (result.becameDone) {
-      await enqueueSwarmPublish(ctx, swarmId);
+      await enqueueSwarmPush(ctx, { kind: "swarm", swarmId });
       await queueSwarmSlackNotify(ctx, { type: "swarm_completed", swarmId });
     }
     /*
@@ -409,7 +431,8 @@ export async function tickSwarm(
      * status, which is deliberate: publishing twice would open a second
      * pull request, and reaping twice is no rows.
      *
-     * Not while a run is still in flight. A failed tree wakes its
+     * Never for a failed swarm (swarmReleasesMachine says why), and
+     * not while a run is still in flight. A tree that ends can wake its
      * planner in this same tick, and that run works in this machine.
      * Every later tick would ask for the machine again, the job would
      * refuse, and each refusal would be recorded as an error for as
@@ -418,7 +441,7 @@ export async function tickSwarm(
      * flight. A job that loses the race and finds a run anyway asks
      * again later rather than failing.
      */
-    if (swarmIsOver(result.status) && !(await swarmHasActiveRun(ctx.db, swarmId))) {
+    if (swarmReleasesMachine(result.status) && !(await swarmHasActiveRun(ctx.db, swarmId))) {
       await queueSwarmSandboxReap(ctx, swarmId);
     }
   }
@@ -831,6 +854,26 @@ async function settleWorkedLeaves(
     if (run && restarts !== null && restarts < MAX_SANDBOX_RESTARTS) {
       await restartAfterSandboxFailure(tx, swarm, task, run, restarts + 1, events, now);
       continue;
+    }
+    /*
+     * Its machine failed past its restarts. Once per task, before the
+     * planner or a person is asked, the task starts over in a new
+     * machine: the failure is the sandbox's, never the work's, and the
+     * work is already on GitHub. A job takes the old machine down
+     * (resumeStartOvers asks for it after this tick commits).
+     */
+    if (
+      run &&
+      restarts !== null &&
+      task.nodeType === "leaf" &&
+      !(task.flags as { autoStartedOver?: boolean }).autoStartedOver
+    ) {
+      const restarted = await retryLeaf(tx as unknown as Parameters<typeof retryLeaf>[0], { task, fresh: true, auto: true, now });
+      if (!("refused" in restarted)) {
+        Object.assign(task, restarted);
+        events.push({ type: "swarm_task_updated", projectId: swarm.projectId, swarmId: swarm.id, taskId: task.id, status: task.status });
+        continue;
+      }
     }
     if (task.nodeType === "leaf" && run?.status === "succeeded") {
       const [lastMessage] = await tx
@@ -1703,6 +1746,8 @@ async function spawnWorkers(
   const byId = new Map(tasks.map((task) => [task.id, task]));
   const ready = tasks.filter(
     (task) => task.nodeType === "leaf" && task.status === "assigned" &&
+      // Starting over: its old machine is being taken down first.
+      !(task.flags as { startingOver?: boolean }).startingOver &&
       !isDocumentAssembly(task) && leafAncestorsDone(task, byId),
   );
   if (ready.length === 0) return { runIds, refusal: null, cap: null };
@@ -2066,8 +2111,18 @@ async function advanceLandingQueue(
    */
   if (queue.some((landing) => landing.status === "conflicted")) return { landing: null, resolverRunIds };
 
+  /*
+   * A landing waiting out a backoff lets the ones behind it go first:
+   * they are other leaves' independent work, and a sandbox one leaf
+   * cannot reach is no reason to stop the whole queue. A dependent
+   * leaf cannot be queued behind its dependency, because it only
+   * starts once that one has landed.
+   */
   const next = queue.find(
-    (landing) => landing.status === "queued" && byId.get(landing.taskId)?.status !== "cancelled",
+    (landing) =>
+      landing.status === "queued" &&
+      byId.get(landing.taskId)?.status !== "cancelled" &&
+      (!landing.notBefore || landing.notBefore <= now),
   );
   // Nothing performs landings in this deployment yet. Promoting the row
   // would move it into a state nothing takes it out of, so the queue is
@@ -2076,7 +2131,7 @@ async function advanceLandingQueue(
 
   await tx
     .update(swarmLandings)
-    .set({ status: "landing", startedAt: now, attempt: next.attempt + 1, updatedAt: now })
+    .set({ status: "landing", startedAt: now, notBefore: null, attempt: next.attempt + 1, updatedAt: now })
     .where(eq(swarmLandings.id, next.id));
   await deps.startLanding(tx, next.id);
   return { landing: { id: next.id, promoted: true }, resolverRunIds };

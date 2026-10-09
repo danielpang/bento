@@ -291,25 +291,32 @@ async function insertSwarmRun(
     return Boolean(row);
   };
 
+  /*
+   * One agent per task, whatever its role. A leaf's worker, its judge,
+   * the resolver for its conflict and a sub planner on a group all work
+   * the task's branch in the task's machine, and two of them at once is
+   * two agents editing each other's work. The partial unique index on
+   * agent_runs (swarm_task_id) is the backstop if a path ever skips
+   * this lock.
+   */
+  if (values.swarmTaskId && (await anyActive(eq(agentRuns.swarmTaskId, values.swarmTaskId)))) {
+    return "busy" as const;
+  }
+
   if (values.role === "planner") {
     // One planner per swarm. The planner owns the tree, and two of
     // them editing it would each be working from a plan the other is
     // changing underneath.
     if (await anyActive(eq(agentRuns.role, "planner"))) return "busy" as const;
   } else if (values.role === "subplanner") {
-    // Per group instead: sub planners decompose different branches of
-    // the tree and have no reason to wait on each other.
-    const busy = await anyActive(
-      and(eq(agentRuns.role, "subplanner"), eq(agentRuns.swarmTaskId, values.swarmTaskId!)),
-    );
-    if (busy) return "busy" as const;
+    // Per group, which the task check above already answered: sub
+    // planners decompose different branches of the tree and have no
+    // reason to wait on each other.
   } else if (values.role === "worker") {
-    // One agent per leaf, for the pipeline's reason: two on one branch
-    // is two agents editing each other's work.
-    if (await anyActive(eq(agentRuns.swarmTaskId, values.swarmTaskId!))) return "busy" as const;
-    // And no more at once than the swarm was allowed. Counted here,
-    // under the lock, because the ceiling is the whole reason a person
-    // sets it: a check outside the lock lets two spawns both see room.
+    // One agent per leaf was answered above. No more at once than the
+    // swarm was allowed: counted here, under the lock, because the
+    // ceiling is the whole reason a person sets it, and a check outside
+    // the lock lets two spawns both see room.
     const [counted] = await tx
       .select({ workers: sql<number>`count(*)::int` })
       .from(agentRuns)
@@ -336,15 +343,12 @@ async function insertSwarmRun(
       .limit(1);
     if (!conflicted) return "busy" as const;
   } else {
-    // A judge, scoped the way its subject is: a leaf's judge per leaf,
-    // a swarm's judge per swarm.
-    const busy = await anyActive(
-      and(
-        eq(agentRuns.role, "judge"),
-        values.swarmTaskId ? eq(agentRuns.swarmTaskId, values.swarmTaskId) : isNull(agentRuns.swarmTaskId),
-      ),
-    );
-    if (busy) return "busy" as const;
+    // A judge, scoped the way its subject is: a leaf's judge was
+    // answered by the task check above, a swarm's judge is one per
+    // swarm.
+    if (!values.swarmTaskId && (await anyActive(and(eq(agentRuns.role, "judge"), isNull(agentRuns.swarmTaskId))))) {
+      return "busy" as const;
+    }
   }
 
   // The organization comes off the locked row, never off the caller:

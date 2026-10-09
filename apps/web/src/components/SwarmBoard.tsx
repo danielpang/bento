@@ -442,6 +442,7 @@ export function SwarmBoard({
             onRetryPlanner: () => selectedId && act(() => swarmApi.retryPlanner(selectedId)),
             onStop: () => selectedId && act(() => swarmApi.stopSwarm(selectedId)),
             onReleaseBranch: () => selectedId && act(() => swarmApi.releaseSwarmBranch(selectedId)),
+            onPublish: (mode) => selectedId && act(() => swarmApi.publishSwarm(selectedId, mode)),
             onReopen: () => setReopening(true),
             onDelete: () => selectedId && setDeleting({ id: selectedId, name: detail.swarm.name }),
             onArchive: () => selectedId && act(() => swarmApi.archiveSwarm(selectedId)),
@@ -482,6 +483,7 @@ export function SwarmBoard({
           agents={agents}
           onRetry={(id) => selectedId && act(() => swarmApi.retryTask(selectedId, id), true)}
           onRetryLanding={(id) => selectedId && act(() => swarmApi.retryLanding(selectedId, id), true)}
+          onStartOver={(id) => selectedId && act(() => swarmApi.startTaskOver(selectedId, id), true)}
           onFixForward={(id, reason) => selectedId && act(() => swarmApi.retryTask(selectedId, id, reason), true)}
           onOpenRun={(runId) => {
             setWorkerOutput({ runId, taskTitle: task.title });

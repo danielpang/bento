@@ -113,6 +113,18 @@ export interface SwarmApi {
    * for saying the wrong thing fails again against the same words.
    */
   retryTask(swarmId: string, taskId: string, reason?: string): Promise<void>;
+  /**
+   * Starts a leaf over: its sandbox and branch are discarded, and a new
+   * agent in a new sandbox does the work again from the swarm's branch.
+   * The answer to any failure, a merge queue failure included.
+   */
+  startTaskOver(swarmId: string, taskId: string): Promise<void>;
+  /**
+   * Opens the pull requests of a finished swarm. "combined" is one pull
+   * request of the swarm's branch, every task merged in order; "stacked"
+   * is one per landed task, each against the task before it.
+   */
+  publishSwarm(swarmId: string, mode: "combined" | "stacked"): Promise<void>;
   retryLanding(swarmId: string, taskId: string): Promise<void>;
   cancelTask(swarmId: string, taskId: string): Promise<void>;
   splitTask(swarmId: string, taskId: string, children: { title: string; description?: string }[]): Promise<void>;
@@ -446,6 +458,29 @@ export function fixtureSwarmApi(clock: () => number = () => Date.now()): Fixture
         );
       });
     },
+    publishSwarm(swarmId, mode) {
+      const detail = find(swarmId);
+      if (detail && mode === "combined") {
+        detail.pullRequests = [...detail.pullRequests, {
+          id: `pr-${swarmId}`,
+          repoUrl: "github.com/acme/storefront",
+          number: 4200 + detail.pullRequests.length,
+          url: "https://github.com/acme/storefront/pull/4200",
+          headSha: null,
+        }];
+      }
+      return Promise.resolve();
+    },
+    startTaskOver(swarmId, taskId) {
+      return mutate(swarmId, (detail) => {
+        detail.tasks = detail.tasks.map((task) => {
+          if (task.id !== taskId) return task;
+          const retries = Number((task.flags as { retries?: unknown }).retries ?? 0);
+          return { ...task, status: "assigned", attention: "none", report: null, endedAt: null,
+            flags: { ...task.flags, landingError: undefined, retries: retries + 1 } };
+        });
+      });
+    },
     retryLanding(swarmId, taskId) {
       return mutate(swarmId, (detail) => {
         detail.swarm.status = "running";
@@ -603,6 +638,8 @@ export interface WireSwarm {
   archivedAt: string | null;
   lastOpenedAt: string | null;
   createdAt: string;
+  /** When the row last changed: what a failed swarm's machine grace is counted from. */
+  updatedAt?: string | null;
 }
 
 export interface WireSwarmRow extends WireSwarm {
@@ -644,6 +681,7 @@ export interface WireLanding {
   status: "queued" | "landing" | "landed" | "conflicted" | "failed" | "cancelled";
   attempt: number;
   error: string | null;
+  errorCode?: string | null;
   resolverRunId: string | null;
   startedAt: string | null;
   endedAt: string | null;
@@ -890,6 +928,7 @@ export function toSwarm(row: WireSwarm, workersActive = 0): Swarm {
     startedAt: null,
     endedAt: null,
     createdAt: row.createdAt,
+    updatedAt: row.updatedAt ?? null,
     archivedAt: row.archivedAt,
     lastOpenedAt: row.lastOpenedAt,
     // A planner's question reaches the board as attention on the node
@@ -1049,6 +1088,12 @@ export function httpSwarmApi(
     },
     async retryTask(swarmId, taskId, reason) {
       await post(`/api/swarms/${swarmId}/tasks/${taskId}/retry`, reason ? { reason } : {});
+    },
+    async publishSwarm(swarmId, mode) {
+      await post(`/api/swarms/${swarmId}/publish`, { mode });
+    },
+    async startTaskOver(swarmId, taskId) {
+      await post(`/api/swarms/${swarmId}/tasks/${taskId}/retry`, { fresh: true });
     },
     async retryLanding(swarmId, taskId) {
       await post(`/api/swarms/${swarmId}/tasks/${taskId}/landing/retry`);
@@ -1254,6 +1299,7 @@ function toLanding(landing: WireLanding): SwarmLanding {
     status: landing.status,
     attempt: landing.attempt,
     error: landing.error,
+    errorCode: landing.errorCode ?? null,
     resolverRunId: landing.resolverRunId,
     startedAt: landing.startedAt,
     endedAt: landing.endedAt,

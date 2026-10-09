@@ -12,7 +12,7 @@ import { SwarmTree } from "./components/SwarmTree.js";
 import { SwarmOutline } from "./components/SwarmOutline.js";
 import { SwarmNodeDrawer } from "./components/SwarmNodeDrawer.js";
 import { SwarmRunOutput, SwarmRunOutputDrawer, SwarmWorkerOutputDrawer } from "./components/SwarmRunOutput.js";
-import { SwarmArtifacts, SwarmPage, SwarmPlanBrief, WorkerStepper } from "./components/SwarmPage.js";
+import { stackedPullRequests, SwarmArtifacts, SwarmPage, SwarmPlanBrief, WorkerStepper } from "./components/SwarmPage.js";
 import { ceilingRefusal, reopenEffectLines } from "./components/ReopenDialog.js";
 import {
   DEFAULT_RUN_SETTINGS,
@@ -689,6 +689,28 @@ test("a merge queue failure keeps its worker report and offers to retry landing"
   assert.doesNotMatch(html, /This swarm worker failed/);
 });
 
+test("any failed leaf leads with starting the task over, and keeps the other ways back", () => {
+  const landing = { ...tasks().find((row) => row.id === "slow")!, status: "failed" as const,
+    flags: { landingError: "the swarm or worker sandbox is unavailable" } };
+  const landingModel = buildSwarmModel([landing], { now: NOW });
+  const landingHtml = renderToStaticMarkup(createElement(SwarmNodeDrawer, {
+    task: landing, node: landingModel.byId.get("slow")!, onClose: () => {},
+    onStartOver: () => {}, onRetryLanding: () => {}, onRetry: () => {}, onFixForward: () => {},
+  }));
+  assert.match(landingHtml, /class="btn btn-primary"[^>]*>Retry task</, "a merge queue failure is retried as a new attempt");
+  assert.match(landingHtml, /Retry merge queue/, "landing the same branch again is still there");
+
+  const worker = { ...tasks().find((row) => row.id === "slow")!, status: "failed" as const, flags: {} };
+  const workerModel = buildSwarmModel([worker], { now: NOW });
+  const workerHtml = renderToStaticMarkup(createElement(SwarmNodeDrawer, {
+    task: worker, node: workerModel.byId.get("slow")!, onClose: () => {},
+    onStartOver: () => {}, onRetry: () => {}, onFixForward: () => {},
+  }));
+  assert.match(workerHtml, /class="btn btn-primary"[^>]*>Retry task</);
+  assert.match(workerHtml, /Fix forward/);
+  assert.match(workerHtml, /Retry in the same sandbox/);
+});
+
 test("a failed plan drawer calls the recoverable parent stalled", () => {
   const plan = { ...tasks().find((row) => row.nodeType === "plan")!, status: "failed" as const, attention: "failed" as const };
   const model = buildSwarmModel([plan], { now: NOW });
@@ -881,7 +903,7 @@ function pageHtml(mode: "local" | "multi", status?: SwarmStatus, options: {
         onPause: () => {},
         onResume: () => {},
         onStop: () => {},
-        onCreatePullRequest: () => {},
+        onPublish: () => {},
         onReopen: () => {},
         onDelete: () => {},
         onArchive: () => {},
@@ -907,10 +929,59 @@ test("the header carries the ring, branch, agent time and controls", () => {
   assert.match(html, /approve the plan to start ready workers/);
   assert.match(html, />Stop swarm<\/button>/);
   assert.match(html, />Delete swarm<\/button>/);
-  assert.match(html, />Create PR<\/button>/);
+  assert.doesNotMatch(html, /One pull request/, "a swarm still working offers no pull request yet");
   assert.match(html, /aria-label="One more worker"/);
   assert.match(html, /aria-label="One fewer worker"/);
   assertNoDashes(html, "the swarm header");
+});
+
+test("a finished swarm offers one pull request or one per task, and a failed one says how long its sandbox is kept", () => {
+  const done = pageHtml("multi", "done");
+  assert.match(done, />One pull request<\/button>/);
+  assert.match(done, />One per task, stacked<\/button>/);
+  assert.match(done, /Every branch is on GitHub/);
+  assertNoDashes(done, "the publish choice");
+
+  const failed = pageHtml("multi", "failed");
+  assert.doesNotMatch(failed, /One pull request/);
+  assertNoDashes(failed, "the failed swarm header");
+});
+
+test("stacked pull requests are read off the tasks, with their addresses checked", () => {
+  const prs = stackedPullRequests([
+    { id: "a", title: "Cart", flags: { pullRequests: { "https://github.com/acme/app": { number: 7, url: "https://github.com/acme/app/pull/7" } } } },
+    { id: "b", title: "Totals", flags: { pullRequests: { "https://github.com/acme/app": { number: 8, url: "javascript:alert(1)" } } } },
+    { id: "c", title: "Not published", flags: {} },
+  ] as unknown as Parameters<typeof stackedPullRequests>[0]);
+  assert.deepEqual(prs.map((pr) => [pr.title, pr.number, pr.url]), [
+    ["Cart", 7, "https://github.com/acme/app/pull/7"],
+    ["Totals", 8, null],
+  ]);
+});
+
+test("a task being started over says so, and a landing failure is named by its code", () => {
+  const base = tasks().find((row) => row.id === "slow")!;
+  const restarting = {
+    ...base,
+    status: "assigned" as const,
+    branchName: "swarm/checkout-slow",
+    flags: { startingOver: true, pushedHeads: { "https://github.com/acme/app": "abc" } },
+  };
+  const restartingHtml = renderToStaticMarkup(createElement(SwarmNodeDrawer, {
+    task: restarting, node: buildSwarmModel([restarting], { now: NOW }).byId.get("slow")!, onClose: () => {},
+    onStartOver: () => {}, onRetry: () => {},
+  }));
+  assert.match(restartingHtml, /Restarting\. The old sandbox is being removed/);
+  assert.match(restartingHtml, />On GitHub</);
+  assert.doesNotMatch(restartingHtml, />Retry (task|worker)/, "nothing else is offered while it is already happening");
+
+  const failed = { ...base, status: "failed" as const, flags: { landingError: "raw words", landingErrorCode: "wake_failed" } };
+  const failedHtml = renderToStaticMarkup(createElement(SwarmNodeDrawer, {
+    task: failed, node: buildSwarmModel([failed], { now: NOW }).byId.get("slow")!, onClose: () => {},
+    onStartOver: () => {}, onRetryLanding: () => {},
+  }));
+  assert.match(failedHtml, /The sandbox holding this branch could not be started\./);
+  assertNoDashes(failedHtml, "the landing failure");
 });
 
 test("disabled worker controls explain the limit on hover", () => {

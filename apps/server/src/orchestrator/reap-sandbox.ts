@@ -1,6 +1,8 @@
+import { execFile } from "node:child_process";
 import { readdir } from "node:fs/promises";
 import path from "node:path";
-import { and, eq, inArray, isNull, ne } from "drizzle-orm";
+import { promisify } from "node:util";
+import { and, eq, inArray, isNull, lt, ne, or } from "drizzle-orm";
 import { agentRuns, features, repositories, sandboxes, swarmTasks, swarms } from "@bento/db";
 import type { SandboxDriver } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
@@ -8,6 +10,8 @@ import { sweepOrphanModalSandboxes } from "./hibernate-sandbox.js";
 import { driverForSandbox, SandboxDriverUnavailable } from "./sandbox-driver.js";
 import { ACTIVE_RUN_STATUSES } from "./start-run.js";
 import { swarmTaskWorkspaceKey } from "./swarm/sandbox.js";
+
+const execFileAsync = promisify(execFile);
 
 /** The queue a finished card's sandbox goes through on its way out. */
 export const REAP_SANDBOX_QUEUE = "sandbox.reap";
@@ -106,7 +110,20 @@ export async function queueSwarmSandboxReap(ctx: AppContext, swarmId: string): P
 }
 
 /** A swarm this reaper treats as over: nothing of it will run again. */
-const FINISHED_SWARM_STATUSES = ["done", "failed", "cancelled"] as const;
+const FINISHED_SWARM_STATUSES = ["done", "cancelled"] as const;
+
+/**
+ * How long a failed swarm keeps its machine with nobody touching it.
+ *
+ * A failed swarm is not over: a person retries a leaf or a landing on
+ * it, and its machine is the only copy of every leaf that already
+ * landed, because the swarm's branch is pushed only when it is done.
+ * Reaping it with the others (this sweep did, on every boot) made the
+ * retry land onto nothing. A week untouched is a swarm nobody is
+ * coming back to, and a sprite bills its storage for as long as it
+ * exists, so it goes then.
+ */
+export const FAILED_SWARM_MACHINE_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
  * Asks for the machine one swarm leaf was worked on to be destroyed.
@@ -280,6 +297,44 @@ export async function reapSwarmSandbox(ctx: AppContext, swarmId: string): Promis
 }
 
 /**
+ * The sweep for the swarms, which the card query cannot see: a
+ * swarm's machine has no feature_id, so an inner join on features
+ * matched none of them and every finished swarm's machine was left
+ * running. Its own query rather than a widened one, because the two
+ * boards say "over" with different words in different tables.
+ *
+ * Done and cancelled swarms at once; a failed one only once it has sat
+ * untouched past FAILED_SWARM_MACHINE_GRACE_MS. Run at boot and by the
+ * nightly sweep, so the grace ends even on a server nobody redeploys.
+ */
+export async function reapFinishedSwarmSandboxes(ctx: AppContext, now: Date = new Date()): Promise<void> {
+  const abandonedBefore = new Date(now.getTime() - FAILED_SWARM_MACHINE_GRACE_MS);
+  const staleSwarms = await ctx.db
+    .select({ swarmId: sandboxes.swarmId })
+    .from(sandboxes)
+    .innerJoin(swarms, eq(swarms.id, sandboxes.swarmId))
+    .where(
+      and(
+        ne(sandboxes.status, "destroyed"),
+        isNull(sandboxes.swarmTaskId),
+        or(
+          inArray(swarms.status, [...FINISHED_SWARM_STATUSES]),
+          and(eq(swarms.status, "failed"), lt(swarms.updatedAt, abandonedBefore)),
+        ),
+      ),
+    );
+  for (const swarmId of new Set(staleSwarms.map((row) => row.swarmId))) {
+    if (!swarmId) continue;
+    try {
+      await sweepReap(ctx, { swarmId });
+    } catch (err) {
+      console.warn(`could not reap the sandbox for swarm ${swarmId}:`, err);
+      ctx.analytics?.captureException(err, null, null, { swarm_id: swarmId, source: "sandbox_reap" });
+    }
+  }
+}
+
+/**
  * Drops the card's host workspace. Sprite deployments never create
  * one, so the removal is a no-op there; a deployment that switched
  * drivers mid-card still gets cleaned.
@@ -356,6 +411,46 @@ export async function reapSwarmTaskSandbox(ctx: AppContext, swarmTaskId: string)
   }
 
   await removeSwarmTaskWorkspace(ctx, swarmTaskId);
+}
+
+/**
+ * Throws away everything a leaf's earlier attempts left, so the next
+ * agent on it starts over from the swarm's branch in a new machine.
+ *
+ * The machine goes through the leaf's own reap, which refuses while an
+ * agent is still in it (stop the runs first) and only marks the row
+ * destroyed once the driver says the machine is gone. A clone driver's
+ * branch lived only in that machine. A host driver's branch outlives
+ * its worktree in the project's checkout, and the next worktree would
+ * check that branch out again with the old commits on it, so it is
+ * deleted there too. A branch that is not there is already what this
+ * wants.
+ */
+export async function discardSwarmTaskWork(
+  ctx: AppContext,
+  input: { swarmTaskId: string; branch: string | null },
+): Promise<void> {
+  await reapSwarmTaskSandbox(ctx, input.swarmTaskId);
+  if (!input.branch) return;
+  const [task] = await ctx.db
+    .select({ projectId: swarms.projectId })
+    .from(swarmTasks)
+    .innerJoin(swarms, eq(swarms.id, swarmTasks.swarmId))
+    .where(eq(swarmTasks.id, input.swarmTaskId))
+    .limit(1);
+  if (!task) return;
+  const repos = await ctx.db
+    .select({ localPath: repositories.localPath })
+    .from(repositories)
+    .where(eq(repositories.projectId, task.projectId));
+  for (const repo of repos) {
+    if (!repo.localPath) continue;
+    try {
+      await execFileAsync("git", ["-C", repo.localPath, "branch", "-D", input.branch]);
+    } catch {
+      // Not a checkout on this host, or no such branch: nothing to remove.
+    }
+  }
 }
 
 /**
@@ -473,33 +568,7 @@ export async function reapFinishedSandboxes(ctx: AppContext): Promise<void> {
     }
   }
 
-  /*
-   * The same sweep for the swarms, which the join above cannot see: a
-   * swarm's machine has no feature_id, so an inner join on features
-   * matched none of them and every finished swarm's machine was left
-   * running. Its own query rather than a widened one, because the two
-   * boards say "over" with different words in different tables.
-   */
-  const staleSwarms = await ctx.db
-    .select({ swarmId: sandboxes.swarmId })
-    .from(sandboxes)
-    .innerJoin(swarms, eq(swarms.id, sandboxes.swarmId))
-    .where(
-      and(
-        ne(sandboxes.status, "destroyed"),
-        isNull(sandboxes.swarmTaskId),
-        inArray(swarms.status, [...FINISHED_SWARM_STATUSES]),
-      ),
-    );
-  for (const swarmId of new Set(staleSwarms.map((row) => row.swarmId))) {
-    if (!swarmId) continue;
-    try {
-      await sweepReap(ctx, { swarmId });
-    } catch (err) {
-      console.warn(`could not reap the sandbox for swarm ${swarmId}:`, err);
-      ctx.analytics?.captureException(err, null, null, { swarm_id: swarmId, source: "sandbox_reap" });
-    }
-  }
+  await reapFinishedSwarmSandboxes(ctx);
 
   const worktreesRoot = path.join(ctx.env.BENTO_DATA_DIR, "worktrees");
   let entries;

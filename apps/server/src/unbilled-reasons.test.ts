@@ -42,6 +42,12 @@ test("provider failures before a Sprite starts are not billed", () => {
     unbilledReason("The sandbox stopped responding before the agent started, so no agent ran.")?.id,
     "sandbox-stalled",
   );
+  assert.equal(
+    unbilledReason(
+      "An agent from an earlier run of this task is still running in its sandbox and could not be stopped, so a second agent was not started beside it.",
+    )?.id,
+    "previous-agent-running",
+  );
 });
 
 test("agent work and caller-caused provisioning failures remain billable", () => {

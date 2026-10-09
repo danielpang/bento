@@ -231,6 +231,11 @@ export interface Swarm {
   startedAt: string | null;
   endedAt: string | null;
   createdAt: string;
+  /**
+   * When the swarm's row last changed. A failed swarm's machine is
+   * reaped a week after this, which the header says.
+   */
+  updatedAt?: string | null;
   archivedAt: string | null;
   lastOpenedAt: string | null;
   question: PlannerQuestion | null;
@@ -335,6 +340,8 @@ export interface SwarmLanding {
   status: "queued" | "landing" | "landed" | "conflicted" | "failed" | "cancelled";
   attempt: number;
   error: string | null;
+  /** Why a failed landing failed, as the server's stable code. Null otherwise. */
+  errorCode?: string | null;
   /** The agent reconciling this branch, when one was started. */
   resolverRunId: string | null;
   startedAt: string | null;

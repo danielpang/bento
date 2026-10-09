@@ -327,7 +327,21 @@ export async function retryLeaf(
    * the event so the drawer can tell it from a failed leaf assigned
    * again with a reason, which writes the same status change.
    */
-  input: { task: Task; now?: Date; reason?: string; rejected?: boolean } & Asker,
+  input: {
+    task: Task;
+    now?: Date;
+    reason?: string;
+    rejected?: boolean;
+    /**
+     * Started over: the caller has already discarded the task's machine
+     * and branch, so the next agent is cut fresh from the swarm's branch.
+     * Clears what the old attempt failed with, a merge queue failure
+     * included, because none of it is about the work that comes next.
+     */
+    fresh?: boolean;
+    /** Started over by Bento after a sandbox failure, not by a person: once per task. */
+    auto?: boolean;
+  } & Asker,
 ): Promise<Task | SplitRefusal> {
   const { task } = input;
   const now = input.now ?? new Date();
@@ -355,6 +369,25 @@ export async function retryLeaf(
         plannerToldAt: undefined,
         plannerToldBy: undefined,
         plannerRetells: undefined,
+        ...(input.fresh
+          ? {
+              landingError: undefined,
+              landingErrorCode: undefined,
+              workerStopped: undefined,
+              rejection: undefined,
+              sandboxRestarts: undefined,
+              // A fresh branch is cut from the swarm's head, so the merge
+              // a conflict's resolver forced on the old one is not this
+              // branch's, and neither is the conflict.
+              conflict: undefined,
+              landPolicy: undefined,
+              // The old machine is discarded by a job before any agent
+              // is put on the task again; the coordinator waits for it.
+              startingOver: true,
+              startOverAttempts: undefined,
+              ...(input.auto ? { autoStartedOver: true } : {}),
+            }
+          : {}),
         ...(input.reason !== undefined ? { rejection: input.reason } : {}),
       },
       updatedAt: now,
@@ -371,6 +404,8 @@ export async function retryLeaf(
       retry: Number.isFinite(retries) ? retries + 1 : 1,
       ...(input.reason ? { rejection: input.reason } : {}),
       ...(input.rejected ? { rejected: true } : {}),
+      ...(input.fresh ? { fresh: true } : {}),
+      ...(input.auto ? { automatic: true } : {}),
     },
   });
   return updated ?? task;

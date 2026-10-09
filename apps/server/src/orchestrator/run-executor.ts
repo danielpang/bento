@@ -30,7 +30,6 @@ import {
   agentRuns,
   featureMessages,
   features,
-  organizationPolicies,
   projects,
   repositories,
   runArtifacts,
@@ -42,6 +41,7 @@ import {
   swarms,
 } from "@bento/db";
 import {
+  AGENT_CLI_BINARIES,
   collectExec,
   isExecTimeout,
   LineChannel,
@@ -59,6 +59,7 @@ import {
   SANDBOX_GONE_AGENT_PREFIX,
   SANDBOX_REFUSED_AGENT_PREFIX,
   SANDBOX_STALLED_AGENT_PREFIX,
+  PREVIOUS_AGENT_RUNNING_PREFIX,
   unbilledReason,
 } from "../unbilled-reasons.js";
 import { githubConnectionFor, reviewForBranch } from "../github.js";
@@ -107,8 +108,9 @@ import { shouldIncludeStageNotes, shouldShareAgentAuth } from "../settings.js";
 import { captureRunQueueDepth } from "./queue-snapshot.js";
 import { ACTIVE_RUN_STATUSES, projectHasRepositories, startRunIfIdle } from "./start-run.js";
 import { enqueueRun, INTERACTIVE_POLL_SECONDS, QUEUE_POLL_SECONDS, RUN_WORKER_POLL_SECONDS } from "./queue.js";
-import { HIBERNATE_SANDBOX_QUEUE, MODAL_SWEEP_QUEUE, scheduleModalHibernation, hibernateSandbox, sweepOrphanModalSandboxes } from "./hibernate-sandbox.js";
-import { modalRunHosts } from "./modal-hosts.js";
+import { HIBERNATE_SANDBOX_QUEUE, MODAL_SWEEP_QUEUE, scheduleModalHibernation, hibernateSandbox, sweepOrphanModalSandboxes, wakeSwarmSandbox } from "./hibernate-sandbox.js";
+import { modalNetworkForProject, organizationRestrictsNetwork } from "./sandbox-network.js";
+import { stopLeftoverAgent } from "./leftover-agent.js";
 import { pipelineAgentBinaries } from "./pipeline-agents.js";
 import { appendRunEvent } from "./transcript.js";
 import { isPersisted, loadPersistedIds, recoverMissedMessages } from "./recover-session.js";
@@ -117,12 +119,14 @@ import { attachLiveConversation } from "./live-session.js";
 import { registerLinearJobs } from "./linear-sync.js";
 import { queueRunFinishedSlack } from "./slack-notify.js";
 import { registerSlackJobs } from "./slack-sync.js";
-import { REAP_SANDBOX_QUEUE, reapFinishedSandboxes, runSandboxReapJob } from "./reap-sandbox.js";
+import { REAP_SANDBOX_QUEUE, reapFinishedSandboxes, reapFinishedSwarmSandboxes, runSandboxReapJob } from "./reap-sandbox.js";
 import { latestConversationRun, resolveFollowUpRun } from "./stage-agent.js";
 import { asPipelineRun, isPipelineRun, type PipelineRun } from "./pipeline-run.js";
 import { describeRunSubject, type RunSubject } from "./run-subject.js";
 import { SWARM_TICK_QUEUE, tickAllLiveSwarms } from "./swarm/coordinator.js";
 import { SWARM_LAND_QUEUE, resumeClaimedLandings } from "./swarm/landing.js";
+import { SWARM_PUSH_QUEUE, ensureSwarmPushWorker, remoteBranchBundles } from "./swarm/remote-branches.js";
+import { SWARM_START_OVER_QUEUE } from "./swarm/start-over.js";
 import {
   claimQueuedMessages,
   confirmDelivered,
@@ -449,6 +453,15 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       ...(subject.kind === "swarm" && subject.task && subject.swarm.branchName && driver.workspace === "clone"
         ? { startFromBundles: await swarmBranchBundles(ctx, subject.swarm, repoRows) }
         : {}),
+      /**
+       * And the swarm's own machine, made again after it was lost, is
+       * made on the branch GitHub holds for it, so every task that
+       * landed is still there. A first machine, or one still standing,
+       * has nothing to restore.
+       */
+      ...(subject.kind === "swarm" && !subject.task && driver.workspace === "clone"
+        ? await swarmRestoreBundles(ctx, subject.swarm, repoRows)
+        : {}),
       say: saySystem,
     };
     const provisionStarted = performance.now();
@@ -679,6 +692,27 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       sessionId: run.cliSessionId,
       cwd: workdir,
     });
+  }
+
+  /**
+   * One task, one agent, in the machine as well as in the rows. A
+   * restart that could not reattach closed its run and left the agent
+   * running, and a second one started here would commit to the same
+   * branch beside it. A machine made for this run cannot hold one.
+   */
+  if (subject.kind === "swarm" && subject.task && sandboxOrigin !== "new" && driver.attach) {
+    const leftover = await stopLeftoverAgent(driver, handle, await leftoverAgentCommands(ctx, subject.task.id, argv));
+    if (leftover === "stopped") {
+      await saySystem("An agent from an earlier run of this task was still running in its sandbox, so it was stopped first.");
+    } else if (leftover === "running") {
+      await finishRun(ctx, runId, {
+        ok: false,
+        error: `${PREVIOUS_AGENT_RUNNING_PREFIX}, so a second agent was not started beside it.`,
+      }, null);
+      emitBoard("failed");
+      await subject.settle(ctx);
+      return;
+    }
   }
 
   let result;
@@ -1876,13 +1910,70 @@ async function swarmBranchBundles(
 ): Promise<Map<string, { branch: string; data: Buffer }>> {
   if (!swarm.sandboxId) return new Map();
   const [row] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, swarm.sandboxId)).limit(1);
-  if (!row || row.status === "destroyed") return new Map();
+  // The swarm's machine is gone: its branch is read back from GitHub,
+  // where every landing pushed it, rather than the worker quietly
+  // starting from the base branch.
+  if (!row || row.status === "destroyed") {
+    return remoteBranchBundles(ctx, {
+      organizationId: swarm.organizationId,
+      branch: swarm.branchName ?? swarmBranchName(swarm.slug),
+      pushedHeads: swarm.pushedHeads,
+      repoRows,
+    });
+  }
+  await wakeSwarmSandbox(ctx, row, swarm, swarm.plannerProfileId);
   return exportSwarmBranch(
     driverForSandbox(ctx.drivers, row),
     { externalId: row.externalId, provider: row.provider, workdir: row.workdir },
     repoRows.map((repo) => ({ name: repo.name, defaultBranch: repo.defaultBranch })),
     swarm.branchName ?? swarmBranchName(swarm.slug),
   );
+}
+
+/**
+ * The commands an agent left in a task's machine could be running
+ * under: this run's own, and the binary of every agent an earlier run
+ * of the task used, since a reassigned leaf leaves the old agent's
+ * process under its own name.
+ */
+async function leftoverAgentCommands(ctx: AppContext, taskId: string, argv: string[]): Promise<string[][]> {
+  const earlier = await ctx.db
+    .selectDistinct({ cli: agentProfiles.cli })
+    .from(agentRuns)
+    .innerJoin(agentProfiles, eq(agentProfiles.id, agentRuns.agentProfileId))
+    .where(eq(agentRuns.swarmTaskId, taskId));
+  const commands = [argv];
+  const seen = new Set([argv[0]]);
+  for (const { cli } of earlier) {
+    const binary = AGENT_CLI_BINARIES[cli as AgentCli];
+    if (!binary || seen.has(binary)) continue;
+    seen.add(binary);
+    commands.push([binary]);
+  }
+  return commands;
+}
+
+/**
+ * The swarm's branch from GitHub, for remaking the swarm's own machine
+ * after the one that held it was destroyed. Nothing when the machine
+ * is still there (a hibernated one is restored from its snapshot) or
+ * nothing was ever pushed.
+ */
+async function swarmRestoreBundles(
+  ctx: AppContext,
+  swarm: typeof swarms.$inferSelect,
+  repoRows: (typeof repositories.$inferSelect)[],
+): Promise<{ startFromBundles?: Map<string, { branch: string; data: Buffer }> }> {
+  if (!swarm.sandboxId || Object.keys(swarm.pushedHeads ?? {}).length === 0) return {};
+  const [row] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, swarm.sandboxId)).limit(1);
+  if (row && row.status !== "destroyed") return {};
+  const bundles = await remoteBranchBundles(ctx, {
+    organizationId: swarm.organizationId,
+    branch: swarm.branchName ?? swarmBranchName(swarm.slug),
+    pushedHeads: swarm.pushedHeads,
+    repoRows,
+  });
+  return bundles.size > 0 ? { startFromBundles: bundles } : {};
 }
 
 /** Whether the planner has written the design note a worker is told to read. */
@@ -1947,52 +2038,6 @@ async function recordSwarmWorkspace(
     .update(swarms)
     .set({ branchName: branch, sandboxId, updatedAt: new Date() })
     .where(eq(swarms.id, subject.swarm.id));
-}
-
-/**
- * The network a Modal sandbox for this project must use.
- *
- * Provision and rollback both call this, so a machine booted to mount
- * a checkpoint gets the same allowlist as the one the run started in.
- * Not restricted: an empty object, and the sandbox keeps open egress.
- */
-export async function modalNetworkForProject(
-  ctx: AppContext,
-  projectId: string,
-  organizationId: string | null,
-  cli: AgentCli,
-  model: string,
-): Promise<Pick<SandboxHandle, "network" | "allowedHosts">> {
-  if (!(await organizationRestrictsNetwork(ctx, organizationId))) return {};
-  const repos = await ctx.db
-    .select({ repoUrl: repositories.repoUrl })
-    .from(repositories)
-    .where(eq(repositories.projectId, projectId));
-  const adapter = getAdapter(cli);
-  const driver = ctx.drivers.get("modal") ?? ctx.drivers.default;
-  const { env: resolved } = await resolveAgentEnv(ctx, organizationId, adapter, model, driver);
-  const custom = await customProviderRunEnv(ctx, organizationId, cli, model);
-  const env = custom ? custom.env : resolved;
-  return {
-    network: "restricted",
-    allowedHosts: modalRunHosts({
-      gatewayUrl: ctx.env.BENTO_MCP_GATEWAY_URL ?? ctx.env.BETTER_AUTH_URL,
-      cloneUrls: repos.map((row) => row.repoUrl),
-      env,
-      ...(custom?.selection?.baseUrl ? { customBaseUrl: custom.selection.baseUrl } : {}),
-    }),
-  };
-}
-
-/** Whether this organization has asked for sandboxes with no egress. */
-async function organizationRestrictsNetwork(ctx: AppContext, organizationId: string | null): Promise<boolean> {
-  if (!organizationId) return false;
-  const [row] = await ctx.db
-    .select({ restrictNetwork: organizationPolicies.restrictNetwork })
-    .from(organizationPolicies)
-    .where(eq(organizationPolicies.organizationId, organizationId))
-    .limit(1);
-  return row?.restrictNetwork === true;
 }
 
 async function finishRun(
@@ -3129,6 +3174,10 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
    * this one's.
    */
   await ctx.boss.createQueue(SWARM_LAND_QUEUE, { name: SWARM_LAND_QUEUE, policy: "short" });
+  // Pushes of a swarm's branches to GitHub. "short" keyed by what is
+  // pushed, so a push already waiting is not queued twice.
+  await ctx.boss.createQueue(SWARM_PUSH_QUEUE, { name: SWARM_PUSH_QUEUE, policy: "short" });
+  await ctx.boss.createQueue(SWARM_START_OVER_QUEUE, { name: SWARM_START_OVER_QUEUE, policy: "short" });
   await ctx.boss.createQueue(HIBERNATE_SANDBOX_QUEUE);
   await ctx.boss.createQueue(MODAL_SWEEP_QUEUE);
 
@@ -3148,6 +3197,12 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
    */
   const claimed = await resumeClaimedLandings(ctx);
   if (claimed > 0) console.log(`resumed ${claimed} landing(s) a restart left claimed`);
+  /**
+   * Pushes a restart left waiting. The worker starts on first use, so
+   * without this a branch queued for GitHub before a deploy would wait
+   * for the next push anyone happened to ask for.
+   */
+  if ((await ctx.boss.getQueueSize(SWARM_PUSH_QUEUE, { before: "active" })) > 0) await ensureSwarmPushWorker(ctx);
   /**
    * Every swarm that is still working gets one tick, after recovery
    * rather than before it: the tick reads the runs, and it should read
@@ -3187,6 +3242,10 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
     { pollingIntervalSeconds: QUEUE_POLL_SECONDS },
     captureJobErrors(ctx.analytics, MODAL_SWEEP_QUEUE, async () => {
       await sweepOrphanModalSandboxes(ctx);
+      // Nightly too, not only at boot: a failed swarm's machine is
+      // reaped once its grace has run out, and that has to happen on
+      // a server nobody redeploys.
+      await reapFinishedSwarmSandboxes(ctx);
     }),
   );
   /**

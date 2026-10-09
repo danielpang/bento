@@ -27,6 +27,7 @@ import { taskTrailer, workerBranchName } from "./branches.js";
 import { tickSwarm } from "./coordinator.js";
 import { commitsForTask } from "./landing-git.js";
 import { performLanding } from "./landing.js";
+import { hibernateSandbox } from "../hibernate-sandbox.js";
 import { swarmTaskWorkspaceKey, swarmWorkspaceKey } from "./sandbox.js";
 
 /**
@@ -575,6 +576,288 @@ test("a worker made on Modal lands onto a swarm on a sprite", async () => {
     assert.deepEqual(exported.sort(), [`modal:modal-worker-${fx.task.id}`, `sprite:sprite-swarm-${fx.swarm.id}`]);
     assert.notEqual(await git(fx.swarmTree, ["rev-parse", "HEAD"]), before);
     assert.equal(await git(fx.swarmTree, ["show", "HEAD:m.txt"]), "from modal");
+  } finally {
+    ctx.drivers = original;
+  }
+});
+
+test("a landing wakes hibernated machines rather than calling them unavailable", async () => {
+  /**
+   * Production: a Modal worker reported, the planner accepted it a
+   * little later, and by then a hibernation job had snapshotted and
+   * stopped the worker's machine. Every export said "is not running"
+   * until the landing ran out of attempts, and the retry found the
+   * swarm's own machine hibernated too. A hibernated machine still
+   * holds the branch; the landing boots it and lands.
+   */
+  const fx = await swarmWithLeaf("hibernated");
+  await commitIn(fx.workerTree, fx.task.id, "h.txt", "from a sleeper\n", "add h");
+  const landing = await queueLanding(fx.swarm.id, fx.task.id, fx.branch);
+
+  const [swarmSandbox] = await db
+    .insert(sandboxes)
+    .values({
+      projectId: PROJECT,
+      swarmId: fx.swarm.id,
+      provider: "modal",
+      externalId: `bento-swarm-${fx.swarm.id}`,
+      status: "hibernated",
+      imageRef: "im-swarm",
+      workdir: "/workspace",
+    })
+    .returning();
+  await db.update(swarms).set({ sandboxId: swarmSandbox!.id }).where(eq(swarms.id, fx.swarm.id));
+  const [workerSandbox] = await db
+    .insert(sandboxes)
+    .values({
+      projectId: PROJECT,
+      swarmId: fx.swarm.id,
+      swarmTaskId: fx.task.id,
+      provider: "modal",
+      externalId: `bento-swarm-${fx.swarm.id}-${fx.task.id.slice(0, 8)}`,
+      status: "hibernated",
+      imageRef: "im-worker",
+      workdir: "/workspace",
+    })
+    .returning();
+
+  const trees = new Map([
+    [swarmSandbox!.externalId, fx.swarmTree],
+    [workerSandbox!.externalId, fx.workerTree],
+  ]);
+  const awake = new Set<string>();
+  const woken: string[] = [];
+  const running = (handle: SandboxHandle) => {
+    if (!awake.has(handle.externalId)) throw new Error(`sandbox ${handle.externalId} is not running`);
+    return trees.get(handle.externalId)!;
+  };
+  const modalDriver = {
+    provider: "modal",
+    workspace: "clone",
+    async wake(handle: SandboxHandle) {
+      if (awake.has(handle.externalId)) return { booted: false };
+      woken.push(`${handle.externalId}@${handle.imageRef}`);
+      awake.add(handle.externalId);
+      return { booted: true };
+    },
+    async exportRepository(handle: SandboxHandle, _name: string, baseBranch: string) {
+      const tree = running(handle);
+      const baseSha = await git(tree, ["merge-base", baseBranch, "HEAD"]);
+      const headSha = await git(tree, ["rev-parse", "HEAD"]);
+      const file = path.join(dataDir, `${handle.externalId}.bundle`);
+      await git(tree, ["bundle", "create", file, "HEAD"]);
+      return { baseSha, headSha, data: await readFile(file) };
+    },
+    async importRepository(handle: SandboxHandle, _name: string, bundle: { data: Buffer }, options: { branch: string; expectedHeadSha: string }) {
+      const tree = running(handle);
+      if ((await git(tree, ["rev-parse", "HEAD"])) !== options.expectedHeadSha) {
+        return { ok: false as const, reason: "moved" as const, detail: "the branch moved" };
+      }
+      const file = path.join(dataDir, `import-hibernated-${fx.swarm.id}.bundle`);
+      await writeFile(file, bundle.data);
+      await git(tree, ["fetch", "--quiet", file, "+HEAD:refs/bento/test-landing"]);
+      await git(tree, ["merge", "--ff-only", "refs/bento/test-landing"]);
+      return { ok: true as const, headSha: await git(tree, ["rev-parse", "HEAD"]) };
+    },
+    async *exec() {
+      yield { kind: "exit" as const, exitCode: 0 };
+    },
+    async provision() {
+      throw new Error("unused");
+    },
+    async destroy() {},
+  } as unknown as SandboxDriver;
+
+  const original = ctx.drivers;
+  ctx.drivers = singleDriver(modalDriver);
+  try {
+    const result = await performLanding(ctx, landing.id);
+    assert.equal(result?.status, "landed", result?.reason ?? "");
+    assert.deepEqual(result?.landed, ["app"]);
+    assert.deepEqual(woken.sort(), [
+      `${swarmSandbox!.externalId}@im-swarm`,
+      `${workerSandbox!.externalId}@im-worker`,
+    ].sort());
+    assert.equal(await git(fx.swarmTree, ["show", "HEAD:h.txt"]), "from a sleeper");
+    const rows = await db.select().from(sandboxes).where(eq(sandboxes.swarmId, fx.swarm.id));
+    assert.deepEqual(rows.map((row) => row.status).sort(), ["ready", "ready"]);
+    assert.equal(
+      queued.filter(
+        (job) =>
+          job.queue === "sandbox.hibernate" &&
+          (job.data.sandboxId === swarmSandbox!.id || job.data.sandboxId === workerSandbox!.id),
+      ).length,
+      2,
+      "a woken machine is put back on the hibernation schedule",
+    );
+  } finally {
+    ctx.drivers = original;
+  }
+});
+
+/** A swarm on Modal whose two machines are hibernated, for the wake tests. */
+async function hibernatedPair(slug: string) {
+  const fx = await swarmWithLeaf(slug);
+  const [swarmSandbox] = await db
+    .insert(sandboxes)
+    .values({
+      projectId: PROJECT,
+      swarmId: fx.swarm.id,
+      provider: "modal",
+      externalId: `bento-swarm-${fx.swarm.id}`,
+      status: "hibernated",
+      imageRef: "im-swarm",
+      workdir: "/workspace",
+    })
+    .returning();
+  await db.update(swarms).set({ sandboxId: swarmSandbox!.id }).where(eq(swarms.id, fx.swarm.id));
+  const [workerSandbox] = await db
+    .insert(sandboxes)
+    .values({
+      projectId: PROJECT,
+      swarmId: fx.swarm.id,
+      swarmTaskId: fx.task.id,
+      provider: "modal",
+      externalId: `bento-swarm-${fx.swarm.id}-${fx.task.id.slice(0, 8)}`,
+      status: "hibernated",
+      imageRef: "im-worker",
+      workdir: "/workspace",
+    })
+    .returning();
+  return { fx, swarmSandbox: swarmSandbox!, workerSandbox: workerSandbox! };
+}
+
+test("a sandbox that could not be started sends the landing back to the queue, then fails it plainly", async () => {
+  const { fx } = await hibernatedPair("wake-fails");
+  await commitIn(fx.workerTree, fx.task.id, "w.txt", "waiting\n", "add w");
+  const landing = await queueLanding(fx.swarm.id, fx.task.id, fx.branch);
+  const original = ctx.drivers;
+  ctx.drivers = singleDriver({
+    provider: "modal",
+    workspace: "clone",
+    async wake() {
+      throw new Error("modal: UNAVAILABLE upstream connect error sb-internal-123");
+    },
+    async exportRepository() {
+      throw new Error("never reached");
+    },
+    async importRepository() {
+      throw new Error("never reached");
+    },
+    async provision() {
+      throw new Error("unused");
+    },
+    async destroy() {},
+  } as unknown as SandboxDriver);
+  const captured: { event?: string; exception?: string; properties?: Record<string, unknown> }[] = [];
+  const originalAnalytics = ctx.analytics;
+  ctx.analytics = {
+    capture: (event) => void captured.push({ event: event.event, properties: event.properties ?? {} }),
+    captureException: (err, _user, _org, properties) =>
+      void captured.push({ exception: (err as Error).message, properties: properties ?? {} }),
+  } as AppContext["analytics"];
+  try {
+    const first = await performLanding(ctx, landing.id);
+    assert.equal(first?.status, "queued", "a provider blip is retried, not the end of the landing");
+    assert.match(first?.reason ?? "", /could not be started/);
+    assert.equal((await taskRow(fx.task.id))?.status === "failed", false);
+    const waiting = await landingRow(landing.id);
+    assert.ok(waiting?.notBefore && waiting.notBefore.getTime() > Date.now(), "and it waits before the next attempt");
+    assert.ok(
+      queued.some((job) => job.queue === "swarm.tick" && (job.data as { swarmId?: string }).swarmId === fx.swarm.id),
+      "with a tick to wake it when the wait is over",
+    );
+
+    // Out of attempts: the task starts over by itself, once.
+    await db.update(swarmLandings).set({ status: "landing", attempt: 5 }).where(eq(swarmLandings.id, landing.id));
+    const restarted = await performLanding(ctx, landing.id);
+    assert.equal(restarted?.status, "failed");
+    const startingOver = await taskRow(fx.task.id);
+    assert.equal(startingOver?.status, "assigned", "a machine that could not be started is answered with a new one");
+    assert.equal((startingOver?.flags as { autoStartedOver?: boolean }).autoStartedOver, true);
+    assert.ok(queued.some((job) => job.queue === "swarm.task-start-over"));
+
+    // The second time it is a failure a person sees, with its code.
+    const [again] = await db
+      .insert(swarmLandings)
+      .values({ swarmId: fx.swarm.id, taskId: fx.task.id, branchName: fx.branch, position: 1, status: "landing", attempt: 5 })
+      .returning();
+    await db.update(swarmTasks).set({ status: "landed" }).where(eq(swarmTasks.id, fx.task.id));
+    const last = await performLanding(ctx, again!.id);
+    assert.equal(last?.status, "failed");
+    assert.match(last?.reason ?? "", /could not be started after 5 attempts/);
+    assert.doesNotMatch(last?.reason ?? "", /sb-internal-123/, "the provider's words stay out of the leaf");
+    assert.equal((await landingRow(again!.id))?.errorCode, "wake_failed");
+    assert.equal(
+      ((await taskRow(fx.task.id))?.flags as { landingErrorCode?: string }).landingErrorCode,
+      "wake_failed",
+      "the console reads the code to pick its sentence",
+    );
+    assert.ok(captured.some((row) => row.event === "swarm landing failed" && row.properties?.code === "wake_failed"));
+    assert.ok(captured.some((row) => row.exception === "swarm landing failed: wake_failed"), "and error tracking hears of it");
+  } finally {
+    ctx.drivers = original;
+    ctx.analytics = originalAnalytics;
+  }
+});
+
+test("a machine a landing is using is not hibernated under it", async () => {
+  const { fx, swarmSandbox, workerSandbox } = await hibernatedPair("landing-active");
+  await db.update(sandboxes).set({ status: "ready" }).where(eq(sandboxes.swarmId, fx.swarm.id));
+  const inFlight = await queueLanding(fx.swarm.id, fx.task.id, fx.branch);
+  await db.update(swarmLandings).set({ startedAt: new Date() }).where(eq(swarmLandings.id, inFlight.id));
+  queued.length = 0;
+  await hibernateSandbox(ctx, swarmSandbox.id);
+  await hibernateSandbox(ctx, workerSandbox.id);
+  const rearmed = queued.filter((job) => job.queue === "sandbox.hibernate").map((job) => job.data.sandboxId);
+  assert.deepEqual(
+    rearmed.sort(),
+    [swarmSandbox.id, workerSandbox.id].sort(),
+    "both machines are left running and asked about again later",
+  );
+  const rows = await db.select().from(sandboxes).where(eq(sandboxes.swarmId, fx.swarm.id));
+  assert.deepEqual(rows.map((row) => row.status), ["ready", "ready"]);
+
+  // A landing whose job died long ago keeps nothing awake.
+  await db
+    .update(swarmLandings)
+    .set({ startedAt: new Date(Date.now() - 31 * 60 * 1000) })
+    .where(eq(swarmLandings.id, inFlight.id));
+  queued.length = 0;
+  const original = ctx.drivers;
+  // Past the activity check the job asks for the machine's driver, and
+  // only a real Modal driver snapshots: this one stops there.
+  ctx.drivers = singleDriver({ provider: "modal", workspace: "clone" } as unknown as SandboxDriver);
+  try {
+    await hibernateSandbox(ctx, swarmSandbox.id);
+  } finally {
+    ctx.drivers = original;
+  }
+  assert.equal(queued.filter((job) => job.queue === "sandbox.hibernate").length, 0, "the stale landing is not activity");
+});
+
+test("a landing onto a swarm whose machine is gone says which machine", async () => {
+  const fx = await swarmWithLeaf("swarm-gone");
+  await commitIn(fx.workerTree, fx.task.id, "g.txt", "lost\n", "add g");
+  const landing = await queueLanding(fx.swarm.id, fx.task.id, fx.branch);
+  const [swarmSandbox] = await db
+    .insert(sandboxes)
+    .values({
+      projectId: PROJECT,
+      swarmId: fx.swarm.id,
+      provider: "modal",
+      externalId: `bento-swarm-gone-${fx.swarm.id}`,
+      status: "destroyed",
+      workdir: "/workspace",
+    })
+    .returning();
+  await db.update(swarms).set({ sandboxId: swarmSandbox!.id }).where(eq(swarms.id, fx.swarm.id));
+  const original = ctx.drivers;
+  ctx.drivers = singleDriver({ provider: "modal", workspace: "clone" } as unknown as SandboxDriver);
+  try {
+    const result = await performLanding(ctx, landing.id);
+    assert.equal(result?.status, "failed");
+    assert.match(result?.reason ?? "", /the swarm's sandbox is gone/);
   } finally {
     ctx.drivers = original;
   }
