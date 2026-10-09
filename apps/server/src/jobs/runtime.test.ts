@@ -155,7 +155,12 @@ test("multi construction refuses before loading Redis when the URL is missing", 
  */
 test("local startup does not import Redis", () => {
   const srcRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
-  const allowed = new Set(["jobs/bullmq.ts", "jobs/bullmq.test.ts"]);
+  const allowed = new Set([
+    "jobs/bullmq.ts",
+    "jobs/bullmq.test.ts",
+    "jobs/contract.test.ts",
+    "jobs/test-queue.ts",
+  ]);
   const forbidden =
     /from\s+["']bullmq["']|from\s+["']ioredis["']|import\s*\(\s*["']bullmq["']\s*\)|import\s*\(\s*["']ioredis["']\s*\)|require\s*\(\s*["']bullmq["']\s*\)|require\s*\(\s*["']ioredis["']\s*\)/;
   const offenders: string[] = [];

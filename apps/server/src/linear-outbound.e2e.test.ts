@@ -1,10 +1,9 @@
-import { after, before, test } from "node:test";
+import { after, before, describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { eq } from "drizzle-orm";
-import PgBoss from "pg-boss";
 import pg from "pg";
 import {
   createDb,
@@ -20,7 +19,7 @@ import {
 import { LocalProcessDriver, WorktreeManager } from "@bento/sandbox";
 import { singleDriver } from "./orchestrator/sandbox-driver.js";
 import { createApp } from "./app.js";
-import { PgBossQueue } from "./jobs/index.js";
+import { createTestJobQueue, realQueueBackends } from "./jobs/test-queue.js";
 import { DiskArtifactStore } from "./artifact-store.js";
 import { SecretBox } from "./secrets.js";
 import { ensureLocalUser, type AppContext } from "./context.js";
@@ -69,7 +68,12 @@ async function pipelineFor(project: string): Promise<string> {
   return row!.id;
 }
 
+for (const backend of realQueueBackends()) {
+describe(`queue:${backend}`, () => {
 before(async () => {
+  filed.length = 0;
+  issuesById.clear();
+  stateUpdates.length = 0;
   const admin = new pg.Client({ connectionString: baseUrl });
   await admin.connect();
   await admin.query(`DROP DATABASE IF EXISTS ${testDbName} WITH (FORCE)`);
@@ -87,16 +91,18 @@ before(async () => {
 
   const pool = createPool(testUrl);
   const db = createDb(pool);
-  const boss = new PgBoss({ connectionString: testUrl, schema: "pgboss" });
-  boss.on("error", () => {});
-  await boss.start();
+  const jobs = await createTestJobQueue({
+    backend,
+    postgresUrl: testUrl,
+    isolation: `${testDbName}-${backend}`,
+  });
   const userId = await ensureLocalUser(db);
 
   ctx = {
     env,
     db,
     pool,
-    jobs: new PgBossQueue(boss),
+    jobs,
     bus: new EventBus(),
     drivers: singleDriver(new LocalProcessDriver()),
     worktrees: new WorktreeManager(dataDir),
@@ -511,3 +517,5 @@ test("the project settings route stores a team and Linear project", async () => 
     globalThis.fetch = stubLinear();
   }
 });
+});
+}

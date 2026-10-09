@@ -1,4 +1,4 @@
-import { after, before, test } from "node:test";
+import { after, before, describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdtemp, writeFile } from "node:fs/promises";
@@ -11,10 +11,9 @@ import type { AgentEvent } from "@bento/core";
 import { SseParser } from "@bento/core";
 import { LocalProcessDriver, WorktreeManager } from "@bento/sandbox";
 import { singleDriver } from "./orchestrator/sandbox-driver.js";
-import PgBoss from "pg-boss";
 import pg from "pg";
 import { createApp } from "./app.js";
-import { PgBossQueue } from "./jobs/index.js";
+import { createTestJobQueue, realQueueBackends, type RealQueueBackend } from "./jobs/test-queue.js";
 import { DiskArtifactStore } from "./artifact-store.js";
 import { SecretBox } from "./secrets.js";
 import { ensureLocalUser, type AppContext } from "./context.js";
@@ -46,7 +45,7 @@ let pgBusA: PgBus;
 let pgBusB: PgBus;
 let repoDir: string;
 
-async function makeContext(): Promise<AppContext> {
+async function makeContext(backend: RealQueueBackend): Promise<AppContext> {
   const dataDir = await mkdtemp(path.join(tmpdir(), "bento-pgbus-data-"));
   const env = loadEnv({
     BENTO_MODE: "local",
@@ -57,15 +56,17 @@ async function makeContext(): Promise<AppContext> {
   } as NodeJS.ProcessEnv);
   const pool = createPool(testUrl);
   const db = createDb(pool);
-  const boss = new PgBoss({ connectionString: testUrl, schema: "pgboss" });
-  boss.on("error", () => {});
-  await boss.start();
+  const jobs = await createTestJobQueue({
+    backend,
+    postgresUrl: testUrl,
+    isolation: `${testDbName}-${backend}`,
+  });
   const userId = await ensureLocalUser(db);
   return {
     env,
     db,
     pool,
-    jobs: new PgBossQueue(boss),
+    jobs,
     bus: new EventBus(),
     drivers: singleDriver(new LocalProcessDriver()),
     worktrees: new WorktreeManager(dataDir),
@@ -94,6 +95,8 @@ function replicate(ctx: AppContext): Promise<PgBus> {
   });
 }
 
+for (const backend of realQueueBackends()) {
+describe(`queue:${backend}`, () => {
 before(async () => {
   const admin = new pg.Client({ connectionString: baseUrl });
   await admin.connect();
@@ -108,8 +111,8 @@ before(async () => {
   await run("git", ["-C", repoDir, "add", "-A"]);
   await run("git", ["-C", repoDir, "-c", "user.email=t@t.test", "-c", "user.name=t", "commit", "-qm", "init"]);
 
-  ctxA = await makeContext();
-  ctxB = await makeContext();
+  ctxA = await makeContext(backend);
+  ctxB = await makeContext(backend);
   // Only A works the queue, so every run executes there; B is purely
   // a viewer's machine.
   await registerJobs(ctxA);
@@ -249,3 +252,5 @@ test("a run executing on one server streams live to a viewer on the other", { ti
   }
   assert.ok(replayed, "the persisted transcript replays from the non-executing server");
 });
+});
+}

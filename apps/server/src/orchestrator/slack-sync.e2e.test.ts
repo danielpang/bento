@@ -1,10 +1,9 @@
-import { after, before, test } from "node:test";
+import { after, before, describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { and, eq } from "drizzle-orm";
-import PgBoss from "pg-boss";
 import pg from "pg";
 import {
   createDb,
@@ -30,7 +29,7 @@ import {
 import { LocalProcessDriver, WorktreeManager } from "@bento/sandbox";
 import { singleDriver } from "./sandbox-driver.js";
 import { DiskArtifactStore } from "../artifact-store.js";
-import { PgBossQueue } from "../jobs/index.js";
+import { createTestJobQueue, realQueueBackends } from "../jobs/test-queue.js";
 import { SecretBox } from "../secrets.js";
 import { ensureLocalUser, LOCAL_USER_ID, type AppContext } from "../context.js";
 import { EventBus } from "../events.js";
@@ -70,7 +69,12 @@ let notifySent = 0;
 const notifyJobs: SlackNotifyJob[] = [];
 let realSend: AppContext["jobs"]["send"];
 
+for (const backend of realQueueBackends()) {
+describe(`queue:${backend}`, () => {
 before(async () => {
+  slackCalls.length = 0;
+  notifySent = 0;
+  notifyJobs.length = 0;
   const admin = new pg.Client({ connectionString: baseUrl });
   await admin.connect();
   await admin.query(`DROP DATABASE IF EXISTS ${testDbName} WITH (FORCE)`);
@@ -89,11 +93,12 @@ before(async () => {
 
   const pool = createPool(testUrl);
   const db = createDb(pool);
-  const boss = new PgBoss({ connectionString: testUrl, schema: "pgboss" });
-  boss.on("error", () => {});
-  await boss.start();
   const userId = await ensureLocalUser(db);
-  const jobs = new PgBossQueue(boss);
+  const jobs = await createTestJobQueue({
+    backend,
+    postgresUrl: testUrl,
+    isolation: `${testDbName}-${backend}`,
+  });
 
   ctx = {
     env,
@@ -636,6 +641,8 @@ test("a failed run posts the error; an auto-advance posts the move; a wait posts
   assert.ok(waiting);
   assert.match(String(waiting.body.text), /is waiting: The mockup is too sparse/);
 });
+});
+}
 
 async function slackLinkedRun(
   title: string,

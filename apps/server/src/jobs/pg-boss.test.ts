@@ -34,6 +34,13 @@ function stubBoss() {
     },
     getQueueSize: async (_name: string, options?: { before?: string }) =>
       options?.before === "completed" ? 3 : 1,
+    getJobById: async () => null,
+    deleteJob: async (...args: unknown[]) => {
+      calls.push({ op: "deleteJob", args });
+    },
+    cancel: async (...args: unknown[]) => {
+      calls.push({ op: "cancel", args });
+    },
   };
   return { boss: boss as unknown as PgBoss, calls };
 }
@@ -54,7 +61,18 @@ test("dedupeKey is singletonKey on a standard queue", async () => {
   const jobs = new PgBossQueue(boss);
   await jobs.send("swarm.publish", { swarmId: "s1" }, { dedupeKey: "s1" });
   assert.deepEqual(calls[0], { op: "createQueue", args: ["swarm.publish"] });
-  assert.equal((calls[1]?.args[2] as { singletonKey?: string }).singletonKey, "s1");
+  const send = calls.find((c) => c.op === "send");
+  assert.equal((send?.args[2] as { singletonKey?: string }).singletonKey, "s1");
+  assert.equal(typeof (send?.args[2] as { id?: string }).id, "string");
+});
+
+test("debounceKey replaces via a stable job id", async () => {
+  const { boss, calls } = stubBoss();
+  const jobs = new PgBossQueue(boss);
+  await jobs.send("sandbox.hibernate", { n: 1 }, { debounceKey: "sb1", delayMs: 500 });
+  const send = calls.find((c) => c.op === "send");
+  assert.equal((send?.args[2] as { singletonKey?: string }).singletonKey, "sb1");
+  assert.equal(typeof (send?.args[2] as { id?: string }).id, "string");
 });
 
 test("delayMs becomes startAfter and attempts map onto retryLimit", async () => {

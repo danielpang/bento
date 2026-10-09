@@ -1,11 +1,10 @@
-import { after, before, test } from "node:test";
+import { after, before, describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { asc, eq } from "drizzle-orm";
-import PgBoss from "pg-boss";
 import pg from "pg";
 import {
   createDb,
@@ -25,7 +24,7 @@ import { LocalProcessDriver, WorktreeManager } from "@bento/sandbox";
 import { singleDriver } from "./orchestrator/sandbox-driver.js";
 import type { LinearWebhookIssue } from "@bento/linear";
 import { createApp } from "./app.js";
-import { PgBossQueue } from "./jobs/index.js";
+import { createTestJobQueue, realQueueBackends } from "./jobs/test-queue.js";
 import { DiskArtifactStore } from "./artifact-store.js";
 import { SecretBox } from "./secrets.js";
 import { ensureLocalUser, type AppContext } from "./context.js";
@@ -62,7 +61,10 @@ const originalFetch = globalThis.fetch;
 /** The issues the stub's team backlog holds, for the sweep. */
 const backlogIssues: { id: string; identifier: string; title: string; url: string }[] = [];
 
+for (const backend of realQueueBackends()) {
+describe(`queue:${backend}`, () => {
 before(async () => {
+  backlogIssues.length = 0;
   const admin = new pg.Client({ connectionString: baseUrl });
   await admin.connect();
   await admin.query(`DROP DATABASE IF EXISTS ${testDbName} WITH (FORCE)`);
@@ -80,16 +82,18 @@ before(async () => {
 
   const pool = createPool(testUrl);
   const db = createDb(pool);
-  const boss = new PgBoss({ connectionString: testUrl, schema: "pgboss" });
-  boss.on("error", () => {});
-  await boss.start();
+  const jobs = await createTestJobQueue({
+    backend,
+    postgresUrl: testUrl,
+    isolation: `${testDbName}-${backend}`,
+  });
   const userId = await ensureLocalUser(db);
 
   ctx = {
     env,
     db,
     pool,
-    jobs: new PgBossQueue(boss),
+    jobs,
     bus: new EventBus(),
     drivers: singleDriver(new LocalProcessDriver()),
     worktrees: new WorktreeManager(dataDir),
@@ -419,3 +423,5 @@ test("a plan with no room for another live card leaves the import in the backlog
     delete ctx.entitlements;
   }
 });
+});
+}

@@ -134,6 +134,8 @@ test("a pool that was never suspended keeps reusing its idle client", async () =
   }
 });
 
+// This file talks to pg-boss itself (Timekeeper, executeSql, the
+// frozen-pool path), not JobQueue, so it is not parameterized.
 test("pg-boss cron and workers come back after a suspend without an error", async (t) => {
   // The path from the PostHog stack: Timekeeper.onCron -> executeSql
   // -> pool.query, on a pool that slept with warm connections. The
