@@ -62,7 +62,7 @@ import {
   unbilledReason,
 } from "../unbilled-reasons.js";
 import { githubConnectionFor, reviewForBranch } from "../github.js";
-import { createRepositorySeed, publishFeatureBranches } from "./publish.js";
+import { createRepositorySeed, isRepositoryAccessError, publishFeatureBranches } from "./publish.js";
 import { applyPendingPullRequestUpdates } from "./pull-request-updates.js";
 import { linkGitHubRemotes, refreshBaseBranches } from "./repo-remote.js";
 import { branchForRun, cardBranch } from "./branch-rotation.js";
@@ -482,18 +482,31 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
      * them. The "sandbox provisioning failed:" prefix stays on both,
      * because the unbilled-reason rules and the swarm cost query read
      * it.
+     *
+     * A repository the GitHub connection cannot read is the project's
+     * configuration. The run record says what to reconnect. It is not
+     * sent to error tracking: that opened an issue for a private
+     * repository the installation cannot see.
      */
     const reported = provisionFailureCause(err);
     const attempts = err instanceof SandboxProvisionError ? err.describeFailures() : [];
-    console.error(`sandbox provisioning failed for run ${runId}:`, reported, ...(attempts.length > 0 ? [attempts] : []));
-    ctx.analytics?.captureException(reported, run.startedBy, subject.organizationId, {
-      run_id: runId,
-      ...runOwnerProperties(subject.sandboxOwner),
-      source: "sandbox_provision",
-      error_kind: sandboxErrorKind(reported),
-      ...(err instanceof SandboxProvisionError ? { blame: err.blame, attempts } : {}),
-      ...provisionFailureContext(err),
-    });
+    if (isRepositoryAccessError(reported)) {
+      console.warn(`repository is not available for run ${runId}:`, reported.message);
+    } else {
+      console.error(
+        `sandbox provisioning failed for run ${runId}:`,
+        reported,
+        ...(attempts.length > 0 ? [attempts] : []),
+      );
+      ctx.analytics?.captureException(reported, run.startedBy, subject.organizationId, {
+        run_id: runId,
+        ...runOwnerProperties(subject.sandboxOwner),
+        source: "sandbox_provision",
+        error_kind: sandboxErrorKind(reported),
+        ...(err instanceof SandboxProvisionError ? { blame: err.blame, attempts } : {}),
+        ...provisionFailureContext(err),
+      });
+    }
     const shown =
       err instanceof SandboxProvisionError && err.blame === "provider" ? err.message : describeSandboxError(reported);
     await finishRun(ctx, runId, { ok: false, error: `sandbox provisioning failed: ${shown}` }, null);
@@ -3383,6 +3396,9 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
  * driver raised it, and the server does not import their SDKs.
  */
 function describeSandboxError(err: unknown): string {
+  // The sentence is already what the run record should show. The class
+  // name in front of it would tell the person nothing.
+  if (isRepositoryAccessError(err)) return err.message;
   // A plain Error carrying a written sentence is that sentence. The
   // "Error:" String() puts in front of it says nothing a reader wants,
   // while a driver's own subclass names who failed and is kept.

@@ -8,9 +8,13 @@ import { promisify } from "node:util";
 import { test } from "node:test";
 import {
   cloneBaseBranch,
+  cloneUrlForSeed,
+  createRepositorySeed,
   inaccessibleCloneExplanation,
   isAncestryPublishFailure,
+  isRepositoryAccessError,
   publishFeatureBranches,
+  RepositoryAccessError,
   resolvePublishBaseSha,
 } from "./publish.js";
 
@@ -205,7 +209,7 @@ test("cloneBaseBranch explains a repository the remote will not show", async () 
         fallbackToDefaultBranch: true,
       }),
       (err: unknown) => {
-        assert.ok(err instanceof Error);
+        assert.ok(err instanceof RepositoryAccessError);
         assert.match(err.message, /acme\/missing could not be cloned from http:\/\/127\.0\.0\.1:\d+\/acme\/missing\.git/);
         assert.match(err.message, /repository was not found/);
         assert.doesNotMatch(err.message, /Command failed|credential\.helper|BENTO_PUSH_TOKEN|\/tmp\/bento-seed/);
@@ -219,6 +223,201 @@ test("cloneBaseBranch explains a repository the remote will not show", async () 
   } finally {
     await server.close();
   }
+});
+
+test("createRepositorySeed clones the repository GitHub returns, not a stale id", async () => {
+  const bare = await seedRemote("main");
+  const tokens: Array<number | undefined> = [];
+  const { bundle, baseBranch } = await createRepositorySeed(
+    {
+      async pushToken(id?: number) {
+        tokens.push(id);
+        return "unused";
+      },
+      async resolveRepository() {
+        return {
+          id: 42,
+          name: "bento-cloud",
+          fullName: "danielpang/bento-cloud",
+          owner: "danielpang",
+          url: "https://github.com/danielpang/bento-cloud",
+          cloneUrl: bare,
+          defaultBranch: "main",
+          canClone: true,
+        };
+      },
+    },
+    "https://github.com/danielpang/old-name",
+    7,
+    "main",
+  );
+  assert.deepEqual(tokens, [42]);
+  assert.equal(baseBranch, "main");
+  assert.ok(bundle.length > 0);
+});
+
+test("createRepositorySeed stops when GitHub will not show the repository", async () => {
+  const tokens: Array<number | undefined> = [];
+  await assert.rejects(
+    createRepositorySeed(
+      {
+        async pushToken(id?: number) {
+          tokens.push(id);
+          return "unused";
+        },
+        async resolveRepository() {
+          return null;
+        },
+      },
+      "https://github.com/danielpang/bento-cloud",
+      42,
+      "main",
+    ),
+    (err: unknown) => {
+      assert.ok(isRepositoryAccessError(err));
+      assert.match(err.message, /danielpang\/bento-cloud could not be cloned/);
+      assert.match(err.message, /GitHub connection cannot see a private repository/);
+      assert.doesNotMatch(err.message, /Command failed|credential\.helper|BENTO_PUSH_TOKEN/);
+      return true;
+    },
+  );
+  assert.deepEqual(tokens, []);
+});
+
+test("createRepositorySeed stops when the connection cannot read the repository", async () => {
+  const tokens: Array<number | undefined> = [];
+  await assert.rejects(
+    createRepositorySeed(
+      {
+        async pushToken(id?: number) {
+          tokens.push(id);
+          return "unused";
+        },
+        async resolveRepository() {
+          return {
+            id: 42,
+            name: "bento-cloud",
+            fullName: "danielpang/bento-cloud",
+            owner: "danielpang",
+            url: "https://github.com/danielpang/bento-cloud",
+            cloneUrl: "https://github.com/danielpang/bento-cloud.git",
+            defaultBranch: "main",
+            canClone: false,
+          };
+        },
+      },
+      "https://github.com/danielpang/bento-cloud",
+      7,
+      "main",
+    ),
+    (err: unknown) => {
+      assert.ok(isRepositoryAccessError(err));
+      assert.match(err.message, /cannot read the repository/);
+      assert.match(err.message, /Contents access/);
+      return true;
+    },
+  );
+  assert.deepEqual(tokens, []);
+});
+
+test("createRepositorySeed retries a scoped token with the installation token", async () => {
+  let requests = 0;
+  const server = await listen((res) => {
+    requests += 1;
+    res.writeHead(404, { "content-type": "text/plain" });
+    res.end("Repository not found\n");
+  });
+  const tokens: Array<number | undefined> = [];
+  try {
+    await assert.rejects(
+      createRepositorySeed(
+        {
+          async pushToken(id?: number) {
+            tokens.push(id);
+            return id === undefined ? "installation" : "scoped";
+          },
+          async resolveRepository() {
+            return {
+              id: 42,
+              name: "missing",
+              fullName: "acme/missing",
+              owner: "acme",
+              url: `${server.url}/acme/missing`,
+              cloneUrl: `${server.url}/acme/missing.git`,
+              defaultBranch: "main",
+              canClone: true,
+            };
+          },
+        },
+        "https://github.com/acme/missing",
+        7,
+        "main",
+      ),
+      (err: unknown) => {
+        assert.ok(isRepositoryAccessError(err));
+        assert.match(err.message, /acme\/missing could not be cloned/);
+        return true;
+      },
+    );
+    assert.deepEqual(tokens, [42, undefined]);
+    assert.equal(requests, 2);
+  } finally {
+    await server.close();
+  }
+});
+
+test("createRepositorySeed does not clone twice when the token ignores the repository id", async () => {
+  let requests = 0;
+  const server = await listen((res) => {
+    requests += 1;
+    res.writeHead(404, { "content-type": "text/plain" });
+    res.end("Repository not found\n");
+  });
+  try {
+    await assert.rejects(
+      createRepositorySeed(
+        {
+          async pushToken() {
+            return "same-token";
+          },
+          async resolveRepository() {
+            return {
+              id: 42,
+              name: "missing",
+              fullName: "acme/missing",
+              owner: "acme",
+              url: `${server.url}/acme/missing`,
+              cloneUrl: `${server.url}/acme/missing.git`,
+              defaultBranch: "main",
+              canClone: true,
+            };
+          },
+        },
+        "https://github.com/acme/missing",
+        7,
+        "main",
+      ),
+      (err: unknown) => isRepositoryAccessError(err),
+    );
+    assert.equal(requests, 1);
+  } finally {
+    await server.close();
+  }
+});
+
+test("cloneUrlForSeed keeps a GitHub clone on github.com", () => {
+  assert.equal(
+    cloneUrlForSeed("https://github.com/danielpang/bento-cloud.git", "danielpang/bento-cloud"),
+    "https://github.com/danielpang/bento-cloud.git",
+  );
+  assert.equal(
+    cloneUrlForSeed("git@github.com:danielpang/bento-cloud.git", "danielpang/bento-cloud"),
+    "https://github.com/danielpang/bento-cloud.git",
+  );
+  assert.throws(
+    () => cloneUrlForSeed("https://example.com/danielpang/bento-cloud.git", "danielpang/bento-cloud"),
+    /unexpected clone URL/,
+  );
 });
 
 test("cloneBaseBranch explains that an empty repository has no branches", async () => {

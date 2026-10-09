@@ -5,6 +5,7 @@ import {
   mergeStateVia,
   openReviewThreadsVia,
   pullRequestForBranchVia,
+  resolveVisibleRepository,
   reviewThreadsVia,
 } from "./app-client.js";
 import type {
@@ -89,5 +90,12 @@ export class GitHubTokenClient implements GitHubClient, GitHubPublisher {
   /** The token itself: a PAT cannot be narrowed per push the way an installation token can. */
   async pushToken(): Promise<string> {
     return this.token;
+  }
+
+  resolveRepository(input: { owner: string; repo: string }) {
+    return resolveVisibleRepository(async (owner, repo) => {
+      const response = await this.octokit.repos.get({ owner, repo });
+      return response.data;
+    }, input);
   }
 }

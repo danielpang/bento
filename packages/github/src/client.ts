@@ -141,6 +141,19 @@ export interface GitHubRepository {
 }
 
 /**
+ * A repository this connection can see, as GitHub describes it now.
+ *
+ * `canClone` is false when the connection can see the repository but
+ * cannot read its git data. The seed stops there: a clone would fail
+ * with the same "repository not found" GitHub uses for a private
+ * repository the token cannot read, and Contents is what the person
+ * has to grant.
+ */
+export interface VisibleRepository extends GitHubRepository {
+  canClone: boolean;
+}
+
+/**
  * The write half: pushing a branch and opening its pull request.
  *
  * Separate from `GitHubClient` because the two have different callers
@@ -169,4 +182,15 @@ export interface GitHubPublisher {
    * one repository about to be updated.
    */
   pushToken(repositoryId?: number): Promise<string>;
+  /**
+   * The repository as this connection can see it now, or null when
+   * GitHub will not show that owner and name.
+   *
+   * Optional so a publisher that only pushes still type checks. Both
+   * real clients implement it. The seed clone asks before it clones:
+   * the answer is the current clone URL and the id a token has to be
+   * limited to. A stale stored id scopes the token to a different
+   * repository, and git then reports the URL as not found.
+   */
+  resolveRepository?(input: { owner: string; repo: string }): Promise<VisibleRepository | null>;
 }
