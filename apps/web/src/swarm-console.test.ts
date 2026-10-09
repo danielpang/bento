@@ -7,6 +7,7 @@ import { BetaTestersScope } from "./beta.js";
 import { BoardModeToggle } from "./components/BoardModeToggle.js";
 import { MergeQueue } from "./components/MergeQueue.js";
 import { SwarmEmpty, SwarmStrip } from "./components/SwarmStrip.js";
+import { SwarmPageSkeleton } from "./components/Skeleton.js";
 import { SwarmTree } from "./components/SwarmTree.js";
 import { SwarmOutline } from "./components/SwarmOutline.js";
 import { SwarmNodeDrawer } from "./components/SwarmNodeDrawer.js";
@@ -149,6 +150,17 @@ test("a project with no swarms still has a switcher trigger", () => {
     }),
   );
   assert.match(html, /aria-label="Choose a swarm"/);
+});
+
+test("a loading swarm draws the swarm page's shape, not the board's lanes", () => {
+  const html = renderToStaticMarkup(createElement(SwarmPageSkeleton));
+  assert.match(html, /role="status">Loading swarm</);
+  assert.match(html, /class="swarm-head"/);
+  assert.match(html, /class="swarm-viewbar"/);
+  assert.equal(html.match(/class="swarm-skeleton-node"/g)?.length, 4, "a root and three children");
+  assert.equal(html.match(/class="swarm-edge swarm-skeleton-edge"/g)?.length, 3, "one edge per child");
+  assert.doesNotMatch(html, /class="lane"/);
+  assert.doesNotMatch(html, /<button/, "nothing on a skeleton is clickable");
 });
 
 test("a project with no swarms offers exactly one action", () => {

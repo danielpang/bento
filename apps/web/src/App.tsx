@@ -28,6 +28,7 @@ import {
   SettingsPageSkeleton,
   Skeleton,
   SpendPageSkeleton,
+  SwarmPageSkeleton,
 } from "./components/Skeleton.js";
 import { useGitHubOutcome } from "./components/GitHubIdentity.js";
 import { SignOutButton } from "./components/IconButtons.js";
@@ -1215,7 +1216,8 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
    * `swarming` is true from the moment the mode is remembered, but the
    * swarm board renders under `swarming && projectId` and the two
    * early returns below (no project list yet, no projects at all) draw
-   * the card board's skeleton without the board toggle. Keyed on
+   * a skeleton (the swarm page's while `swarming`, else the card
+   * board's) without the board toggle. Keyed on
    * `swarming` alone, somebody whose remembered mode is swarms and
    * whose project list fails to load got a topbar with no Board, no
    * Sessions and no toggle: nothing but the URL bar to get out with.
@@ -1276,6 +1278,8 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
           <SessionsListSkeleton framed />
         ) : screen === "spend" ? (
           <SpendPageSkeleton />
+        ) : swarming ? (
+          <SwarmPageSkeleton />
         ) : (
           <BoardSkeleton projectId={projectId} />
         )}
@@ -1399,9 +1403,9 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
         </Suspense>
       ) : swarming && projectId ? (
         /* A second board of the same project. Its own boundary, like
-           the panels: the chunk arrives without blanking the chrome. Its
-           lanes are not stages, so the skeleton takes the seeded shape. */
-        <Suspense fallback={<BoardSkeleton projectId={null} />}>
+           the panels: the chunk arrives without blanking the chrome. A
+           swarm has no lanes, so its skeleton is the swarm page's own. */
+        <Suspense fallback={<SwarmPageSkeleton />}>
           <SwarmBoard
             projectId={projectId}
             client={client}

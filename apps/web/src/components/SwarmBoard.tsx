@@ -9,7 +9,7 @@ import { SwarmEmpty, SwarmStrip } from "./SwarmStrip.js";
 import { SwarmNodeDrawer } from "./SwarmNodeDrawer.js";
 import { SwarmRunOutput, SwarmRunOutputDrawer, SwarmWorkerOutputDrawer } from "./SwarmRunOutput.js";
 import { SwarmPage } from "./SwarmPage.js";
-import { BoardSkeleton } from "./Skeleton.js";
+import { SwarmPageSkeleton } from "./Skeleton.js";
 import { swarmApi, type SwarmAgent } from "../swarm/client.js";
 import { createModelCache } from "../swarm/layout.js";
 import type { ModeSurfaces } from "../swarm/plan.js";
@@ -344,8 +344,28 @@ export function SwarmBoard({
       .finally(() => setBusy(false));
   }
 
-  // Swarm lanes are not the project's stages: the seeded shape.
-  if (swarms === null) return <BoardSkeleton projectId={null} />;
+  // A swarm is a header and a tree, not lanes: its own skeleton. A list
+  // that failed to load says so and offers a retry, rather than leaving
+  // the skeleton shimmering over a fetch that is no longer in flight.
+  if (swarms === null) {
+    if (!error) return <SwarmPageSkeleton />;
+    return (
+      <div className="swarm-board">
+        <div className="setup-prompt" role="alert">
+          <span>{error}</span>
+          <button
+            className="btn"
+            onClick={() => {
+              setError("");
+              loadSwarms();
+            }}
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   const task = taskId ? detail?.tasks.find((row) => row.id === taskId) ?? null : null;
   const layoutNode = taskId ? model.byId.get(taskId) ?? null : null;
@@ -433,7 +453,7 @@ export function SwarmBoard({
           }}
         />
       ) : (
-        <BoardSkeleton projectId={null} />
+        <SwarmPageSkeleton />
       )}
 
       {task && layoutNode && (
