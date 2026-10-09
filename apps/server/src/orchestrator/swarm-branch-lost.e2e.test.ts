@@ -310,3 +310,26 @@ test("a worker whose swarm Modal box stopped with no snapshot left marks the row
   const [row] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.swarmId, swarmId));
   assert.equal(row?.status, "destroyed");
 });
+
+test("a planner whose swarm sprite vanished under a live row is refused, not given a fresh clone", async () => {
+  ctx.drivers = singleDriver(cloneDriver("sprite", { exists: async () => false } as Partial<SandboxDriver>));
+  const { swarmId } = await swarmWith({ sandbox: "ready", landed: true });
+  const runId = await queueRun(swarmId, "planner");
+  await executeRun(ctx, runId);
+  assertRefused(await runRow(runId));
+  const [row] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.swarmId, swarmId));
+  assert.equal(row?.status, "destroyed");
+});
+
+test("a planner whose swarm Modal box stopped is woken from its snapshot and provisioned as usual", async () => {
+  let woke = 0;
+  ctx.drivers = singleDriver(
+    cloneDriver("modal", { wake: async () => (woke++, { booted: true }) } as Partial<SandboxDriver>),
+  );
+  const { swarmId } = await swarmWith({ sandbox: "ready", provider: "modal", landed: true });
+  const runId = await queueRun(swarmId, "planner");
+  await executeRun(ctx, runId);
+  assert.equal(woke, 1, "the box is asked about before the run trusts the row");
+  assert.notEqual((await runRow(runId)).error, SWARM_BRANCH_LOST_MESSAGE);
+  assert.equal(provisioned, 1);
+});

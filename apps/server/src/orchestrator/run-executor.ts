@@ -2035,7 +2035,29 @@ async function swarmRestoreBundles(
   const [row] = swarm.sandboxId
     ? await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, swarm.sandboxId)).limit(1)
     : [];
-  if (row && row.status !== "destroyed") return {};
+  if (row && row.status !== "destroyed") {
+    /*
+     * A row that says the machine is there is asked, once the swarm has
+     * landed work to lose: a sprite deleted outside Bento, or a Modal box
+     * past its 24 hour cap with no snapshot, would otherwise be made
+     * again by name as a fresh clone, and the planner would go on from
+     * a branch without the landed tasks. The wake marks such a row
+     * destroyed, and the restore below then reads GitHub or says the
+     * branch is lost.
+     */
+    if (!(await swarmHasLandedWork(ctx, swarm.id))) return {};
+    try {
+      await wakeSwarmSandbox(ctx, row, swarm, swarm.plannerProfileId);
+      return {};
+    } catch (err) {
+      if (!(err instanceof SandboxGone)) {
+        // A provider that could not answer: provisioning asks it again
+        // and fails the run its own way if it is still down.
+        console.warn(`could not confirm swarm ${swarm.id}'s machine before its run:`, err);
+        return {};
+      }
+    }
+  }
   const bundles = await remoteBranchBundles(ctx, {
     organizationId: swarm.organizationId,
     branch: swarm.branchName ?? swarmBranchName(swarm.slug),

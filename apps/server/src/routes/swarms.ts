@@ -2216,6 +2216,9 @@ export function swarmRoutes(ctx: AppContext) {
             externalId: sandbox.externalId,
             provider: driver.provider,
             workdir: sandbox.workdir,
+            // A hibernated Modal machine is its image; without it the
+            // image outlives the swarm and goes on billing.
+            ...(sandbox.imageRef ? { imageRef: sandbox.imageRef } : {}),
           };
           await driver.destroy(handle);
         } catch (err) {
