@@ -6,7 +6,7 @@ import type {
   PlanState,
   TeamPolicy,
 } from "./settings.js";
-import { SseParser, type AgentDelta, type AgentEvent, type CustomProviderProtocol, type GateCriteria } from "@bento/core";
+import { SseParser, type AgentDelta, type AgentEvent, type CatalogProvider, type CustomProviderProtocol, type GateCriteria } from "@bento/core";
 import { BUILD_HEADER } from "@bento/core";
 import type {
   AgentProfile,
@@ -1414,6 +1414,14 @@ export class BentoClient {
 
   deleteSecret(secretId: string) {
     return this.request<{ ok: boolean }>(`/api/secrets/${secretId}`, { method: "DELETE" });
+  }
+
+  /**
+   * The model list the server is serving. Public. Newer than the
+   * snapshot bundled in this client once a refresh has landed.
+   */
+  getModelCatalog() {
+    return this.request<CatalogProvider[]>("/api/catalog/models");
   }
 
   /**

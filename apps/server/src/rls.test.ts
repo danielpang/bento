@@ -607,6 +607,22 @@ test("the tenant role cannot update MCP connections", async () => {
   assert.equal(rows[0]?.sel, true);
 });
 
+test("the tenant role cannot write the model catalog snapshot", async () => {
+  // The row is global, not org-scoped, so row-level security is not
+  // what keeps a request from replacing the list every tenant is served.
+  // The privilege is. Reading it is the same list the public route returns.
+  const { rows } = await pool.query<{ ins: boolean; upd: boolean; del: boolean; sel: boolean }>(
+    `select has_table_privilege('bento_user','model_catalog_snapshots','INSERT') as ins,
+            has_table_privilege('bento_user','model_catalog_snapshots','UPDATE') as upd,
+            has_table_privilege('bento_user','model_catalog_snapshots','DELETE') as del,
+            has_table_privilege('bento_user','model_catalog_snapshots','SELECT') as sel`,
+  );
+  assert.equal(rows[0]?.ins, false);
+  assert.equal(rows[0]?.upd, false);
+  assert.equal(rows[0]?.del, false);
+  assert.equal(rows[0]?.sel, true);
+});
+
 test("the tenant role cannot write OAuth requests or client registrations", async () => {
   // Neither table is org-scoped (a pending authorization predates the
   // sign in, a client registration is global), so least privilege is

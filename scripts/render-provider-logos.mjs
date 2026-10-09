@@ -18,7 +18,7 @@
 // distance from white IS its alpha. That gives a clean antialiased mask,
 // which is then painted in whichever ink the appearance needs.
 //
-// Run after scripts/update-models.mjs refreshes the catalog:
+// Run after scripts/update-models.ts refreshes the catalog:
 //   node scripts/render-provider-logos.mjs
 
 import { execFileSync } from "node:child_process";

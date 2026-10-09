@@ -20,6 +20,7 @@ import {
   forgetsBetweenRuns,
   hasNoLiveTranscript,
   historyTriggerLabel,
+  installModelCatalog,
   modelGuidanceFor,
   quietRunMessage,
 } from "@bento/core";
@@ -216,6 +217,20 @@ export function Console({
   const [tokens] = useState(() => new FileTokenStore(baseUrl));
   const [client] = useState(() => new BentoClient({ baseUrl, tokens }));
   const [screen, setScreen] = useState<Screen>("loading");
+  // The bundled snapshot answers until the server's list arrives. The
+  // stamp forces the picker to redraw once that list is installed.
+  const [catalogEpoch, setCatalogEpoch] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    void client.getModelCatalog().then((catalog) => {
+      if (cancelled || !installModelCatalog(catalog)) return;
+      setCatalogEpoch((epoch) => epoch + 1);
+    }).catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [client]);
+  void catalogEpoch;
   const [connectionFailed, setConnectionFailed] = useState(false);
 
   const { rows: terminalRows, columns: terminalColumns } = useWindowSize();
