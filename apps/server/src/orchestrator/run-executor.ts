@@ -59,6 +59,7 @@ import {
   SANDBOX_GONE_AGENT_PREFIX,
   SANDBOX_REFUSED_AGENT_PREFIX,
   SANDBOX_STALLED_AGENT_PREFIX,
+  RESTART_BEFORE_AGENT_PREFIX,
   PREVIOUS_AGENT_RUNNING_PREFIX,
   unbilledReason,
 } from "../unbilled-reasons.js";
@@ -2677,17 +2678,28 @@ export async function recoverInterruptedRuns(ctx: AppContext): Promise<void> {
 async function failRunAsInterrupted(
   ctx: AppContext,
   run: typeof agentRuns.$inferSelect,
-  how: { error: string; transcript: string } = {
-    error: "interrupted by a server restart",
-    transcript: "Bento restarted while this run was working, so the run ended here. Send a message to pick up where it left off.",
-  },
+  how: { error: string; transcript: string } = run.agentStartedAt
+    ? {
+        error: "interrupted by a server restart",
+        transcript: "Bento restarted while this run was working, so the run ended here. Send a message to pick up where it left off.",
+      }
+    : {
+        // Nothing ran yet: the restart is Bento's, not the work's, and is
+        // neither billed nor handed to a planner as a failure.
+        error: `${RESTART_BEFORE_AGENT_PREFIX}, so no agent ran.`,
+        transcript: "Bento restarted before the agent started, so the run ended here. Nothing was changed. Try the run again.",
+      },
 ): Promise<void> {
+  const unbilled = unbilledReason(how.error) !== null;
   const [closed] = await ctx.db
     .update(agentRuns)
     .set({
       status: "failed",
       endedAt: new Date(),
       error: how.error,
+      // The column the team's hours and a swarm's spend read. Left at its
+      // default, a run the reaper closed before any agent ran was counted.
+      billable: !unbilled,
     })
     .where(and(eq(agentRuns.id, run.id), inArray(agentRuns.status, ["starting", "running"])))
     .returning({ id: agentRuns.id });
@@ -2703,7 +2715,7 @@ async function failRunAsInterrupted(
   // as long as the run said it was, and a restart is not a refund.
   // Not billed when the reason is on the unbilled list: a run the
   // reaper closed before its agent was launched ran nothing.
-  await announceRunFinished(ctx, run.id, "failed", unbilledReason(how.error) === null);
+  await announceRunFinished(ctx, run.id, "failed", !unbilled);
 
   await appendRunEvent(ctx, run.id, {
     type: "message",

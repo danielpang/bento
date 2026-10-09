@@ -48,6 +48,8 @@ test("provider failures before a Sprite starts are not billed", () => {
     )?.id,
     "previous-agent-running",
   );
+  assert.equal(unbilledReason("Bento restarted before the agent started, so no agent ran.")?.id, "restart-before-agent");
+  assert.equal(unbilledReason("interrupted by a server restart"), null, "a restart that cut off a working agent stays billed");
 });
 
 test("agent work and caller-caused provisioning failures remain billable", () => {

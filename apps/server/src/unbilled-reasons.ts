@@ -40,6 +40,14 @@ export const SANDBOX_STALLED_AGENT_PREFIX = "The sandbox stopped responding befo
  * task was still running in the task's machine and could not be
  * stopped, so this run's agent was never started beside it.
  */
+/**
+ * How a run record opens when a restart of this server ended it before
+ * its agent was exec'd. Nothing ran in the machine, and the restart was
+ * Bento's own, so it is neither billed nor the work's failure: the
+ * coordinator starts a swarm's run again the way it does any run whose
+ * sandbox failed first.
+ */
+export const RESTART_BEFORE_AGENT_PREFIX = "Bento restarted before the agent started";
 export const PREVIOUS_AGENT_RUNNING_PREFIX =
   "An agent from an earlier run of this task is still running in its sandbox and could not be stopped";
 
@@ -84,6 +92,11 @@ export const UNBILLED_REASONS: readonly UnbilledReason[] = [
     id: "sandbox-stalled",
     summary: "The sandbox stopped answering before the agent was launched, so no agent ran.",
     match: { kind: "prefix", text: SANDBOX_STALLED_AGENT_PREFIX },
+  },
+  {
+    id: "restart-before-agent",
+    summary: "A restart of the server ended the run before its agent was launched, so no agent ran.",
+    match: { kind: "prefix", text: RESTART_BEFORE_AGENT_PREFIX },
   },
   {
     id: "previous-agent-running",
