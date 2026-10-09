@@ -119,6 +119,7 @@ import { isPersisted, loadPersistedIds, recoverMissedMessages } from "./recover-
 import { compactedConversation } from "./conversation-history.js";
 import { attachLiveConversation } from "./live-session.js";
 import { registerLinearJobs } from "./linear-sync.js";
+import { registerModelCatalogJobs } from "./model-catalog.js";
 import { queueRunFinishedSlack } from "./slack-notify.js";
 import { registerSlackJobs } from "./slack-sync.js";
 import { REAP_SANDBOX_QUEUE, reapFinishedSandboxes, reapFinishedSwarmSandboxes, runSandboxReapJob } from "./reap-sandbox.js";
@@ -3662,6 +3663,7 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
 
   await registerLinearJobs(ctx);
   await registerSlackJobs(ctx);
+  await registerModelCatalogJobs(ctx);
 }
 
 /**

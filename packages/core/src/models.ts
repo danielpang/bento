@@ -1,4 +1,5 @@
 import { AGENT_CREDENTIALS, MODEL_GUIDANCE, modelGuidanceFor } from "./credentials.js";
+import { isCatalogProviderList } from "./model-catalog-build.js";
 import { MODEL_CATALOG as GENERATED_CATALOG } from "./model-catalog.generated.js";
 import { GATEWAY_CATALOG } from "./model-catalog.gateway.js";
 import { MANUAL_CATALOG } from "./model-catalog.manual.js";
@@ -84,11 +85,79 @@ export interface CatalogProvider {
  * are appended, so Composer stays listed even after models.dev grows a
  * Cursor provider of its own, and a hand-added id drops out of the
  * manual list's way once a refresh carries it.
+ *
+ * The array is live. A server that has fetched a newer list from
+ * models.dev replaces its contents, and every reader in this process
+ * (the picker, the pairing check, the price lookup) sees the replacement
+ * on its next call. The committed snapshots stay the list a process
+ * serves until that fetch has succeeded.
  */
-export const MODEL_CATALOG: readonly CatalogProvider[] = mergeCatalogs(
-  mergeCatalogs(GENERATED_CATALOG, GATEWAY_CATALOG),
-  MANUAL_CATALOG,
-);
+const liveCatalog: CatalogProvider[] = mergedCommittedCatalog();
+
+export const MODEL_CATALOG: readonly CatalogProvider[] = liveCatalog;
+
+/** The snapshots shipped in this build, before any fetch replaces them. */
+export function committedCatalogSources(): {
+  generated: readonly CatalogProvider[];
+  gateway: readonly CatalogProvider[];
+} {
+  return { generated: GENERATED_CATALOG, gateway: GATEWAY_CATALOG };
+}
+
+function mergedCommittedCatalog(): CatalogProvider[] {
+  return mergeCatalogs(mergeCatalogs(GENERATED_CATALOG, GATEWAY_CATALOG), MANUAL_CATALOG);
+}
+
+function cloneProvider(provider: CatalogProvider): CatalogProvider {
+  return {
+    ...provider,
+    env: [...provider.env],
+    models: provider.models.map((model) => ({
+      ...model,
+      ...(model.cost ? { cost: { ...model.cost } } : {}),
+    })),
+  };
+}
+
+/**
+ * Replaces the list this process serves. Refuses a payload that is not
+ * a catalog, or one that dropped Anthropic or OpenAI, and leaves the
+ * current list in place.
+ */
+export function installModelCatalog(next: readonly CatalogProvider[]): boolean {
+  if (!isCatalogProviderList(next)) return false;
+  if (!next.some((provider) => provider.id === "anthropic" && provider.models.length > 0)) return false;
+  if (!next.some((provider) => provider.id === "openai" && provider.models.length > 0)) return false;
+  liveCatalog.splice(0, liveCatalog.length, ...next.map(cloneProvider));
+  return true;
+}
+
+/** Puts the committed snapshots back. Tests use this after installing a fixture. */
+export function resetModelCatalog(): void {
+  liveCatalog.splice(0, liveCatalog.length, ...mergedCommittedCatalog());
+}
+
+/**
+ * Merges a fetched models.dev list and a fetched Gateway list with the
+ * hand-maintained ids, then installs the result. The manual half is
+ * always this build's, so a Composer id added in a deploy is listed
+ * even when the stored fetch predates it.
+ */
+/** The list a fetch would serve, including this build's hand-maintained ids. */
+export function previewModelCatalog(
+  generated: readonly CatalogProvider[],
+  gateway: readonly CatalogProvider[],
+): CatalogProvider[] {
+  return mergeCatalogs(mergeCatalogs(generated, gateway), MANUAL_CATALOG);
+}
+
+export function publishModelCatalog(
+  generated: readonly CatalogProvider[],
+  gateway: readonly CatalogProvider[],
+): boolean {
+  if (!isCatalogProviderList(generated) || !isCatalogProviderList(gateway)) return false;
+  return installModelCatalog(previewModelCatalog(generated, gateway));
+}
 
 /** Generated providers first; manual ids fill gaps on the same provider. */
 export function mergeCatalogs(

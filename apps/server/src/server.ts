@@ -29,6 +29,7 @@ import {
 import { EventBus } from "./events.js";
 import { loadEnv, posthogApiKey, type Env } from "./env.js";
 import { registerJobs } from "./orchestrator/run-executor.js";
+import { refreshModelCatalog } from "./orchestrator/model-catalog.js";
 import { QUEUE_POLL_SECONDS } from "./orchestrator/queue.js";
 import { applyInitialAgentAuthSharing } from "./settings.js";
 
@@ -227,6 +228,14 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     ctx.featureFlags = featureFlags;
 
     await registerJobs(ctx);
+    // The daily job is the one that keeps the list current. This one
+    // covers a deploy that would otherwise wait until 06:17 UTC.
+    void refreshModelCatalog(ctx).then((result) => {
+      if (!result.ok) console.warn(`model catalog refresh skipped: ${result.reason}`);
+    }).catch((err: unknown) => {
+      console.warn("model catalog refresh failed:", err);
+      analytics?.captureException(err, null, null, { source: "model_catalog" });
+    });
 
     /**
      * Replicates bus events across server processes, so a viewer whose

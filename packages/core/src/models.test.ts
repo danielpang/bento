@@ -355,8 +355,9 @@ test("the fake agent has no provider", () => {
  */
 test("a tool paired with its own provider's model is fine", () => {
   assert.equal(checkAgentPairing("claude-code", "claude-opus-5").status, "ok");
+  assert.equal(checkAgentPairing("claude-code", "claude-opus-5-5").status, "ok");
   assert.equal(checkAgentPairing("claude-code", "claude-sonnet-5").status, "ok");
-  // Added by hand until the models.dev snapshot carries it.
+  assert.equal(checkAgentPairing("codex", "gpt-6-astra").status, "ok");
   assert.equal(checkAgentPairing("claude-code", "claude-fable-5-1").status, "ok");
   assert.equal(providerForProfile("claude-code", "claude-fable-5-1")?.id, "anthropic");
   assert.equal(providerForProfile("cursor", "claude-fable-5-1")?.id, "anthropic");

@@ -9,7 +9,7 @@ import {
   type ProjectSession,
   type Stage,
 } from "@bento/api-client";
-import { spendCoverageNote, type AgentEvent } from "@bento/core";
+import { installModelCatalog, spendCoverageNote, type AgentEvent } from "@bento/core";
 import { useSession, useListOrganizations, signOut } from "./auth-client.js";
 import { teamDisplayName } from "./team-name.js";
 import { useCountUp } from "./count-up.js";
@@ -164,6 +164,23 @@ const client = new BentoClient({
 export function App() {
   const { data: session, isPending } = useSession();
   const previousUserId = useRef<string | null>(null);
+  // Bumped when the server's model list replaces the bundled snapshot,
+  // so an open picker re-renders with the models the refresh added.
+  const [catalogEpoch, setCatalogEpoch] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    void client.getModelCatalog().then((catalog) => {
+      if (cancelled || !installModelCatalog(catalog)) return;
+      setCatalogEpoch((epoch) => epoch + 1);
+    }).catch(() => {
+      // The bundled snapshot still answers. A refresh that has not
+      // landed yet, or a server that cannot be reached, is not an error
+      // the board needs to show.
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   useEffect(() => {
     if (isPending) return;
     const change = sessionIdentityChange(previousUserId.current, session?.user ?? null);
@@ -178,13 +195,14 @@ export function App() {
   return (
     <BetaTestersProvider client={client} userId={session?.user.id}>
       <Suspense fallback={<RouteFallback />}>
-        <Route />
+        <Route catalogEpoch={catalogEpoch} />
       </Suspense>
     </BetaTestersProvider>
   );
 }
 
-function Route() {
+function Route({ catalogEpoch }: { catalogEpoch: number }) {
+  void catalogEpoch;
   if (window.location.pathname === "/device") return <DeviceApproval />;
   if (window.location.pathname === "/connect-mcp") return <McpAuthorize client={client} />;
   if (window.location.pathname === "/accept-invitation") return <AcceptInvitation />;

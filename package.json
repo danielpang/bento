@@ -20,7 +20,7 @@
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
-    "models:update": "node scripts/update-models.mjs",
+    "models:update": "pnpm --filter @bento/core exec tsx ../../scripts/update-models.ts",
     "db:generate": "pnpm --filter @bento/db db:generate",
     "db:migrate": "pnpm --filter @bento/db db:migrate"
   },

@@ -14,10 +14,10 @@ import { AGENT_CREDENTIALS, MODEL_CATALOG, MODEL_GUIDANCE, modelStringFor, provi
  * tenant, and holding it behind auth would only mean a sign-in before a
  * person can see which models exist.
  *
- * The catalog carries list prices as well as names, refreshed with the
- * model list by the same script, which is what lets a run that printed
- * only its token counts be priced rather than guessed at. Prices are
- * dollars per million tokens, exactly as models.dev publishes them and
+ * The catalog carries list prices as well as names. A daily job refetches
+ * models.dev and the AI Gateway and serves that list; until a fetch has
+ * succeeded, and whenever a fetch is refused, this is the committed
+ * snapshot. Prices are dollars per million tokens, exactly as models.dev publishes them and
  * as every provider quotes them. They are public for the same reason
  * the names are: a published price is not anybody's secret.
  */

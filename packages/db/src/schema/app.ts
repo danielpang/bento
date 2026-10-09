@@ -14,7 +14,7 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
-import { CUSTOM_PROVIDER_PROTOCOLS } from "@bento/core";
+import { CUSTOM_PROVIDER_PROTOCOLS, type CatalogProvider } from "@bento/core";
 import { organization, user } from "./identity.js";
 
 const timestamps = {
@@ -2199,4 +2199,24 @@ export const swarmPlanSources = pgTable(
     // A source with neither text nor bytes is nothing a planner could read.
     check("swarm_plan_sources_content_or_key", sql`${t.content} is not null or ${t.storageKey} is not null`),
   ],
+);
+
+/**
+ * The last model list fetched from models.dev and the AI Gateway.
+ *
+ * One row, the same for every organization. It is not tenant data: the
+ * public catalog route already serves this list, and a request running
+ * as bento_user can read it and cannot replace it. The server process
+ * writes it. Absent, the process serves the snapshots committed in
+ * @bento/core.
+ */
+export const modelCatalogSnapshots = pgTable(
+  "model_catalog_snapshots",
+  {
+    id: text("id").primaryKey().default("current"),
+    generated: jsonb("generated").$type<CatalogProvider[]>().notNull(),
+    gateway: jsonb("gateway").$type<CatalogProvider[]>().notNull(),
+    fetchedAt: timestamp("fetched_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [check("model_catalog_snapshots_singleton", sql`${t.id} = 'current'`)],
 );
