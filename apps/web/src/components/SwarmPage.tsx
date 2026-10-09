@@ -460,9 +460,9 @@ export function SwarmPage({
         onOpen={onOpenArtifact}
       />
 
-      {swarm.status === "failed" && swarm.endedAt && (
+      {swarm.status === "failed" && swarm.updatedAt && (
         <p className="muted swarm-grace-note">
-          This swarm&apos;s sandbox is kept until about {graceDate(swarm.endedAt)} so its tasks and merge queue can be
+          This swarm&apos;s sandbox is kept until about {graceDate(swarm.updatedAt)} so its tasks and merge queue can be
           retried. Its branches are also on GitHub when the project has a GitHub connection.
         </p>
       )}
@@ -772,9 +772,9 @@ function PlannerQuestionBanner({
   );
 }
 
-/** When a failed swarm's sandbox is reaped, a week after it ended, as a date. */
-function graceDate(endedAt: string): string {
-  const date = new Date(new Date(endedAt).getTime() + 7 * 24 * 60 * 60 * 1000);
+/** When a failed swarm's sandbox is reaped, a week after the swarm last changed, as a date. */
+function graceDate(updatedAt: string): string {
+  const date = new Date(new Date(updatedAt).getTime() + 7 * 24 * 60 * 60 * 1000);
   return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 

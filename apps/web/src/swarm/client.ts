@@ -638,6 +638,8 @@ export interface WireSwarm {
   archivedAt: string | null;
   lastOpenedAt: string | null;
   createdAt: string;
+  /** When the row last changed: what a failed swarm's machine grace is counted from. */
+  updatedAt?: string | null;
 }
 
 export interface WireSwarmRow extends WireSwarm {
@@ -926,6 +928,7 @@ export function toSwarm(row: WireSwarm, workersActive = 0): Swarm {
     startedAt: null,
     endedAt: null,
     createdAt: row.createdAt,
+    updatedAt: row.updatedAt ?? null,
     archivedAt: row.archivedAt,
     lastOpenedAt: row.lastOpenedAt,
     // A planner's question reaches the board as attention on the node

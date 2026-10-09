@@ -231,6 +231,11 @@ export interface Swarm {
   startedAt: string | null;
   endedAt: string | null;
   createdAt: string;
+  /**
+   * When the swarm's row last changed. A failed swarm's machine is
+   * reaped a week after this, which the header says.
+   */
+  updatedAt?: string | null;
   archivedAt: string | null;
   lastOpenedAt: string | null;
   question: PlannerQuestion | null;
