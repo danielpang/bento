@@ -285,6 +285,7 @@ test("waking a hibernated sandbox boots it from its image and arms a new hiberna
   await wakeHibernatedSandbox(ctx, hibernated!, {});
   const [row] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, card.sandboxId));
   assert.deepEqual(booted, ["im-hibernated"]);
+  assert.equal(row?.imageRef, "im-hibernated");
   assert.equal(row?.status, "ready");
   assert.equal(jobsFor(card.sandboxId).length, 1);
 
@@ -292,6 +293,39 @@ test("waking a hibernated sandbox boots it from its image and arms a new hiberna
   await wakeHibernatedSandbox(ctx, row!, {});
   assert.deepEqual(booted, ["im-hibernated"]);
   assert.equal(jobsFor(card.sandboxId).length, 1);
+});
+
+test("a wake records the exit snapshot it booted from", async () => {
+  const card = await seed({ title: "wake exit", sandboxStatus: "hibernated", imageRef: "im-stored" });
+  useModal(idleApi({ dead: true, exitSnapshot: async () => ({ imageId: "im-exit" }) }));
+  const [hibernated] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, card.sandboxId));
+  await wakeHibernatedSandbox(ctx, hibernated!, {});
+  const [row] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, card.sandboxId));
+  assert.equal(row?.status, "ready");
+  assert.equal(row?.imageRef, "im-exit", "the row names the image the machine now comes from");
+});
+
+test("a machine booted for a row that was reaped meanwhile is destroyed again", async () => {
+  const card = await seed({ title: "wake reaped", sandboxStatus: "hibernated", imageRef: "im-stored" });
+  let terminated = false;
+  const api = idleApi({
+    onTerminate: () => {
+      terminated = true;
+    },
+  });
+  const create = api.create;
+  api.create = async (image, params) => {
+    // The reap lands while the machine is booting.
+    await ctx.db.update(sandboxes).set({ status: "destroyed" }).where(eq(sandboxes.id, card.sandboxId));
+    api.fromName = async () => box;
+    const box = await create(image, params);
+    return box;
+  };
+  useModal(api);
+  const [hibernated] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, card.sandboxId));
+  await assert.rejects(wakeHibernatedSandbox(ctx, hibernated!, {}), /reaped while it was being started/);
+  assert.equal(terminated, true, "nothing else would ever find this machine");
+  assert.equal(jobsFor(card.sandboxId).length, 0);
 });
 
 test("hibernation loses the race with a run that already started", async () => {

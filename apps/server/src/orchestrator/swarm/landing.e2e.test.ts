@@ -27,6 +27,7 @@ import { taskTrailer, workerBranchName } from "./branches.js";
 import { tickSwarm } from "./coordinator.js";
 import { commitsForTask } from "./landing-git.js";
 import { performLanding } from "./landing.js";
+import { hibernateSandbox } from "../hibernate-sandbox.js";
 import { swarmTaskWorkspaceKey, swarmWorkspaceKey } from "./sandbox.js";
 
 /**
@@ -634,10 +635,10 @@ test("a landing wakes hibernated machines rather than calling them unavailable",
     provider: "modal",
     workspace: "clone",
     async wake(handle: SandboxHandle) {
-      if (awake.has(handle.externalId)) return false;
+      if (awake.has(handle.externalId)) return { booted: false };
       woken.push(`${handle.externalId}@${handle.imageRef}`);
       awake.add(handle.externalId);
-      return true;
+      return { booted: true };
     },
     async exportRepository(handle: SandboxHandle, _name: string, baseBranch: string) {
       const tree = running(handle);
@@ -692,6 +693,93 @@ test("a landing wakes hibernated machines rather than calling them unavailable",
   } finally {
     ctx.drivers = original;
   }
+});
+
+/** A swarm on Modal whose two machines are hibernated, for the wake tests. */
+async function hibernatedPair(slug: string) {
+  const fx = await swarmWithLeaf(slug);
+  const [swarmSandbox] = await db
+    .insert(sandboxes)
+    .values({
+      projectId: PROJECT,
+      swarmId: fx.swarm.id,
+      provider: "modal",
+      externalId: `bento-swarm-${fx.swarm.id}`,
+      status: "hibernated",
+      imageRef: "im-swarm",
+      workdir: "/workspace",
+    })
+    .returning();
+  await db.update(swarms).set({ sandboxId: swarmSandbox!.id }).where(eq(swarms.id, fx.swarm.id));
+  const [workerSandbox] = await db
+    .insert(sandboxes)
+    .values({
+      projectId: PROJECT,
+      swarmId: fx.swarm.id,
+      swarmTaskId: fx.task.id,
+      provider: "modal",
+      externalId: `bento-swarm-${fx.swarm.id}-${fx.task.id.slice(0, 8)}`,
+      status: "hibernated",
+      imageRef: "im-worker",
+      workdir: "/workspace",
+    })
+    .returning();
+  return { fx, swarmSandbox: swarmSandbox!, workerSandbox: workerSandbox! };
+}
+
+test("a sandbox that could not be started sends the landing back to the queue, then fails it plainly", async () => {
+  const { fx } = await hibernatedPair("wake-fails");
+  await commitIn(fx.workerTree, fx.task.id, "w.txt", "waiting\n", "add w");
+  const landing = await queueLanding(fx.swarm.id, fx.task.id, fx.branch);
+  const original = ctx.drivers;
+  ctx.drivers = singleDriver({
+    provider: "modal",
+    workspace: "clone",
+    async wake() {
+      throw new Error("modal: UNAVAILABLE upstream connect error sb-internal-123");
+    },
+    async exportRepository() {
+      throw new Error("never reached");
+    },
+    async importRepository() {
+      throw new Error("never reached");
+    },
+    async provision() {
+      throw new Error("unused");
+    },
+    async destroy() {},
+  } as unknown as SandboxDriver);
+  try {
+    const first = await performLanding(ctx, landing.id);
+    assert.equal(first?.status, "queued", "a provider blip is retried, not the end of the landing");
+    assert.match(first?.reason ?? "", /could not be started/);
+    assert.equal((await taskRow(fx.task.id))?.status === "failed", false);
+
+    await db.update(swarmLandings).set({ status: "landing", attempt: 5 }).where(eq(swarmLandings.id, landing.id));
+    const last = await performLanding(ctx, landing.id);
+    assert.equal(last?.status, "failed");
+    assert.match(last?.reason ?? "", /could not be started after 5 attempts/);
+    assert.doesNotMatch(last?.reason ?? "", /sb-internal-123/, "the provider's words stay out of the leaf");
+  } finally {
+    ctx.drivers = original;
+  }
+});
+
+test("a machine a landing is using is not hibernated under it", async () => {
+  const { fx, swarmSandbox, workerSandbox } = await hibernatedPair("landing-active");
+  await db.update(sandboxes).set({ status: "ready" }).where(eq(sandboxes.swarmId, fx.swarm.id));
+  await queueLanding(fx.swarm.id, fx.task.id, fx.branch);
+  queued.length = 0;
+  await hibernateSandbox(ctx, swarmSandbox.id);
+  await hibernateSandbox(ctx, workerSandbox.id);
+  const rearmed = queued.filter((job) => job.queue === "sandbox.hibernate").map((job) => job.data.sandboxId);
+  assert.deepEqual(
+    rearmed.sort(),
+    [swarmSandbox.id, workerSandbox.id].sort(),
+    "both machines are left running and asked about again later",
+  );
+  const rows = await db.select().from(sandboxes).where(eq(sandboxes.swarmId, fx.swarm.id));
+  assert.deepEqual(rows.map((row) => row.status), ["ready", "ready"]);
 });
 
 test("a landing onto a swarm whose machine is gone says which machine", async () => {

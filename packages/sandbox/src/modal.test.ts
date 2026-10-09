@@ -293,15 +293,20 @@ test("restore of a stopped sandbox uses the same allowlist as provision", async 
 
 test("wake boots a hibernated sandbox from its image, with the run's allowlist", async () => {
   const env = fake({ running: false });
-  const booted = await driver(env.api).wake({
-    externalId: "bento-swarm-1-task",
-    provider: "modal",
-    workdir: "/workspace",
-    imageRef: "im-hibernated",
-    network: "restricted",
-    allowedHosts: ["https://api.anthropic.com"],
-  });
-  assert.equal(booted, true);
+  const woke = await driver(env.api).wake(
+    {
+      externalId: "bento-swarm-1-task",
+      provider: "modal",
+      workdir: "/workspace",
+      imageRef: "im-hibernated",
+      network: "restricted",
+      allowedHosts: ["https://api.anthropic.com"],
+    },
+    { organizationId: "org-1" },
+  );
+  assert.deepEqual(woke, { booted: true }, "booted from the stored image, so the row keeps it");
+  assert.equal(env.creates[0]?.tags.bento_org, "org-1");
+  assert.deepEqual(env.deleted, []);
   assert.deepEqual(env.images, ["im-hibernated"]);
   assert.equal(env.creates[0]?.name, "bento-swarm-1-task");
   assert.equal(env.creates[0]?.tags.bento_feature, "swarm-1-task");
@@ -314,12 +319,14 @@ test("wake prefers the exit snapshot and leaves a running sandbox alone", async 
   stopped.api.fromName = async () => stopped.box;
   stopped.box.poll = async () => 1;
   stopped.box.experimentalGetExitSnapshot = async () => ({ imageId: "im-exit" });
-  await driver(stopped.api).wake({ externalId: "bento-x", provider: "modal", workdir: "/workspace", imageRef: "im-old" });
+  const woke = await driver(stopped.api).wake({ externalId: "bento-x", provider: "modal", workdir: "/workspace", imageRef: "im-old" });
   assert.deepEqual(stopped.images, ["im-exit"]);
+  assert.deepEqual(woke, { booted: true, imageRef: "im-exit" }, "the row is told which image it now has");
+  assert.deepEqual(stopped.deleted, ["im-old"], "and the image it superseded is not left in storage");
 
   const running = fake();
-  const booted = await driver(running.api).wake({ externalId: "bento-x", provider: "modal", workdir: "/workspace" });
-  assert.equal(booted, false);
+  const again = await driver(running.api).wake({ externalId: "bento-x", provider: "modal", workdir: "/workspace" });
+  assert.deepEqual(again, { booted: false });
   assert.equal(running.creates.length, 0);
 });
 

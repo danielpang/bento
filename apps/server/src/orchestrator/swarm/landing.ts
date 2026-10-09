@@ -31,7 +31,7 @@ import { queueSwarmTaskSandboxReap } from "../reap-sandbox.js";
 import { queueSwarmSlackNotify } from "../slack-notify.js";
 import { swarmBranchName, swarmWorkspaceKey } from "./sandbox.js";
 import { driverForSandbox } from "../sandbox-driver.js";
-import { wakeSwarmSandbox } from "../run-executor.js";
+import { wakeSwarmSandbox } from "../hibernate-sandbox.js";
 
 /**
  * The merge queue's other half: what actually happens when a landing
@@ -208,11 +208,13 @@ export async function performLanding(ctx: AppContext, landingId: string): Promis
 
   const landed: string[] = [];
   const problems: { repo: string; outcome: LandFailure }[] = [];
-  let remoteHandles: Awaited<ReturnType<typeof landingSandboxHandles>> | null = null;
+  let remoteHandles: RemoteHandles | null = null;
   if (clone) {
+    let found: Awaited<ReturnType<typeof landingSandboxHandles>>;
     try {
-      remoteHandles = await landingSandboxHandles(ctx, swarm, task);
+      found = await landingSandboxHandles(ctx, swarm, task);
     } catch (err) {
+      if (err instanceof LandingWakeFailed) return wakeFailed(ctx, landing, task, err);
       return finish(
         ctx,
         landing,
@@ -221,30 +223,27 @@ export async function performLanding(ctx: AppContext, landingId: string): Promis
         task,
       );
     }
-    if ("missing" in remoteHandles) {
+    if ("missing" in found) {
       return finish(
         ctx,
         landing,
         "failed",
-        remoteHandles.missing === "swarm"
+        found.missing === "swarm"
           ? "the swarm's sandbox is gone, so Bento has no copy of the swarm's branch to land this onto."
           : "this task's sandbox is gone, so Bento cannot read the branch that is waiting to land.",
         task,
       );
     }
-  }
-  if (
-    remoteHandles &&
-    !("missing" in remoteHandles) &&
-    (!landingDriver?.exportRepository || !landingDriver.importRepository || !remoteHandles.workerDriver.exportRepository)
-  ) {
-    return finish(
-      ctx,
-      landing,
-      "failed",
-      "this sandbox driver cannot transfer a reconciled branch back into the swarm sandbox.",
-      task,
-    );
+    if (!landingDriver?.exportRepository || !landingDriver.importRepository || !found.workerDriver.exportRepository) {
+      return finish(
+        ctx,
+        landing,
+        "failed",
+        "this sandbox driver cannot transfer a reconciled branch back into the swarm sandbox.",
+        task,
+      );
+    }
+    remoteHandles = found;
   }
   for (const repo of repoRows) {
     /**
@@ -258,7 +257,7 @@ export async function performLanding(ctx: AppContext, landingId: string): Promis
      * retry starts again from the top, where the repositories that did
      * land read as "already an ancestor" and cost nothing.
      */
-    const outcome = remoteHandles && !("missing" in remoteHandles)
+    const outcome = remoteHandles
       ? await landSandboxBranch({ swarm: landingDriver!, worker: remoteHandles.workerDriver }, {
           repoName: repo.name,
           baseBranch: repo.defaultBranch,
@@ -341,6 +340,53 @@ export async function performLanding(ctx: AppContext, landingId: string): Promis
   return finish(ctx, landing, "failed", `${problem.repo}: ${problem.outcome.detail}`, task);
 }
 
+/** The two machines a remote landing reconciles, and the driver that owns the worker's. */
+interface RemoteHandles {
+  swarm: SandboxHandle;
+  worker: SandboxHandle;
+  workerDriver: SandboxDriver;
+}
+
+/** A hibernated machine this landing needed could not be started. */
+class LandingWakeFailed extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = "LandingWakeFailed";
+  }
+}
+
+/**
+ * A machine that could not be started is usually the provider having
+ * a bad minute, not something about this branch, so the landing goes
+ * back to the queue and the next tick tries again, counted against the
+ * same attempts a moved branch is. The provider's words go to the log
+ * and to error tracking; the leaf, once the attempts are spent, gets a
+ * sentence a person can act on.
+ */
+async function wakeFailed(
+  ctx: AppContext,
+  landing: typeof swarmLandings.$inferSelect,
+  task: typeof swarmTasks.$inferSelect,
+  err: LandingWakeFailed,
+): Promise<LandingResult | null> {
+  console.warn(`landing ${landing.id} could not start a sandbox:`, err.cause ?? err);
+  ctx.analytics?.captureException(err.cause ?? err, null, null, {
+    source: "swarm_landing_wake",
+    landing_id: landing.id,
+    swarm_id: landing.swarmId,
+  });
+  if (landing.attempt < MAX_LANDING_ATTEMPTS) {
+    return requeue(ctx, landing, "a sandbox holding this branch could not be started, so the landing will try again.");
+  }
+  return finish(
+    ctx,
+    landing,
+    "failed",
+    `a sandbox holding this branch could not be started after ${landing.attempt} attempts. Retry the merge queue entry to try again.`,
+    task,
+  );
+}
+
 /** The driver that owns the swarm's machine, when that machine is still there. */
 async function landingDriverFor(ctx: AppContext, swarmSandboxId: string | null): Promise<SandboxDriver | null> {
   if (!swarmSandboxId) return null;
@@ -365,9 +411,7 @@ async function landingSandboxHandles(
   ctx: AppContext,
   swarm: typeof swarms.$inferSelect,
   task: typeof swarmTasks.$inferSelect,
-): Promise<
-  { swarm: SandboxHandle; worker: SandboxHandle; workerDriver: SandboxDriver } | { missing: "swarm" | "worker" }
-> {
+): Promise<RemoteHandles | { missing: "swarm" | "worker" }> {
   if (!swarm.sandboxId) return { missing: "swarm" };
   const [swarmSandbox] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, swarm.sandboxId)).limit(1);
   const workerRows = await ctx.db.select().from(sandboxes).where(eq(sandboxes.swarmTaskId, task.id));
@@ -381,8 +425,14 @@ async function landingSandboxHandles(
    * landing retried by hand an hour later finds both machines that
    * way. So each is woken here, before either is exec'd into.
    */
-  await wakeSwarmSandbox(ctx, swarmSandbox, swarm, swarm.plannerProfileId);
-  await wakeSwarmSandbox(ctx, workerSandbox, swarm, task.agentProfileId ?? swarm.workerProfileId);
+  try {
+    await Promise.all([
+      wakeSwarmSandbox(ctx, swarmSandbox, swarm, swarm.plannerProfileId),
+      wakeSwarmSandbox(ctx, workerSandbox, swarm, task.agentProfileId ?? swarm.workerProfileId),
+    ]);
+  } catch (err) {
+    throw new LandingWakeFailed(err);
+  }
   return {
     swarm: {
       externalId: swarmSandbox.externalId,

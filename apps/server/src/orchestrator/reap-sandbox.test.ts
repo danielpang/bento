@@ -32,10 +32,12 @@ import { loadEnv } from "../env.js";
 import { SecretBox } from "../secrets.js";
 import { EventBus } from "../events.js";
 import {
+  FAILED_SWARM_MACHINE_GRACE_MS,
   MAX_SANDBOX_REAP_DEFERRALS,
   SANDBOX_REAP_DEFER_MS,
   SandboxReapDeferred,
   reapFinishedSandboxes,
+  reapFinishedSwarmSandboxes,
   reapSandbox,
   reapSwarmSandbox,
   runSandboxReapJob,
@@ -439,6 +441,29 @@ test("the boot sweep reclaims the machine of a swarm that is over, and leaves a 
   assert.equal(destroyed.includes(live.externalId), false, "a swarm still working keeps its machine");
   const [running] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, live.sandboxId));
   assert.equal(running?.status, "ready");
+});
+
+/**
+ * A failed swarm is the one a person retries, and its machine is the
+ * only copy of every leaf that landed. Production lost a swarm's
+ * landed work to this sweep; now it waits out a week untouched.
+ */
+test("the boot sweep keeps a failed swarm's machine until it has sat untouched past its grace", async () => {
+  const recent = await seedSwarm({ title: "Swarm failed today", status: "failed" });
+  const abandoned = await seedSwarm({ title: "Swarm failed long ago", status: "failed" });
+  await ctx.db
+    .update(swarms)
+    .set({ updatedAt: new Date(Date.now() - FAILED_SWARM_MACHINE_GRACE_MS - 60_000) })
+    .where(eq(swarms.id, abandoned.swarmId));
+
+  await reapFinishedSwarmSandboxes(ctx);
+
+  assert.equal(destroyed.includes(recent.externalId), false, "a retry can still land onto it");
+  const [kept] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, recent.sandboxId));
+  assert.equal(kept?.status, "ready");
+  assert.ok(destroyed.includes(abandoned.externalId), "a week untouched is a swarm nobody is coming back to");
+  const [gone] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, abandoned.sandboxId));
+  assert.equal(gone?.status, "destroyed");
 });
 
 test("a swarm's machine is not taken out from under an agent still working in it", async () => {

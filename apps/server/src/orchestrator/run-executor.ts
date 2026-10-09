@@ -30,7 +30,6 @@ import {
   agentRuns,
   featureMessages,
   features,
-  organizationPolicies,
   projects,
   repositories,
   runArtifacts,
@@ -107,8 +106,8 @@ import { shouldIncludeStageNotes, shouldShareAgentAuth } from "../settings.js";
 import { captureRunQueueDepth } from "./queue-snapshot.js";
 import { ACTIVE_RUN_STATUSES, projectHasRepositories, startRunIfIdle } from "./start-run.js";
 import { enqueueRun, INTERACTIVE_POLL_SECONDS, QUEUE_POLL_SECONDS, RUN_WORKER_POLL_SECONDS } from "./queue.js";
-import { HIBERNATE_SANDBOX_QUEUE, MODAL_SWEEP_QUEUE, scheduleModalHibernation, hibernateSandbox, sweepOrphanModalSandboxes, wakeHibernatedSandbox } from "./hibernate-sandbox.js";
-import { modalRunHosts } from "./modal-hosts.js";
+import { HIBERNATE_SANDBOX_QUEUE, MODAL_SWEEP_QUEUE, scheduleModalHibernation, hibernateSandbox, sweepOrphanModalSandboxes, wakeSwarmSandbox } from "./hibernate-sandbox.js";
+import { modalNetworkForProject, organizationRestrictsNetwork } from "./sandbox-network.js";
 import { pipelineAgentBinaries } from "./pipeline-agents.js";
 import { appendRunEvent } from "./transcript.js";
 import { isPersisted, loadPersistedIds, recoverMissedMessages } from "./recover-session.js";
@@ -117,7 +116,7 @@ import { attachLiveConversation } from "./live-session.js";
 import { registerLinearJobs } from "./linear-sync.js";
 import { queueRunFinishedSlack } from "./slack-notify.js";
 import { registerSlackJobs } from "./slack-sync.js";
-import { REAP_SANDBOX_QUEUE, reapFinishedSandboxes, runSandboxReapJob } from "./reap-sandbox.js";
+import { REAP_SANDBOX_QUEUE, reapFinishedSandboxes, reapFinishedSwarmSandboxes, runSandboxReapJob } from "./reap-sandbox.js";
 import { latestConversationRun, resolveFollowUpRun } from "./stage-agent.js";
 import { asPipelineRun, isPipelineRun, type PipelineRun } from "./pipeline-run.js";
 import { describeRunSubject, type RunSubject } from "./run-subject.js";
@@ -1886,44 +1885,6 @@ async function swarmBranchBundles(
   );
 }
 
-/**
- * Wakes a swarm's machine, or one of its workers', when it is
- * hibernated, with the network its own runs get.
- *
- * `profileId` is the agent whose runs use the machine: the planner's
- * for the swarm's own, the leaf's for a worker's. An organization
- * that restricts the network has its allowlist built from that
- * agent's hosts, as provision would; with no such agent the machine
- * is not booted at all, rather than booted with the network open.
- */
-export async function wakeSwarmSandbox(
-  ctx: AppContext,
-  row: typeof sandboxes.$inferSelect,
-  swarm: Pick<typeof swarms.$inferSelect, "projectId" | "organizationId">,
-  profileId: string | null,
-): Promise<void> {
-  // A sprite wakes on its own when exec'd into; only a driver that
-  // has to boot the machine again is asked to.
-  if (row.status !== "hibernated" || !driverForSandbox(ctx.drivers, row).wake) return;
-  let network: Pick<SandboxHandle, "network" | "allowedHosts"> = {};
-  if (await organizationRestrictsNetwork(ctx, swarm.organizationId)) {
-    const [profile] = profileId
-      ? await ctx.db
-          .select({ cli: agentProfiles.cli, model: agentProfiles.model })
-          .from(agentProfiles)
-          .where(eq(agentProfiles.id, profileId))
-          .limit(1)
-      : [];
-    if (!profile) {
-      throw new Error(
-        `sandbox ${row.externalId} is hibernated, and the agent it was made for is gone, so it cannot be started with this organization's network restriction.`,
-      );
-    }
-    network = await modalNetworkForProject(ctx, swarm.projectId, swarm.organizationId, profile.cli, profile.model);
-  }
-  await wakeHibernatedSandbox(ctx, row, network);
-}
-
 /** Whether the planner has written the design note a worker is told to read. */
 /**
  * The swarm's plan sources, with a copy of each written into this
@@ -1986,52 +1947,6 @@ async function recordSwarmWorkspace(
     .update(swarms)
     .set({ branchName: branch, sandboxId, updatedAt: new Date() })
     .where(eq(swarms.id, subject.swarm.id));
-}
-
-/**
- * The network a Modal sandbox for this project must use.
- *
- * Provision and rollback both call this, so a machine booted to mount
- * a checkpoint gets the same allowlist as the one the run started in.
- * Not restricted: an empty object, and the sandbox keeps open egress.
- */
-export async function modalNetworkForProject(
-  ctx: AppContext,
-  projectId: string,
-  organizationId: string | null,
-  cli: AgentCli,
-  model: string,
-): Promise<Pick<SandboxHandle, "network" | "allowedHosts">> {
-  if (!(await organizationRestrictsNetwork(ctx, organizationId))) return {};
-  const repos = await ctx.db
-    .select({ repoUrl: repositories.repoUrl })
-    .from(repositories)
-    .where(eq(repositories.projectId, projectId));
-  const adapter = getAdapter(cli);
-  const driver = ctx.drivers.get("modal") ?? ctx.drivers.default;
-  const { env: resolved } = await resolveAgentEnv(ctx, organizationId, adapter, model, driver);
-  const custom = await customProviderRunEnv(ctx, organizationId, cli, model);
-  const env = custom ? custom.env : resolved;
-  return {
-    network: "restricted",
-    allowedHosts: modalRunHosts({
-      gatewayUrl: ctx.env.BENTO_MCP_GATEWAY_URL ?? ctx.env.BETTER_AUTH_URL,
-      cloneUrls: repos.map((row) => row.repoUrl),
-      env,
-      ...(custom?.selection?.baseUrl ? { customBaseUrl: custom.selection.baseUrl } : {}),
-    }),
-  };
-}
-
-/** Whether this organization has asked for sandboxes with no egress. */
-async function organizationRestrictsNetwork(ctx: AppContext, organizationId: string | null): Promise<boolean> {
-  if (!organizationId) return false;
-  const [row] = await ctx.db
-    .select({ restrictNetwork: organizationPolicies.restrictNetwork })
-    .from(organizationPolicies)
-    .where(eq(organizationPolicies.organizationId, organizationId))
-    .limit(1);
-  return row?.restrictNetwork === true;
 }
 
 async function finishRun(
@@ -3226,6 +3141,10 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
     { pollingIntervalSeconds: QUEUE_POLL_SECONDS },
     captureJobErrors(ctx.analytics, MODAL_SWEEP_QUEUE, async () => {
       await sweepOrphanModalSandboxes(ctx);
+      // Nightly too, not only at boot: a failed swarm's machine is
+      // reaped once its grace has run out, and that has to happen on
+      // a server nobody redeploys.
+      await reapFinishedSwarmSandboxes(ctx);
     }),
   );
   /**

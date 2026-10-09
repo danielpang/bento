@@ -8,8 +8,9 @@ import { agentProfiles, agentRuns, features, projects, runEvents, sandboxes, sta
 import type { AppContext } from "../context.js";
 import { deferAfterCommit, tenantDb as db } from "../middleware/tenant.js";
 import { actor } from "../middleware/actor.js";
-import { markCancelled, modalNetworkForProject } from "../orchestrator/run-executor.js";
-import { armModalHibernation } from "../orchestrator/hibernate-sandbox.js";
+import { markCancelled } from "../orchestrator/run-executor.js";
+import { modalNetworkForProject } from "../orchestrator/sandbox-network.js";
+import { markSandboxAwake } from "../orchestrator/hibernate-sandbox.js";
 import { CARD_BUSY, NO_REPOSITORIES, projectHasRepositories, startRunIfIdle } from "../orchestrator/start-run.js";
 import { enqueueRun } from "../orchestrator/queue.js";
 import type { SandboxDriver } from "@bento/sandbox";
@@ -216,11 +217,7 @@ export function runRoutes(ctx: AppContext) {
         // 24 hour cap. Ready plus a later job puts it back on the
         // same path as a run that just finished.
         if (driver.provider === "modal" && sandbox) {
-          await db(c, ctx)
-            .update(sandboxes)
-            .set({ status: "ready", lastUsedAt: new Date() })
-            .where(and(eq(sandboxes.id, sandbox.id), eq(sandboxes.status, "hibernated")));
-          await armModalHibernation(ctx, sandbox.id);
+          await markSandboxAwake(db(c, ctx), ctx, sandbox.id);
         }
       } catch (err) {
         ctx.analytics?.captureException(err, actor(c), run.organizationId, {

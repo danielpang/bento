@@ -437,9 +437,12 @@ export class ModalDriver implements SandboxDriver {
    * reason restore takes it: the next run in the warm window reuses
    * this machine as it is.
    */
-  async wake(handle: SandboxHandle): Promise<boolean> {
+  async wake(
+    handle: SandboxHandle,
+    options: { organizationId?: string | null } = {},
+  ): Promise<{ booted: boolean; imageRef?: string }> {
     const api = await this.api();
-    if (await this.runningBox(api, handle.externalId)) return false;
+    if (await this.runningBox(api, handle.externalId)) return { booted: false };
     const allowlist = modalOutboundAllowlist({
       ...(handle.network ? { network: handle.network } : {}),
       ...(handle.allowedHosts ? { allowedHosts: handle.allowedHosts } : {}),
@@ -457,16 +460,20 @@ export class ModalDriver implements SandboxDriver {
     let box: ModalBox;
     try {
       box = await this.createNamed(api, image, this.createParams(handle.externalId, {
-        tags: this.sandboxTags(workspaceKey, undefined),
+        tags: this.sandboxTags(workspaceKey, options.organizationId ?? undefined),
         ...(allowlist ? { outboundDomainAllowlist: allowlist } : {}),
       }));
     } catch (err) {
       // A run's provision, or another wake, booted it first.
-      if (await this.runningBox(api, handle.externalId)) return false;
+      if (await this.runningBox(api, handle.externalId)) return { booted: false };
       throw err;
     }
     this.remembered.set(handle.externalId, box);
-    return true;
+    if (image.imageId === handle.imageRef) return { booted: true };
+    // Booted from the exit snapshot, which supersedes the stored
+    // image. The row records the new one, and the old one is nobody's.
+    if (handle.imageRef) await api.deleteImage(handle.imageRef).catch(() => {});
+    return { booted: true, imageRef: image.imageId };
   }
 
   async exportRepository(

@@ -319,14 +319,21 @@ poll of the reap queue an exception for as long as the planner kept
 working. A swarm that ended "failed" never asks at all: its branch has
 never been pushed, the machine is the only copy of every leaf that
 landed, and a failed swarm is the one a person retries a leaf or a
-landing on. Archiving or deleting it reaps it.
+landing on. Archiving or deleting it reaps it, and so does the sweep
+(at boot and nightly) once it has sat untouched for
+`FAILED_SWARM_MACHINE_GRACE_MS`, a week, because a sprite bills its
+storage for as long as it exists.
 
 A hibernated machine is still the branch. The merge queue and a new
 worker both read branches out of other machines, and either can find
 that machine hibernated (a planner slower than the warm window, a
 landing retried an hour later). They wake it through
 `wakeSwarmSandbox`, which boots it from its snapshot with the network
-its own runs get and puts it back on the hibernation schedule.
+its own runs get, records the image it booted from, and puts it back
+on the hibernation schedule; a landing in flight counts as activity,
+so its checks are never stopped under it, and a machine that could
+not be started sends the landing back to the queue rather than
+failing it.
 Exec'ing into the row as if it were running failed as "is not
 running", which the landing read as a moved branch until it ran out of
 attempts. A hibernation job also waits out the warm window from the
