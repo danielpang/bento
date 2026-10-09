@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { collectExec, type SandboxHandle } from "./driver.js";
 import { ModalDriver } from "./modal.js";
+import { sandboxFileExists, writeSandboxFiles } from "./sandbox-files.js";
 
 /**
  * A real Modal sandbox: toolchain image, one agent CLI, a follow stream
@@ -53,6 +54,49 @@ test(
       assert.equal(version.exitCode, 0, version.stderr);
       assert.ok(version.stdout.trim().length > 0);
 
+      // What a swarm run does before its agent starts: copy the plan
+      // sources in through stdin. The swarm that hung handed over about
+      // 50KB of plan, 67KB as base64, past the 64KB a pipe holds. Each
+      // step has a deadline, so a regression fails here instead of
+      // hanging the job.
+      const plan = Buffer.alloc(50 * 1024, "plan line\n");
+      const written = await within(
+        3 * 60_000,
+        "writing the plan sources",
+        writeSandboxFiles(
+          driver,
+          handle,
+          "/workspace/.bento/plan",
+          [
+            { name: "1-index.html", data: plan.toString("base64") },
+            { name: "2-hub.js", data: Buffer.from("console.log(1)\n").toString("base64") },
+          ],
+          { overwrite: true, timeoutMs: 120_000 },
+        ),
+      );
+      assert.deepEqual(written, ["/workspace/.bento/plan/1-index.html", "/workspace/.bento/plan/2-hub.js"]);
+      const sizes = await collectExec(driver.exec(handle, ["wc", "-c", ...written], { timeoutMs: 30_000 }));
+      assert.match(sizes.stdout, new RegExp(`${plan.length} /workspace/.bento/plan/1-index.html`));
+      assert.equal(await sandboxFileExists(driver, handle, written[1]!), true);
+
+      // The shape of the hang itself: stdin fed to a command that is not
+      // there. Nothing reads the pipe, and the feeder must give up when
+      // the command's exit is written rather than wait for the input to
+      // drain.
+      const missing = await within(
+        3 * 60_000,
+        "feeding stdin to a missing command",
+        collectExec(
+          driver.exec(handle, ["bento-no-such-command"], {
+            timeoutMs: 60_000,
+            stdin: (async function* () {
+              yield "x".repeat(70 * 1024);
+            })(),
+          }),
+        ),
+      );
+      assert.notEqual(missing.exitCode, 0);
+
       let release: (() => void) | undefined;
       const seen = new Promise<void>((resolve) => {
         release = resolve;
@@ -99,3 +143,16 @@ test(
     }
   },
 );
+
+/** Fails with `label` when `promise` has not settled after `ms`, instead of hanging the job. */
+async function within<T>(ms: number, label: string, promise: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} did not finish within ${ms / 1000}s`)), ms);
+  });
+  try {
+    return await Promise.race([promise, expired]);
+  } finally {
+    clearTimeout(timer);
+  }
+}

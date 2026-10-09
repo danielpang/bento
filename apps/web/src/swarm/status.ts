@@ -116,19 +116,76 @@ export function taskWords(status: TaskStatus): string {
   }
 }
 
-/** A failed group can still recover when its failed descendant is retried. */
-export function diagramTaskWords(status: TaskStatus, nodeType: NodeType): string {
-  return nodeType === "plan" && status === "failed" ? "stalled" : taskWords(status);
+/**
+ * What a node says on the diagram, the outline, and the drawer.
+ *
+ * "working" is only an agent that is running in a sandbox right now.
+ * A task that has not been picked up, including one whose status was
+ * rolled up from children or is only queued, reads as pending. A
+ * finished task reads as completed. A failed plan is stalled, because
+ * retrying the failed descendant can still move it.
+ */
+export function diagramTaskWords(
+  status: TaskStatus,
+  nodeType: NodeType,
+  agentActive = false,
+  landing: "waiting" | "failed" | "review" | null = null,
+): string {
+  // An agent in the sandbox is working, whatever the row's own status
+  // says. A resolver keeps the leaf landed, and a subplanner keeps a
+  // plan failed, and neither of those words is what is happening.
+  if (agentActive) return "working";
+  // A leaf whose work is finished and accepted is not pending: its
+  // branch is in the merge queue, or failed to land.
+  if (landing === "failed") return "landing failed";
+  if (landing === "waiting") return "waiting to land";
+  // Reported and not yet accepted: the worker finished, and the
+  // planner has the report. Not pending, which reads as nobody started.
+  if (landing === "review") return "waiting for review";
+  if (nodeType === "plan" && status === "failed") return "stalled";
+  if (status === "done") return "completed";
+  if (status === "open" || status === "assigned" || status === "working") return "pending";
+  return taskWords(status);
 }
 
-export function diagramTaskTone(status: TaskStatus, nodeType: NodeType): Tone {
-  return nodeType === "plan" && status === "failed" ? "gated" : taskTone(status);
+/**
+ * The hue beside those words.
+ *
+ * Pending is idle, so a queued task does not wear the same blue as an
+ * agent that is actually running. Landed stays in motion: the branch
+ * is in, and the leaf is not finished until it is completed.
+ */
+export function diagramTaskTone(
+  status: TaskStatus,
+  nodeType: NodeType,
+  agentActive = false,
+  landing: "waiting" | "failed" | "review" | null = null,
+): Tone {
+  if (agentActive) return "running";
+  if (landing === "failed") return "failed";
+  if (landing === "waiting") return taskTone("landed");
+  if (landing === "review") return "idle";
+  if (nodeType === "plan" && status === "failed") return "gated";
+  if (status === "open" || status === "assigned" || status === "working") return "idle";
+  return taskTone(status);
 }
 
-/** Do not print the same failure twice on a leaf. */
-export function diagramAttentionWords(status: TaskStatus, nodeType: NodeType, attention: TaskAttention): string | null {
+/**
+ * Do not print the same failure twice on a leaf.
+ *
+ * "Still running" is a statement about an agent that is running. It
+ * is not printed on a node whose agent has not started, even when a
+ * clock flag is still sitting on the row.
+ */
+export function diagramAttentionWords(
+  status: TaskStatus,
+  nodeType: NodeType,
+  attention: TaskAttention,
+  agentActive = false,
+): string | null {
+  if (attention === "long_running" && !agentActive) return null;
   const words = attentionWords(attention);
-  return words === diagramTaskWords(status, nodeType) ? null : words;
+  return words === diagramTaskWords(status, nodeType, agentActive) ? null : words;
 }
 
 /**
@@ -250,8 +307,52 @@ export function canPause(status: SwarmStatus): boolean {
   return status === "planning" || status === "running" || status === "waiting";
 }
 
+/**
+ * Whether Resume is offered: a paused swarm, and only that.
+ *
+ * Not the two ceilings. Resuming is the start route, which refuses
+ * both: starting one used to put it back to running until the next
+ * tick ended it again. What moves one is raising the ceiling, which
+ * the header offers instead (`ceilingAction`).
+ */
 export function canResume(status: SwarmStatus): boolean {
-  return status === "paused" || status === "budget_exhausted" || status === "timed_out";
+  return status === "paused";
+}
+
+/**
+ * What the header offers a swarm stopped by a ceiling: the setting to
+ * raise, opened in Settings. Null for any other status.
+ */
+export function ceilingAction(status: SwarmStatus): string | null {
+  if (status === "budget_exhausted") return "Raise budget";
+  if (status === "timed_out") return "Raise time limit";
+  return null;
+}
+
+/** The node controls whose answer depends on the swarm, named as the drawer offers them. */
+export type TaskAction = "markDone" | "retry" | "retryLanding" | "cancel" | "split" | "add";
+
+/**
+ * Why the server refuses this node control on a swarm in this state,
+ * or null when it does not.
+ *
+ * The routes' own rules, mirrored: mark done is refused only on a
+ * stopped swarm; retry, start over, fix forward, the merge queue retry,
+ * cancel and split on a done or stopped one (a failed swarm is the one
+ * a person unsticks by hand); adding a task also on a failed one,
+ * because nothing would start it until the swarm is reopened. Edit and
+ * reassign are refused nowhere. A change to a route's precondition
+ * belongs here too, or the drawer offers a button the route refuses.
+ */
+export function taskActionRefusal(status: SwarmStatus | undefined, action: TaskAction): string | null {
+  if (status === "stopped") return "This swarm was stopped, so its tasks do not change.";
+  if (status === "done") {
+    return action === "markDone" ? null : "This swarm is done. Add a follow up to change its work.";
+  }
+  if (status === "failed" && action === "add") {
+    return "This swarm failed. Retry its tasks, or add a follow up to add work.";
+  }
+  return null;
 }
 
 /**

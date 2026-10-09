@@ -169,14 +169,41 @@ def cmd_follow(directory, offset):
         time.sleep(0.05)
 
 def cmd_stdin(directory):
+    # Feeds the pipe until this exec's own stdin ends, or until the
+    # command it feeds has exited. The second matters: an EOF the client
+    # sent that never arrived would otherwise keep this process, and the
+    # client waiting on it, alive for the life of the sandbox.
+    import select
     fifo = os.path.join(directory, "stdin")
-    with open(fifo, "wb", buffering=0) as dest:
+    exit_path = os.path.join(directory, "exit")
+    dest = None
+    while dest is None:
+        if os.path.exists(exit_path):
+            return 0
+        try:
+            dest = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+        except OSError:
+            # No reader yet: the daemon has not opened the pipe.
+            time.sleep(0.05)
+    os.set_blocking(dest, True)
+    source = sys.stdin.buffer.fileno()
+    try:
         while True:
-            chunk = sys.stdin.buffer.read(65536)
+            ready, _, _ = select.select([source], [], [], 0.5)
+            if not ready:
+                if os.path.exists(exit_path):
+                    return 0
+                continue
+            chunk = os.read(source, 65536)
             if not chunk:
-                break
-            dest.write(chunk)
-    return 0
+                return 0
+            view = memoryview(chunk)
+            while view:
+                view = view[os.write(dest, view):]
+    except BrokenPipeError:
+        return 0
+    finally:
+        os.close(dest)
 
 def cmd_eof(directory):
     open(os.path.join(directory, "eof"), "w").close()

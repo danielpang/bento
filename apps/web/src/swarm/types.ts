@@ -109,7 +109,8 @@ export interface TaskCommit {
  * Something that happened to one node.
  *
  * `kind` is the server's own word (created, assigned, status_changed,
- * attention_raised, landed, note), and `runId` is what makes a
+ * attention_raised, reported, review_requested, review_interrupted,
+ * landed, note), and `runId` is what makes a
  * resolver visible: it is the only record on the node itself that an
  * agent other than its worker was ever put on it.
  *
@@ -150,6 +151,8 @@ export interface SwarmTaskRun {
   startedAt: string | null;
   endedAt: string | null;
   error: string | null;
+  /** The sandbox provider the run ran on; absent or null when unknown. */
+  sandboxProvider?: string | null;
 }
 
 export interface SwarmTask {
@@ -194,6 +197,13 @@ export interface SwarmTask {
   startedAt: string | null;
   endedAt: string | null;
   commits: TaskCommit[];
+  /**
+   * Whether the merge queue retry route would take this task right now,
+   * as the server answers it with the route's own predicate. The drawer
+   * and the merge queue offer "Retry merge queue" only when it is true.
+   * Absent (a fixture, an older server) reads as false.
+   */
+  canRetryLanding?: boolean;
 }
 
 /** A question the planner stopped to ask. One at a time. */
@@ -230,6 +240,11 @@ export interface Swarm {
   startedAt: string | null;
   endedAt: string | null;
   createdAt: string;
+  /**
+   * When the swarm's row last changed. A failed swarm's machine is
+   * reaped a week after this, which the header says.
+   */
+  updatedAt?: string | null;
   archivedAt: string | null;
   lastOpenedAt: string | null;
   question: PlannerQuestion | null;
@@ -334,8 +349,15 @@ export interface SwarmLanding {
   status: "queued" | "landing" | "landed" | "conflicted" | "failed" | "cancelled";
   attempt: number;
   error: string | null;
+  /** Why a failed landing failed, as the server's stable code. Null otherwise. */
+  errorCode?: string | null;
   /** The agent reconciling this branch, when one was started. */
   resolverRunId: string | null;
+  /**
+   * When a queued row may be tried again, after a landing that failed
+   * for a reason worth retrying. Null or absent when it may go now.
+   */
+  notBefore?: string | null;
   startedAt: string | null;
   endedAt: string | null;
 }
@@ -388,6 +410,30 @@ export interface SwarmDetail {
   pullRequests: SwarmPullRequest[];
   /** What the person handed the planner, when they handed over anything. */
   planSources?: SwarmPlanSource[];
+  /**
+   * Tasks whose agent is running in a sandbox right now.
+   *
+   * Absent on a fixture that builds the tree by hand. The page then
+   * treats a working row that already names a run as active. An empty
+   * list is an answer: nobody is in a sandbox.
+   */
+  runningTaskIds?: string[];
+  /**
+   * When the agent on a task started, keyed by task id.
+   *
+   * The long-run clock: the moment the process was exec'd, or the
+   * claim time when a run from before that stamp is still in flight.
+   * Two agents on one node keep the earlier clock, which is the run
+   * the watchdog would warn on first.
+   */
+  agentStartedAt?: Record<string, string>;
+  /**
+   * How many agent runs of this swarm are queued, starting or running,
+   * planner included. What tells the header a running swarm is idle.
+   * Absent on a fixture, which the header reads as unknown rather than
+   * as nothing running.
+   */
+  activeRunCount?: number;
 }
 
 export interface SwarmPlannerRun {

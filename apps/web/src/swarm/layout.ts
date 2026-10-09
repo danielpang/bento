@@ -76,8 +76,20 @@ export interface SwarmNode {
   title: string;
   nodeType: NodeType;
   status: TaskStatus;
-  /** This node has its own agent run, rather than inheriting working from children. */
+  /**
+   * An agent is running in a sandbox for this node.
+   *
+   * A plan that only inherited working from its children is not this,
+   * and neither is a run that is still queued or starting.
+   */
   agentActive: boolean;
+  /**
+   * Where a finished leaf's work is: reported and waiting for the
+   * planner's review, accepted and waiting to land, or failed to land.
+   * Null for anything else. Without it a leaf whose agent had finished
+   * read as "pending", as if its agent had not started.
+   */
+  landing: NodeLanding;
   /** Derived, not copied: see `attentionFor`. */
   attention: TaskAttention;
   weight: number;
@@ -93,6 +105,12 @@ export interface SwarmNode {
   totalLeaves: number;
   /** Milliseconds this node has been working, or worked for. */
   elapsedMs: number;
+  /**
+   * Milliseconds the agent has been in the sandbox, or null when
+   * that clock is not known. The long-run note uses this, because
+   * elapsedMs starts when the task was handed a run.
+   */
+  runningForMs: number | null;
   /** A worker is on this node, or it is asking for a person. */
   frontier: boolean;
   /** This node, or something under it, is on the frontier. */
@@ -158,6 +176,23 @@ export interface ModelOptions {
   now?: number;
   /** How long a working leaf may run before it turns yellow. */
   longRunMs?: number;
+  /**
+   * Tasks whose agent is running in a sandbox right now.
+   *
+   * When this is set, it is the only thing that makes a node active:
+   * a status of working with a run id can still be queued or starting,
+   * and those are pending until the agent is actually in the sandbox.
+   * Omitted, the model falls back to a working row that already names
+   * a run, which is what the tests that build a tree by hand use.
+   */
+  runningTaskIds?: ReadonlySet<string>;
+  /**
+   * When the agent on a task was started, keyed by task id.
+   *
+   * The long-run clock. Only consulted together with runningTaskIds:
+   * a fixture that omits both keeps timing from the task row.
+   */
+  agentStartedAt?: ReadonlyMap<string, string>;
 }
 
 const NO_SPEND: SwarmSpend = { measuredUsd: 0, estimatedUsd: 0, assumedUsd: 0, notionalUsd: 0 };
@@ -177,8 +212,35 @@ export function addSpend(a: SwarmSpend, b: SwarmSpend): SwarmSpend {
  * the server has not caught up, and an escalation is never downgraded
  * by the clock.
  */
-export function attentionFor(task: SwarmTask, now: number, longRunMs = LONG_RUN_WARNING_MS): TaskAttention {
+export function attentionFor(
+  task: SwarmTask,
+  now: number,
+  longRunMs = LONG_RUN_WARNING_MS,
+  /**
+   * Whether an agent is in the sandbox, and when it started.
+   *
+   * Omitted, the clock falls back to a working or assigned leaf and
+   * the task's own start, which is what a fixture that builds a tree
+   * by hand can know. Passed, including with active false, that
+   * fallback is off: a wait for a sandbox is not a long run, and a
+   * "still running" flag is dropped until an agent is actually
+   * running. The start is the agent's, not the task's.
+   */
+  agent?: { active: boolean; startedAt: string | null },
+): TaskAttention {
+  // "Still running" is a claim about an agent that is running now.
+  // A flag left from a wait, or from a run that has not reached the
+  // sandbox, is not that. Escalated is a notice that already went
+  // out, so it stays until the server takes it back.
+  if (task.attention === "long_running") {
+    const active = agent ? agent.active : task.nodeType === "leaf" && WORKING.includes(task.status);
+    return active ? "long_running" : "none";
+  }
   if (task.attention !== "none") return task.attention;
+  if (agent) {
+    if (!agent.active || task.nodeType !== "leaf" || !agent.startedAt) return "none";
+    return elapsedFor({ startedAt: agent.startedAt, endedAt: null }, now) >= longRunMs ? "long_running" : "none";
+  }
   if (task.nodeType !== "leaf" || !WORKING.includes(task.status)) return "none";
   return elapsedFor(task, now) >= longRunMs ? "long_running" : "none";
 }
@@ -210,6 +272,15 @@ export function buildSwarmModel(tasks: SwarmTask[], options: ModelOptions = {}):
   const orphanIds: string[] = [];
 
   for (const task of tasks) {
+    // An empty set is an answer: nobody is in a sandbox. Omitting the
+    // set is the fixture path, which treats a working row that names
+    // a run as active.
+    const runningTaskIds = options.runningTaskIds;
+    const live = runningTaskIds !== undefined;
+    const agentActive = runningTaskIds
+      ? runningTaskIds.has(task.id)
+      : task.status === "working" && task.assignedRunId !== null;
+    const agentStartedAt = live ? options.agentStartedAt?.get(task.id) ?? null : null;
     byId.set(task.id, {
       id: task.id,
       parentId: task.parentId,
@@ -219,8 +290,9 @@ export function buildSwarmModel(tasks: SwarmTask[], options: ModelOptions = {}):
       title: task.title,
       nodeType: task.nodeType,
       status: task.status,
-      agentActive: task.status === "working" && task.assignedRunId !== null,
-      attention: attentionFor(task, now, longRunMs),
+      agentActive,
+      landing: nodeLanding(task),
+      attention: attentionFor(task, now, longRunMs, live ? { active: agentActive, startedAt: agentStartedAt } : undefined),
       weight: Number.isFinite(task.weight) && task.weight > 0 ? task.weight : 1,
       ownCost: task.cost,
       cost: task.cost,
@@ -230,6 +302,7 @@ export function buildSwarmModel(tasks: SwarmTask[], options: ModelOptions = {}):
       doneLeaves: 0,
       totalLeaves: 0,
       elapsedMs: elapsedFor(task, now),
+      runningForMs: agentStartedAt ? elapsedFor({ startedAt: agentStartedAt, endedAt: null }, now) : null,
       frontier: false,
       frontierPath: false,
       // Filled in on the walk below, because it is inherited from an
@@ -499,6 +572,32 @@ function round(n: number): number {
   return Math.round(n * 100) / 100;
 }
 
+export type NodeLanding = "waiting" | "failed" | "review" | null;
+
+/**
+ * Where a leaf's finished work is, when its row's status does not say.
+ *
+ * "failed" when its landing failed, "waiting" once the planner
+ * accepted it and its branch is in the merge queue, and "review" when
+ * its worker reported and the planner has not accepted it yet. A
+ * failed leaf is never "waiting": an acceptance left on a leaf whose
+ * next attempt failed is about the attempt before, and read as waiting
+ * to land it hid the failure.
+ */
+export function nodeLanding(task: {
+  nodeType: NodeType;
+  status: TaskStatus;
+  report?: string | null;
+  flags?: Record<string, unknown> | null;
+}): NodeLanding {
+  if (task.nodeType !== "leaf" || (task.status !== "working" && task.status !== "landed" && task.status !== "failed")) return null;
+  if (typeof task.flags?.landingError === "string") return "failed";
+  if (task.status === "failed") return null;
+  if (task.status === "landed" || task.flags?.accepted === true) return "waiting";
+  if (typeof task.report === "string" && task.report.trim() !== "") return "review";
+  return null;
+}
+
 /** One row of the outline: the same node, read as a list rather than a tree. */
 export interface OutlineRow {
   id: string;
@@ -508,6 +607,7 @@ export interface OutlineRow {
   nodeType: NodeType;
   status: TaskStatus;
   agentActive: boolean;
+  landing: NodeLanding;
   attention: TaskAttention;
   completion: number;
   cost: SwarmSpend;
@@ -515,6 +615,8 @@ export interface OutlineRow {
   rolled: boolean;
   hasChildren: boolean;
   elapsedMs: number;
+  /** Agent time, when the agent start is known. The long-run note uses it. */
+  runningForMs: number | null;
   doneLeaves: number;
   totalLeaves: number;
   /** The follow up this row is inside, or null for the first pass. */
@@ -538,12 +640,14 @@ export function outlineRows(model: SwarmModel): OutlineRow[] {
     nodeType: node.nodeType,
     status: node.status,
     agentActive: node.agentActive,
+    landing: node.landing,
     attention: node.attention,
     completion: node.completion,
     cost: node.cost,
     rolled: node.childIds.length > 0,
     hasChildren: node.childIds.length > 0,
     elapsedMs: node.elapsedMs,
+    runningForMs: node.runningForMs,
     doneLeaves: node.doneLeaves,
     totalLeaves: node.totalLeaves,
     followUp: node.followUp,
@@ -615,7 +719,18 @@ export function createModelCache(): (tasks: SwarmTask[], options?: ModelOptions)
   let lastKey = "";
   let last: SwarmModel | null = null;
   return (tasks, options = {}) => {
-    const key = `${[...(options.expanded ?? [])].sort().join(",")}|${[...(options.folded ?? [])].sort().join(",")}|${options.autoCollapseCompleted !== false}|${options.now ?? 0}|${options.longRunMs ?? LONG_RUN_WARNING_MS}`;
+    // "fallback" and "set:" are different answers. An empty set means
+    // nobody is in a sandbox; omitting the set means a working row
+    // that names a run is active. Collapsing both to an empty string
+    // handed the second call the first model.
+    const running = options.runningTaskIds !== undefined
+      ? `set:${[...options.runningTaskIds].sort().join(",")}`
+      : "fallback";
+    const started = [...(options.agentStartedAt?.entries() ?? [])]
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([id, at]) => `${id}=${at}`)
+      .join(",");
+    const key = `${[...(options.expanded ?? [])].sort().join(",")}|${[...(options.folded ?? [])].sort().join(",")}|${options.autoCollapseCompleted !== false}|${options.now ?? 0}|${options.longRunMs ?? LONG_RUN_WARNING_MS}|${running}|${started}`;
     if (last && lastTasks === tasks && lastKey === key) return last;
     last = buildSwarmModel(tasks, options);
     lastTasks = tasks;

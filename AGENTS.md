@@ -154,9 +154,16 @@ the provider's own failure moves on to the next driver: the sprite
 driver tags every failure with its phase and its blame
 (`ProvisionFailure`), and a checkout that git refused is the
 project's, which Modal would refuse the same way, so it ends the run
-and keeps the sprite for the retry. An existing sandbox row keeps its driver with no fallback, so a
-hibernated Modal machine resumes on Modal and a swarm never splits
-across providers. A team with the network lock on is a Modal team: a
+and keeps the sprite for the retry. An existing sandbox row keeps its
+driver with no fallback, so a hibernated Modal machine resumes on
+Modal. A swarm worker with no machine of its own follows the swarm's
+provider first and, on "auto", carries the providers after it, so a
+worker whose sprite Fly cannot make is made on Modal under a sprite
+swarm rather than failed; the landing reads each machine's own row
+and moves self contained bundles through the server, so the two
+providers land onto each other. The swarm's own machine never falls
+back, because it holds the swarm's branch and that branch exists
+nowhere else. A team with the network lock on is a Modal team: a
 sprite cannot restrict egress, so `provisionWorkspace` never asks it
 for a locked run and goes straight to Modal, and the Team route
 offers the lock whenever Modal is there to take those runs. The lock
@@ -187,7 +194,20 @@ provision one sprite at once.
 Every provision emits `sandbox provisioned` to PostHog with the
 `provider` that answered, the `selection` that chose it, and
 `fell_back_from` when Fly did not; a sprite failure that Modal covered
-also goes to error tracking as `sandbox_provision_fallback`. A new
+also goes to error tracking as `sandbox_provision_fallback`. Every
+provider that fails emits `sandbox provision failed` (`kind`
+"attempt", with `next_provider` when "auto" moved on), and a provision
+that ends without a machine emits one more (`kind` "final"),
+including one refused before any provider was asked (`phase`
+"preflight", `attempts` 0: an unreachable clone URL, or a network lock
+nothing can honor); it carries the error's kind and class, never its
+text. All of these, and `sandbox ready`, name the run (`run_id`,
+`role`, `run_type`), which `provisionWorkspace` takes as `run`, and
+the run itself records the provider that answered in
+`agent_runs.sandbox_provider`, because the sandboxes row is rewritten
+when a machine is made again. The console shows that provider to beta
+testers only, and the routes that return whole run rows drop it for
+everyone else (`runsForCaller`). A new
 place that provisions must go through `provisionWorkspace` so it is
 counted. The executor then emits `sandbox ready` once the agent has
 come up in the machine (its first event for a streamed CLI, its spawn
@@ -248,6 +268,223 @@ the transcript write did, because the two are different incidents.
 The real-sprite e2e test runs a command past the line and checks that
 the sprite lists its session by a line the driver looks for.
 
+A provisioning script's socket can close without an exit frame too.
+The SDK starts every exec's exit code at -1 and emits that from
+`handleClose` when the socket ends before the exit byte, so "exit
+code -1" is never the script: production saw it a minute into a
+checkout, blamed on the project, billed, and never retried. The
+driver now reads a missing or negative code as a dropped connection:
+every fresh script asks the sprite to keep the process for
+`EXEC_DISCONNECT_GRACE`, the retry walks the handshake ladder and
+joins the script when the session listing still shows it, starts it
+again when the listing says it is gone (every provisioning script is
+written to be run twice), and waits without starting a second copy
+when the listing itself fails. A drop that outlasts the ladder is
+the provider's failure in every phase, `control_plane` in error
+tracking, and reaches the run record as the generic unavailable
+sentence. A script that did exit quotes the last line of its stderr
+in the message, and `provisionFailureContext` puts the output on the
+captured exception, because captureException reads only the message
+and a git fatal was filed as "exit code 128" with the reason in the
+server log alone.
+
+## A swarm worker starts from the ref its bundle has, and a machine that was never made is not a worker that stopped
+
+A worker on a clone driver is cut from the swarm's branch, which has
+never been pushed: it travels as a bundle that `exportRepository`
+builds with `git bundle create HEAD ^base`, and the only ref in that
+bundle is `HEAD`. The checkout once fetched `refs/heads/<swarm
+branch>` from it, which git refuses with exit 128, so every worker of
+a swarm died at the checkout while the unit test and the sprite e2e,
+which both built a range bundle (`base..branch`, which carries the
+branch ref and no `HEAD`), agreed the command was fine.
+`fetchStartBundleCommand` in `packages/sandbox/src/start-bundle.ts`
+lists the bundle's heads and fetches whichever of the two it has;
+both drivers use it, and `start-bundle.test.ts` runs the production
+shape through real git. Do not hardcode either ref again.
+
+A run that failed before its agent started (no provider could make
+its machine, the exec socket dropped, the sandbox was gone) is the
+sandbox's failure and not the work's, and the unbilled-reason rules
+in `apps/server/src/unbilled-reasons.ts` are the one list of those
+failures. The coordinator reads that list: a leaf or plan node whose
+run died that way goes back to "assigned" and the same tick starts
+another agent on it, up to `MAX_SANDBOX_RESTARTS` times, counted in
+the node's `sandboxRestarts` flag, before the planner is told. A
+planner run that died that way is started again with its own prompt
+(the first plan's is empty, a wake's is the folded news) up to the
+same bound, because the latch that folds each leaf's news into one
+wake was already set for the run that never heard it; before this a
+swarm sat in planning until a person pressed retry. An agent that
+ran and failed is still the planner's to decide about, on the first
+failure.
+
+A reap asked for while an agent is still in the machine is not an
+error. `reapSwarmSandbox` and its siblings throw
+`SandboxReapDeferred`, the queue worker puts the same job back thirty
+seconds later (up to `MAX_SANDBOX_REAP_DEFERRALS`, past which the wait
+is the failure it has become; the boot sweep leaves such a machine for
+the next sweep rather than starting a chain of its own), and the tick
+that ends a swarm asks for its machine only once no run is active: a failed leaf wakes
+the planner in the tick that marks the swarm failed, and that run
+works in the swarm's own machine, so asking on every tick made every
+poll of the reap queue an exception for as long as the planner kept
+working. A swarm that ended "failed" never asks at all: its branch has
+never been pushed, the machine is the only copy of every leaf that
+landed, and a failed swarm is the one a person retries a leaf or a
+landing on. Archiving or deleting it reaps it, and so does the sweep
+(at boot and nightly) once it has sat untouched for
+`FAILED_SWARM_MACHINE_GRACE_MS`, a week, because a sprite bills its
+storage for as long as it exists.
+
+A hibernated machine is still the branch. The merge queue and a new
+worker both read branches out of other machines, and either can find
+that machine hibernated (a planner slower than the warm window, a
+landing retried an hour later). They wake it through
+`wakeSwarmSandbox`, which boots it from its snapshot with the network
+its own runs get, records the image it booted from, and puts it back
+on the hibernation schedule; a landing in flight counts as activity,
+so its checks are never stopped under it, and a machine that could
+not be started sends the landing back to the queue rather than
+failing it.
+Exec'ing into the row as if it were running failed as "is not
+running", which the landing read as a moved branch until it ran out of
+attempts. A hibernation job also waits out the warm window from the
+row's `lastUsedAt`, because a job armed again while a run was going can
+fire seconds after that run ends.
+
+A swarm task has one agent at a time, whatever its role. `insertSwarmRun`
+refuses any run naming a task that already has a queued, starting, or
+running run, and the partial unique index
+`agent_runs_one_active_per_swarm_task_idx` refuses it in the database
+if a path ever skips that lock. The rows are not the whole story: a
+restart that could not reattach closes its run and leaves the agent
+running in the machine. So before a task run launches in a machine it
+did not just make, `stopLeftoverAgent` attaches to any agent of the
+same command, aborts it, and confirms it is gone; one that cannot be
+stopped fails the new run as `PREVIOUS_AGENT_RUNNING_PREFIX`, which is
+unbilled, rather than putting a second agent on the branch.
+
+Retrying a failed leaf has two meanings. "Retry task" (the retry route
+with `fresh: true`) starts it over: the agent stops, the task is marked
+`startingOver`, and a job on `swarm.task-start-over` takes its machine
+down through `discardSwarmTaskWork` (on a host driver it also deletes the
+branch from the checkout) before the coordinator, which skips a task
+so marked, puts a new agent on it cut from the swarm's branch. Done in
+the request, a slow provider timed the request out after the agent was
+already stopped. Every tick re-queues the job for any task still marked,
+so a job a restart lost is not a task stuck restarting. Bento starts a
+task over by itself once (`autoStartedOver`) when its sandbox failed past
+`MAX_SANDBOX_RESTARTS` or its landing failed because a machine was gone
+or could not be started, before the planner is told. The plain retry
+continues in the same machine on the same branch.
+
+"Retry task" is the way out of anything, so the console offers it on
+every leaf that is not done or cancelled, whatever it is stuck in. It
+takes the task's branch out of the merge queue (`withdrawTaskLandings`),
+and waits only for a landing moving that branch this moment. Every
+retry clears what was said about the last attempt (`accepted`, the
+landing failure), because the next one is judged on its own report.
+And an accept puts a task's failed or withdrawn landing row back at the
+end of the queue (`requeuedLanding`): accept once looked only for a
+row, found the failed one, and queued nothing, so a leaf whose landing
+failed and whose retry the planner then accepted sat "working" with
+nothing to land it and a merge queue retry that refused it.
+
+## A swarm's machine is reaped only once the swarm is over, and never rebuilt without its work
+
+Swarm 7a33f51d lost three landed tasks this way: a worker failure
+briefly made the swarm "failed", a reap of its machine was queued, the
+swarm was retried, and the reap ran a second after the planner's turn
+ended and destroyed the live sprite. The next planner run found the row
+destroyed, Fly refused the new sprite, `auto` fell back to Modal, and the
+swarm went on from a fresh clone without saying so.
+
+So `reapSwarmSandbox` locks the swarm row and destroys only when the
+swarm is gone, done or cancelled (`swarmReleasesMachine`), archived, or
+past `FAILED_SWARM_MACHINE_GRACE_MS` in an ending a person can still
+resume (failed, budget_exhausted, timed_out). A swarm live again keeps
+its machine, quietly. It also waits for a landing in flight. And a
+swarm machine that is gone is never made again as a fresh clone once
+the swarm has landed work: it is restored from GitHub
+(`swarmRestoreBundles`), or the run fails as `SWARM_BRANCH_LOST_MESSAGE`,
+unbilled, captured as `swarm_branch_lost`, and not restarted by the
+coordinator, because another start would find the same nothing. A
+worker is refused the same way rather than cut from the base branch.
+
+A row that says live is not proof. Before a planner trusts it (once
+there is landed work), before a landing exports from it, and before a
+worker reads the swarm's branch, `wakeSwarmSandbox` asks the provider:
+a Modal box that stopped is booted from its exit snapshot or image, and
+one with no snapshot left (`SandboxImageLost`) has its row marked
+destroyed and throws `SandboxGone`; a sprite whose `exists` says no is
+treated the same, while a lookup that errors is not. Every reader that
+uses a ready machine stamps `lastUsedAt` as it reads, and hibernation's
+`finish` aborts inside the warm window, so a machine is never stopped
+under a reader. A Modal row "busy" with nothing active goes back to
+ready rather than re-arming forever. Every destroy passes the row's
+`imageRef`, or the hibernation image outlives the machine and bills.
+
+## Every live swarm is reconciled every minute, and nothing waits on an event that will not come
+
+Ticks used to come only from events (a run ending, a landing, a route)
+and boot, so any state with nothing in flight stayed frozen until a
+person acted. The watchdog now ticks every swarm in `WATCHED_SWARMS`
+once a minute under the swarm's singleton key. On top of that, each
+stall found in production or by audit has its own exit:
+
+- A planner whose turn succeeded without deciding a reported leaf is
+  told again (`PLANNER_NOT_TOLD`), up to `MAX_PLANNER_RETELLS`, then the
+  leaf is flagged for a person (`planner_undecided`).
+- Open leaves left when the swarm has nothing else to do are listed to
+  the planner once (`openNoticedAt`); open still means "not approved",
+  so they are not assigned for it.
+- A planner, sub planner or resolver refused for plan limits or budget
+  pauses or ends the swarm the way a worker refusal does.
+- A queued run whose job was lost is sent again after ten minutes
+  (`requeueStrandedRuns`, on runner.reap), and a landing stuck in
+  "landing" past the job's expiry is claimed again.
+- Swarm messages delivered to a planner run that failed or was
+  cancelled go back to queued.
+- A start over beside a failed sibling counts as in flight, and
+  reactivates a failed swarm.
+- A landing outcome never overrides a person who marked the leaf done or
+  cancelled it meanwhile, and the queue only promotes branches still
+  accepted. Every handover to failed or assigned clears `accepted`.
+- A resolver whose sandbox failed before its agent started does not use
+  up the conflict's one try.
+
+The console reads the same rules: `landingRetryRefusal` decides "Retry
+merge queue" on both sides (`canRetryLanding`), every retry, mark done
+and cancel withdraw the task's landings first, the drawer hides what the
+swarm's status refuses (`taskActionRefusal`), and an idle node or swarm
+says what it waits on.
+
+## A swarm's branches are on GitHub as soon as there is anything on them
+
+The swarm's machine used to hold the only copy of every landed task until
+the swarm finished, and a reaped machine lost them all. Now
+`swarm/remote-branches.ts` pushes, through the retried `swarm.push`
+queue: a worker's (or resolver's) branch when its run ends, failed runs
+included, from the subject's `settle`; and after every landing, the
+swarm's branch plus the landed task's branch set to the swarm's head at
+that landing (`landedHeads` on the task), so task N's branch is exactly
+task N-1's plus task N. A push holds a lease against the commit Bento
+last pushed (`swarms.pushed_heads`, the task's `pushedHeads`) and refuses
+when anything else is on the branch, and the combined publish reads the
+same lease. A project with no GitHub connection or no remote is left as
+it was. A machine that is gone is rebuilt from those pushes:
+`remoteBranchBundles` reads a branch back as a bundle, the swarm's own
+machine is made again on it (`swarmRestoreBundles`), a worker whose
+swarm machine is gone starts from it, and a landing whose worker machine
+is gone lands the worker's pushed branch.
+
+Nothing opens a pull request when a swarm finishes. A person chooses on
+the swarm's header, through `POST /api/swarms/:id/publish`: `combined`
+is one pull request of the swarm's branch, `stacked` is one per landed
+task, each against the task that landed before it, recorded on the task
+as `pullRequests`.
+
 ## Starting a run goes through startRunIfIdle, never a bare insert
 
 One card, one agent. Every door that starts a run (the runs route,
@@ -267,6 +504,63 @@ thirty seconds, because one worker per slot polling every two seconds
 kept the hosted database busy enough to never scale down; `enqueueRun`
 wakes them, so a run queued in-process still starts at once. A bare
 send works, and waits for the next poll.
+
+## A planner that never finished its turn never read its news
+
+A leaf's report or failure is handed to the planner once, latched by
+`plannerToldAt` in its flags. The wake also records `plannerToldBy`,
+the planner run it went to, and `PLANNER_NOT_TOLD` in
+`orchestrator/swarm/planner-news.ts` reads a leaf as not told again
+once that run failed or was cancelled, unless the leaf was accepted,
+marked done, or landed meanwhile. At most `MAX_PLANNER_RETELLS` times
+per piece of news, counted as `plannerRetells` and cleared with the
+latch, so a planner that fails every time is not woken forever. A
+cancelled planner's news never starts a planner by itself (a person
+who stopped it chose to): it rides along with the next wake. A planner
+restarted after a sandbox failure reruns the same prompt, so it takes
+over the leaves the failed run was told about. Before this, a planner that was
+handed a report and then died (stranded, restarted, stopped) left the
+leaf "working" with its report forever: every later tick read it as
+told, and the swarm never moved. The rule lives in the filter, not in
+each path that ends a run, so a new terminal path cannot forget it.
+
+Each handover is written to the leaf's own log as `review_requested`
+with the planner's run id, and a handover lost this way as
+`review_interrupted`, so the node drawer shows a worker waiting on a
+planner rather than a worker nobody is looking at.
+
+A server run whose handler hangs in its sandbox before the agent says
+anything is closed by `reapStalledRuns` in `run-executor.ts`, on the
+existing `runner.reap` schedule, after `STALLED_RUN_MIN` minutes with
+no transcript line. It closes them with `SANDBOX_STALLED_AGENT_PREFIX`,
+which is on the unbilled list, so the run is not billed and the
+coordinator restarts it like any run whose sandbox failed first. A
+handler that comes back after its run was closed stops at the compare
+and set that moves the run to running, just before the agent is
+exec'd. Nothing else ends it: pg-boss expires the
+`run.execute` job after fifteen minutes but cannot stop the promise,
+and the retry's early return on a run that is not queued is what stops
+a long agent from being started twice, so it must stay a no-op. Only
+runs whose agent never produced an event are reaped (the executor's
+own system lines and the prompt it writes as a user line do not
+count); an agent that started and went quiet is usually running a long
+command. A text-mode agent (dsh) says nothing until it exits, so once
+`agentStartedAt` is stamped (as it is exec'd) it is never reaped.
+
+## Modal stdin closes through the stream, never closeStdin()
+
+Every Modal run in production hung at its first sandbox file write
+(`writeSandboxFiles`, which feeds `node -e` through stdin), so no Modal
+run had ever started an agent. modal 0.10.1's `closeStdin()` sends EOF
+at offset 0, which the server drops once bytes were written, and the
+SDK swallows the error, so `bento-exec stdin` held the FIFO open
+forever. `endStdin` in `packages/sandbox/src/modal-client.ts` closes
+the stdin stream itself, which sends EOF at the offset the writes
+reached, and keeps `closeStdin()` only as the fallback for a stream
+that cannot close. The feeder's exit is also waited on for at most
+`MODAL_STDIN_DRAIN_MS`, because exec's `finally` waits on it, and an
+unbounded wait there is what kept even the command timeout from
+ending the run.
 
 ## Queue workers poll slowly on purpose
 

@@ -3,8 +3,8 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { and, eq } from "drizzle-orm";
-import { featurePullRequests, features, swarmPullRequests } from "@bento/db";
+import { and, eq, sql } from "drizzle-orm";
+import { featurePullRequests, features, swarmPullRequests, swarmTasks, swarms } from "@bento/db";
 import { STAGE_ARTIFACT_DIR } from "@bento/core";
 import { parseRepoUrl, type GitHubPublisher } from "@bento/github";
 import type { RepositoryBundle } from "@bento/sandbox";
@@ -314,7 +314,19 @@ export async function publishSwarmBranches(
     protectedBranchRefusal: (branch) =>
       `this swarm's branch is named ${branch}, which is a protected branch. Nothing was pushed.`,
     ...options,
+    /*
+     * The branch is pushed after every landing now, so the commit Bento
+     * last put there is usually that push's, not the pull request's.
+     * Either is Bento's own; the newer one is the lease.
+     */
     lease: async (repo) => {
+      const [swarm] = await db
+        .select({ pushedHeads: swarms.pushedHeads })
+        .from(swarms)
+        .where(eq(swarms.id, args.swarmId))
+        .limit(1);
+      const pushed = swarm?.pushedHeads?.[repo.repoUrl];
+      if (pushed) return pushed;
       const [known] = await db
         .select({ headSha: swarmPullRequests.headSha })
         .from(swarmPullRequests)
@@ -323,6 +335,7 @@ export async function publishSwarmBranches(
       return known?.headSha ?? null;
     },
     record: async (repo, pr) => {
+      await recordPushedHead(db, { swarmId: args.swarmId }, repo.repoUrl, pr.headSha);
       await db
         .insert(swarmPullRequests)
         .values({
@@ -339,6 +352,150 @@ export async function publishSwarmBranches(
         });
     },
   });
+}
+
+/**
+ * Records the commit Bento just pushed to a branch, as the lease the
+ * next push of it holds. Merged into the jsonb rather than written
+ * over it, so two repositories recorded at once do not erase each
+ * other, and a task's other flags are never read and written back.
+ */
+export async function recordPushedHead(
+  db: Pick<Db, "update">,
+  owner: { swarmId: string } | { taskId: string },
+  repoUrl: string,
+  headSha: string,
+): Promise<void> {
+  const entry = JSON.stringify({ [repoUrl]: headSha });
+  if ("taskId" in owner) {
+    await db
+      .update(swarmTasks)
+      .set({
+        flags: sql`jsonb_set(coalesce(${swarmTasks.flags}, '{}'::jsonb), '{pushedHeads}', coalesce(${swarmTasks.flags}->'pushedHeads', '{}'::jsonb) || ${entry}::jsonb)`,
+      })
+      .where(eq(swarmTasks.id, owner.taskId));
+    return;
+  }
+  await db
+    .update(swarms)
+    .set({ pushedHeads: sql`${swarms.pushedHeads} || ${entry}::jsonb` })
+    .where(eq(swarms.id, owner.swarmId));
+}
+
+/** What pushing one branch to every repository it has commits in did. */
+export interface PushOutcome {
+  pushed: { name: string; repoUrl: string; headSha: string }[];
+  failures: { name: string; reason: string }[];
+}
+
+/**
+ * One branch to GitHub, with no pull request.
+ *
+ * A swarm's branches leave their machines as soon as there is
+ * something on them: a worker's when its run ends, the swarm's after
+ * every landing. A machine that is lost after that loses nothing, and
+ * the pull requests are a separate choice a person makes at the end.
+ * The same push the publish path makes: the server holds the
+ * credential, the bundle leaves the sandbox with no remote configured,
+ * and the push holds a lease against the commit Bento last pushed, so
+ * a person's commits on the branch are refused rather than overwritten.
+ */
+export async function pushBranches(
+  publisher: GitHubPublisher,
+  plan: {
+    branch: string;
+    repositories: PublishableRepository[];
+    lease: (repo: PublishableRemote) => Promise<string | null>;
+    record: (repo: PublishableRemote, headSha: string) => Promise<void>;
+    /** A commit inside the bundle to push instead of its head, per repository. */
+    target?: (repo: PublishableRemote) => string | undefined;
+    remoteUrl?: (owner: string, repo: string) => string;
+  },
+): Promise<PushOutcome> {
+  const pushed: PushOutcome["pushed"] = [];
+  const failures: PushOutcome["failures"] = [];
+  if (PROTECTED_BRANCHES.has(plan.branch.toLowerCase())) {
+    return { pushed, failures: [{ name: "any repository", reason: `${plan.branch} is a protected branch. Nothing was pushed.` }] };
+  }
+  for (const repo of plan.repositories) {
+    // No remote is not a failure here: nothing asked for a pull
+    // request, and a project with no GitHub keeps its branches where
+    // they always were.
+    if (!repo.repoUrl) continue;
+    const remoteRepo: PublishableRemote = { ...repo, repoUrl: repo.repoUrl };
+    const parsed = parseRepoUrl(repo.repoUrl);
+    if (!parsed) continue;
+    try {
+      const bundle = repo.exportBundle
+        ? await repo.exportBundle()
+        : repo.bundle !== undefined
+          ? repo.bundle
+          : repo.worktreePath
+            ? await bundleFromWorktree(repo.worktreePath, repo.defaultBranch)
+            : null;
+      if (!bundle) continue;
+      const token = await publisher.pushToken(repo.githubRepoId ?? undefined);
+      const remote = plan.remoteUrl?.(parsed.owner, parsed.repo) ?? `https://github.com/${parsed.owner}/${parsed.repo}.git`;
+      const target = plan.target?.(remoteRepo);
+      const head = await pushBundle(bundle, remote, repo.defaultBranch, plan.branch, token, {
+        includeStageNotes: false,
+        label: `${parsed.owner}/${parsed.repo}`,
+        expectedRemoteHead: await plan.lease(remoteRepo),
+        ...(target ? { target } : {}),
+      });
+      if (head === null) continue;
+      await plan.record(remoteRepo, head);
+      pushed.push({ name: repo.name, repoUrl: repo.repoUrl, headSha: head });
+    } catch (err) {
+      failures.push({ name: repo.name, reason: reasonOf(err) });
+    }
+  }
+  return { pushed, failures };
+}
+
+/**
+ * A branch Bento pushed, read back from GitHub as a bundle a sandbox
+ * can fetch: how a machine that was lost is rebuilt from what was
+ * pushed before it went. Null when the branch is not on the remote.
+ *
+ * `selfContained` carries every object (what a landing needs); without
+ * it the bundle stops at the base branch, which a sandbox seeded from
+ * that base already has.
+ */
+export async function fetchRemoteBranchBundle(
+  publisher: GitHubPublisher,
+  repo: { repoUrl: string; githubRepoId?: number | null; defaultBranch: string },
+  branch: string,
+  options: { selfContained?: boolean; remoteUrl?: (owner: string, repo: string) => string } = {},
+): Promise<RepositoryBundle | null> {
+  const parsed = parseRepoUrl(repo.repoUrl);
+  if (!parsed) return null;
+  const remote = options.remoteUrl?.(parsed.owner, parsed.repo) ?? `https://github.com/${parsed.owner}/${parsed.repo}.git`;
+  const token = await publisher.pushToken(repo.githubRepoId ?? undefined);
+  const root = await mkdtemp(path.join(tmpdir(), "bento-restore-"));
+  const checkout = path.join(root, "checkout");
+  const home = path.join(root, "home");
+  const bundlePath = path.join(root, "branch.bundle");
+  await mkdir(home);
+  const env = trustedGitEnv(home, token);
+  try {
+    const { stdout: listed } = await run("git", [...credentialArguments(), "ls-remote", remote, `refs/heads/${branch}`], { env });
+    if (!listed.trim()) return null;
+    await cloneBaseBranch({ remote, label: `${parsed.owner}/${parsed.repo}`, baseBranch: repo.defaultBranch, checkout, env, flags: ["--no-checkout"] });
+    await run("git", ["-C", checkout, ...credentialArguments(), "fetch", "--no-tags", remote, `+refs/heads/${branch}:refs/heads/${branch}`], { env });
+    const { stdout: headOut } = await run("git", ["-C", checkout, "rev-parse", `refs/heads/${branch}^{commit}`], { env });
+    const headSha = headOut.trim();
+    const { stdout: baseOut } = await run("git", ["-C", checkout, "merge-base", `origin/${repo.defaultBranch}`, headSha], { env });
+    const baseSha = baseOut.trim();
+    await run(
+      "git",
+      ["-C", checkout, "bundle", "create", bundlePath, `refs/heads/${branch}`, ...(options.selfContained ? [] : [`^${baseSha}`])],
+      { env },
+    );
+    return { baseSha, headSha, data: await readFile(bundlePath) };
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 }
 
 /** A repository that got as far as having a remote to push to. */
@@ -490,6 +647,12 @@ async function pushBundle(
     expectedRemoteHead?: string | null;
     /** Skip the bundle-base ancestry check and push HEAD anyway. */
     skipAncestryCheck?: boolean;
+    /**
+     * A commit inside the bundle to push instead of its head: a task's
+     * branch is pushed as the swarm's head at the moment that task
+     * landed, which a later landing has since built on.
+     */
+    target?: string;
   },
 ): Promise<string | null> {
   const root = await mkdtemp(path.join(tmpdir(), "bento-publish-"));
@@ -524,14 +687,18 @@ async function pushBundle(
       [...credentialArgs, "ls-remote", remote, `refs/heads/${branch}`],
       { env },
     );
+    const tip = options.target ?? bundle.headSha;
+    if (options.target) {
+      await run("git", ["-C", checkout, "merge-base", "--is-ancestor", options.target, bundle.headSha], { env });
+    }
     const head = options.includeStageNotes
-      ? bundle.headSha
-      : await withoutStageNotes(checkout, bundle.headSha, path.join(root, "strip.index"), env);
+      ? tip
+      : await withoutStageNotes(checkout, tip, path.join(root, "strip.index"), env);
     // A stage that only wrote its notes (a plan, say) leaves a branch
     // that, with the notes taken out, is the base again. Pushing it
     // would open a pull request with no files changed, so it is held
     // back until a stage commits something a reviewer can read.
-    if (head !== bundle.headSha && (await sameTreeAsForkPoint(checkout, head, env))) return null;
+    if (head !== tip && (await sameTreeAsForkPoint(checkout, head, env))) return null;
 
     const actual = remoteRef.trim().split(/\s+/)[0] ?? "";
     /**
@@ -660,7 +827,20 @@ async function withoutStageNotes(
  * Publishing does not set it. There the stored branch is the pull
  * request's base as well as the clone, so a rename is a mismatch a
  * person must reconcile, not one this quietly papers over.
+ *
+ * A repository GitHub will not show is a different failure, and it
+ * must not travel as the command that hit it. execFile's message is
+ * the whole argv, and that argv carries the credential helper, so the
+ * run record and the exception capture were a git command line ending
+ * in "repository not found". GitHub uses that same sentence when the
+ * repository is private and this organization's installation cannot
+ * see it, and when the repository was renamed or deleted. The person
+ * gets a sentence that says so. git's own line stays on the cause,
+ * without the command.
  */
+/** How long a clone GitHub refused waits before it is asked once more. */
+export const CLONE_ACCESS_RETRY_MS = 2_000;
+
 export async function cloneBaseBranch(args: {
   remote: string;
   /** owner/repository, because the run record does not name it otherwise. */
@@ -689,9 +869,25 @@ export async function cloneBaseBranch(args: {
       { env: args.env },
     );
   try {
-    await cloneBranch(args.baseBranch);
+    try {
+      await cloneBranch(args.baseBranch);
+    } catch (first) {
+      /*
+       * GitHub answers "not found" or a refused credential now and then
+       * for a repository it served a moment before (a swarm planner hit
+       * it right after a deploy, and the same clone worked two seconds
+       * later). Read as the project's failure, that ends and bills the
+       * run and hands it to a person, so it is asked once more first.
+       */
+      if (!inaccessibleCloneExplanation(args.label, args.remote, first)) throw first;
+      await rm(args.checkout, { recursive: true, force: true }).catch(() => {});
+      await new Promise((resolve) => setTimeout(resolve, CLONE_ACCESS_RETRY_MS));
+      await cloneBranch(args.baseBranch);
+    }
     return args.baseBranch;
   } catch (err) {
+    const access = inaccessibleCloneExplanation(args.label, args.remote, err);
+    if (access) throw new Error(access, { cause: cloneFailureCause(err) });
     if (!missingBranchFailure(err)) throw err;
     if (args.fallbackToDefaultBranch) {
       const fallback = await remoteDefaultBranch(args.remote, args.env);
@@ -739,9 +935,93 @@ async function remoteDefaultBranch(remote: string, env: NodeJS.ProcessEnv): Prom
  * both are read: a driver that keeps only one of them still matches.
  */
 function missingBranchFailure(err: unknown): boolean {
+  return /Remote branch .+ not found in upstream/i.test(gitFailureText(err));
+}
+
+/**
+ * What to tell a person when the clone never reached a branch because
+ * the remote hid the repository or refused the credential.
+ *
+ * Null for every other failure. A missing branch has its own sentence.
+ * A network error is left as git wrote it: telling someone to fix the
+ * repository would be the wrong advice when this host cannot reach it.
+ */
+export function inaccessibleCloneExplanation(label: string, remote: string, err: unknown): string | null {
+  const text = gitFailureText(err);
+  if (/Remote branch .+ not found in upstream/i.test(text)) return null;
+  const github = /github\.com/i.test(remote);
+  if (repositoryNotFound(text)) {
+    if (!github) {
+      return (
+        `${label} could not be cloned from ${remote}. The remote says the repository was not found. ` +
+        "Check the URL and its access under Settings, Repositories, then run again."
+      );
+    }
+    return (
+      `${label} could not be cloned. GitHub says the repository was not found. ` +
+      "That is also what GitHub says when this organization's GitHub connection cannot see a private repository, " +
+      "and when the repository was renamed or deleted. Check it under Settings, Repositories. " +
+      "Then save a GitHub token under Settings, GitHub, or install the GitHub App on the repository, and run again."
+    );
+  }
+  if (credentialRejected(text)) {
+    if (!github) {
+      return (
+        `${label} could not be cloned from ${remote} because the remote rejected the credentials. ` +
+        "Check its access under Settings, Repositories, then run again."
+      );
+    }
+    return (
+      `${label} could not be cloned because GitHub rejected the credentials. ` +
+      "Reconnect GitHub under Settings, GitHub, and confirm the GitHub App is installed on this repository, then run again."
+    );
+  }
+  return null;
+}
+
+function repositoryNotFound(text: string): boolean {
+  return (
+    /repository not found/i.test(text) ||
+    /fatal: repository '.+' not found/i.test(text) ||
+    /requested URL returned error: 404/i.test(text)
+  );
+}
+
+function credentialRejected(text: string): boolean {
+  return (
+    /authentication failed/i.test(text) ||
+    /invalid username or token/i.test(text) ||
+    /could not read Username/i.test(text) ||
+    /terminal prompts disabled/i.test(text) ||
+    /write access to repository not granted/i.test(text) ||
+    /requested URL returned error: 401/i.test(text) ||
+    /requested URL returned error: 403/i.test(text)
+  );
+}
+
+/** stderr plus the message, which is where execFile puts git's fatal line. */
+function gitFailureText(err: unknown): string {
+  const stderr = gitStderr(err);
+  return `${stderr}\n${err instanceof Error ? err.message : String(err)}`;
+}
+
+function gitStderr(err: unknown): string {
   const stderr = typeof err === "object" && err !== null ? (err as { stderr?: unknown }).stderr : undefined;
-  const text = `${typeof stderr === "string" ? stderr : ""}\n${String(err)}`;
-  return /Remote branch .+ not found in upstream/i.test(text);
+  return typeof stderr === "string" ? stderr : "";
+}
+
+/**
+ * git's own lines, for the log and the exception cause.
+ *
+ * The command is left out. It is how the helper is spelled, and it is
+ * not a fact about the repository.
+ */
+function cloneFailureCause(err: unknown): Error {
+  const lines = gitStderr(err)
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !/credential\.helper|BENTO_PUSH_TOKEN/i.test(line));
+  return new Error(lines.slice(-6).join("\n") || "git clone failed");
 }
 
 function credentialArguments(): string[] {

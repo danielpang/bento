@@ -3263,6 +3263,16 @@ a.pr-row:hover .pr-external {
  * does not first render the empty state (a claim that nothing exists)
  * and then swap it for the board. The shine is a sweep, gated by the
  * reduced-motion rule further down this file.
+ *
+ * The sweep is one band of light painted against the viewport
+ * (background-attachment: fixed), not one per bone. A per-bone
+ * translate moved a 40px bone and a 300px bone at different speeds and
+ * out of phase, and a stagger on top made lanes start late and catch
+ * up, which read as jitter. Against the viewport every bone shows the
+ * same band at the same instant, so the page shimmers as one surface
+ * at one steady speed. The bones fade in after a beat, so a fetch that
+ * answers at once never flashes them, and the first sweep starts from
+ * off screen rather than mid stride.
  */
 .skeleton {
   display: block;
@@ -3274,28 +3284,52 @@ a.pr-row:hover .pr-external {
   position: relative;
   overflow: hidden;
   pointer-events: none;
+  animation: skeleton-in 360ms ease-out 140ms both;
 }
 
 .skeleton::after {
   content: "";
   position: absolute;
   inset: 0;
-  background: linear-gradient(
-    90deg,
-    transparent 0%,
-    color-mix(in srgb, var(--text) 11%, transparent) 50%,
-    transparent 100%
+  background-image: linear-gradient(
+    100deg,
+    transparent 38%,
+    color-mix(in srgb, var(--text) 9%, transparent) 50%,
+    transparent 62%
   );
-  animation: skeleton-shimmer 1.4s ease-in-out infinite;
-  animation-delay: calc(var(--skeleton-i, 0) * 70ms);
+  background-size: 200vw 100%;
+  background-repeat: no-repeat;
+  background-attachment: fixed;
+  animation: skeleton-shimmer 3s linear infinite;
 }
 
+/* The band's centre sits at 100vw within its 200vw image, so these
+   carry it from just off the left edge to just off the right one, then
+   rest off screen for the last part of the cycle before the next. */
 @keyframes skeleton-shimmer {
+  0% {
+    background-position: -130vw 0;
+  }
+  75%,
+  100% {
+    background-position: 30vw 0;
+  }
+}
+
+/* Without motion the band would stop wherever the shortened animation
+   left it, a stripe frozen across the bones near the right edge. */
+@media (prefers-reduced-motion: reduce) {
+  .skeleton::after {
+    display: none;
+  }
+}
+
+@keyframes skeleton-in {
   from {
-    transform: translateX(-100%);
+    opacity: 0;
   }
   to {
-    transform: translateX(100%);
+    opacity: 1;
   }
 }
 
@@ -3370,6 +3404,74 @@ a.pr-row:hover .pr-external {
 .chat-skeleton-tall {
   flex: 1;
   max-height: none;
+}
+
+/*
+ * The swarm page's bones: its own header, goal and diagram bar (the
+ * page's classes), and a small tree in the stage where the real one
+ * draws. Nodes sit in percentages of the tree, so it shrinks to fit a
+ * narrow stage instead of scrolling.
+ */
+/* Doubled so it outranks the stage's own padding, set further down. */
+.swarm-stage.swarm-stage-skeleton {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 56px 24px 24px;
+  /* The real stage pans by drag; this one has nothing to pan, so a
+     swipe that starts on it scrolls the page as anywhere else would. */
+  cursor: default;
+  touch-action: auto;
+  user-select: auto;
+}
+
+.swarm-skeleton-tree {
+  position: relative;
+  width: min(100%, 616px);
+}
+
+.swarm-skeleton-edge {
+  stroke: var(--line);
+}
+
+.swarm-skeleton-node {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 14px;
+  background: var(--panel-raised);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--line-bright);
+  border-radius: 10px;
+  box-shadow: 0 6px 22px var(--shadow-1);
+  overflow: hidden;
+}
+
+.swarm-skeleton-node .swarm-node-head {
+  gap: 8px;
+}
+
+@media (max-width: 640px) {
+  .swarm-stage.swarm-stage-skeleton {
+    padding: 40px 12px 16px;
+  }
+
+  .swarm-skeleton-node {
+    padding: 9px;
+    gap: 6px;
+    border-radius: 8px;
+  }
+
+  .swarm-skeleton-node .skeleton-lines > :last-child {
+    display: none;
+  }
+}
+
+.swarm-skeleton-excerpt {
+  flex: 1;
+  max-width: 34rem;
 }
 
 .page-skeleton {
@@ -7871,7 +7973,8 @@ a.hours-person-name:hover {
  * read as the same kind of fact.
  */
 .swarm-queue {
-  margin: 20px 16px 24px;
+  /* The same side inset as the diagram, so the two boxes share a width. */
+  margin: 20px 36px 24px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--panel);
@@ -8062,6 +8165,7 @@ a.hours-person-name:hover {
   margin: 0;
   padding: 0 14px 10px;
 }
+.swarm-queue-actions { display: flex; gap: 8px; padding: 0 14px 10px; }
 .swarm-queue-technical { padding: 0 14px 10px; color: var(--text-dim); font-size: 11px; }
 .swarm-queue-technical summary { cursor: pointer; }
 .swarm-queue-technical .swarm-queue-error { padding: 9px 0 0; }
@@ -9570,9 +9674,8 @@ a.hours-person-name:hover {
 }
 
 .swarm-brief {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(250px, 330px);
-  gap: 20px;
+  display: flex;
+  flex-direction: column;
   margin: 0 36px;
   padding: 12px 20px;
   border: 1px solid var(--line);
@@ -9582,6 +9685,42 @@ a.hours-person-name:hover {
 
 .swarm-brief-copy .label {
   color: var(--brand);
+}
+
+/*
+ * What happens next to a finished or failed swarm's work: the choice of
+ * pull requests once it is done, and how long a failed one's sandbox
+ * is kept. On the page's own margins, under the goal.
+ */
+.swarm-publish {
+  margin: 14px 36px 0;
+  padding: 14px 20px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--panel) 87%, var(--bg));
+}
+
+.swarm-publish p {
+  margin: 0 0 10px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.swarm-publish .actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.swarm-grace-note {
+  margin: 10px 36px 0;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.swarm-prs {
+  padding: 10px 36px 0;
 }
 
 .swarm-brief-copy p {
@@ -9594,35 +9733,40 @@ a.hours-person-name:hover {
   overflow-wrap: anywhere;
 }
 
-.swarm-brief-side {
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  gap: 8px;
-  border-left: 1px solid var(--line);
-  padding-left: 20px;
-}
-
 .swarm-next-step {
-  margin: 0;
+  margin: 10px 0 0;
   color: var(--text-dim);
   font-size: 12px;
   line-height: 1.45;
 }
 
+/*
+ * Spend and the worker ceiling share the goal's line, beside Hide.
+ * The line is as tall as the stepper. The plan below uses the full
+ * width of the brief, so the figures do not hold a column open.
+ */
 .swarm-brief-metrics {
   display: flex;
-  align-items: end;
+  align-items: center;
   flex-wrap: wrap;
-  gap: 18px 24px;
+  gap: 6px 22px;
+  margin-left: auto;
+}
+
+.swarm-brief-metrics + .swarm-brief-toggle {
+  margin-left: 16px;
 }
 
 .swarm-spend-summary,
 .swarm-worker-control {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 5px;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.swarm-brief-metrics .btn {
+  padding: 4px 8px;
 }
 
 .swarm-spend-summary > span,
@@ -10067,13 +10211,18 @@ a.hours-person-name:hover {
 @media (max-width: 820px) {
   .swarm-head { grid-template-columns: 1fr; padding: 24px 18px 18px; }
   .swarm-head-actions { padding-top: 0; justify-content: flex-start; }
-  .swarm-brief { grid-template-columns: 1fr; margin: 0 18px; padding: 12px 16px; }
-  .swarm-brief-side { padding: 12px 0 0; border-left: 0; border-top: 1px solid var(--line); }
+  .swarm-brief { margin: 0 18px; padding: 12px 16px; }
   .swarm-artifacts { margin: 14px 18px 0; }
   .swarm-viewbar { margin: 22px 18px 0; }
   .swarm-stage, .swarm-outline { margin: 0 18px 20px; }
+  .swarm-queue { margin-left: 18px; margin-right: 18px; }
   .swarm-stage { padding: 0; }
   .swarm-outline { padding-inline: 12px; }
+}
+
+@media (max-width: 640px) {
+  .swarm-brief-head .swarm-brief-toggle { order: 1; margin-left: auto; }
+  .swarm-brief-metrics { order: 2; margin-left: 0; flex-basis: 100%; }
 }
 
 
@@ -10125,6 +10274,43 @@ a.hours-person-name:hover {
   border-radius: var(--radius);
   background: var(--bg);
   font-size: 12px;
+}
+
+/* Under the goal, a source is a short chip. The name does not stretch
+   the row across the brief. Text files share one chip: the label is
+   said once, and the names are a list inside it. */
+.swarm-brief-plan .swarm-plan-sources > li {
+  width: max-content;
+  max-width: min(100%, 28rem);
+}
+
+.swarm-brief-plan .swarm-plan-files {
+  align-items: baseline;
+  gap: 10px;
+}
+
+.swarm-brief-plan .swarm-plan-file-names {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.swarm-brief-plan .swarm-plan-sources .swarm-plan-file-names li {
+  display: block;
+  width: auto;
+  max-width: none;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+}
+
+.swarm-brief-plan .swarm-plan-source-name {
+  flex: 0 1 auto;
 }
 
 .swarm-plan-source-kind {
@@ -10256,15 +10442,14 @@ a.swarm-plan-source-name:hover {
  * opens it again; the metrics and the plan come back with the goal.
  */
 .swarm-brief[data-open="false"] {
-  grid-template-columns: minmax(0, 1fr);
-  gap: 0;
   padding: 8px 20px;
 }
 
 .swarm-brief-head {
   display: flex;
   align-items: center;
-  gap: 10px;
+  flex-wrap: wrap;
+  gap: 8px 10px;
   min-width: 0;
 }
 

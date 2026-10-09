@@ -7,6 +7,7 @@ import {
   canResume,
   canStart,
   canStop,
+  ceilingAction,
   diagramAttentionWords,
   diagramTaskTone,
   diagramTaskWords,
@@ -87,7 +88,35 @@ test("a failed descendant leaves its plan stalled without a duplicate failure la
   assert.equal(diagramTaskWords("failed", "leaf"), "failed");
   assert.equal(diagramTaskTone("failed", "leaf"), "failed");
   assert.equal(diagramAttentionWords("failed", "leaf", "failed"), null);
-  assert.equal(diagramAttentionWords("working", "leaf", "long_running"), "Still running");
+  assert.equal(diagramAttentionWords("working", "leaf", "long_running", true), "Still running");
+  assert.equal(diagramAttentionWords("working", "leaf", "long_running"), null, "a wait is not an agent that is still running");
+  assert.equal(diagramAttentionWords("blocked", "leaf", "escalated"), "Planner notified of long run task");
+});
+
+test("a task says working only while an agent is running, and pending or completed otherwise", () => {
+  assert.equal(diagramTaskWords("assigned", "leaf"), "pending");
+  assert.equal(diagramTaskWords("open", "leaf"), "pending");
+  assert.equal(diagramTaskWords("working", "leaf"), "pending");
+  assert.equal(diagramTaskWords("working", "plan"), "pending");
+  assert.equal(diagramTaskTone("assigned", "leaf"), "idle");
+  assert.equal(diagramTaskTone("working", "plan"), "idle");
+  assert.equal(diagramTaskWords("working", "leaf", false, "waiting"), "waiting to land", "an accepted leaf is not pending");
+  assert.equal(diagramTaskWords("working", "leaf", false, "failed"), "landing failed");
+  assert.equal(diagramTaskWords("working", "leaf", false, "review"), "waiting for review", "a reported leaf is not pending");
+  assert.equal(diagramTaskTone("working", "leaf", false, "review"), "idle");
+  assert.equal(diagramTaskWords("working", "leaf", true, "review"), "working", "an agent in the sandbox is working");
+  assert.equal(diagramTaskTone("working", "leaf", false, "failed"), "failed");
+  assert.equal(diagramTaskWords("working", "leaf", true), "working");
+  assert.equal(diagramTaskTone("working", "leaf", true), "running");
+  assert.equal(diagramTaskWords("landed", "leaf", true), "working", "a resolver is an agent in the sandbox");
+  assert.equal(diagramTaskTone("landed", "leaf", true), "running");
+  assert.equal(diagramTaskWords("failed", "leaf", true), "working");
+  assert.equal(diagramTaskWords("failed", "plan", true), "working");
+  assert.equal(diagramTaskWords("failed", "plan"), "stalled");
+  assert.equal(diagramTaskWords("done", "leaf"), "completed");
+  assert.equal(diagramTaskTone("done", "leaf"), "succeeded");
+  assert.equal(diagramTaskWords("landed", "leaf"), "landed");
+  assert.equal(diagramTaskWords("cancelled", "leaf"), "cancelled");
 });
 
 test("every swarm status resolves to one of the same five, and is called something", () => {
@@ -182,6 +211,22 @@ test("the clock only ever raises attention, and only for a working leaf", () => 
   assert.equal(attentionFor(leaf("working", { attention: "escalated", startedAt: started }), past), "escalated");
   // Nor is one raised early.
   assert.equal(attentionFor(leaf("working", { startedAt: started }), LONG_RUN_WARNING_MS - 1), "none");
+  // The live clock is the agent's start, and only while it is running.
+  const agentStarted = new Date(LONG_RUN_WARNING_MS).toISOString();
+  assert.equal(
+    attentionFor(leaf("working", { startedAt: started, attention: "long_running" }), past, LONG_RUN_WARNING_MS, { active: false, startedAt: null }),
+    "none",
+    "a clock flag does not survive an agent that is not in the sandbox",
+  );
+  assert.equal(
+    attentionFor(leaf("landed", { startedAt: started }), past, LONG_RUN_WARNING_MS, { active: true, startedAt: agentStarted }),
+    "none",
+    "time before the agent started does not count",
+  );
+  assert.equal(
+    attentionFor(leaf("landed", { startedAt: started }), past + LONG_RUN_WARNING_MS, LONG_RUN_WARNING_MS, { active: true, startedAt: agentStarted }),
+    "long_running",
+  );
 });
 
 test("elapsed stops at the end rather than counting forever", () => {
@@ -213,7 +258,12 @@ test("the controls a swarm offers follow the state it is in", () => {
   assert.equal(canPause("paused"), false);
   assert.equal(canPause("done"), false);
   assert.equal(canResume("paused"), true);
-  assert.equal(canResume("budget_exhausted"), true);
+  // The start route refuses both ceilings: raising one is what moves it.
+  assert.equal(canResume("budget_exhausted"), false);
+  assert.equal(canResume("timed_out"), false);
+  assert.equal(ceilingAction("budget_exhausted"), "Raise budget");
+  assert.equal(ceilingAction("timed_out"), "Raise time limit");
+  assert.equal(ceilingAction("paused"), null);
   assert.equal(canResume("running"), false);
   /*
    * Starting is not resuming, and a planned swarm needs it.

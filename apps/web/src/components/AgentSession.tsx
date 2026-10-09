@@ -11,6 +11,8 @@ import {
   type AgentEvent,
 } from "@bento/core";
 import { linkifiedError } from "../error-text.js";
+import { useBetaTesters } from "../beta.js";
+import { sandboxProviderWords } from "../sandbox-provider.js";
 import type { LineQuote } from "./DiffReview.js";
 import { StopButton } from "./IconButtons.js";
 import { LIVE_TOOLS } from "./ui.js";
@@ -134,6 +136,9 @@ export function AgentSession({
     return saved === null ? (defaultShowDetail ?? false) : saved === "1";
   });
   const showDetail = controlledShowDetail ?? showDetailState;
+  // Which sandbox provider ran each run, for beta testers only: the
+  // rest of the console never names a provider (see sandbox-provider.ts).
+  const showsSandbox = useBetaTesters();
   const [say, setSay] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -585,6 +590,7 @@ export function AgentSession({
                 <div className="chat-run">
                   <span>
                     {section.agentName} · {section.when} · {section.status}
+                    {showsSandbox && sandboxLabel(runs, section.runId)}
                   </span>
                 </div>
                 {section.items.map((item) => (
@@ -1108,6 +1114,12 @@ function RunPicker({
       </Menu.Portal>
     </Menu.Root>
   );
+}
+
+/** " · Fly sprite" for a run whose provider is known, nothing otherwise. */
+function sandboxLabel(runs: AgentRun[], runId: string): string {
+  const words = sandboxProviderWords(runs.find((run) => run.id === runId)?.sandboxProvider);
+  return words ? ` · ${words}` : "";
 }
 
 function runCaption(run: AgentRun, profiles: AgentProfile[], stages: Stage[] | undefined): string {

@@ -202,6 +202,12 @@ export interface AgentRun {
   queuedAt: string;
   startedAt: string | null;
   endedAt: string | null;
+  /**
+   * The sandbox provider that ran this run ("sprite", "modal",
+   * "docker", "local-process", or what a runner reported). Null until
+   * the run provisions, when provisioning failed, and on older runs.
+   */
+  sandboxProvider?: string | null;
 }
 
 /**

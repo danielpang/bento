@@ -136,8 +136,10 @@ test("one swarm reads back with its plan, its spend and what is working", async 
     swarm: wireSwarm(),
     tasks: [wireTask(), wireTask({ id: "t-2", attention: "question", status: "blocked" })],
     activeRuns: [
-      { id: "r1", role: "worker", status: "running", swarmTaskId: "t-1" },
-      { id: "r2", role: "planner", status: "running", swarmTaskId: null },
+      { id: "r1", role: "worker", status: "running", swarmTaskId: "t-1", agentStartedAt: "2026-09-04T12:10:00.000Z" },
+      { id: "r2", role: "planner", status: "running", swarmTaskId: null, agentStartedAt: "2026-09-04T12:05:00.000Z" },
+      { id: "r3", role: "worker", status: "starting", swarmTaskId: "t-2", agentStartedAt: null },
+      { id: "r4", role: "worker", status: "queued", swarmTaskId: "t-2" },
     ],
   };
   const { calls, doFetch } = fetchStub(detail);
@@ -148,10 +150,13 @@ test("one swarm reads back with its plan, its spend and what is working", async 
   assert.deepEqual(read.swarm.spend, { measuredUsd: 5.08, estimatedUsd: 0.37, assumedUsd: 0.25 , notionalUsd: 0});
   assert.equal(read.swarm.budgetUsd, 40);
   assert.equal(read.swarm.workers, 4, "the swarm's own ceiling is what the stepper changes");
-  assert.equal(read.swarm.workersActive, 1, "the planner is not a worker");
+  assert.equal(read.swarm.workersActive, 3, "queued and starting workers count, the planner does not");
   assert.deepEqual(read.tasks[0]!.cost, { measuredUsd: 1.5, estimatedUsd: 0.25, assumedUsd: 0 , notionalUsd: 0});
   assert.equal(read.tasks[0]!.attention, "none");
   assert.equal(read.tasks[1]!.attention, "question", "the server's own reason, not a severity it was flattened into");
+  assert.deepEqual(read.runningTaskIds, ["t-1"], "only a run whose agent is in the sandbox");
+  assert.deepEqual(read.agentStartedAt, { "t-1": "2026-09-04T12:10:00.000Z" }, "the planner is on no node, so its clock is not the root's");
+  assert.equal(read.activeRunCount, 4, "every active run, the planner's included");
 
   // Nothing is invented for the surfaces the routes do not serve.
   assert.deepEqual(read.landings, []);
@@ -418,7 +423,11 @@ test("a swarm's status is said in the console's words, and a budget stop says so
   assert.equal(status({ status: "planning" }), "planning");
   assert.equal(status({ status: "running" }), "running");
   assert.equal(status({ status: "paused", pausedReason: "manual" }), "paused");
-  assert.equal(status({ status: "paused", pausedReason: "budget" }), "budget_exhausted");
+  // An older server's budget stop: resuming is what moves that row.
+  assert.equal(status({ status: "paused", pausedReason: "budget" }), "paused");
+  // The two ceilings used to fall through to planning, and offer Approve plan.
+  assert.equal(status({ status: "budget_exhausted", pausedReason: "budget" }), "budget_exhausted");
+  assert.equal(status({ status: "timed_out", pausedReason: "time_limit" }), "timed_out");
   assert.equal(status({ status: "blocked" }), "waiting");
   assert.equal(status({ status: "cancelled" }), "stopped");
   assert.equal(status({ status: "done" }), "done");
@@ -447,6 +456,75 @@ test("a swarm with no plan and no runs still draws", () => {
   assert.deepEqual(read.tasks, []);
   assert.equal(read.swarm.workersActive, 0);
   assert.equal(read.swarm.startedAt, null, "the header falls back to when it was created");
+});
+
+test("working is the agent in the sandbox, and a planner with no task is on no node", () => {
+  const read = toDetail({
+    swarm: wireSwarm(),
+    tasks: [
+      wireTask({ id: "root", nodeType: "plan", parentId: null, position: 0 }),
+      wireTask({ id: "leaf", parentId: "root", position: 1, status: "landed" }),
+      wireTask({ id: "setup", parentId: "root", position: 2, status: "working" }),
+    ],
+    activeRuns: [
+      { id: "planner", role: "planner", status: "running", swarmTaskId: null, agentStartedAt: "2026-09-04T12:00:00.000Z" },
+      { id: "resolver", role: "resolver", status: "running", swarmTaskId: "leaf", agentStartedAt: "2026-09-04T12:20:00.000Z" },
+      { id: "install", role: "worker", status: "starting", swarmTaskId: "setup", agentStartedAt: null },
+    ],
+  });
+  // The planner used to be painted on the first top level task, so a
+  // flat plan's first leaf read "working" while only the planner ran.
+  assert.deepEqual(read.runningTaskIds, ["leaf"]);
+  assert.deepEqual(read.agentStartedAt, { leaf: "2026-09-04T12:20:00.000Z" });
+});
+
+test("the route's merge queue retry answer and a landing's backoff reach the page", () => {
+  const read = toDetail({
+    swarm: wireSwarm(),
+    tasks: [wireTask({ id: "yes", canRetryLanding: true }), wireTask({ id: "older" })],
+    activeRuns: [],
+    landings: [{
+      id: "l1", taskId: "yes", branchName: "b", position: 0, status: "queued", attempt: 1, error: null,
+      resolverRunId: null, notBefore: "2026-09-04T12:05:00.000Z", startedAt: null, endedAt: null,
+    }],
+  });
+  assert.equal(read.tasks[0]!.canRetryLanding, true);
+  assert.equal(read.tasks[1]!.canRetryLanding, false, "a server that sends no answer offers no retry");
+  assert.equal(read.landings[0]!.notBefore, "2026-09-04T12:05:00.000Z");
+  assert.equal(read.activeRunCount, 0);
+});
+
+test("the long-run clock is the earlier agent, and a missing stamp falls back to the claim", () => {
+  const read = toDetail({
+    swarm: wireSwarm(),
+    tasks: [
+      wireTask({ id: "root", nodeType: "plan", parentId: null, position: 0 }),
+      wireTask({ id: "old", parentId: "root", position: 1 }),
+    ],
+    activeRuns: [
+      // Newest queued first, the way the route orders the list. This
+      // row was claimed long before the other agent started, and it
+      // has no agent stamp, so its clock is the claim.
+      {
+        id: "pre-column",
+        role: "worker",
+        status: "running",
+        swarmTaskId: "old",
+        startedAt: "2026-09-04T11:00:00.000Z",
+        agentStartedAt: null,
+      },
+      {
+        id: "later-agent",
+        role: "worker",
+        status: "running",
+        swarmTaskId: "old",
+        startedAt: "2026-09-04T10:00:00.000Z",
+        agentStartedAt: "2026-09-04T12:40:00.000Z",
+      },
+    ],
+  });
+  assert.deepEqual(read.runningTaskIds, ["old"]);
+  assert.deepEqual(read.agentStartedAt, { old: "2026-09-04T11:00:00.000Z" });
 });
 
 

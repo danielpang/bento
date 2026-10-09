@@ -8,6 +8,7 @@ import {
   createPool,
   runEvents,
   runMigrations,
+  swarmLandings,
   swarmMessages,
   swarmTasks,
   swarms,
@@ -18,6 +19,8 @@ import { FakeJobQueue } from "./jobs/index.js";
 import { EventBus, type BoardEvent } from "./events.js";
 import { loadEnv } from "./env.js";
 import { runWatchdog } from "./orchestrator/swarm/watchdog.js";
+import { tickSwarm } from "./orchestrator/swarm/coordinator.js";
+import { DOCUMENT_ASSEMBLY_FLAG } from "./orchestrator/swarm/deliverable.js";
 
 /**
  * The clock, against a real database and a real minute.
@@ -372,6 +375,70 @@ test("a long planner turn does not leave the whole swarm blocked for good", asyn
  * node was put there by something that knows more about it than "an
  * agent was on this for a while".
  */
+/**
+ * The clock is the agent, not the claim.
+ *
+ * A run that has been queued or provisioning for longer than the
+ * warning has not been working. A running row whose agent started a
+ * minute ago has not either, however long ago it was claimed.
+ */
+test("a run that has not started its agent is not a long run", async () => {
+  const swarm = await makeSwarm();
+  const claimed = new Date(Date.now() - (WARN_MIN + 10) * 60_000);
+  const [queuedTask] = await db
+    .insert(swarmTasks)
+    .values({ swarmId: swarm.id, title: "Waiting for a slot", status: "working" })
+    .returning();
+  await db.insert(agentRuns).values({
+    type: "swarm",
+    swarmId: swarm.id,
+    swarmTaskId: queuedTask!.id,
+    role: "worker",
+    agentProfileId: PROFILE,
+    prompt: "",
+    status: "queued",
+    queuedAt: claimed,
+  });
+  const [startingTask] = await db
+    .insert(swarmTasks)
+    .values({ swarmId: swarm.id, title: "Installing", status: "working" })
+    .returning();
+  await db.insert(agentRuns).values({
+    type: "swarm",
+    swarmId: swarm.id,
+    swarmTaskId: startingTask!.id,
+    role: "worker",
+    agentProfileId: PROFILE,
+    prompt: "",
+    status: "starting",
+    queuedAt: claimed,
+    startedAt: claimed,
+  });
+  const { task } = await workingLeaf(swarm.id, 1);
+  await db.update(agentRuns).set({
+    startedAt: claimed,
+    agentStartedAt: new Date(Date.now() - 60_000),
+  }).where(eq(agentRuns.swarmTaskId, task.id));
+
+  const result = await runWatchdog(ctx);
+  assert.deepEqual(result.warned, []);
+  assert.equal((await readTask(queuedTask!.id)).attention, null);
+  assert.equal((await readTask(startingTask!.id)).attention, null);
+  assert.equal((await readTask(task.id)).attention, null, "a minute of agent time is not the warning");
+});
+
+test("the clock comes off when the agent is no longer in the sandbox", async () => {
+  const swarm = await makeSwarm();
+  const { task, run } = await workingLeaf(swarm.id, WARN_MIN + 1);
+  await runWatchdog(ctx);
+  assert.equal((await readTask(task.id)).attention, "long_running");
+
+  await db.update(agentRuns).set({ status: "starting" }).where(eq(agentRuns.id, run.id));
+  const after = await runWatchdog(ctx);
+  assert.deepEqual(after.cleared, [task.id]);
+  assert.equal((await readTask(task.id)).attention, null);
+});
+
 test("the clock clears only what the clock wrote", async () => {
   const swarm = await makeSwarm();
   const [waiting] = await db
@@ -382,4 +449,74 @@ test("the clock clears only what the clock wrote", async () => {
   const after = await runWatchdog(ctx, new Date());
   assert.deepEqual(after.cleared, []);
   assert.equal((await readTask(waiting!.id)).attention, "question", "somebody else's flag stays up");
+});
+
+/**
+ * A swarm is a reconciler fed by events, and an event can be lost: a
+ * job pg-boss gave up on, a send that failed after its commit, a tick
+ * dropped under a singleton key. Each stalled a swarm until a reboot,
+ * because boot was the only thing that ticked a swarm nothing had
+ * happened to. The clock's pass is now that floor.
+ */
+test("every swarm still being worked is reconciled each pass, even with nothing in flight", async () => {
+  const running = await makeSwarm({ status: "running" });
+  const planning = await makeSwarm({ status: "planning" });
+  const blocked = await makeSwarm({ status: "blocked" });
+  const done = await makeSwarm({ status: "done" });
+  const spent = await makeSwarm({ status: "budget_exhausted", pausedReason: "budget" });
+  const landingUnderCeiling = await makeSwarm({ status: "timed_out", pausedReason: "time_limit" });
+  const [leaf] = await db
+    .insert(swarmTasks)
+    .values({ swarmId: landingUnderCeiling.id, title: "landing", status: "working", flags: { accepted: true } })
+    .returning();
+  await db.insert(swarmLandings).values({ swarmId: landingUnderCeiling.id, taskId: leaf!.id, position: 0 });
+
+  const result = await runWatchdog(ctx);
+  const ticked = new Set(
+    queued.filter((job) => job.queue === "swarm.tick").map((job) => (job.data as { swarmId: string }).swarmId),
+  );
+  for (const swarm of [running, planning, blocked, landingUnderCeiling]) {
+    assert.ok(ticked.has(swarm.id), `a ${swarm.status} swarm is ticked`);
+    assert.ok(result.reconciled.includes(swarm.id));
+  }
+  assert.ok(!ticked.has(done.id), "an ended swarm is not");
+  assert.ok(!ticked.has(spent.id), "and neither is a ceiling with nothing left in flight under it");
+  assert.equal(
+    (await db.select().from(swarms).where(eq(swarms.id, landingUnderCeiling.id)))[0]!.status,
+    "timed_out",
+    "the clock does not give a swarm at a ceiling another ending",
+  );
+});
+
+/**
+ * The document assembly's lease is a working row with a fresh
+ * updatedAt, and a process that died holding it left nothing that
+ * would ever tick the swarm again. The pass's tick is what finds the
+ * stale lease and takes it back.
+ */
+test("a document assembly whose lease ran out is taken back by the tick the pass asks for", async () => {
+  const swarm = await makeSwarm({ status: "running", deliverable: "document" });
+  await db.insert(swarmTasks).values({ swarmId: swarm.id, title: "The findings", status: "done" });
+  const [assembly] = await db
+    .insert(swarmTasks)
+    .values({
+      swarmId: swarm.id,
+      title: "Assemble document",
+      status: "working",
+      updatedAt: new Date(Date.now() - 10 * 60_000),
+      flags: { [DOCUMENT_ASSEMBLY_FLAG]: true, reopenCount: 0 },
+    })
+    .returning();
+
+  await runWatchdog(ctx);
+  const job = queued.find(
+    (entry) => entry.queue === "swarm.tick" && (entry.data as { swarmId?: string }).swarmId === swarm.id,
+  );
+  assert.ok(job, "nothing else would ever tick this swarm");
+
+  // What the tick worker does with that job.
+  await tickSwarm(ctx, swarm.id);
+  const after = await readTask(assembly!.id);
+  assert.notEqual(after.status, "working", "the stale lease is taken back and the assembly run again");
+  assert.match(after.report ?? "", /Document assembly failed/, "here it fails visibly, having no branch to assemble on");
 });

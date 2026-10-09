@@ -107,6 +107,29 @@ test("only a node with its own working agent gets the active halo in both views"
   assert.equal(model.byId.get("active")?.agentActive, true);
   assert.equal(model.byId.get("waiting")?.agentActive, false);
   assert.equal(outlineRows(model).find((row) => row.id === "active")?.agentActive, true);
+
+  const live = buildSwarmModel([
+    node("root", null, "plan", "working"),
+    node("active", "root", "leaf", "working", { assignedRunId: "run-1" }),
+    node("starting", "root", "leaf", "working", { assignedRunId: "run-2" }),
+  ], { now: 0, runningTaskIds: new Set(["active"]) });
+  assert.equal(live.byId.get("active")?.agentActive, true);
+  assert.equal(live.byId.get("starting")?.agentActive, false, "a run that has not reached the sandbox is not working");
+  assert.equal(live.byId.get("root")?.agentActive, false);
+
+  const waiting = buildSwarmModel([
+    node("leaf", null, "leaf", "working", {
+      assignedRunId: "run-1",
+      attention: "long_running",
+      startedAt: new Date(0).toISOString(),
+    }),
+    node("resolver", null, "leaf", "landed", { assignedRunId: "run-2" }),
+  ], { now: LONG_RUN_WARNING_MS + 5, runningTaskIds: new Set(["resolver"]), agentStartedAt: new Map([["resolver", new Date(LONG_RUN_WARNING_MS).toISOString()]]) });
+  assert.equal(waiting.byId.get("leaf")?.agentActive, false);
+  assert.equal(waiting.byId.get("leaf")?.attention, "none", "queued time is not a long run");
+  assert.equal(waiting.byId.get("resolver")?.agentActive, true);
+  assert.equal(waiting.byId.get("resolver")?.attention, "none", "the agent has only just started");
+  assert.equal(waiting.byId.get("resolver")?.runningForMs, 5);
 });
 
 test("weight decides the share, not the count", () => {
@@ -402,6 +425,13 @@ test("two hundred nodes lay out once, stay stable, and hold a frame", () => {
   assert.equal(cached(tasks, { now: 0 }), once);
   // A changed input is a new build rather than a stale answer.
   assert.notEqual(cached(tasks, { now: 1 }), once);
+
+  // Omitting the set and passing an empty one are different models.
+  // The same task array must not reuse the fallback halo.
+  const same = [node("a", null, "leaf", "working", { assignedRunId: "run-1" })];
+  const cache = createModelCache();
+  assert.equal(cache(same, { now: 0 }).byId.get("a")?.agentActive, true);
+  assert.equal(cache(same, { now: 0, runningTaskIds: new Set() }).byId.get("a")?.agentActive, false);
 });
 
 test("a cycle in the tree draws what arrived instead of hanging", () => {

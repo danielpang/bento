@@ -1,16 +1,18 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { CompletionRing } from "./CompletionRing.js";
 import { MergeQueue } from "./MergeQueue.js";
 import { OutOfCompute } from "./OutOfCompute.js";
 import { SwarmOutline } from "./SwarmOutline.js";
 import { SwarmTree } from "./SwarmTree.js";
-import { canPause, canReopen, canResume, canStop, pausedWords, swarmTone, swarmWords } from "../swarm/status.js";
+import { canPause, canReopen, canResume, canStop, ceilingAction, pausedWords, swarmTone, swarmWords } from "../swarm/status.js";
+import { idleWords } from "../swarm/waiting.js";
 import { cappedUsd, formatUsd } from "../swarm/money.js";
 import { formatCompletion, type SwarmModel } from "../swarm/layout.js";
 import { formatElapsed } from "../swarm/time.js";
 import type { ModeSurfaces } from "../swarm/plan.js";
 import type { SwarmArtifact, SwarmDetail, SwarmPlanSource } from "../swarm/types.js";
 import { formatBytes } from "@bento/core";
+import { externalHttpUrl } from "../external-url.js";
 import { browserStorage, readBriefOpen, rememberBriefOpen, type StorageLike, type SwarmView } from "../swarm/view-state.js";
 
 /** Ticks the header's clock, and only while there is something running. */
@@ -57,14 +59,14 @@ export interface SwarmActions {
   onRetryPlanner?: () => void;
   onStop: () => void;
   onReleaseBranch?: () => void;
+  /** Retries one task's failed merge queue entry, from the queue's own row. */
+  onRetryLanding?: (taskId: string) => void;
   /**
-   * Opens a pull request for the swarm's branch.
-   *
-   * Optional, and absent is the answer today: no route does it, so the
-   * button says so by being unavailable rather than by doing nothing
-   * when it is pressed.
+   * Opens the pull requests of a finished swarm, in the shape a person
+   * chooses: one for the swarm, or one per task, stacked. The branches
+   * are already on GitHub; this only asks for the pull requests.
    */
-  onCreatePullRequest?: () => void;
+  onPublish?: (mode: "combined" | "stacked") => void;
   /**
    * Opens the reopen dialog for a swarm that has finished.
    *
@@ -114,23 +116,7 @@ export function SwarmPlanBrief({
       </p>
       {sources.length > 0 && (
         <ul className="swarm-plan-sources" aria-label="Plan sources">
-          {sources.map((source) => (
-            <li key={source.id} data-media={source.media}>
-              {source.media === "image" && (
-                <img className="swarm-plan-source-thumb" src={source.contentPath} alt="" loading="lazy" />
-              )}
-              <span className="swarm-plan-source-kind">{planSourceLabel(source)}</span>
-              {source.url
-                ? <a className="swarm-plan-source-name" href={source.url} target="_blank" rel="noreferrer noopener" title={source.url}>{source.name}</a>
-                : <span className="swarm-plan-source-name" title={source.name}>{source.name}</span>}
-              <span className="muted">{planSourceSize(source)}</span>
-              {source.media !== "text" && (
-                <a className="swarm-plan-source-open" href={source.contentPath} target="_blank" rel="noreferrer noopener">
-                  {source.media === "image" ? "Open" : "Download"}
-                </a>
-              )}
-            </li>
-          ))}
+          {planSourceRows(sources)}
         </ul>
       )}
     </div>
@@ -152,6 +138,74 @@ export function goalExcerpt(goal: string, max = 120): string {
   return `${(atWord > max / 2 ? cut.slice(0, atWord) : cut).trimEnd()}\u2026`;
 }
 
+/**
+ * A text file handed over as the plan.
+ *
+ * Several of these share one label. A PDF, an image, or a website
+ * stays its own row, because each of those is something to open.
+ */
+function isPlanFile(source: Pick<SwarmPlanSource, "kind" | "media">): boolean {
+  return source.kind === "file" && source.media === "text";
+}
+
+/**
+ * The sources, with every text file gathered under one label.
+ *
+ * The label is said once. Repeating it on each name is a column of
+ * the same word, and the names are the part a person came to read.
+ */
+function planSourceRows(sources: SwarmPlanSource[]): ReactNode[] {
+  const files = sources.filter(isPlanFile);
+  let filesListed = false;
+  const rows: ReactNode[] = [];
+  for (const source of sources) {
+    if (isPlanFile(source)) {
+      if (filesListed) continue;
+      filesListed = true;
+      rows.push(<PlanFiles key="files" files={files} />);
+      continue;
+    }
+    rows.push(<PlanSourceRow key={source.id} source={source} />);
+  }
+  return rows;
+}
+
+function PlanFiles({ files }: { files: SwarmPlanSource[] }) {
+  return (
+    <li className="swarm-plan-files">
+      <span className="swarm-plan-source-kind">{files.length === 1 ? "File" : "Files"}</span>
+      <ul className="swarm-plan-file-names">
+        {files.map((file) => (
+          <li key={file.id}>
+            <span className="swarm-plan-source-name" title={file.name}>{file.name}</span>
+          </li>
+        ))}
+      </ul>
+    </li>
+  );
+}
+
+function PlanSourceRow({ source }: { source: SwarmPlanSource }) {
+  const size = planSourceSize(source);
+  return (
+    <li data-media={source.media}>
+      {source.media === "image" && (
+        <img className="swarm-plan-source-thumb" src={source.contentPath} alt="" loading="lazy" />
+      )}
+      <span className="swarm-plan-source-kind">{planSourceLabel(source)}</span>
+      {source.url
+        ? <a className="swarm-plan-source-name" href={source.url} target="_blank" rel="noreferrer noopener" title={source.url}>{source.name}</a>
+        : <span className="swarm-plan-source-name" title={source.name}>{source.name}</span>}
+      {size && <span className="muted">{size}</span>}
+      {source.media !== "text" && (
+        <a className="swarm-plan-source-open" href={source.contentPath} target="_blank" rel="noreferrer noopener">
+          {source.media === "image" ? "Open" : "Download"}
+        </a>
+      )}
+    </li>
+  );
+}
+
 /** What a source is, as the list labels it. */
 export function planSourceLabel(source: Pick<SwarmPlanSource, "kind" | "media">): string {
   if (source.media === "pdf") return "PDF";
@@ -159,12 +213,18 @@ export function planSourceLabel(source: Pick<SwarmPlanSource, "kind" | "media">)
   return source.kind === "file" ? "File" : "Website";
 }
 
-/** How big a source is, in the unit a person reads it by. */
-export function planSourceSize(source: Pick<SwarmPlanSource, "media" | "size" | "hasText" | "byteSize">): string {
-  if (source.media === "text") return `${source.size.toLocaleString()} characters`;
+/**
+ * How big a source is, in the unit a person reads it by.
+ *
+ * A text file has no size worth printing: a character count does not
+ * say whether the plan is the right one. A PDF or an image is a
+ * download, so its size is in bytes.
+ */
+export function planSourceSize(source: Pick<SwarmPlanSource, "media" | "size" | "hasText" | "byteSize">): string | null {
+  if (source.media === "text") return null;
   const bytes = formatBytes(source.byteSize ?? 0);
   if (source.media === "image") return bytes;
-  return source.hasText ? `${bytes}, ${source.size.toLocaleString()} characters of text` : `${bytes}, no text (a scan)`;
+  return source.hasText ? bytes : `${bytes}, no text (a scan)`;
 }
 
 /**
@@ -247,15 +307,30 @@ export function SwarmPage({
         : "The plan is not ready. Message the planner to finish it."
     : "Review the diagram, then approve the plan to start ready workers.";
   const plannerFailed = waitingForPlan && detail.plannerRun?.status === "failed";
+  const ceiling = ceilingAction(swarm.status);
   const primaryAction = planNeedsApproval
     ? { label: "Approve plan", onClick: actions.onResume }
     : canResume(swarm.status)
       ? { label: "Resume work", onClick: actions.onResume }
-      : canReopen(swarm.status)
-        ? { label: "Add follow up", onClick: actions.onReopen }
-        : swarm.status === "running"
-          ? { label: "Pause work", onClick: actions.onPause }
-          : null;
+      // A ceiling is lifted by raising it, which Settings does and the
+      // coordinator acts on. Starting is refused for both.
+      : ceiling
+        ? { label: ceiling, onClick: actions.onSettings }
+        : canReopen(swarm.status)
+          ? { label: "Add follow up", onClick: actions.onReopen }
+          : swarm.status === "running" || swarm.status === "waiting"
+            ? { label: "Pause work", onClick: actions.onPause }
+            : null;
+  /*
+   * Why a swarm that says it is at work is not moving. "waiting" is the
+   * server's blocked: something in the tree wants a person. A running
+   * swarm with nothing running and nothing landing says what it is
+   * waiting on, when the tree shows it; without this the header showed
+   * only Pause and Stop over a swarm that was doing nothing.
+   */
+  const stillWords = swarm.status === "waiting"
+    ? "This swarm is waiting for you. Open the highlighted tasks in the diagram to see what each one needs."
+    : idleWords(detail);
 
   return (
     <div className="swarm-page">
@@ -272,6 +347,11 @@ export function SwarmPage({
       {stopped && (
         <p className="swarm-paused" role="status">
           {stopped}
+        </p>
+      )}
+      {!stopped && stillWords && (
+        <p className="swarm-paused" role="status" data-kind="idle">
+          {stillWords}
         </p>
       )}
 
@@ -324,8 +404,11 @@ export function SwarmPage({
             </summary>
             <div className="swarm-more-menu">
               {swarm.status === "planning" && plannerActive && canPause(swarm.status) && <button className="btn" disabled={busy} onClick={actions.onPause}>Pause planner</button>}
-              {planNeedsApproval && (swarm.status === "running" || swarm.status === "waiting") && (
+              {(swarm.status === "running" || swarm.status === "waiting") && primaryAction?.label !== "Pause work" && (
                 <button className="btn" disabled={busy} onClick={actions.onPause}>Pause work</button>
+              )}
+              {canReopen(swarm.status) && primaryAction?.label !== "Add follow up" && (
+                <button className="btn" disabled={busy} onClick={actions.onReopen}>Add follow up</button>
               )}
               {canStop(swarm.status) && <button className="btn" disabled={busy} onClick={actions.onStop}>Stop swarm</button>}
               {swarm.archivedAt ? (
@@ -335,7 +418,6 @@ export function SwarmPage({
                   <button className="btn" disabled={busy} onClick={actions.onArchive}>Archive</button>
                 )
               )}
-              {actions.onCreatePullRequest && <button className="btn" disabled={busy} onClick={actions.onCreatePullRequest}>Create PR</button>}
               <button className="btn btn-danger-quiet" disabled={busy} onClick={actions.onDelete}>
                 Delete swarm
               </button>
@@ -350,6 +432,12 @@ export function SwarmPage({
           <div className="swarm-brief-head">
             <span className="label">Goal</span>
             {!briefOpen && <span className="swarm-brief-excerpt" title={swarm.goal}>{goalExcerpt(swarm.goal)}</span>}
+            {briefOpen && (
+              <div className="swarm-brief-metrics">
+                <div className="swarm-spend-summary"><span>Spend estimate</span><strong className="spend-figure">{formatUsd(cappedUsd(swarm.spend))}</strong><small>{swarm.budgetUsd === null ? "No budget cap" : `${formatUsd(swarm.budgetUsd)} budget`}</small></div>
+                <div className="swarm-worker-control"><span className="swarm-control-label">Workers</span><WorkerStepper workers={swarm.workers} active={swarm.workersActive} max={swarm.maxWorkers} disabledReason={busy ? "Wait for the current change to finish." : !canStop(swarm.status) ? "Worker count cannot change after the swarm ends." : null} onChange={actions.onWorkers} /></div>
+              </div>
+            )}
             <button
               type="button"
               className="swarm-brief-toggle"
@@ -367,6 +455,7 @@ export function SwarmPage({
             <div id="swarm-brief-body">
               <p>{swarm.goal}</p>
               <SwarmPlanBrief planMode={swarm.planMode} sources={detail.planSources ?? []} />
+              {(waitingForPlan || planNeedsApproval) && <p className="swarm-next-step" role="status">{nextStep}</p>}
             </div>
           )}
         </div>
@@ -381,13 +470,6 @@ export function SwarmPage({
         {!briefOpen && (waitingForPlan || planNeedsApproval) && (
           <p className="swarm-next-step swarm-next-step-folded" role="status">{nextStep}</p>
         )}
-        {briefOpen && <div className="swarm-brief-side">
-          {(waitingForPlan || planNeedsApproval) && <p className="swarm-next-step" role="status">{nextStep}</p>}
-          <div className="swarm-brief-metrics">
-            <div className="swarm-spend-summary"><span>Spend estimate</span><strong className="spend-figure">{formatUsd(cappedUsd(swarm.spend))}</strong><small>{swarm.budgetUsd === null ? "No budget cap" : `${formatUsd(swarm.budgetUsd)} budget`}</small></div>
-            <div className="swarm-worker-control"><span className="swarm-control-label">Workers</span><WorkerStepper workers={swarm.workers} active={swarm.workersActive} max={swarm.maxWorkers} disabledReason={busy ? "Wait for the current change to finish." : !canStop(swarm.status) ? "Worker count cannot change after the swarm ends." : null} onChange={actions.onWorkers} /></div>
-          </div>
-        </div>}
       </section>
 
       {swarm.question && (
@@ -403,6 +485,39 @@ export function SwarmPage({
         deliverable={swarm.deliverable}
         onOpen={onOpenArtifact}
       />
+
+      {swarm.status === "failed" && swarm.updatedAt && (
+        <p className="muted swarm-grace-note">
+          This swarm&apos;s sandbox is kept until about {graceDate(swarm.updatedAt)} so its tasks and merge queue can be
+          retried. Its branches are also on GitHub when the project has a GitHub connection.
+        </p>
+      )}
+
+      {swarm.status === "done" && actions.onPublish && detail.pullRequests.length === 0 && stackedPullRequests(detail.tasks).length === 0 && (
+        <div className="swarm-publish" role="group" aria-label="Open pull requests">
+          <p>Every branch is on GitHub. Open the pull requests as one for the swarm, or one per task, stacked in the order the tasks landed.</p>
+          <div className="actions">
+            <button className="btn btn-primary" disabled={busy} onClick={() => actions.onPublish?.("combined")}>One pull request</button>
+            <button className="btn" disabled={busy} onClick={() => actions.onPublish?.("stacked")}>One per task, stacked</button>
+          </div>
+        </div>
+      )}
+
+      {stackedPullRequests(detail.tasks).length > 0 && (
+        <div className="swarm-prs" aria-label="Stacked pull requests">
+          {stackedPullRequests(detail.tasks).map((pr) =>
+            pr.url ? (
+              <a key={pr.key} className="chip chip-link" href={pr.url} target="_blank" rel="noreferrer" title={pr.repoUrl}>
+                {pr.title} #{pr.number}
+              </a>
+            ) : (
+              <span key={pr.key} className="chip" title="This pull request's address is not a web link, so it is shown without one.">
+                {pr.title} #{pr.number}
+              </span>
+            ),
+          )}
+        </div>
+      )}
 
       {detail.pullRequests.length > 0 && (
         <div className="swarm-prs">
@@ -472,6 +587,8 @@ export function SwarmPage({
           swarmDone={swarm.status === "done"}
           checkout={detail.branchCheckout}
           onReleaseBranch={actions.onReleaseBranch}
+          onRetryLanding={actions.onRetryLanding}
+          swarmStatus={swarm.status}
           busy={busy}
           tasks={detail.tasks}
           selectedId={selectedId}
@@ -681,4 +798,37 @@ function PlannerQuestionBanner({
       </form>
     </div>
   );
+}
+
+/** When a failed swarm's sandbox is reaped, a week after the swarm last changed, as a date. */
+function graceDate(updatedAt: string): string {
+  const date = new Date(new Date(updatedAt).getTime() + 7 * 24 * 60 * 60 * 1000);
+  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+/**
+ * The per-task pull requests of a swarm published as a stack, in the
+ * order the tasks were laid out. Each task records its own, per
+ * repository; the address goes through the same check every other
+ * link here does.
+ */
+export function stackedPullRequests(
+  tasks: SwarmDetail["tasks"],
+): { key: string; title: string; repoUrl: string; number: number; url: string | null }[] {
+  const out: { key: string; title: string; repoUrl: string; number: number; url: string | null }[] = [];
+  for (const task of tasks) {
+    const prs = (task.flags as { pullRequests?: Record<string, { number?: unknown; url?: unknown }> }).pullRequests;
+    if (!prs || typeof prs !== "object") continue;
+    for (const [repoUrl, pr] of Object.entries(prs)) {
+      if (typeof pr?.number !== "number") continue;
+      out.push({
+        key: `${task.id}:${repoUrl}`,
+        title: task.title,
+        repoUrl,
+        number: pr.number,
+        url: typeof pr.url === "string" ? externalHttpUrl(pr.url) : null,
+      });
+    }
+  }
+  return out;
 }

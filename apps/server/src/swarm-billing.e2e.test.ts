@@ -32,6 +32,8 @@ import { loadEnv } from "./env.js";
 import { createFeatureFlags } from "./feature-flags.js";
 import { executeRun, markCancelled } from "./orchestrator/run-executor.js";
 import { tickSwarm } from "./orchestrator/swarm/coordinator.js";
+import { SANDBOX_PROVISIONED_EVENT } from "./orchestrator/sandbox-metrics.js";
+import { recordingAnalytics } from "./test-analytics.js";
 
 /**
  * The contract between swarms and whatever bills for them.
@@ -425,6 +427,35 @@ test("a Sprite provider failure before the agent starts is neither charged nor a
   assert.equal(Number(uncharged!.spentMeasuredUsd), 0);
   assert.equal(Number(uncharged!.spentEstimatedUsd), 0);
   assert.equal(Number(uncharged!.spentAssumedUsd), 0);
+});
+
+/**
+ * Not billing, but this is the suite that runs a swarm's run through
+ * the executor: a swarm run records its provider on the shared
+ * agent_runs row the way a card's does, and the provision event says
+ * it was a swarm's planner.
+ */
+test("a swarm run records the provider that made its machine", async () => {
+  const created = await createSwarm();
+  const swarm = (await created.json()) as { id: string; plannerRunId: string };
+  const recorded = recordingAnalytics();
+  const previousAnalytics = ctx.analytics;
+  ctx.analytics = recorded.analytics;
+  try {
+    await executeRun(ctx, swarm.plannerRunId);
+  } finally {
+    ctx.analytics = previousAnalytics;
+  }
+
+  const [run] = await db.select().from(agentRuns).where(eq(agentRuns.id, swarm.plannerRunId));
+  assert.equal(run!.type, "swarm");
+  assert.equal(run!.sandboxProvider, "local-process");
+  const provisioned = recorded.events.filter((e) => e.event === SANDBOX_PROVISIONED_EVENT);
+  assert.equal(provisioned.length, 1);
+  assert.equal(provisioned[0]?.properties?.run_id, swarm.plannerRunId);
+  assert.equal(provisioned[0]?.properties?.role, "planner");
+  assert.equal(provisioned[0]?.properties?.run_type, "swarm");
+  assert.equal(provisioned[0]?.properties?.swarm_id, swarm.id);
 });
 
 /**

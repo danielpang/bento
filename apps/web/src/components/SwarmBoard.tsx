@@ -9,9 +9,10 @@ import { SwarmEmpty, SwarmStrip } from "./SwarmStrip.js";
 import { SwarmNodeDrawer } from "./SwarmNodeDrawer.js";
 import { SwarmRunOutput, SwarmRunOutputDrawer, SwarmWorkerOutputDrawer } from "./SwarmRunOutput.js";
 import { SwarmPage } from "./SwarmPage.js";
-import { BoardSkeleton } from "./Skeleton.js";
+import { SwarmPageSkeleton } from "./Skeleton.js";
 import { swarmApi, type SwarmAgent } from "../swarm/client.js";
 import { createModelCache } from "../swarm/layout.js";
+import { leafStartBlocker } from "../swarm/waiting.js";
 import type { ModeSurfaces } from "../swarm/plan.js";
 import type {
   NewSwarmInput,
@@ -307,7 +308,21 @@ export function SwarmBoard({
   const [workerOutput, setWorkerOutput] = useState<{ runId: string; taskTitle: string } | null>(null);
 
   const model = useMemo(
-    () => buildModel(detail?.tasks ?? [], { expanded, folded, autoCollapseCompleted: detail?.swarm.status !== "done", now }),
+    () => buildModel(detail?.tasks ?? [], {
+      expanded,
+      folded,
+      autoCollapseCompleted: detail?.swarm.status !== "done",
+      now,
+      // An empty list is an answer: nobody is in a sandbox. A fixture
+      // that omits the field keeps the run id on the task row. The
+      // check is presence, and an empty array is present.
+      ...(detail?.runningTaskIds
+        ? {
+            runningTaskIds: new Set(detail.runningTaskIds),
+            agentStartedAt: new Map(Object.entries(detail.agentStartedAt ?? {})),
+          }
+        : {}),
+    }),
     [buildModel, detail, expanded, folded, now],
   );
 
@@ -330,8 +345,28 @@ export function SwarmBoard({
       .finally(() => setBusy(false));
   }
 
-  // Swarm lanes are not the project's stages: the seeded shape.
-  if (swarms === null) return <BoardSkeleton projectId={null} />;
+  // A swarm is a header and a tree, not lanes: its own skeleton. A list
+  // that failed to load says so and offers a retry, rather than leaving
+  // the skeleton shimmering over a fetch that is no longer in flight.
+  if (swarms === null) {
+    if (!error) return <SwarmPageSkeleton />;
+    return (
+      <div className="swarm-board">
+        <div className="setup-prompt" role="alert">
+          <span>{error}</span>
+          <button
+            className="btn"
+            onClick={() => {
+              setError("");
+              loadSwarms();
+            }}
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   const task = taskId ? detail?.tasks.find((row) => row.id === taskId) ?? null : null;
   const layoutNode = taskId ? model.byId.get(taskId) ?? null : null;
@@ -408,6 +443,8 @@ export function SwarmBoard({
             onRetryPlanner: () => selectedId && act(() => swarmApi.retryPlanner(selectedId)),
             onStop: () => selectedId && act(() => swarmApi.stopSwarm(selectedId)),
             onReleaseBranch: () => selectedId && act(() => swarmApi.releaseSwarmBranch(selectedId)),
+            onRetryLanding: (taskId) => selectedId && act(() => swarmApi.retryLanding(selectedId, taskId), true),
+            onPublish: (mode) => selectedId && act(() => swarmApi.publishSwarm(selectedId, mode)),
             onReopen: () => setReopening(true),
             onDelete: () => selectedId && setDeleting({ id: selectedId, name: detail.swarm.name }),
             onArchive: () => selectedId && act(() => swarmApi.archiveSwarm(selectedId)),
@@ -419,7 +456,7 @@ export function SwarmBoard({
           }}
         />
       ) : (
-        <BoardSkeleton projectId={null} />
+        <SwarmPageSkeleton />
       )}
 
       {task && layoutNode && (
@@ -441,6 +478,8 @@ export function SwarmBoard({
           {...(node?.taskId === task.id ? { detail: node } : {})}
           busy={busy}
           actionError={taskActionError}
+          swarmStatus={detail?.swarm.status}
+          startBlocker={detail ? leafStartBlocker(task, detail.tasks, detail.swarm) : null}
           onClose={() => { setTaskActionError(""); setTaskId(null); }}
           // act reloads the detail, so the rings above the node move
           // as soon as the reconciler has rolled the finish up.
@@ -448,6 +487,7 @@ export function SwarmBoard({
           agents={agents}
           onRetry={(id) => selectedId && act(() => swarmApi.retryTask(selectedId, id), true)}
           onRetryLanding={(id) => selectedId && act(() => swarmApi.retryLanding(selectedId, id), true)}
+          onStartOver={(id) => selectedId && act(() => swarmApi.startTaskOver(selectedId, id), true)}
           onFixForward={(id, reason) => selectedId && act(() => swarmApi.retryTask(selectedId, id, reason), true)}
           onOpenRun={(runId) => {
             setWorkerOutput({ runId, taskTitle: task.title });

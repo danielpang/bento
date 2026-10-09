@@ -868,7 +868,10 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
       await git(origin, ["commit", "--quiet", "-am", "Line item totals"]);
       const swarmSha = (await git(origin, ["rev-parse", "HEAD"])).trim();
       const startPath = path.join(root, "start.bundle");
-      await git(origin, ["bundle", "create", startPath, `${baseSha}..swarm/e2e`]);
+      // The same shape exportRepository writes: HEAD, not the branch
+      // name. A range (`base..branch`) carries the branch ref and hid
+      // the fetch that asks a HEAD bundle for that ref.
+      await git(origin, ["bundle", "create", startPath, "HEAD", `^${baseSha}`]);
       await git(origin, ["checkout", "--quiet", "main"]);
 
       await driver.provision({

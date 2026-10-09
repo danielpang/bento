@@ -3,6 +3,7 @@ import { WORKSPACE_ARTIFACT_DIR } from "@bento/core";
 import { AGENT_BINARIES, TOOLCHAIN_VERSION, agentToolchainScript } from "./agent-toolchain.js";
 import {
   execTimeoutMessage,
+  SandboxImageLost,
   type ExecChunk,
   type ExecOptions,
   type ProvisionSpec,
@@ -15,6 +16,8 @@ import {
 } from "./driver.js";
 import { BENTO_EXEC_PYTHON, FrameDecoder, execDirectory, execStamp } from "./modal-exec.js";
 import { spriteSize } from "./sprite.js";
+import { shellQuote, shellQuotePart } from "./shell.js";
+import { fetchStartBundleCommand } from "./start-bundle.js";
 
 /**
  * One App for every sandbox this deployment creates. Development and
@@ -51,6 +54,15 @@ export const MODAL_REPO_PREPARE_TIMEOUT_MS = 10 * 60 * 1000;
 const SNAPSHOT_TIMEOUT_MS = 240_000;
 const CREATE_NAME_RETRY_MS = [2_000, 2_000];
 const LIFETIME_NOTICE_MS = 23 * 60 * 60 * 1000;
+
+/**
+ * How long a stdin feeder may take to exit once its input is closed.
+ * It exits as soon as EOF reaches it, so this only runs out when EOF
+ * was lost. The command's own result never waits on the feeder longer
+ * than this: before the bound, a lost EOF left exec's `finally` waiting
+ * on the feeder forever, so even the command timeout could not end it.
+ */
+export const MODAL_STDIN_DRAIN_MS = 30_000;
 
 export interface ModalImageRef {
   imageId: string;
@@ -151,6 +163,8 @@ export interface ModalDriverOptions {
   memoryMiB?: number;
   /** Test double. Production leaves this unset and builds a real client. */
   api?: ModalApi;
+  /** Test override for MODAL_STDIN_DRAIN_MS. */
+  stdinDrainMs?: number;
 }
 
 export function modalSandboxSize(cpu: number, memoryMiB: number): string {
@@ -413,6 +427,54 @@ export class ModalDriver implements SandboxDriver {
     await box.mountImage(handle.workdir, image);
   }
 
+  /**
+   * Starts a hibernated machine again under its own name, from the
+   * newest image of its workspace: the exit snapshot of the stopped
+   * box when this process can still see one, else the hibernation
+   * image on the row. Never a fresh toolchain image, because the
+   * caller wants the branches that only the snapshot holds.
+   *
+   * The network is the one provision would have given it, for the
+   * reason restore takes it: the next run in the warm window reuses
+   * this machine as it is.
+   */
+  async wake(
+    handle: SandboxHandle,
+    options: { organizationId?: string | null } = {},
+  ): Promise<{ booted: boolean; imageRef?: string }> {
+    const api = await this.api();
+    if (await this.runningBox(api, handle.externalId)) return { booted: false };
+    const allowlist = modalOutboundAllowlist({
+      ...(handle.network ? { network: handle.network } : {}),
+      ...(handle.allowedHosts ? { allowedHosts: handle.allowedHosts } : {}),
+    });
+    let image: ModalImageRef | null = null;
+    const dead = await this.deadBox(api, handle.externalId);
+    if (dead) image = await dead.experimentalGetExitSnapshot().catch(() => null);
+    if (!image && handle.imageRef) image = await api.imageFromId(handle.imageRef);
+    if (!image) throw new SandboxImageLost(handle.externalId);
+    const workspaceKey = handle.externalId.startsWith("bento-")
+      ? handle.externalId.slice("bento-".length)
+      : handle.externalId;
+    let box: ModalBox;
+    try {
+      box = await this.createNamed(api, image, this.createParams(handle.externalId, {
+        tags: this.sandboxTags(workspaceKey, options.organizationId ?? undefined),
+        ...(allowlist ? { outboundDomainAllowlist: allowlist } : {}),
+      }));
+    } catch (err) {
+      // A run's provision, or another wake, booted it first.
+      if (await this.runningBox(api, handle.externalId)) return { booted: false };
+      throw err;
+    }
+    this.remembered.set(handle.externalId, box);
+    if (image.imageId === handle.imageRef) return { booted: true };
+    // Booted from the exit snapshot, which supersedes the stored
+    // image. The row records the new one, and the old one is nobody's.
+    if (handle.imageRef) await api.deleteImage(handle.imageRef).catch(() => {});
+    return { booted: true, imageRef: image.imageId };
+  }
+
   async exportRepository(
     handle: SandboxHandle,
     repositoryName: string,
@@ -434,6 +496,8 @@ export class ModalDriver implements SandboxDriver {
       // checkout will need. An incremental bundle is enough when the
       // reader already has the base, which is the publish path.
       ...(options.selfContained ? [] : ['if [ "$base_sha" = "$head_sha" ]; then exit 3; fi']),
+      // HEAD, not the branch name. The checkout fetches whichever
+      // ref the bundle lists. See fetchStartBundleCommand.
       options.selfContained
         ? `git bundle create ${shellQuote(bundlePath)} HEAD >/dev/null`
         : `git bundle create ${shellQuote(bundlePath)} HEAD "^$base_sha" >/dev/null`,
@@ -870,7 +934,8 @@ export class ModalDriver implements SandboxDriver {
       }
     } finally {
       await proc.endStdin().catch(() => {});
-      await proc.wait().catch(() => {});
+      const drained = await settlesWithin(proc.wait(), this.options.stdinDrainMs ?? MODAL_STDIN_DRAIN_MS);
+      if (!drained) console.warn(`modal stdin feeder for ${dir} did not exit after its input was closed`);
       await this.closeStdin(box, dir);
     }
   }
@@ -940,9 +1005,11 @@ export class ModalDriver implements SandboxDriver {
             "fi",
             ...(repo.startBundle
               ? [
-                  // Forced, because a re-provision finds the ref already
-                  // there at an older head: the swarm's branch has moved.
-                  `cd ${shellQuote(dir)} && git fetch ${shellQuote(startPath)} +refs/heads/${shellQuotePart(repo.startBundle.branch)}:refs/heads/${shellQuotePart(repo.startBundle.branch)}`,
+                  // The bundle lists HEAD or the branch, depending on
+                  // who built it. Asking a HEAD bundle for the branch
+                  // ref is exit 128. Forced, so a re-provision replaces
+                  // the head the swarm has moved past.
+                  fetchStartBundleCommand(dir, startPath, repo.startBundle.branch),
                 ]
               : []),
             `cd ${shellQuote(dir)} && (git checkout ${shellQuote(branch)} || git checkout -b ${shellQuote(branch)} ${shellQuote(startRef)})`,
@@ -1009,15 +1076,6 @@ function isAlreadyExists(err: unknown): boolean {
   return err instanceof Error && (err.name === "AlreadyExistsError" || /AlreadyExistsError/.test(err.message));
 }
 
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
-function shellQuotePart(value: string): string {
-  if (!/^[a-zA-Z0-9._/-]+$/.test(value)) throw new Error("unsafe git reference");
-  return value;
-}
-
 async function runShell(
   box: ModalBox,
   script: string,
@@ -1037,4 +1095,17 @@ async function runShell(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Whether `promise` settles (either way) within `ms`. Never rejects. */
+async function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<false>((resolve) => {
+    timer = setTimeout(() => resolve(false), ms);
+  });
+  try {
+    return await Promise.race([promise.then(() => true, () => true), expired]);
+  } finally {
+    clearTimeout(timer);
+  }
 }

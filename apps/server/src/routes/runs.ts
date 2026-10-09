@@ -8,14 +8,16 @@ import { agentProfiles, agentRuns, features, projects, runEvents, sandboxes, sta
 import type { AppContext } from "../context.js";
 import { deferAfterCommit, tenantDb as db } from "../middleware/tenant.js";
 import { actor } from "../middleware/actor.js";
-import { markCancelled, modalNetworkForProject } from "../orchestrator/run-executor.js";
-import { armModalHibernation } from "../orchestrator/hibernate-sandbox.js";
+import { markCancelled } from "../orchestrator/run-executor.js";
+import { modalNetworkForProject } from "../orchestrator/sandbox-network.js";
+import { markSandboxAwake } from "../orchestrator/hibernate-sandbox.js";
 import { CARD_BUSY, NO_REPOSITORIES, projectHasRepositories, startRunIfIdle } from "../orchestrator/start-run.js";
 import { enqueueRun } from "../orchestrator/queue.js";
 import type { SandboxDriver } from "@bento/sandbox";
 import { driverForSandbox, SandboxDriverUnavailable } from "../orchestrator/sandbox-driver.js";
 import { canAccessProject, getAccessibleFeature, getAccessibleRun, getAccessibleRunOutput } from "../access.js";
 import { requireSwarms } from "../orchestrator/swarm/gate.js";
+import { runsForCaller } from "../feature-flags.js";
 
 const createRun = z.object({
   featureId: z.string().uuid(),
@@ -78,7 +80,8 @@ export function runRoutes(ctx: AppContext) {
     .get("/:id", async (c) => {
       const found = await getAccessibleRun(ctx, c, c.req.param("id"));
       if (!found) return c.json({ error: "not found" }, 404);
-      return c.json(found.run);
+      const [run] = await runsForCaller(ctx, c, [found.run]);
+      return c.json(run);
     })
     /**
      * Continues a finished run in the same CLI session, so the agent
@@ -142,8 +145,9 @@ export function runRoutes(ctx: AppContext) {
         runId: run.id,
         status: "cancelled",
       });
-      const [updated] = await db(c, ctx).select().from(agentRuns).where(eq(agentRuns.id, run.id));
-      return c.json(updated);
+      const updated = await db(c, ctx).select().from(agentRuns).where(eq(agentRuns.id, run.id));
+      const [visible] = await runsForCaller(ctx, c, updated);
+      return c.json(visible);
     })
     /**
      * Undoes a run by restoring the sandbox to the snapshot taken before
@@ -216,11 +220,7 @@ export function runRoutes(ctx: AppContext) {
         // 24 hour cap. Ready plus a later job puts it back on the
         // same path as a run that just finished.
         if (driver.provider === "modal" && sandbox) {
-          await db(c, ctx)
-            .update(sandboxes)
-            .set({ status: "ready", lastUsedAt: new Date() })
-            .where(and(eq(sandboxes.id, sandbox.id), eq(sandboxes.status, "hibernated")));
-          await armModalHibernation(ctx, sandbox.id);
+          await markSandboxAwake(db(c, ctx), ctx, sandbox.id);
         }
       } catch (err) {
         ctx.analytics?.captureException(err, actor(c), run.organizationId, {

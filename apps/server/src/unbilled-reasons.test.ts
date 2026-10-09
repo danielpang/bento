@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { UNBILLED_REASONS, unbilledReason, type UnbilledReason } from "./unbilled-reasons.js";
+import { SWARM_BRANCH_LOST_MESSAGE, UNBILLED_REASONS, unbilledReason, type UnbilledReason } from "./unbilled-reasons.js";
 
 test("unbilled reason ids are unique", () => {
   const ids = UNBILLED_REASONS.map((reason) => reason.id);
@@ -38,6 +38,19 @@ test("provider failures before a Sprite starts are not billed", () => {
     unbilledReason("The sandbox for this run no longer exists, so codex never ran. Run again to provision a new sandbox.")?.id,
     "sandbox-gone",
   );
+  assert.equal(
+    unbilledReason("The sandbox stopped responding before the agent started, so no agent ran.")?.id,
+    "sandbox-stalled",
+  );
+  assert.equal(
+    unbilledReason(
+      "An agent from an earlier run of this task is still running in its sandbox and could not be stopped, so a second agent was not started beside it.",
+    )?.id,
+    "previous-agent-running",
+  );
+  assert.equal(unbilledReason("Bento restarted before the agent started, so no agent ran.")?.id, "restart-before-agent");
+  assert.equal(unbilledReason("interrupted by a server restart"), null, "a restart that cut off a working agent stays billed");
+  assert.equal(unbilledReason(SWARM_BRANCH_LOST_MESSAGE)?.id, "swarm-branch-lost");
 });
 
 test("agent work and caller-caused provisioning failures remain billable", () => {

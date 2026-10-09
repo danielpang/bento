@@ -1,5 +1,5 @@
 import { and, asc, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
-import { agentRuns, runEvents, swarmMessages, swarmTaskEvents, swarmTasks, swarms } from "@bento/db";
+import { agentRuns, runEvents, swarmLandings, swarmMessages, swarmTaskEvents, swarmTasks, swarms } from "@bento/db";
 import type { AppContext } from "../../context.js";
 import { captureJobErrors } from "../../analytics.js";
 import { QUEUE_POLL_SECONDS } from "../queue.js";
@@ -31,6 +31,14 @@ import { captureSwarmSpend } from "./spend.js";
  * it: the workers that are mid task finish, and the swarm ends when
  * the last of them stops.
  *
+ * And every swarm that is still being worked, once a minute, because a
+ * swarm is a reconciler fed by events and an event can be lost: a job
+ * that pg-boss gave up on, a send that failed after its commit, a
+ * landing's backoff whose tick was dropped. Each of those stalled a
+ * swarm silently until a reboot ticked everything. A tick is a
+ * function of the rows, so one that finds nothing to do writes nothing,
+ * and this pass is the floor under every other door.
+ *
  * And a swarm paused because the team ran out of agent hours, which is
  * the case that needs a clock most of all. Hours coming back is not an
  * event this server hears about: the period rolls over somewhere else,
@@ -45,6 +53,15 @@ import { captureSwarmSpend } from "./spend.js";
  */
 
 export const SWARM_WATCHDOG_QUEUE = "swarm.watchdog";
+
+/**
+ * A run whose agent process is in the sandbox.
+ *
+ * Queued and starting are the claim, the provision, and repository
+ * setup. None of those is an agent working, so the long-run clock
+ * neither warns on them nor treats them as a reason to keep a warning.
+ */
+const AGENT_IN_SANDBOX = ["running"] as const;
 
 /** Every minute. The thresholds are in tens of minutes; this is precise enough. */
 const WATCHDOG_CRON = "* * * * *";
@@ -116,18 +133,40 @@ export async function stopSwarmWatchdog(ctx: AppContext): Promise<void> {
  * that cannot wake itself.
  */
 export async function hasWatchedSwarms(ctx: Pick<AppContext, "db">): Promise<boolean> {
-  const [row] = await ctx.db
-    .select({ id: swarms.id })
-    .from(swarms)
-    .where(
-      or(
-        inArray(swarms.status, ["planning", "running", "blocked"]),
-        and(eq(swarms.status, "paused"), eq(swarms.pausedReason, "plan_limit")),
-      ),
-    )
-    .limit(1);
+  const [row] = await ctx.db.select({ id: swarms.id }).from(swarms).where(WATCHED_SWARMS).limit(1);
   return Boolean(row);
 }
+
+/**
+ * The swarms the clock looks at, and the reconcile pass ticks.
+ *
+ * Every state a tick can still move: being planned, being worked,
+ * blocked on a person, and paused on the plan's hours. And the two
+ * ceilings, but only while something is still in flight under them:
+ * nothing is killed for a budget or a time limit, so the workers that
+ * were running finish and their branches land, and that landing is
+ * what can finish the swarm. Once nothing is in flight they wait for a
+ * person to raise the ceiling, which ticks them itself, and a tick a
+ * minute for a swarm that ended last month would be a cost with no
+ * purpose.
+ */
+export const WATCHED_SWARMS = or(
+  inArray(swarms.status, ["planning", "running", "blocked"]),
+  and(eq(swarms.status, "paused"), eq(swarms.pausedReason, "plan_limit")),
+  and(
+    inArray(swarms.status, ["budget_exhausted", "timed_out"]),
+    sql`(
+      exists (
+        select 1 from ${agentRuns}
+        where ${agentRuns.swarmId} = ${swarms.id} and ${agentRuns.status} in ('queued', 'starting', 'running')
+      )
+      or exists (
+        select 1 from ${swarmLandings}
+        where ${swarmLandings.swarmId} = ${swarms.id} and ${swarmLandings.status} in ('queued', 'landing', 'conflicted')
+      )
+    )`,
+  ),
+);
 
 /** What one pass did, for the log and for the tests. */
 export interface WatchdogResult {
@@ -141,6 +180,8 @@ export interface WatchdogResult {
   retried: string[];
   /** Nodes this pass stopped calling slow, because they had stopped. */
   cleared: string[];
+  /** Swarms this pass asked to reconcile, which is every one it watched. */
+  reconciled: string[];
 }
 
 /**
@@ -151,7 +192,7 @@ export interface WatchdogResult {
  * second time and a process that restarts loses nothing.
  */
 export async function runWatchdog(ctx: AppContext, now: Date = new Date()): Promise<WatchdogResult> {
-  const result: WatchdogResult = { warned: [], escalated: [], timedOut: [], retried: [], cleared: [] };
+  const result: WatchdogResult = { warned: [], escalated: [], timedOut: [], retried: [], cleared: [], reconciled: [] };
   const live = await ctx.db
     .select({
       id: swarms.id,
@@ -162,12 +203,7 @@ export async function runWatchdog(ctx: AppContext, now: Date = new Date()): Prom
       timeLimitMin: swarms.timeLimitMin,
     })
     .from(swarms)
-    .where(
-      or(
-        inArray(swarms.status, ["planning", "running", "blocked"]),
-        and(eq(swarms.status, "paused"), eq(swarms.pausedReason, "plan_limit")),
-      ),
-    );
+    .where(WATCHED_SWARMS);
 
   for (const swarm of live) {
     const thresholds: Thresholds = DEFAULT_THRESHOLDS;
@@ -181,12 +217,26 @@ export async function runWatchdog(ctx: AppContext, now: Date = new Date()): Prom
     if (swarm.status === "paused") {
       await enqueueSwarmTick(ctx, swarm.id);
       result.retried.push(swarm.id);
+      result.reconciled.push(swarm.id);
       continue;
     }
 
     await watchRuns(ctx, swarm, thresholds, now, result);
     await clearStoppedRuns(ctx, swarm, now, result);
-    await enforceTimeLimit(ctx, swarm, now, result);
+    // A swarm already at a ceiling has its ending; the clock does not
+    // give it another one.
+    if (swarm.status !== "budget_exhausted" && swarm.status !== "timed_out") {
+      await enforceTimeLimit(ctx, swarm, now, result);
+    }
+    /*
+     * And the reconcile. One tick per swarm per pass, on the swarm's own
+     * singleton key, so a pass that already asked for one above (an
+     * escalation, a cleared clock) or an event that did adds no second
+     * job: a tick waiting to be picked up swallows the send. A swarm the
+     * clock just timed out is ticked too, which is what records it.
+     */
+    await enqueueSwarmTick(ctx, swarm.id);
+    result.reconciled.push(swarm.id);
   }
   return result;
 }
@@ -222,15 +272,17 @@ async function clearStoppedRuns(
   if (flagged.length === 0) return;
 
   /*
-   * Which nodes still have an agent on them, counting the planner's
-   * turn against the root exactly as watchRuns counts it there. The
-   * two have to agree, or the clock would clear the root a second
-   * after saying it.
+   * Which nodes still have an agent in a sandbox, counting the
+   * planner's turn against the root exactly as watchRuns counts it
+   * there. The two have to agree, or the clock would clear the root
+   * a second after saying it. A queued or starting run is not an
+   * agent on the node: the flag is about an agent that is running,
+   * and it comes off when that stops being true.
    */
   const running = await ctx.db
     .select({ taskId: agentRuns.swarmTaskId })
     .from(agentRuns)
-    .where(and(eq(agentRuns.swarmId, swarm.id), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)));
+    .where(and(eq(agentRuns.swarmId, swarm.id), inArray(agentRuns.status, AGENT_IN_SANDBOX)));
   const busy = new Set<string>();
   let rootStandsIn: string | null | undefined;
   for (const run of running) {
@@ -277,12 +329,13 @@ type WatchedSwarm = {
 };
 
 /**
- * The two thresholds, over every agent currently working in one swarm.
+ * The two thresholds, over every agent that is in a sandbox.
  *
- * Elapsed is measured from when the run started rather than when it was
- * queued: a run that waited ten minutes for a slot has not been working
- * for ten minutes, and counting the wait would turn a busy swarm yellow
- * for being busy.
+ * Elapsed is measured from when the agent process started, not from
+ * the claim and not from the queue. A run that waited for a slot, or
+ * sat in provisioning and setup, has not been working for that time.
+ * A row from before agent_started_at existed has only the claim time,
+ * which is the closest clock it has.
  */
 async function watchRuns(
   ctx: AppContext,
@@ -297,15 +350,16 @@ async function watchRuns(
       role: agentRuns.role,
       taskId: agentRuns.swarmTaskId,
       startedAt: agentRuns.startedAt,
-      queuedAt: agentRuns.queuedAt,
+      agentStartedAt: agentRuns.agentStartedAt,
     })
     .from(agentRuns)
-    .where(and(eq(agentRuns.swarmId, swarm.id), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)));
+    .where(and(eq(agentRuns.swarmId, swarm.id), inArray(agentRuns.status, AGENT_IN_SANDBOX)));
   if (running.length === 0) return;
 
   let woke = false;
   for (const run of running) {
-    const since = run.startedAt ?? run.queuedAt;
+    const since = run.agentStartedAt ?? run.startedAt;
+    if (!since) continue;
     const minutes = (now.getTime() - since.getTime()) / 60_000;
     if (minutes < thresholds.warnMin) continue;
 

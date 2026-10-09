@@ -10,8 +10,10 @@ import {
   projects,
   runMigrations,
   sandboxes,
+  swarmTasks,
   swarms,
 } from "@bento/db";
+import { eq } from "drizzle-orm";
 import pg from "pg";
 import { createApp } from "../app.js";
 import { createDrivers, ensureLocalUser, type AppContext } from "../context.js";
@@ -445,6 +447,110 @@ test("a swarm on a modal project uses Modal, and a live Sprite swarm stays on Sp
     assert.equal(kept.provider, "sprite");
     assert.notEqual(kept, drivers.default);
     assert.notEqual(kept, drivers.get("modal"));
+  } finally {
+    await pool.end();
+  }
+});
+
+test("a worker whose swarm is on a sprite falls back to Modal on auto, and the swarm's own machine does not", async () => {
+  const baseUrl = process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5439/app";
+  const testDbName = "sandbox_driver_worker_test";
+  const testUrl = baseUrl.replace(/\/[^/]+$/, `/${testDbName}`);
+  const admin = new pg.Client({ connectionString: baseUrl });
+  await admin.connect();
+  await admin.query(`DROP DATABASE IF EXISTS ${testDbName} WITH (FORCE)`);
+  await admin.query(`CREATE DATABASE ${testDbName}`);
+  await admin.end();
+  await runMigrations(testUrl);
+
+  const pool = createPool(testUrl);
+  const db = createDb(pool);
+  try {
+    const ownerId = await ensureLocalUser(db);
+    // A hosted deployment: sprites by default, Modal behind them.
+    const drivers = driversFor({
+      BENTO_SANDBOX_DRIVER: "sprite",
+      SPRITES_TOKEN: "test-token",
+      MODAL_TOKEN_ID: "id",
+      MODAL_TOKEN_SECRET: "secret",
+    });
+    const sprite = drivers.get("sprite")!;
+    const modal = drivers.get("modal")!;
+    const ctx = {
+      db,
+      drivers,
+      env: loadEnv({ BENTO_MODE: "multi", DATABASE_URL: testUrl, BENTO_SANDBOX_DRIVER: "sprite" }),
+      featureFlags: new FeatureFlags(null, true),
+    } as AppContext;
+
+    const seed = async (sandboxProvider: string | null, slug: string) => {
+      const [project] = await db.insert(projects).values({ ownerId, name: slug, sandboxProvider }).returning();
+      const [swarm] = await db
+        .insert(swarms)
+        .values({ projectId: project!.id, slug, title: slug, goal: "land", workerIsolation: "sandbox" })
+        .returning();
+      const [row] = await db
+        .insert(sandboxes)
+        .values({
+          projectId: project!.id,
+          swarmId: swarm!.id,
+          provider: "sprite",
+          externalId: `bento-swarm-${swarm!.id}`,
+          status: "ready",
+          workdir: "/workspace",
+        })
+        .returning();
+      await db.update(swarms).set({ sandboxId: row!.id }).where(eq(swarms.id, swarm!.id));
+      return { ...swarm!, sandboxId: row!.id };
+    };
+
+    /**
+     * Every worker of one swarm died at its sprite's checkout on
+     * October 8th, and each was failed and handed to the planner. A
+     * card on the same project would have gone to Modal. The worker
+     * follows its swarm's provider first and carries the rest of the
+     * "auto" order behind it.
+     */
+    const auto = await seed("auto", "auto-swarm");
+    const worker = await driversForSwarmProvision(db, ctx, auto, { id: "11111111-1111-1111-1111-111111111111" }, ownerId);
+    assert.equal(worker.driver, sprite, "the swarm's provider first, so a swarm stays together while Fly answers");
+    assert.deepEqual(worker.fallbacks, [modal], "and Modal behind it, the way a card gets it");
+    assert.equal(worker.selection, "existing");
+
+    // The swarm's own machine holds the swarm's branch, which exists
+    // nowhere else: it is never moved to another provider.
+    const own = await driversForSwarmProvision(db, ctx, auto, null, ownerId);
+    assert.equal(own.driver, sprite);
+    assert.deepEqual(own.fallbacks, []);
+
+    // A project that pinned its provider gets that provider or a failed
+    // run, for a worker as for a card.
+    const pinned = await seed("sprite", "pinned-swarm");
+    const pinnedWorker = await driversForSwarmProvision(db, ctx, pinned, { id: "22222222-2222-2222-2222-222222222222" }, ownerId);
+    assert.equal(pinnedWorker.driver, sprite);
+    assert.deepEqual(pinnedWorker.fallbacks, []);
+
+    // A worker that already has a machine keeps it, whatever the project says.
+    const [workerRow] = await db
+      .insert(sandboxes)
+      .values({
+        projectId: auto.projectId,
+        swarmId: auto.id,
+        swarmTaskId: null,
+        provider: "modal",
+        externalId: `bento-swarm-${auto.id}-33333333`,
+        status: "ready",
+        workdir: "/workspace",
+      })
+      .returning();
+    const [task] = await db
+      .insert(swarmTasks)
+      .values({ swarmId: auto.id, title: "on modal already" })
+      .returning();
+    await db.update(sandboxes).set({ swarmTaskId: task!.id }).where(eq(sandboxes.id, workerRow!.id));
+    const kept = await driversForSwarmProvision(db, ctx, auto, { id: task!.id }, ownerId);
+    assert.equal(kept.driver, modal);
+    assert.deepEqual(kept.fallbacks, []);
   } finally {
     await pool.end();
   }

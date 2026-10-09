@@ -31,9 +31,12 @@ import {
 } from "../access.js";
 import type { AppContext } from "../context.js";
 import type { BoardEvent } from "../events.js";
+import { runsForCaller } from "../feature-flags.js";
 import { actor } from "../middleware/actor.js";
 import { deferAfterCommit, deferOnRollback, tenantDb as db } from "../middleware/tenant.js";
 import { queueSwarmSandboxReap, reapSwarmSandbox } from "../orchestrator/reap-sandbox.js";
+import { enqueueTaskStartOver } from "../orchestrator/swarm/start-over.js";
+import { enqueueSwarmPublish } from "../orchestrator/swarm/complete.js";
 import { driverForProject, driverForSandbox } from "../orchestrator/sandbox-driver.js";
 import { markCancelled } from "../orchestrator/run-executor.js";
 import { enqueueSwarmTick } from "../orchestrator/swarm/coordinator.js";
@@ -47,10 +50,14 @@ import {
   addLeaf,
   addedTaskNotice,
   cancelTaskTree,
+  descendantIds,
+  landingRetryRefusal,
   reassignLeaf,
   reactivateSwarmForRetry,
+  requeuedLanding,
   retryLeaf,
   retryRefusal,
+  withdrawTaskLandings,
   splitLeaf,
 } from "../orchestrator/swarm/task-actions.js";
 import { quoteUntrusted } from "../orchestrator/swarm/planner-prompt.js";
@@ -112,6 +119,9 @@ export const RUNNER_PROJECT_REFUSAL =
  */
 const LANDINGS_SHOWN = 20;
 const LANDINGS_HISTORY = 10;
+
+/** What a request that would pull a branch out from under a landing in flight is told. */
+const LANDING_IN_FLIGHT = "This task's branch is landing right now. Try again when the merge queue finishes with it.";
 
 /** A restart can overwrite a failure the agent already recorded. Show the agent's reason. */
 async function plannerFailureText(ctx: AppContext, c: Context, run: { id: string; error: string | null }) {
@@ -722,6 +732,8 @@ export function swarmRoutes(ctx: AppContext) {
           status: agentRuns.status,
           swarmTaskId: agentRuns.swarmTaskId,
           queuedAt: agentRuns.queuedAt,
+          startedAt: agentRuns.startedAt,
+          agentStartedAt: agentRuns.agentStartedAt,
         })
         .from(agentRuns)
         .where(and(eq(agentRuns.swarmId, swarm.id), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)))
@@ -786,7 +798,11 @@ export function swarmRoutes(ctx: AppContext) {
         status: swarmLandings.status,
         attempt: swarmLandings.attempt,
         error: swarmLandings.error,
+        errorCode: swarmLandings.errorCode,
         resolverRunId: swarmLandings.resolverRunId,
+        // When a queued row may be tried again, so the panel can say a
+        // branch is waiting out a backoff rather than waiting its turn.
+        notBefore: swarmLandings.notBefore,
         startedAt: swarmLandings.startedAt,
         endedAt: swarmLandings.endedAt,
       };
@@ -844,9 +860,10 @@ export function swarmRoutes(ctx: AppContext) {
        * and the text is the planner's to read through its tools.
        */
       const planSources = await listPlanSources(db(c, ctx), swarm.id);
+      const retryable = await landingRetryableTasks(ctx, c, swarm, tasks);
       return c.json({
         swarm,
-        tasks,
+        tasks: tasks.map((task) => ({ ...task, canRetryLanding: retryable.has(task.id) })),
         planSources,
         activeRuns: runs,
         agentTimeMs,
@@ -1141,6 +1158,28 @@ export function swarmRoutes(ctx: AppContext) {
      * same two refusals: there is no second door with its own idea of
      * when a swarm may run.
      */
+    /**
+     * Opens the pull requests of a finished swarm, in the shape a
+     * person chose: "combined", one pull request of the swarm's branch
+     * with every task merged in order, or "stacked", one per landed task
+     * against the task before it. The branches are already on GitHub
+     * (pushed as the swarm went), so this only asks GitHub for the
+     * pull requests, through the publish queue, which retries.
+     */
+    .post("/:id/publish", async (c) => {
+      const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
+      if (!swarm) return c.json({ error: "not found" }, 404);
+      const refusal = await requireSwarms(ctx, c, swarm.organizationId);
+      if (refusal) return c.json(refusal.body, refusal.status);
+      const body = await c.req.json().catch(() => ({}));
+      const parsed = z.object({ mode: z.enum(["combined", "stacked"]) }).safeParse(body);
+      if (!parsed.success) return c.json({ error: "Choose combined or stacked pull requests." }, 400);
+      if (swarm.status !== "done") {
+        return c.json({ error: "Pull requests open once the swarm is done." }, 409);
+      }
+      deferAfterCommit(c, () => enqueueSwarmPublish(ctx, swarm.id, parsed.data.mode));
+      return c.json({ mode: parsed.data.mode, status: "queued" }, 202);
+    })
     .post("/:id/planner/retry", async (c) => {
       const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
       if (!swarm) return c.json({ error: "not found" }, 404);
@@ -1220,6 +1259,27 @@ export function swarmRoutes(ctx: AppContext) {
       if (!swarm) return c.json({ error: "not found" }, 404);
       const refusal = await requireSwarms(ctx, c, swarm.organizationId);
       if (refusal) return c.json(refusal.body, refusal.status);
+
+      /*
+       * A ceiling is lifted by raising it, not by starting. Starting one
+       * put the swarm back to "running" until the next tick refused the
+       * spawn and ended it again, so the button looked like it worked.
+       * Raising the ceiling (PATCH /api/swarms/:id, the Settings dialog)
+       * is what the coordinator acts on, and reopen raises it with a
+       * follow up.
+       */
+      if (swarm.status === "budget_exhausted") {
+        return c.json({
+          error: "This swarm reached its budget. Raise the budget in Settings and it carries on, or add a follow up with a higher budget.",
+          code: "BUDGET",
+        }, 409);
+      }
+      if (swarm.status === "timed_out") {
+        return c.json({
+          error: "This swarm reached its time limit. Raise the time limit in Settings and it carries on, or add a follow up with a longer limit.",
+          code: "TIME_LIMIT",
+        }, 409);
+      }
 
       const [{ count } = { count: 0 }] = await db(c, ctx)
         .select({ count: sql<number>`count(*)::int` })
@@ -1703,13 +1763,20 @@ export function swarmRoutes(ctx: AppContext) {
           startedAt: agentRuns.startedAt,
           endedAt: agentRuns.endedAt,
           error: agentRuns.error,
+          sandboxProvider: agentRuns.sandboxProvider,
         })
         .from(agentRuns)
         .where(and(eq(agentRuns.swarmTaskId, task.id), eq(agentRuns.role, "worker")))
         .orderBy(desc(agentRuns.queuedAt), desc(agentRuns.id));
 
       const commits = await taskCommits(ctx, c, swarm, task);
-      return c.json({ task, events, runs, commits });
+      const retryable = await landingRetryableTasks(ctx, c, swarm, [task]);
+      return c.json({
+        task: { ...task, canRetryLanding: retryable.has(task.id) },
+        events,
+        runs: await runsForCaller(ctx, c, runs),
+        commits,
+      });
     })
     /**
      * Marks a leaf done, because a person says so.
@@ -1765,6 +1832,16 @@ export function swarmRoutes(ctx: AppContext) {
       if (task.status === "done") return c.json(task);
 
       const now = new Date();
+      /*
+       * Done by hand is done without the merge queue, so the branch
+       * leaves it: a queued row would land work on a task that is
+       * already finished, and a failed one kept offering to. A landing
+       * moving the branch right now is waited for, the way a retry
+       * waits for it.
+       */
+      if ((await withdrawTaskLandings(db(c, ctx), task.id, now)) === "landing") {
+        return c.json({ error: LANDING_IN_FLIGHT, code: "LANDING_IN_FLIGHT" }, 409);
+      }
       const [done] = await db(c, ctx)
         .update(swarmTasks)
         .set({
@@ -1774,6 +1851,9 @@ export function swarmRoutes(ctx: AppContext) {
           // job is saying where to look.
           attention: null,
           assignedRunId: null,
+          // Nor a merge queue failure: it is about a landing that is
+          // not going to happen, and it kept a retry on offer.
+          flags: { ...task.flags, landingError: undefined, landingErrorCode: undefined },
           endedAt: now,
           updatedAt: now,
         })
@@ -1822,8 +1902,11 @@ export function swarmRoutes(ctx: AppContext) {
       if ("refusal" in found) return found.refusal;
       const { swarm, task } = found;
       const body = await c.req.json().catch(() => ({}));
-      const parsed = z.object({ reason: z.string().trim().min(1).max(4000).optional() }).safeParse(body);
+      const parsed = z
+        .object({ reason: z.string().trim().min(1).max(4000).optional(), fresh: z.boolean().optional() })
+        .safeParse(body);
       if (!parsed.success) return c.json({ error: "Invalid retry request" }, 400);
+      const fresh = parsed.data.fresh === true;
       const finished = swarm.status === "failed" ? null : finishedTaskMutationRefusal(c, swarm);
       if (finished) return finished;
 
@@ -1836,8 +1919,19 @@ export function swarmRoutes(ctx: AppContext) {
        * have an agent on it, and that leaf is exactly the one somebody
        * reaches for Retry on.
        */
-      const refusedFor = retryRefusal(task);
+      const refusedFor = retryRefusal(task, { fresh });
       if (refusedFor) return c.json({ error: refusedFor, code: "NOT_A_LEAF" }, 409);
+      /*
+       * Every retry takes the branch out of the merge queue first, not
+       * only a start over. A start over discards the branch; a plain
+       * retry puts a new worker on it, whose report is accepted or not
+       * on its own. A queued row of the old attempt left behind landed
+       * the old branch and marked the task done under the new worker.
+       * One being landed this moment is the one thing this waits for.
+       */
+      if ((await withdrawTaskLandings(db(c, ctx), task.id, new Date())) === "landing") {
+        return c.json({ error: LANDING_IN_FLIGHT, code: "LANDING_IN_FLIGHT" }, 409);
+      }
 
       /*
        * Then the agent on it stops, and then the leaf goes back in the
@@ -1845,12 +1939,28 @@ export function swarmRoutes(ctx: AppContext) {
        * agent on a branch the first one is still committing to, which
        * is the one thing the merge queue cannot sort out afterwards.
        */
+      /*
+       * Starting over is cut from the swarm's branch. With the swarm's
+       * machine gone, that branch is read back from GitHub, where every
+       * landing pushed it; a swarm that never pushed (no GitHub) starts
+       * the task from the base branch, which the console says before a
+       * person confirms.
+       */
       await stopRunsOnTask(ctx, c, task.id);
-      const retried = await retryLeaf(db(c, ctx), { task, actorUserId: actor(c), ...(parsed.data.reason ? { reason: parsed.data.reason } : {}) });
+      const retried = await retryLeaf(db(c, ctx), {
+        task,
+        actorUserId: actor(c),
+        ...(parsed.data.reason ? { reason: parsed.data.reason } : {}),
+        ...(fresh ? { fresh: true } : {}),
+      });
       if ("refused" in retried) return c.json({ error: retried.refused, code: "NOT_A_LEAF" }, 409);
       if (await reactivateSwarmForRetry(db(c, ctx), swarm.id)) {
         saySwarmChanged(ctx, c, swarm, "running");
       }
+      // Starting over takes the old machine down in a job, not in this
+      // request: a slow provider would time the request out with the
+      // agent already stopped. The task reads "Restarting" until then.
+      if (fresh) deferAfterCommit(c, () => enqueueTaskStartOver(ctx, task.id));
       deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
       return c.json(retried);
     })
@@ -1858,33 +1968,44 @@ export function swarmRoutes(ctx: AppContext) {
       const found = await accessibleTask(ctx, c);
       if ("refusal" in found) return found.refusal;
       const { swarm, task } = found;
-      if (swarm.status === "cancelled" || swarm.status === "done" || task.status !== "failed" || typeof task.flags.landingError !== "string") {
-        return c.json({ error: "This task has no failed merge queue entry to retry." }, 409);
-      }
       const [landing] = await db(c, ctx).select().from(swarmLandings)
         .where(and(eq(swarmLandings.swarmId, swarm.id), eq(swarmLandings.taskId, task.id), eq(swarmLandings.status, "failed")))
         .orderBy(desc(swarmLandings.createdAt)).limit(1);
-      if (!landing) return c.json({ error: "This task has no failed merge queue entry to retry." }, 409);
-      if (await swarmHasActiveRun(db(c, ctx), swarm.id)) {
-        return c.json({ error: "An agent is still working on this swarm. Retry the merge queue after it finishes." }, 409);
+      const [agentOnTask] = await db(c, ctx).select({ id: agentRuns.id }).from(agentRuns)
+        .where(and(eq(agentRuns.swarmTaskId, task.id), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)))
+        .limit(1);
+      // The same predicate the detail routes answer `canRetryLanding`
+      // with, so the drawer offers exactly what this accepts.
+      const refused = landingRetryRefusal({ swarm, task, failedLanding: !!landing, agentOnTask: !!agentOnTask });
+      if (refused || !landing) {
+        return c.json({ error: refused ?? "This task has no failed merge queue entry to retry.", code: "CANNOT_RETRY_LANDING" }, 409);
       }
 
       const now = new Date();
       const retried = await db(c, ctx).transaction(async (tx) => {
+        /*
+         * Requeued the way the planner's accept requeues a row: nothing
+         * of the landing that failed (its count of tries, its resolver,
+         * its backoff) is about this attempt, and a resolver id left on
+         * it read as "the resolver already tried" and failed the next
+         * conflict at once. It keeps its place in the queue, which is
+         * ahead of anything accepted since: a person asked for this
+         * branch to land, and it was accepted before the ones behind it.
+         */
         const [row] = await tx.update(swarmLandings)
-          .set({ status: "queued", error: null, startedAt: null, endedAt: null, updatedAt: now })
+          .set(requeuedLanding(landing.branchName ?? task.branchName, landing.position, now))
           .where(and(eq(swarmLandings.id, landing.id), eq(swarmLandings.status, "failed")))
           .returning({ id: swarmLandings.id });
         if (!row) return false;
         await tx.update(swarmTasks)
           .set({
             status: "landed", attention: null, updatedAt: now,
-            flags: { ...task.flags, landingError: undefined, plannerToldAt: now.toISOString() },
+            flags: { ...task.flags, landingError: undefined, landingErrorCode: undefined, plannerToldAt: now.toISOString(), plannerToldBy: undefined, plannerRetells: undefined },
           })
-          .where(and(eq(swarmTasks.id, task.id), eq(swarmTasks.status, "failed")));
+          .where(and(eq(swarmTasks.id, task.id), eq(swarmTasks.status, task.status)));
         await reactivateSwarmForRetry(tx as unknown as Db, swarm.id);
         await tx.insert(swarmTaskEvents).values({
-          taskId: task.id, kind: "status_changed", fromStatus: "failed", toStatus: "landed",
+          taskId: task.id, kind: "status_changed", fromStatus: task.status, toStatus: "landed",
           detail: { mergeQueueRetry: landing.id },
         });
         return true;
@@ -1907,8 +2028,22 @@ export function swarmRoutes(ctx: AppContext) {
       const found = await accessibleTask(ctx, c);
       if ("refusal" in found) return found.refusal;
       const { swarm, task } = found;
-      const finished = finishedTaskMutationRefusal(c, swarm);
+      // A failed swarm is the one a person unsticks by hand, so its
+      // tasks can be cancelled the way they can be retried. Done and
+      // stopped swarms go through reopen.
+      const finished = swarm.status === "failed" ? null : finishedTaskMutationRefusal(c, swarm);
       if (finished) return finished;
+
+      /*
+       * The branches of the subtree leave the merge queue with it (see
+       * cancelTaskTree). Asked first, over the whole subtree, so a
+       * landing in flight refuses the request before anything is
+       * cancelled rather than leaving half of it done.
+       */
+      const subtree = [task.id, ...(await descendantIds(db(c, ctx), task.id))];
+      if ((await withdrawTaskLandings(db(c, ctx), subtree, new Date())) === "landing") {
+        return c.json({ error: LANDING_IN_FLIGHT, code: "LANDING_IN_FLIGHT" }, 409);
+      }
 
       const cancelled = await cancelTaskTree(db(c, ctx), { task, actorUserId: actor(c) });
       for (const id of cancelled) await stopRunsOnTask(ctx, c, id);
@@ -1943,7 +2078,9 @@ export function swarmRoutes(ctx: AppContext) {
         const found = await accessibleTask(ctx, c);
         if ("refusal" in found) return found.refusal;
         const { swarm, task } = found;
-        const finished = finishedTaskMutationRefusal(c, swarm);
+        // Allowed on a failed swarm for the reason cancel is: a leaf too
+        // big to finish is one way a swarm fails.
+        const finished = swarm.status === "failed" ? null : finishedTaskMutationRefusal(c, swarm);
         if (finished) return finished;
 
         const created = await splitLeaf(db(c, ctx), {
@@ -2086,6 +2223,9 @@ export function swarmRoutes(ctx: AppContext) {
             externalId: sandbox.externalId,
             provider: driver.provider,
             workdir: sandbox.workdir,
+            // A hibernated Modal machine is its image; without it the
+            // image outlives the swarm and goes on billing.
+            ...(sandbox.imageRef ? { imageRef: sandbox.imageRef } : {}),
           };
           await driver.destroy(handle);
         } catch (err) {
@@ -2232,7 +2372,14 @@ async function accessibleTask(
   return { swarm, task };
 }
 
-/** Status-changing node controls on an ended swarm go through reopen. */
+/**
+ * Status-changing node controls on an ended swarm go through reopen.
+ *
+ * Retry, start over, cancel, split and the merge queue retry let a
+ * failed swarm through (each says so where it asks), because a failed
+ * swarm is the one a person unsticks by hand. The console mirrors this
+ * in `taskActionRefusal`, so a change here belongs there too.
+ */
 function finishedTaskMutationRefusal(
   c: Context,
   swarm: Pick<typeof swarms.$inferSelect, "status">,
@@ -2244,6 +2391,43 @@ function finishedTaskMutationRefusal(
       code: "SWARM_FINISHED",
     },
     409,
+  );
+}
+
+/**
+ * The tasks whose failed merge queue entry the landing retry route
+ * would take right now, by `landingRetryRefusal`, the predicate the
+ * route itself asks. Two queries for the whole tree rather than two per
+ * task: which tasks have a failed row, and which have an agent on them.
+ */
+async function landingRetryableTasks(
+  ctx: AppContext,
+  c: Context,
+  swarm: typeof swarms.$inferSelect,
+  tasks: (typeof swarmTasks.$inferSelect)[],
+): Promise<Set<string>> {
+  const leaves = tasks.filter((task) => task.nodeType === "leaf").map((task) => task.id);
+  if (leaves.length === 0) return new Set();
+  const failed = await db(c, ctx)
+    .selectDistinct({ taskId: swarmLandings.taskId })
+    .from(swarmLandings)
+    .where(and(eq(swarmLandings.swarmId, swarm.id), eq(swarmLandings.status, "failed"), inArray(swarmLandings.taskId, leaves)));
+  if (failed.length === 0) return new Set();
+  const failedIds = new Set(failed.map((row) => row.taskId));
+  const busy = await db(c, ctx)
+    .selectDistinct({ taskId: agentRuns.swarmTaskId })
+    .from(agentRuns)
+    .where(and(inArray(agentRuns.swarmTaskId, [...failedIds]), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)));
+  const busyIds = new Set(busy.map((row) => row.taskId));
+  return new Set(
+    tasks
+      .filter((task) => landingRetryRefusal({
+        swarm,
+        task,
+        failedLanding: failedIds.has(task.id),
+        agentOnTask: busyIds.has(task.id),
+      }) === null)
+      .map((task) => task.id),
   );
 }
 

@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import test from "node:test";
-import { collectExec, execTimeoutMessage } from "./driver.js";
+import { collectExec, execTimeoutMessage, SandboxImageLost } from "./driver.js";
 import { BENTO_EXEC_PYTHON, FrameDecoder } from "./modal-exec.js";
+import { adaptProc } from "./modal-client.js";
 import {
   MODAL_SANDBOX_TIMEOUT_MS,
   ModalDriver,
@@ -137,11 +138,12 @@ function fake(options?: { running?: boolean; exitText?: string | null; dirs?: Mo
   };
 }
 
-function driver(api: ModalApi, options?: { cpu?: number; memoryMiB?: number }): ModalDriver {
+function driver(api: ModalApi, options?: { cpu?: number; memoryMiB?: number; stdinDrainMs?: number }): ModalDriver {
   return new ModalDriver({
     tokenId: "id",
     tokenSecret: "secret",
     api,
+    ...(options?.stdinDrainMs ? { stdinDrainMs: options.stdinDrainMs } : {}),
     ...(options?.cpu ? { cpu: options.cpu } : {}),
     ...(options?.memoryMiB ? { memoryMiB: options.memoryMiB } : {}),
   });
@@ -289,6 +291,62 @@ test("restore of a stopped sandbox uses the same allowlist as provision", async 
   assert.ok(stopped.creates[0]?.tags.bento_created);
 });
 
+test("wake boots a hibernated sandbox from its image, with the run's allowlist", async () => {
+  const env = fake({ running: false });
+  const woke = await driver(env.api).wake(
+    {
+      externalId: "bento-swarm-1-task",
+      provider: "modal",
+      workdir: "/workspace",
+      imageRef: "im-hibernated",
+      network: "restricted",
+      allowedHosts: ["https://api.anthropic.com"],
+    },
+    { organizationId: "org-1" },
+  );
+  assert.deepEqual(woke, { booted: true }, "booted from the stored image, so the row keeps it");
+  assert.equal(env.creates[0]?.tags.bento_org, "org-1");
+  assert.deepEqual(env.deleted, []);
+  assert.deepEqual(env.images, ["im-hibernated"]);
+  assert.equal(env.creates[0]?.name, "bento-swarm-1-task");
+  assert.equal(env.creates[0]?.tags.bento_feature, "swarm-1-task");
+  assert.deepEqual(env.creates[0]?.outboundDomainAllowlist, ["api.anthropic.com"]);
+  assert.equal(env.toolchainCalls, 0);
+});
+
+test("wake prefers the exit snapshot and leaves a running sandbox alone", async () => {
+  const stopped = fake({ running: false });
+  stopped.api.fromName = async () => stopped.box;
+  stopped.box.poll = async () => 1;
+  stopped.box.experimentalGetExitSnapshot = async () => ({ imageId: "im-exit" });
+  const woke = await driver(stopped.api).wake({ externalId: "bento-x", provider: "modal", workdir: "/workspace", imageRef: "im-old" });
+  assert.deepEqual(stopped.images, ["im-exit"]);
+  assert.deepEqual(woke, { booted: true, imageRef: "im-exit" }, "the row is told which image it now has");
+  assert.deepEqual(stopped.deleted, ["im-old"], "and the image it superseded is not left in storage");
+
+  const running = fake();
+  const again = await driver(running.api).wake({ externalId: "bento-x", provider: "modal", workdir: "/workspace" });
+  assert.deepEqual(again, { booted: false });
+  assert.equal(running.creates.length, 0);
+});
+
+test("wake refuses rather than boot a fresh clone when no snapshot survives", async () => {
+  const gone = fake({ running: false });
+  gone.api.imageFromId = async () => null;
+  await assert.rejects(
+    driver(gone.api).wake({ externalId: "bento-x", provider: "modal", workdir: "/workspace", imageRef: "im-gone" }),
+    (err: unknown) => {
+      // Typed, so a caller can tell a machine that is gone for good
+      // from a provider that failed to answer.
+      assert.ok(err instanceof SandboxImageLost);
+      assert.match(err.message, /no snapshot of its workspace survives/);
+      return true;
+    },
+  );
+  assert.equal(gone.creates.length, 0);
+  assert.equal(gone.toolchainCalls, 0);
+});
+
 test("a failed clone after create terminates the new sandbox", async () => {
   const env = fake({ running: false });
   let terminated = 0;
@@ -381,6 +439,64 @@ test("create retries AlreadyExistsError and then keeps the name", async () => {
   const handle = await driver(env.api).provision(spec);
   assert.equal(handle.externalId, "bento-feature-1");
   assert.equal(attempts, 2);
+});
+
+test("stdin is closed through the stream, at the offset its writes reached", async () => {
+  /**
+   * modal 0.10.1's closeStdin() sends EOF at offset 0, which the server
+   * drops after any bytes were written. Every Modal run hung at its
+   * first sandbox file write because of it.
+   */
+  const calls: string[] = [];
+  const proc = adaptProc(
+    {
+      stdout: Object.assign(new ReadableStream<Uint8Array>(), { readText: async () => "" }),
+      stderr: { readText: async () => "" },
+      stdin: {
+        writeText: async () => {
+          calls.push("write");
+        },
+        close: async () => {
+          calls.push("close");
+        },
+      },
+      closeStdin: async () => {
+        calls.push("closeStdin");
+      },
+      wait: async () => 0,
+    },
+    false,
+  );
+  await proc.writeStdin("data\n");
+  await proc.endStdin();
+  assert.deepEqual(calls, ["write", "close"]);
+});
+
+test("a stdin feeder that never exits cannot hold the command's result", async () => {
+  /**
+   * The production hang: EOF was lost, so bento-exec stdin never exited,
+   * and exec's finally waited on it forever. Nothing ended the run, not
+   * even the command timeout.
+   */
+  const env = fake({ running: true });
+  const modal = driver(env.api, { stdinDrainMs: 20 });
+  const box = env.box;
+  const original = box.exec;
+  box.exec = async (argv, opts) => {
+    if (argv[1] === "stdin") {
+      env.execs.push(argv);
+      return { ...textProc(0), wait: () => new Promise<number>(() => {}) };
+    }
+    return original(argv, opts);
+  };
+  async function* lines() {
+    yield "hello";
+  }
+  const done = await collectExec(
+    modal.exec({ externalId: "bento-feature-1", provider: "modal", workdir: "/workspace" }, ["cat"], { stdin: lines() }),
+  );
+  assert.equal(done.exitCode, 0);
+  assert.ok(env.execs.some((argv) => argv[1] === "eof"), "the runner is still told to close its end");
 });
 
 test("exec parses frames, and a timeout writes execTimeoutMessage", async () => {
@@ -645,13 +761,52 @@ test("bento-exec stdin accepts a write after start has exited", async () => {
   }
 });
 
+test("bento-exec stdin carries bytes and EOF to the command", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "bento-exec-feed-"));
+  const script = path.join(dir, "bento-exec");
+  await writeFile(script, BENTO_EXEC_PYTHON, { mode: 0o755 });
+  const work = path.join(dir, "run");
+  const started = await run(script, ["start", work, "--", "python3", "-c", "import sys; sys.stdout.write(sys.stdin.read())"]);
+  assert.equal(started.code, 0, started.stderr);
+  const fed = await runPython([script, "stdin", work], "payload\n");
+  assert.equal(fed.code, 0, fed.stderr);
+  const closed = await run(script, ["eof", work]);
+  assert.equal(closed.code, 0, closed.stderr);
+  const followed = await run(script, ["follow", work, "0"]);
+  const frames = new FrameDecoder().push(Buffer.from(followed.stdout));
+  assert.equal(frames[0]?.kind === "stdout" ? frames[0].data : "", "payload\n");
+  assert.equal(frames.at(-1)?.kind === "exit" ? frames.at(-1)?.exitCode : -1, 0);
+});
+
+test("bento-exec stdin quits when its command exits, even if its own input never ends", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "bento-exec-orphan-"));
+  const script = path.join(dir, "bento-exec");
+  await writeFile(script, BENTO_EXEC_PYTHON, { mode: 0o755 });
+  const work = path.join(dir, "run");
+  const started = await run(script, ["start", work, "--", "python3", "-c", "import sys; sys.stdin.readline()"]);
+  assert.equal(started.code, 0, started.stderr);
+  // One line reaches the command and it exits; the feeder's input stays
+  // open, which is what a lost EOF looks like from inside the sandbox.
+  const fed = await runPython([script, "stdin", work], "line\n", { keepStdinOpen: true });
+  assert.equal(fed.code, 0, fed.stderr);
+  await stat(path.join(work, "exit"));
+});
+
 function run(script: string, args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
   return runPython([script, ...args]);
 }
 
-function runPython(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+function runPython(
+  args: string[],
+  input?: string,
+  options?: { keepStdinOpen?: boolean },
+): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn("python3", args, { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn("python3", args, { stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"] });
+    if (input !== undefined) {
+      child.stdin?.write(input);
+      if (!options?.keepStdinOpen) child.stdin?.end();
+    }
     let stdout = "";
     let stderr = "";
     const timer = setTimeout(() => {

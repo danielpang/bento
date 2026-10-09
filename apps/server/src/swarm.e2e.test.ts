@@ -383,14 +383,19 @@ test("a swarm plans, works, lands through a conflict, and opens a pull request",
   const landings = await db.select().from(swarmLandings).where(eq(swarmLandings.swarmId, swarm.id));
   assert.equal(landings.filter((row) => row.status === "landed").length, 2);
 
-  /* ---- the root is done, so the swarm publishes ---- */
+  /* ---- the root is done: its branch is pushed, and a person opens the pull request ---- */
 
   const finished = await tickSwarm(ctx, swarm.id);
   assert.equal(finished!.status, "done");
   assert.equal(finished!.becameDone, true);
   assert.ok(
-    queued.some((job) => job.queue === "swarm.publish" && (job.data as { swarmId?: string }).swarmId === swarm.id),
-    "and the tick asks for the publish rather than doing it inline",
+    queued.some((job) => job.queue === "swarm.push" && (job.data as { swarmId?: string }).swarmId === swarm.id),
+    "and the tick asks for the branch to be pushed rather than doing it inline",
+  );
+  assert.equal(
+    queued.filter((job) => job.queue === "swarm.publish").length,
+    0,
+    "no pull request opens until a person chooses one for the swarm or one per task",
   );
 
   const [row] = await db.select().from(swarms).where(eq(swarms.id, swarm.id));

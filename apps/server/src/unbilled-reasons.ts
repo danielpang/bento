@@ -29,6 +29,37 @@ export type UnbilledReason = {
  */
 export const SANDBOX_REFUSED_AGENT_PREFIX = "The sandbox did not accept the command that starts the agent";
 export const SANDBOX_GONE_AGENT_PREFIX = "The sandbox for this run no longer exists";
+/**
+ * How a run record opens when its sandbox stopped answering before the
+ * agent was launched, and reapStalledRuns closed it. Written by the
+ * reaper and read by the rule below, like the two above.
+ */
+export const SANDBOX_STALLED_AGENT_PREFIX = "The sandbox stopped responding before the agent started";
+/**
+ * How a run record opens when an agent from an earlier run of the same
+ * task was still running in the task's machine and could not be
+ * stopped, so this run's agent was never started beside it.
+ */
+/**
+ * How a run record opens when a restart of this server ended it before
+ * its agent was exec'd. Nothing ran in the machine, and the restart was
+ * Bento's own, so it is neither billed nor the work's failure: the
+ * coordinator starts a swarm's run again the way it does any run whose
+ * sandbox failed first.
+ */
+export const RESTART_BEFORE_AGENT_PREFIX = "Bento restarted before the agent started";
+export const PREVIOUS_AGENT_RUNNING_PREFIX =
+  "An agent from an earlier run of this task is still running in its sandbox and could not be stopped";
+
+/**
+ * How a run record reads when the swarm's machine was lost with tasks
+ * already landed on its branch, and GitHub has no copy to make it
+ * again from. The run is refused before any machine is made, because a
+ * fresh clone would be a branch without that work, and nothing after
+ * it could tell.
+ */
+export const SWARM_BRANCH_LOST_MESSAGE =
+  "The swarm's branch was lost with its sandbox and is not on GitHub, so its landed tasks cannot be restored. Start the swarm again.";
 
 export const UNBILLED_REASONS: readonly UnbilledReason[] = [
   {
@@ -66,6 +97,26 @@ export const UNBILLED_REASONS: readonly UnbilledReason[] = [
     id: "sandbox-gone",
     summary: "The sandbox was gone when the agent was to start, so no agent ran.",
     match: { kind: "prefix", text: SANDBOX_GONE_AGENT_PREFIX },
+  },
+  {
+    id: "sandbox-stalled",
+    summary: "The sandbox stopped answering before the agent was launched, so no agent ran.",
+    match: { kind: "prefix", text: SANDBOX_STALLED_AGENT_PREFIX },
+  },
+  {
+    id: "restart-before-agent",
+    summary: "A restart of the server ended the run before its agent was launched, so no agent ran.",
+    match: { kind: "prefix", text: RESTART_BEFORE_AGENT_PREFIX },
+  },
+  {
+    id: "previous-agent-running",
+    summary: "An earlier run's agent was still in the task's sandbox and could not be stopped, so no second agent ran.",
+    match: { kind: "prefix", text: PREVIOUS_AGENT_RUNNING_PREFIX },
+  },
+  {
+    id: "swarm-branch-lost",
+    summary: "The swarm's branch was lost with its sandbox and could not be restored, so no agent ran.",
+    match: { kind: "prefix", text: SWARM_BRANCH_LOST_MESSAGE },
   },
 ];
 
