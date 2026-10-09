@@ -149,6 +149,7 @@ test("a swarm run the restart stranded is closed, and its swarm is told", async 
       prompt: "",
       status: "running",
       executor: "server",
+      agentStartedAt: new Date(),
     })
     .returning();
 
@@ -174,6 +175,32 @@ test("a swarm run the restart stranded is closed, and its swarm is told", async 
   const board = emitted.find((event) => event.type === "swarm_task_updated");
   assert.ok(board, "the board is told too");
   assert.equal("taskId" in board! ? board.taskId : null, task!.id);
+});
+
+test("a swarm run a restart cut off before its agent started is not billed, and reads as the sandbox's", async () => {
+  const swarm = await makeSwarm();
+  const [task] = await db.insert(swarmTasks).values({ swarmId: swarm.id, title: "leaf" }).returning();
+  const [orphan] = await db
+    .insert(agentRuns)
+    .values({
+      type: "swarm",
+      swarmId: swarm.id,
+      swarmTaskId: task!.id,
+      role: "worker",
+      agentProfileId: PROFILE,
+      prompt: "",
+      status: "running",
+      executor: "server",
+    })
+    .returning();
+
+  await recoverInterruptedRuns(ctx);
+
+  const [closed] = await db.select().from(agentRuns).where(eq(agentRuns.id, orphan!.id));
+  assert.equal(closed!.status, "failed");
+  assert.equal(closed!.error, "Bento restarted before the agent started, so no agent ran.");
+  assert.equal(closed!.billable, false);
+  assert.equal(unbilledReason(closed!.error)?.id, "restart-before-agent", "so the coordinator restarts it like any sandbox failure");
 });
 
 /** A server run that started `minutesAgo`, with these transcript lines, each that long ago too. */

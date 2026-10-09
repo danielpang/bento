@@ -2675,21 +2675,43 @@ export async function recoverInterruptedRuns(ctx: AppContext): Promise<void> {
  * race a run that finished or was cancelled while recovery deliberated,
  * and the loser must change nothing.
  */
+/**
+ * Whether a run's agent never started: it was never exec'd, and nothing
+ * but the executor's own lines (system lines, the prompt it writes as a
+ * user line) is in its transcript. Both, the way reapStalledRuns reads a
+ * stall, so a run from before the stamp existed is not mistaken for one.
+ */
+async function agentNeverStarted(ctx: AppContext, run: typeof agentRuns.$inferSelect): Promise<boolean> {
+  if (run.agentStartedAt) return false;
+  const [spoke] = await ctx.db
+    .select({ id: runEvents.id })
+    .from(runEvents)
+    .where(
+      and(
+        eq(runEvents.runId, run.id),
+        sql`not (${runEvents.type} = 'message' and ${runEvents.payload} ->> 'role' in ('system', 'user'))`,
+      ),
+    )
+    .limit(1);
+  return !spoke;
+}
+
 async function failRunAsInterrupted(
   ctx: AppContext,
   run: typeof agentRuns.$inferSelect,
-  how: { error: string; transcript: string } = run.agentStartedAt
+  given?: { error: string; transcript: string },
+): Promise<void> {
+  const how = given ?? ((await agentNeverStarted(ctx, run))
     ? {
-        error: "interrupted by a server restart",
-        transcript: "Bento restarted while this run was working, so the run ended here. Send a message to pick up where it left off.",
-      }
-    : {
         // Nothing ran yet: the restart is Bento's, not the work's, and is
         // neither billed nor handed to a planner as a failure.
         error: `${RESTART_BEFORE_AGENT_PREFIX}, so no agent ran.`,
         transcript: "Bento restarted before the agent started, so the run ended here. Nothing was changed. Try the run again.",
-      },
-): Promise<void> {
+      }
+    : {
+        error: "interrupted by a server restart",
+        transcript: "Bento restarted while this run was working, so the run ended here. Send a message to pick up where it left off.",
+      });
   const unbilled = unbilledReason(how.error) !== null;
   const [closed] = await ctx.db
     .update(agentRuns)
