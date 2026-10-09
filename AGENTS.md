@@ -316,7 +316,22 @@ that ends a swarm asks for its machine only once no run is active: a failed leaf
 the planner in the tick that marks the swarm failed, and that run
 works in the swarm's own machine, so asking on every tick made every
 poll of the reap queue an exception for as long as the planner kept
-working.
+working. A swarm that ended "failed" never asks at all: its branch has
+never been pushed, the machine is the only copy of every leaf that
+landed, and a failed swarm is the one a person retries a leaf or a
+landing on. Archiving or deleting it reaps it.
+
+A hibernated machine is still the branch. The merge queue and a new
+worker both read branches out of other machines, and either can find
+that machine hibernated (a planner slower than the warm window, a
+landing retried an hour later). They wake it through
+`wakeSwarmSandbox`, which boots it from its snapshot with the network
+its own runs get and puts it back on the hibernation schedule.
+Exec'ing into the row as if it were running failed as "is not
+running", which the landing read as a moved branch until it ran out of
+attempts. A hibernation job also waits out the warm window from the
+row's `lastUsedAt`, because a job armed again while a run was going can
+fire seconds after that run ends.
 
 ## Starting a run goes through startRunIfIdle, never a bare insert
 
