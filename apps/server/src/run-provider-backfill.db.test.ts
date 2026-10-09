@@ -7,10 +7,10 @@ import { agentRuns, createDb, createPool, runEvents, runMigrations, sandboxes, s
 
 /**
  * Migration 0054, run against rows: the provider each run from before
- * 0053 used, read from its transcript and its sandbox row. The
- * migrations have already run on an empty database here, so the file
- * is run again on the rows below, which is also what proves running it
- * twice changes nothing it already decided.
+ * 0053 used, read from its transcript and its sandbox row, on the
+ * hosted instance only. The migrations have already run on an empty
+ * database here, so the file is run again on the rows below, which is
+ * also what proves running it twice changes nothing it already decided.
  */
 const adminUrl = process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5439/app";
 const testDbName = "run_provider_backfill_test";
@@ -18,6 +18,10 @@ const testUrl = adminUrl.replace(/\/[^/]+$/, `/${testDbName}`);
 
 const PROJECT = "11111111-1111-1111-1111-111111111111";
 const PROFILE = "22222222-2222-2222-2222-222222222222";
+/** The hosted instance's organization, whose row is what the migration is guarded on. */
+const HOSTED_ORG = "LElYbC0PEXQqAvpIKqVUK89Wc6Naxivb";
+/** Before 0053 shipped; the migration reads nothing queued after it. */
+const EARLIER = new Date("2026-10-08T12:00:00Z");
 const backfill = readFileSync(
   new URL("../../../packages/db/migrations/0054_backfill_agent_run_sandbox_provider.sql", import.meta.url),
   "utf8",
@@ -85,6 +89,7 @@ async function runOn(
       prompt: "",
       status: "succeeded",
       sandboxId: sandbox?.id ?? null,
+      queuedAt: EARLIER,
       ...run,
     })
     .returning();
@@ -100,7 +105,23 @@ async function providerOf(runId: string): Promise<string | null> {
   return row!.provider;
 }
 
-test("each finished run takes the provider its transcript and row say, and nothing else is touched", async () => {
+test("anywhere but the hosted instance, nothing is filled", async () => {
+  const modalLine = await runOn("modal", ["Starting a Modal sandbox"]);
+  const sprite = await runOn("sprite", []);
+  const docker = await runOn("docker", []);
+
+  await pool.query(backfill);
+
+  assert.equal(await providerOf(modalLine), null);
+  assert.equal(await providerOf(sprite), null);
+  assert.equal(await providerOf(docker), null, "a self-hosted database keeps its earlier runs as 0053 left them");
+});
+
+test("on the hosted instance, each earlier finished run takes the provider its transcript and row say", async () => {
+  await pool.query(
+    `insert into identity.organization (id,name,slug) values ($1,'Hosted','hosted') on conflict do nothing`,
+    [HOSTED_ORG],
+  );
   const modalLine = await runOn("modal", ["Starting a Modal sandbox", "Preparing repository app..."]);
   const reused = await runOn("modal", ["Starting a Modal sandbox", "Reusing the Modal sandbox (bento-swarm-x)."]);
   // A swarm's row rewritten to sprite after its Modal machine was made again.
@@ -116,6 +137,8 @@ test("each finished run takes the provider its transcript and row say, and nothi
     status: "failed",
   });
   const inFlight = await runOn("sprite", [], { status: "running" });
+  // Queued after 0053 shipped: it recorded its own provider, or had none.
+  const afterShip = await runOn("sprite", ["Starting a Modal sandbox"], { queuedAt: new Date("2026-10-09T19:00:00Z") });
   const alreadyRecorded = await runOn("sprite", ["Starting a Modal sandbox"], { sandboxProvider: "sprite" });
   // A user line that quotes the Modal sentence is not the driver's.
   const quoted = await runOn("sprite", []);
@@ -137,6 +160,7 @@ test("each finished run takes the provider its transcript and row say, and nothi
   assert.equal(await providerOf(unknown), null, "a provider that cannot be known is not guessed");
   assert.equal(await providerOf(noMachine), null, "a run that got no machine has no provider");
   assert.equal(await providerOf(inFlight), null, "a run still going records its own");
+  assert.equal(await providerOf(afterShip), null, "nothing queued after 0053 shipped is read");
   assert.equal(await providerOf(alreadyRecorded), "sprite", "what a run recorded itself is never overwritten");
   assert.equal(await providerOf(quoted), "sprite", "only the driver's own system line counts");
 
