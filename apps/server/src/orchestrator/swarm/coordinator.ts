@@ -2082,8 +2082,18 @@ async function advanceLandingQueue(
    */
   if (queue.some((landing) => landing.status === "conflicted")) return { landing: null, resolverRunIds };
 
+  /*
+   * A landing waiting out a backoff lets the ones behind it go first:
+   * they are other leaves' independent work, and a sandbox one leaf
+   * cannot reach is no reason to stop the whole queue. A dependent
+   * leaf cannot be queued behind its dependency, because it only
+   * starts once that one has landed.
+   */
   const next = queue.find(
-    (landing) => landing.status === "queued" && byId.get(landing.taskId)?.status !== "cancelled",
+    (landing) =>
+      landing.status === "queued" &&
+      byId.get(landing.taskId)?.status !== "cancelled" &&
+      (!landing.notBefore || landing.notBefore <= now),
   );
   // Nothing performs landings in this deployment yet. Promoting the row
   // would move it into a state nothing takes it out of, so the queue is
@@ -2092,7 +2102,7 @@ async function advanceLandingQueue(
 
   await tx
     .update(swarmLandings)
-    .set({ status: "landing", startedAt: now, attempt: next.attempt + 1, updatedAt: now })
+    .set({ status: "landing", startedAt: now, notBefore: null, attempt: next.attempt + 1, updatedAt: now })
     .where(eq(swarmLandings.id, next.id));
   await deps.startLanding(tx, next.id);
   return { landing: { id: next.id, promoted: true }, resolverRunIds };

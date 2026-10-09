@@ -30,25 +30,47 @@ function sandboxWithAgent(options: { stubborn?: boolean } = {}) {
 
 test("an agent an earlier run left behind is stopped, and the stop is confirmed", async () => {
   const sandbox = sandboxWithAgent();
-  assert.equal(await stopLeftoverAgent(sandbox.driver, handle, argv), "stopped");
+  assert.equal(await stopLeftoverAgent(sandbox.driver, handle, [argv]), "stopped");
   assert.equal(sandbox.running, false);
   assert.deepEqual(sandbox.attaches, ["claude", "claude"], "asked once to stop it and once to confirm");
 });
 
 test("a machine with no agent in it is left alone", async () => {
   const driver: Pick<SandboxDriver, "attach"> = { attach: async () => null };
-  assert.equal(await stopLeftoverAgent(driver, handle, argv), "none");
-  assert.equal(await stopLeftoverAgent({}, handle, argv), "none", "a driver that cannot attach has nothing to find");
+  assert.equal(await stopLeftoverAgent(driver, handle, [argv]), "none");
+  assert.equal(await stopLeftoverAgent({}, handle, [argv]), "none", "a driver that cannot attach has nothing to find");
 });
 
 test("an agent that will not stop, or a sandbox that cannot say, means no second agent", async () => {
   const stubborn = sandboxWithAgent({ stubborn: true });
-  assert.equal(await stopLeftoverAgent(stubborn.driver, handle, argv, 50), "running");
+  assert.equal(await stopLeftoverAgent(stubborn.driver, handle, [argv], { stopMs: 50 }), "running");
 
   const unreachable: Pick<SandboxDriver, "attach"> = {
     attach: async () => {
       throw new Error("connection refused");
     },
   };
-  assert.equal(await stopLeftoverAgent(unreachable, handle, argv), "running");
+  assert.equal(await stopLeftoverAgent(unreachable, handle, [argv], { attachRetryMs: 1 }), "running");
+});
+
+test("a blip is asked about again before it counts as a running agent", async () => {
+  let calls = 0;
+  const flaky: Pick<SandboxDriver, "attach"> = {
+    attach: async () => {
+      calls += 1;
+      if (calls === 1) throw new Error("502 from the provider");
+      return null;
+    },
+  };
+  assert.equal(await stopLeftoverAgent(flaky, handle, [argv], { attachRetryMs: 1 }), "none");
+  assert.equal(calls, 2);
+});
+
+test("an agent left by another CLI is found under its own command", async () => {
+  const sandbox = sandboxWithAgent();
+  const onlyCodex: Pick<SandboxDriver, "attach"> = {
+    attach: (h, command, opts) => (command[0] === "codex" ? sandbox.driver.attach!(h, command, opts) : Promise.resolve(null)),
+  };
+  assert.equal(await stopLeftoverAgent(onlyCodex, handle, [argv, ["codex"]]), "stopped");
+  assert.equal(sandbox.running, false);
 });

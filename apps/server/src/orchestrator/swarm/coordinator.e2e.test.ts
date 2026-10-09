@@ -730,6 +730,32 @@ test("the landing queue keeps one in flight and drops what was withdrawn", async
   assert.equal(result?.landingId, byTask.get(done.id)!.id);
 });
 
+test("a landing waiting out its backoff lets the one behind it go first", async () => {
+  const swarm = await makeSwarm({ status: "running" });
+  const waiting = await makeTask(swarm.id, { title: "sandbox unreachable", status: "landed" });
+  const ready = await makeTask(swarm.id, { title: "ready", status: "landed" });
+  const [backingOff] = await db.insert(swarmLandings).values([
+    { swarmId: swarm.id, taskId: waiting.id, position: 0, branchName: "swarm/x/1", notBefore: new Date(Date.now() + 60_000) },
+    { swarmId: swarm.id, taskId: ready.id, position: 1, branchName: "swarm/x/2" },
+  ]).returning();
+
+  const landed: string[] = [];
+  const deps = { ...starter(), startLanding: async (_tx: unknown, id: string) => void landed.push(id) };
+  await tickSwarm(ctx, swarm.id, deps as unknown as SwarmTickDeps);
+  const rows = await db.select().from(swarmLandings).where(eq(swarmLandings.swarmId, swarm.id));
+  const byTask = new Map(rows.map((row) => [row.taskId, row]));
+  assert.equal(byTask.get(waiting.id)!.status, "queued", "not before its wait is over");
+  assert.equal(byTask.get(ready.id)!.status, "landing", "and the queue does not stop for it");
+
+  // Once the other has settled and the wait has passed, it is promoted, and the wait is cleared.
+  await db.update(swarmLandings).set({ status: "landed" }).where(eq(swarmLandings.taskId, ready.id));
+  await db.update(swarmLandings).set({ notBefore: new Date(Date.now() - 1_000) }).where(eq(swarmLandings.id, backingOff!.id));
+  await tickSwarm(ctx, swarm.id, deps as unknown as SwarmTickDeps);
+  const [after] = await db.select().from(swarmLandings).where(eq(swarmLandings.id, backingOff!.id));
+  assert.equal(after!.status, "landing");
+  assert.equal(after!.notBefore, null);
+});
+
 test("a conflict whose resolver has finished is tried again, rather than holding forever", async () => {
   const swarm = await makeSwarm({ status: "running" });
   const stuck = await makeTask(swarm.id, { title: "stuck", status: "working", report: "did it" });

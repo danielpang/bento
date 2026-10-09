@@ -26,7 +26,7 @@ import { landWorkerBranch, landWorkerBundles, type LandOutcome } from "./landing
  * every multi repository swarm.
  */
 type LandFailure = Exclude<Extract<LandOutcome, { ok: false }>, { reason: "empty" }>;
-import { enqueueSwarmTick } from "./coordinator.js";
+import { SWARM_TICK_QUEUE, enqueueSwarmTick } from "./coordinator.js";
 import { queueSwarmTaskSandboxReap } from "../reap-sandbox.js";
 import { queueSwarmSlackNotify } from "../slack-notify.js";
 import { swarmBranchName, swarmWorkspaceKey } from "./sandbox.js";
@@ -54,6 +54,51 @@ import { wakeSwarmSandbox } from "../hibernate-sandbox.js";
  * again. A row written first and a branch moved second would have the
  * opposite failure, and it is the one that loses the work.
  */
+
+/**
+ * Why a landing failed, as a word the console picks its sentence and
+ * its button from, and the analytics count by. The sentence in the
+ * row's error is for people and changes; these do not.
+ */
+export const LANDING_FAILURE_CODES = [
+  "no_repositories",
+  "driver_unavailable",
+  "checkout_failed",
+  "swarm_sandbox_gone",
+  "task_sandbox_gone",
+  "transfer_unsupported",
+  "wake_failed",
+  "attempts_exhausted",
+  "conflict_unresolved",
+  "checks_failed",
+  "checks_unavailable",
+  "landing_error",
+] as const;
+export type LandingFailureCode = (typeof LANDING_FAILURE_CODES)[number];
+
+/**
+ * The failures that are about a machine and not about the work: the
+ * branch is fine, Bento could not reach it or put it anywhere. These
+ * are what error tracking is for, and what starting the task over in a
+ * new machine can answer.
+ */
+export const SANDBOX_LANDING_FAILURES: ReadonlySet<LandingFailureCode> = new Set([
+  "driver_unavailable",
+  "swarm_sandbox_gone",
+  "task_sandbox_gone",
+  "transfer_unsupported",
+  "wake_failed",
+]);
+
+/**
+ * How long a landing sent back to the queue waits before it is
+ * promoted again: thirty seconds, doubling, at most eight minutes. A
+ * provider having a bad few minutes used to spend all five attempts in
+ * the time one tick took to follow another.
+ */
+export function landingBackoffMs(attempt: number): number {
+  return Math.min(30_000 * 2 ** Math.max(0, attempt - 1), 8 * 60_000);
+}
 
 /** The queue one landing at a time goes through. */
 export const SWARM_LAND_QUEUE = "swarm.land";
@@ -174,7 +219,7 @@ export async function performLanding(ctx: AppContext, landingId: string): Promis
     .where(eq(repositories.projectId, swarm.projectId))
     .orderBy(asc(repositories.position));
   if (repoRows.length === 0) {
-    return finish(ctx, landing, "failed", "this project spans no repositories, so there is nothing to land.");
+    return finish(ctx, landing, "failed", "this project spans no repositories, so there is nothing to land.", undefined, "no_repositories");
   }
   const swarmBranch = swarm.branchName ?? swarmBranchName(swarm.slug);
   const workerBranch = landing.branchName ?? task.branchName ?? workerBranchName(swarmBranch, task.id);
@@ -191,6 +236,7 @@ export async function performLanding(ctx: AppContext, landingId: string): Promis
       "failed",
       err instanceof Error ? err.message : "no driver configured on this server",
       task,
+      "driver_unavailable",
     );
   }
   const clone = (landingDriver ?? ctx.drivers.default).workspace === "clone";
@@ -202,7 +248,7 @@ export async function performLanding(ctx: AppContext, landingId: string): Promis
         swarmBranch,
       );
     } catch (error) {
-      return finish(ctx, landing, "failed", `the swarm checkout could not be prepared: ${String(error)}`, task);
+      return finish(ctx, landing, "failed", `the swarm checkout could not be prepared: ${String(error)}`, task, "checkout_failed");
     }
   }
 
@@ -221,6 +267,7 @@ export async function performLanding(ctx: AppContext, landingId: string): Promis
         "failed",
         err instanceof Error ? err.message : "no driver configured on this server",
         task,
+        "driver_unavailable",
       );
     }
     if ("missing" in found) {
@@ -232,6 +279,7 @@ export async function performLanding(ctx: AppContext, landingId: string): Promis
           ? "the swarm's sandbox is gone, so Bento has no copy of the swarm's branch to land this onto."
           : "this task's sandbox is gone, so Bento cannot read the branch that is waiting to land.",
         task,
+        found.missing === "swarm" ? "swarm_sandbox_gone" : "task_sandbox_gone",
       );
     }
     if (!landingDriver?.exportRepository || !landingDriver.importRepository || !found.workerDriver.exportRepository) {
@@ -241,6 +289,7 @@ export async function performLanding(ctx: AppContext, landingId: string): Promis
         "failed",
         "this sandbox driver cannot transfer a reconciled branch back into the swarm sandbox.",
         task,
+        "transfer_unsupported",
       );
     }
     remoteHandles = found;
@@ -301,7 +350,7 @@ export async function performLanding(ctx: AppContext, landingId: string): Promis
      */
     const check = await runLandingTests(ctx, swarm, repoRows, task);
     if (check.kind === "failed") return failTests(ctx, landing, task, swarm, check.detail);
-    if (check.kind === "unavailable") return finish(ctx, landing, "failed", check.detail, task);
+    if (check.kind === "unavailable") return finish(ctx, landing, "failed", check.detail, task, "checks_unavailable");
     return succeed(ctx, landing, task, swarm, landed);
   }
 
@@ -330,14 +379,15 @@ export async function performLanding(ctx: AppContext, landingId: string): Promis
           problem.outcome.detail,
         ].join("\n"),
         task,
+        "attempts_exhausted",
       );
     }
-    return requeue(ctx, landing, problem.outcome.detail);
+    return requeue(ctx, landing, problem.outcome.detail, landingBackoffMs(landing.attempt));
   }
   if (problem.outcome.reason === "conflict") {
     return conflicted(ctx, landing, task, swarm, `${problem.repo}: ${problem.outcome.detail}`);
   }
-  return finish(ctx, landing, "failed", `${problem.repo}: ${problem.outcome.detail}`, task);
+  return finish(ctx, landing, "failed", `${problem.repo}: ${problem.outcome.detail}`, task, "landing_error");
 }
 
 /** The two machines a remote landing reconciles, and the driver that owns the worker's. */
@@ -376,14 +426,20 @@ async function wakeFailed(
     swarm_id: landing.swarmId,
   });
   if (landing.attempt < MAX_LANDING_ATTEMPTS) {
-    return requeue(ctx, landing, "a sandbox holding this branch could not be started, so the landing will try again.");
+    return requeue(
+      ctx,
+      landing,
+      "a sandbox holding this branch could not be started, so the landing will try again.",
+      landingBackoffMs(landing.attempt),
+    );
   }
   return finish(
     ctx,
     landing,
     "failed",
-    `a sandbox holding this branch could not be started after ${landing.attempt} attempts. Retry the merge queue entry to try again.`,
+    `a sandbox holding this branch could not be started after ${landing.attempt} attempts.`,
     task,
+    "wake_failed",
   );
 }
 
@@ -714,7 +770,13 @@ async function failTests(
   const now = new Date();
   let claimed = false;
   await ctx.db.transaction(async (tx) => {
-    claimed = await claimOutcome(tx, landing, { status: "failed", error: failure, endedAt: now, updatedAt: now });
+    claimed = await claimOutcome(tx, landing, {
+      status: "failed",
+      error: failure,
+      errorCode: "checks_failed",
+      endedAt: now,
+      updatedAt: now,
+    });
     if (!claimed) return;
     await handLeafToPlanner(tx, {
       task,
@@ -734,6 +796,7 @@ async function failTests(
     });
   });
   if (!claimed) return null;
+  reportLandingFailure(ctx, landing, "checks_failed", failure);
   ctx.bus.emitBoardEvent({
     type: "swarm_task_updated",
     projectId: swarm.projectId,
@@ -783,7 +846,13 @@ async function conflicted(
   let claimed = false;
   if (alreadyTried) {
     await ctx.db.transaction(async (tx) => {
-      claimed = await claimOutcome(tx, landing, { status: "failed", error: detail, endedAt: now, updatedAt: now });
+      claimed = await claimOutcome(tx, landing, {
+        status: "failed",
+        error: detail,
+        errorCode: "conflict_unresolved",
+        endedAt: now,
+        updatedAt: now,
+      });
       if (!claimed) return;
       await handLeafToPlanner(tx, {
         task,
@@ -795,6 +864,7 @@ async function conflicted(
       });
     });
     if (!claimed) return null;
+    reportLandingFailure(ctx, landing, "conflict_unresolved", detail);
     ctx.bus.emitBoardEvent({
       type: "swarm_task_updated",
       projectId: swarm.projectId,
@@ -849,17 +919,65 @@ async function requeue(
   ctx: AppContext,
   landing: typeof swarmLandings.$inferSelect,
   detail: string,
+  /** How long to wait before it is promoted again. Absent: at once. */
+  delayMs?: number,
 ): Promise<LandingResult | null> {
   const now = new Date();
+  const notBefore = delayMs ? new Date(now.getTime() + delayMs) : null;
   const claimed = await claimOutcome(ctx.db, landing, {
     status: "queued",
     error: detail,
     startedAt: null,
+    notBefore,
     updatedAt: now,
   });
   if (!claimed) return null;
   await enqueueSwarmTick(ctx, landing.swarmId);
+  // And a tick for when the wait is over, under its own key so it does
+  // not stand in for the ordinary ticks meanwhile.
+  if (notBefore) {
+    await ctx.boss.send(
+      SWARM_TICK_QUEUE,
+      { swarmId: landing.swarmId },
+      { singletonKey: `${landing.swarmId}:landing-backoff`, startAfter: notBefore },
+    );
+  }
   return { landingId: landing.id, status: "queued", landed: [], resolverRunId: null, reason: detail };
+}
+
+/**
+ * Every landing that ends failed is counted, and every one that is
+ * about a machine rather than the work goes to error tracking.
+ *
+ * Before this a failed landing wrote its row and nothing else: the
+ * swarm that lost its branch to a hibernated worker was found by a
+ * person reading the board, not by an alert. Grouped by the code, so
+ * one provider incident is one issue and not one per swarm.
+ */
+function reportLandingFailure(
+  ctx: AppContext,
+  landing: typeof swarmLandings.$inferSelect,
+  code: LandingFailureCode,
+  reason: string,
+): void {
+  const properties = {
+    swarm_id: landing.swarmId,
+    swarm_task_id: landing.taskId,
+    landing_id: landing.id,
+    code,
+    attempt: landing.attempt,
+  };
+  ctx.analytics?.capture({
+    event: "swarm landing failed",
+    organizationId: landing.organizationId,
+    properties,
+  });
+  if (code === "checks_failed" || code === "conflict_unresolved") return;
+  ctx.analytics?.captureException(new Error(`swarm landing failed: ${code}`), null, landing.organizationId, {
+    ...properties,
+    source: "swarm_landing",
+    reason,
+  });
 }
 
 /** Ends a landing with a status and a sentence, and tells the tree. */
@@ -869,23 +987,26 @@ async function finish(
   status: "failed" | "cancelled",
   reason: string,
   task?: typeof swarmTasks.$inferSelect,
+  code?: LandingFailureCode,
 ): Promise<LandingResult | null> {
   const now = new Date();
+  const errorCode = status === "failed" ? (code ?? "landing_error") : null;
   let claimed = false;
   await ctx.db.transaction(async (tx) => {
-    claimed = await claimOutcome(tx, landing, { status, error: reason, endedAt: now, updatedAt: now });
+    claimed = await claimOutcome(tx, landing, { status, error: reason, errorCode, endedAt: now, updatedAt: now });
     if (!claimed) return;
     if (!task || status !== "failed") return;
     await handLeafToPlanner(tx, {
       task,
       status: "failed",
       attention: "failed",
-      flags: { landingError: reason },
-      detail: { landingError: reason },
+      flags: { landingError: reason, landingErrorCode: errorCode },
+      detail: { landingError: reason, landingErrorCode: errorCode },
       now,
     });
   });
   if (!claimed) return null;
+  if (errorCode) reportLandingFailure(ctx, landing, errorCode, reason);
   /**
    * A withdrawn leaf's machine, for the reason a landed one's is asked
    * for: the branch it holds is never going onto the swarm's branch, so

@@ -2004,6 +2004,16 @@ export const swarmLandings = pgTable(
     /** How many times this branch has been tried. */
     attempt: integer("attempt").notNull().default(0),
     error: text("error"),
+    /**
+     * Why a failed landing failed, as a stable word the console and the
+     * analytics both read: the sentence in `error` is for people.
+     */
+    errorCode: text("error_code"),
+    /**
+     * A queued landing waiting out a backoff is not promoted before
+     * this. Null is "whenever it reaches the front".
+     */
+    notBefore: timestamp("not_before", { withTimezone: true }),
     startedAt: timestamp("started_at", { withTimezone: true }),
     endedAt: timestamp("ended_at", { withTimezone: true }),
     ...timestamps,

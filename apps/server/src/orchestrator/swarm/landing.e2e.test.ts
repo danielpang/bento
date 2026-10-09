@@ -749,26 +749,49 @@ test("a sandbox that could not be started sends the landing back to the queue, t
     },
     async destroy() {},
   } as unknown as SandboxDriver);
+  const captured: { event?: string; exception?: string; properties?: Record<string, unknown> }[] = [];
+  const originalAnalytics = ctx.analytics;
+  ctx.analytics = {
+    capture: (event) => void captured.push({ event: event.event, properties: event.properties ?? {} }),
+    captureException: (err, _user, _org, properties) =>
+      void captured.push({ exception: (err as Error).message, properties: properties ?? {} }),
+  } as AppContext["analytics"];
   try {
     const first = await performLanding(ctx, landing.id);
     assert.equal(first?.status, "queued", "a provider blip is retried, not the end of the landing");
     assert.match(first?.reason ?? "", /could not be started/);
     assert.equal((await taskRow(fx.task.id))?.status === "failed", false);
+    const waiting = await landingRow(landing.id);
+    assert.ok(waiting?.notBefore && waiting.notBefore.getTime() > Date.now(), "and it waits before the next attempt");
+    assert.ok(
+      queued.some((job) => job.queue === "swarm.tick" && (job.data as { swarmId?: string }).swarmId === fx.swarm.id),
+      "with a tick to wake it when the wait is over",
+    );
 
     await db.update(swarmLandings).set({ status: "landing", attempt: 5 }).where(eq(swarmLandings.id, landing.id));
     const last = await performLanding(ctx, landing.id);
     assert.equal(last?.status, "failed");
     assert.match(last?.reason ?? "", /could not be started after 5 attempts/);
     assert.doesNotMatch(last?.reason ?? "", /sb-internal-123/, "the provider's words stay out of the leaf");
+    assert.equal((await landingRow(landing.id))?.errorCode, "wake_failed");
+    assert.equal(
+      ((await taskRow(fx.task.id))?.flags as { landingErrorCode?: string }).landingErrorCode,
+      "wake_failed",
+      "the console reads the code to pick its sentence",
+    );
+    assert.ok(captured.some((row) => row.event === "swarm landing failed" && row.properties?.code === "wake_failed"));
+    assert.ok(captured.some((row) => row.exception === "swarm landing failed: wake_failed"), "and error tracking hears of it");
   } finally {
     ctx.drivers = original;
+    ctx.analytics = originalAnalytics;
   }
 });
 
 test("a machine a landing is using is not hibernated under it", async () => {
   const { fx, swarmSandbox, workerSandbox } = await hibernatedPair("landing-active");
   await db.update(sandboxes).set({ status: "ready" }).where(eq(sandboxes.swarmId, fx.swarm.id));
-  await queueLanding(fx.swarm.id, fx.task.id, fx.branch);
+  const inFlight = await queueLanding(fx.swarm.id, fx.task.id, fx.branch);
+  await db.update(swarmLandings).set({ startedAt: new Date() }).where(eq(swarmLandings.id, inFlight.id));
   queued.length = 0;
   await hibernateSandbox(ctx, swarmSandbox.id);
   await hibernateSandbox(ctx, workerSandbox.id);
@@ -780,6 +803,23 @@ test("a machine a landing is using is not hibernated under it", async () => {
   );
   const rows = await db.select().from(sandboxes).where(eq(sandboxes.swarmId, fx.swarm.id));
   assert.deepEqual(rows.map((row) => row.status), ["ready", "ready"]);
+
+  // A landing whose job died long ago keeps nothing awake.
+  await db
+    .update(swarmLandings)
+    .set({ startedAt: new Date(Date.now() - 31 * 60 * 1000) })
+    .where(eq(swarmLandings.id, inFlight.id));
+  queued.length = 0;
+  const original = ctx.drivers;
+  // Past the activity check the job asks for the machine's driver, and
+  // only a real Modal driver snapshots: this one stops there.
+  ctx.drivers = singleDriver({ provider: "modal", workspace: "clone" } as unknown as SandboxDriver);
+  try {
+    await hibernateSandbox(ctx, swarmSandbox.id);
+  } finally {
+    ctx.drivers = original;
+  }
+  assert.equal(queued.filter((job) => job.queue === "sandbox.hibernate").length, 0, "the stale landing is not activity");
 });
 
 test("a landing onto a swarm whose machine is gone says which machine", async () => {

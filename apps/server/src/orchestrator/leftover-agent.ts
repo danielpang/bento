@@ -28,38 +28,75 @@ export const LEFTOVER_AGENT_STOP_MS = 30_000;
  *
  * The same door a resume uses: attach finds the session by the
  * command, and aborting the attached stream kills it on every driver
- * that has attach. A second attach then confirms nothing is left. A
- * question the sandbox could not answer counts as "running": better
- * a run that waits for the coordinator to try again than two agents
- * on one branch.
+ * that has attach. A second attach then confirms nothing is left.
+ * Every command an earlier run of the task could have started is
+ * asked about, because a leaf reassigned to another agent leaves the
+ * old one's process under another name. A question the sandbox could
+ * not answer, after a few tries, counts as "running": better a run
+ * that waits for the coordinator to try again than two agents on one
+ * branch.
  */
 export async function stopLeftoverAgent(
   driver: Pick<SandboxDriver, "attach">,
   handle: SandboxHandle,
-  argv: string[],
-  stopMs: number = LEFTOVER_AGENT_STOP_MS,
+  commands: string[][],
+  options: { stopMs?: number; attachRetryMs?: number } = {},
 ): Promise<LeftoverAgent> {
   if (!driver.attach) return "none";
-  const controller = new AbortController();
-  let stream: AsyncIterable<ExecChunk> | null;
-  try {
-    stream = await driver.attach(handle, argv, { signal: controller.signal, timeoutMs: stopMs });
-  } catch {
-    return "running";
+  let stopped = false;
+  for (const argv of commands) {
+    const outcome = await stopOne(driver as Required<Pick<SandboxDriver, "attach">>, handle, argv, options);
+    if (outcome === "running") return "running";
+    if (outcome === "stopped") stopped = true;
   }
+  return stopped ? "stopped" : "none";
+}
+
+/**
+ * How many times a question the sandbox could not answer is asked
+ * again before it counts as "running". A provider blip at the start
+ * of a run would otherwise fail it, and three of those in a row hand a
+ * healthy task to the planner.
+ */
+const ATTACH_ATTEMPTS = 3;
+
+async function stopOne(
+  driver: Required<Pick<SandboxDriver, "attach">>,
+  handle: SandboxHandle,
+  argv: string[],
+  options: { stopMs?: number; attachRetryMs?: number },
+): Promise<LeftoverAgent> {
+  const stopMs = options.stopMs ?? LEFTOVER_AGENT_STOP_MS;
+  const controller = new AbortController();
+  const stream = await attachWithRetry(
+    () => driver.attach(handle, argv, { signal: controller.signal, timeoutMs: stopMs }),
+    options.attachRetryMs ?? 2_000,
+  );
+  if (stream === "unanswered") return "running";
   if (!stream) return "none";
 
   controller.abort();
   const exited = await drainUntilExit(stream, stopMs);
   if (!exited) return "running";
-  try {
-    const again = await driver.attach(handle, argv, { timeoutMs: stopMs });
-    if (!again) return "stopped";
-    // Still there: let go of the connection and say so.
-    void Promise.resolve(again[Symbol.asyncIterator]().return?.()).catch(() => {});
-    return "running";
-  } catch {
-    return "running";
+  const again = await attachWithRetry(() => driver.attach(handle, argv, { timeoutMs: stopMs }), options.attachRetryMs ?? 2_000);
+  if (again === "unanswered") return "running";
+  if (!again) return "stopped";
+  // Still there: let go of the connection and say so.
+  void Promise.resolve(again[Symbol.asyncIterator]().return?.()).catch(() => {});
+  return "running";
+}
+
+async function attachWithRetry(
+  attach: () => Promise<AsyncIterable<ExecChunk> | null>,
+  retryMs: number,
+): Promise<AsyncIterable<ExecChunk> | null | "unanswered"> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await attach();
+    } catch {
+      if (attempt >= ATTACH_ATTEMPTS) return "unanswered";
+      await new Promise((resolve) => setTimeout(resolve, retryMs));
+    }
   }
 }
 

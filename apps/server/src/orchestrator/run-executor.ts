@@ -41,6 +41,7 @@ import {
   swarms,
 } from "@bento/db";
 import {
+  AGENT_CLI_BINARIES,
   collectExec,
   isExecTimeout,
   LineChannel,
@@ -689,7 +690,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
    * branch beside it. A machine made for this run cannot hold one.
    */
   if (subject.kind === "swarm" && subject.task && sandboxOrigin !== "new" && driver.attach) {
-    const leftover = await stopLeftoverAgent(driver, handle, argv);
+    const leftover = await stopLeftoverAgent(driver, handle, await leftoverAgentCommands(ctx, subject.task.id, argv));
     if (leftover === "stopped") {
       await saySystem("An agent from an earlier run of this task was still running in its sandbox, so it was stopped first.");
     } else if (leftover === "running") {
@@ -1906,6 +1907,29 @@ async function swarmBranchBundles(
     repoRows.map((repo) => ({ name: repo.name, defaultBranch: repo.defaultBranch })),
     swarm.branchName ?? swarmBranchName(swarm.slug),
   );
+}
+
+/**
+ * The commands an agent left in a task's machine could be running
+ * under: this run's own, and the binary of every agent an earlier run
+ * of the task used, since a reassigned leaf leaves the old agent's
+ * process under its own name.
+ */
+async function leftoverAgentCommands(ctx: AppContext, taskId: string, argv: string[]): Promise<string[][]> {
+  const earlier = await ctx.db
+    .selectDistinct({ cli: agentProfiles.cli })
+    .from(agentRuns)
+    .innerJoin(agentProfiles, eq(agentProfiles.id, agentRuns.agentProfileId))
+    .where(eq(agentRuns.swarmTaskId, taskId));
+  const commands = [argv];
+  const seen = new Set([argv[0]]);
+  for (const { cli } of earlier) {
+    const binary = AGENT_CLI_BINARIES[cli as AgentCli];
+    if (!binary || seen.has(binary)) continue;
+    seen.add(binary);
+    commands.push([binary]);
+  }
+  return commands;
 }
 
 /** Whether the planner has written the design note a worker is told to read. */

@@ -1911,14 +1911,14 @@ export function swarmRoutes(ctx: AppContext) {
       const now = new Date();
       const retried = await db(c, ctx).transaction(async (tx) => {
         const [row] = await tx.update(swarmLandings)
-          .set({ status: "queued", error: null, startedAt: null, endedAt: null, updatedAt: now })
+          .set({ status: "queued", error: null, errorCode: null, notBefore: null, startedAt: null, endedAt: null, updatedAt: now })
           .where(and(eq(swarmLandings.id, landing.id), eq(swarmLandings.status, "failed")))
           .returning({ id: swarmLandings.id });
         if (!row) return false;
         await tx.update(swarmTasks)
           .set({
             status: "landed", attention: null, updatedAt: now,
-            flags: { ...task.flags, landingError: undefined, plannerToldAt: now.toISOString(), plannerToldBy: undefined, plannerRetells: undefined },
+            flags: { ...task.flags, landingError: undefined, landingErrorCode: undefined, plannerToldAt: now.toISOString(), plannerToldBy: undefined, plannerRetells: undefined },
           })
           .where(and(eq(swarmTasks.id, task.id), eq(swarmTasks.status, "failed")));
         await reactivateSwarmForRetry(tx as unknown as Db, swarm.id);

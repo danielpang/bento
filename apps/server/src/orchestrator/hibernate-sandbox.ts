@@ -1,10 +1,16 @@
-import { and, eq, inArray, isNull, ne, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, isNull, ne, sql } from "drizzle-orm";
 import { agentProfiles, agentRuns, sandboxes, swarmLandings, swarms } from "@bento/db";
 import { ModalDriver, MODAL_REPO_PREPARE_TIMEOUT_MS, MODAL_WARM_WINDOW_MS, type SandboxHandle } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
 import { driverForSandbox } from "./sandbox-driver.js";
 import { modalNetworkForProject, organizationRestrictsNetwork } from "./sandbox-network.js";
 import { ACTIVE_RUN_STATUSES } from "./start-run.js";
+
+/**
+ * How long a landing in flight counts as using its machines. A real
+ * landing, checks included, finishes well inside it.
+ */
+export const LANDING_ACTIVITY_MAX_MS = 30 * 60 * 1000;
 
 /** Queued when a Modal run finishes. Fires after the warm window. */
 export const HIBERNATE_SANDBOX_QUEUE = "sandbox.hibernate";
@@ -113,6 +119,9 @@ async function workspaceHasActiveRun(
         and(
           eq(swarmLandings.swarmId, row.swarmId),
           eq(swarmLandings.status, "landing"),
+          // A row whose job died says "landing" forever. Past this it
+          // is not keeping anybody's machine awake until the 24 hour cap.
+          gt(swarmLandings.startedAt, new Date(Date.now() - LANDING_ACTIVITY_MAX_MS)),
           ...(row.swarmTaskId ? [eq(swarmLandings.taskId, row.swarmTaskId)] : []),
         ),
       )

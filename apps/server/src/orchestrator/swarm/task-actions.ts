@@ -368,7 +368,18 @@ export async function retryLeaf(
         plannerToldBy: undefined,
         plannerRetells: undefined,
         ...(input.fresh
-          ? { landingError: undefined, workerStopped: undefined, rejection: undefined, sandboxRestarts: undefined }
+          ? {
+              landingError: undefined,
+              landingErrorCode: undefined,
+              workerStopped: undefined,
+              rejection: undefined,
+              sandboxRestarts: undefined,
+              // A fresh branch is cut from the swarm's head, so the merge
+              // a conflict's resolver forced on the old one is not this
+              // branch's, and neither is the conflict.
+              conflict: undefined,
+              landPolicy: undefined,
+            }
           : {}),
         ...(input.reason !== undefined ? { rejection: input.reason } : {}),
       },
