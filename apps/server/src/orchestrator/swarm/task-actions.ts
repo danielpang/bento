@@ -339,6 +339,8 @@ export async function retryLeaf(
      * included, because none of it is about the work that comes next.
      */
     fresh?: boolean;
+    /** Started over by Bento after a sandbox failure, not by a person: once per task. */
+    auto?: boolean;
   } & Asker,
 ): Promise<Task | SplitRefusal> {
   const { task } = input;
@@ -379,6 +381,11 @@ export async function retryLeaf(
               // branch's, and neither is the conflict.
               conflict: undefined,
               landPolicy: undefined,
+              // The old machine is discarded by a job before any agent
+              // is put on the task again; the coordinator waits for it.
+              startingOver: true,
+              startOverAttempts: undefined,
+              ...(input.auto ? { autoStartedOver: true } : {}),
             }
           : {}),
         ...(input.reason !== undefined ? { rejection: input.reason } : {}),
@@ -398,6 +405,7 @@ export async function retryLeaf(
       ...(input.reason ? { rejection: input.reason } : {}),
       ...(input.rejected ? { rejected: true } : {}),
       ...(input.fresh ? { fresh: true } : {}),
+      ...(input.auto ? { automatic: true } : {}),
     },
   });
   return updated ?? task;

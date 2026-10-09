@@ -29,6 +29,7 @@ import {
   type Db,
 } from "@bento/db";
 import { LocalProcessDriver, WorktreeManager, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
+import { performTaskStartOver } from "../orchestrator/swarm/start-over.js";
 import { singleDriver } from "../orchestrator/sandbox-driver.js";
 import { createApp } from "../app.js";
 import { DiskArtifactStore } from "../artifact-store.js";
@@ -1534,11 +1535,16 @@ test("starting a leaf over discards its machine, and a merge queue failure with 
   try {
     const res = await post(`/api/swarms/${swarm.id}/tasks/${tree.first.id}/retry`, { fresh: true });
     assert.equal(res.status, 200, await res.clone().text());
+    assert.deepEqual(destroyed, [], "the request does not wait on the provider");
+    assert.equal(((await readTask(tree.first.id)).flags as { startingOver?: boolean }).startingOver, true, "it reads as restarting");
+    assert.ok(queued.some((job) => job.queue === "swarm.task-start-over"));
+    await performTaskStartOver(ctx, tree.first.id);
   } finally {
     ctx.drivers.default.destroy = realDestroy;
   }
 
-  assert.deepEqual(destroyed, ["bento-swarm-start-over-leaf"], "the old machine and its branch are gone");
+  assert.deepEqual(destroyed, ["bento-swarm-start-over-leaf"], "the job takes the old machine and its branch down");
+  assert.equal(((await readTask(tree.first.id)).flags as { startingOver?: boolean }).startingOver, undefined);
   const [machine] = await db.select().from(sandboxes).where(eq(sandboxes.swarmTaskId, tree.first.id));
   assert.equal(machine?.status, "destroyed", "so the next worker gets a new one");
   const after = await readTask(tree.first.id);
@@ -1547,7 +1553,7 @@ test("starting a leaf over discards its machine, and a merge queue failure with 
   assert.equal((after.flags as { retries?: number }).retries, 3);
 });
 
-test("a leaf is not started over when the swarm's branch went with its machine", async () => {
+test("a leaf can still be started over after the swarm's machine is gone", async () => {
   const swarm = await createSwarm();
   await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.swarmId, swarm.id));
   const tree = await treeOf(swarm.id);
@@ -1559,9 +1565,8 @@ test("a leaf is not started over when the swarm's branch went with its machine",
   await db.update(swarms).set({ sandboxId: machine!.id }).where(eq(swarms.id, swarm.id));
 
   const res = await post(`/api/swarms/${swarm.id}/tasks/${tree.first.id}/retry`, { fresh: true });
-  assert.equal(res.status, 409);
-  assert.equal(((await res.json()) as { code?: string }).code, "SWARM_SANDBOX_GONE");
-  assert.equal((await readTask(tree.first.id)).status, "failed", "nothing was changed");
+  assert.equal(res.status, 200, await res.clone().text());
+  assert.equal((await readTask(tree.first.id)).status, "assigned", "its next worker starts from what GitHub holds");
 });
 
 test("fix forward keeps earlier worker runs on the task and gives the next attempt a reason", async () => {

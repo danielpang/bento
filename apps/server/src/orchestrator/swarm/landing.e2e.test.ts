@@ -768,12 +768,26 @@ test("a sandbox that could not be started sends the landing back to the queue, t
       "with a tick to wake it when the wait is over",
     );
 
+    // Out of attempts: the task starts over by itself, once.
     await db.update(swarmLandings).set({ status: "landing", attempt: 5 }).where(eq(swarmLandings.id, landing.id));
-    const last = await performLanding(ctx, landing.id);
+    const restarted = await performLanding(ctx, landing.id);
+    assert.equal(restarted?.status, "failed");
+    const startingOver = await taskRow(fx.task.id);
+    assert.equal(startingOver?.status, "assigned", "a machine that could not be started is answered with a new one");
+    assert.equal((startingOver?.flags as { autoStartedOver?: boolean }).autoStartedOver, true);
+    assert.ok(queued.some((job) => job.queue === "swarm.task-start-over"));
+
+    // The second time it is a failure a person sees, with its code.
+    const [again] = await db
+      .insert(swarmLandings)
+      .values({ swarmId: fx.swarm.id, taskId: fx.task.id, branchName: fx.branch, position: 1, status: "landing", attempt: 5 })
+      .returning();
+    await db.update(swarmTasks).set({ status: "landed" }).where(eq(swarmTasks.id, fx.task.id));
+    const last = await performLanding(ctx, again!.id);
     assert.equal(last?.status, "failed");
     assert.match(last?.reason ?? "", /could not be started after 5 attempts/);
     assert.doesNotMatch(last?.reason ?? "", /sb-internal-123/, "the provider's words stay out of the leaf");
-    assert.equal((await landingRow(landing.id))?.errorCode, "wake_failed");
+    assert.equal((await landingRow(again!.id))?.errorCode, "wake_failed");
     assert.equal(
       ((await taskRow(fx.task.id))?.flags as { landingErrorCode?: string }).landingErrorCode,
       "wake_failed",

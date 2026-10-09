@@ -33,7 +33,9 @@ import type { AppContext } from "../context.js";
 import type { BoardEvent } from "../events.js";
 import { actor } from "../middleware/actor.js";
 import { deferAfterCommit, deferOnRollback, tenantDb as db } from "../middleware/tenant.js";
-import { discardSwarmTaskWork, queueSwarmSandboxReap, reapSwarmSandbox } from "../orchestrator/reap-sandbox.js";
+import { queueSwarmSandboxReap, reapSwarmSandbox } from "../orchestrator/reap-sandbox.js";
+import { enqueueTaskStartOver } from "../orchestrator/swarm/start-over.js";
+import { enqueueSwarmPublish } from "../orchestrator/swarm/complete.js";
 import { driverForProject, driverForSandbox } from "../orchestrator/sandbox-driver.js";
 import { markCancelled } from "../orchestrator/run-executor.js";
 import { enqueueSwarmTick } from "../orchestrator/swarm/coordinator.js";
@@ -1143,6 +1145,28 @@ export function swarmRoutes(ctx: AppContext) {
      * same two refusals: there is no second door with its own idea of
      * when a swarm may run.
      */
+    /**
+     * Opens the pull requests of a finished swarm, in the shape a
+     * person chose: "combined", one pull request of the swarm's branch
+     * with every task merged in order, or "stacked", one per landed task
+     * against the task before it. The branches are already on GitHub
+     * (pushed as the swarm went), so this only asks GitHub for the
+     * pull requests, through the publish queue, which retries.
+     */
+    .post("/:id/publish", async (c) => {
+      const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
+      if (!swarm) return c.json({ error: "not found" }, 404);
+      const refusal = await requireSwarms(ctx, c, swarm.organizationId);
+      if (refusal) return c.json(refusal.body, refusal.status);
+      const body = await c.req.json().catch(() => ({}));
+      const parsed = z.object({ mode: z.enum(["combined", "stacked"]) }).safeParse(body);
+      if (!parsed.success) return c.json({ error: "Choose combined or stacked pull requests." }, 400);
+      if (swarm.status !== "done") {
+        return c.json({ error: "Pull requests open once the swarm is done." }, 409);
+      }
+      deferAfterCommit(c, () => enqueueSwarmPublish(ctx, swarm.id, parsed.data.mode));
+      return c.json({ mode: parsed.data.mode, status: "queued" }, 202);
+    })
     .post("/:id/planner/retry", async (c) => {
       const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
       if (!swarm) return c.json({ error: "not found" }, 404);
@@ -1851,35 +1875,13 @@ export function swarmRoutes(ctx: AppContext) {
        * is the one thing the merge queue cannot sort out afterwards.
        */
       /*
-       * Starting over is cut from the swarm's branch, which on a clone
-       * driver exists only in the swarm's own machine. With that machine
-       * gone a new worker would quietly start from the base branch and
-       * its work could never land, so it is refused before anything is
-       * stopped or thrown away.
+       * Starting over is cut from the swarm's branch. With the swarm's
+       * machine gone, that branch is read back from GitHub, where every
+       * landing pushed it; a swarm that never pushed (no GitHub) starts
+       * the task from the base branch, which the console says before a
+       * person confirms.
        */
-      if (fresh && (await swarmMachineGone(ctx, swarm.sandboxId))) {
-        return c.json({
-          error: "This swarm's sandbox is gone, so there is no swarm branch to start this task over from.",
-          code: "SWARM_SANDBOX_GONE",
-        }, 409);
-      }
-
       await stopRunsOnTask(ctx, c, task.id);
-      if (fresh) {
-        try {
-          await discardSwarmTaskWork(ctx, { swarmTaskId: task.id, branch: task.branchName });
-        } catch (err) {
-          console.warn(`could not discard the sandbox of swarm task ${task.id}:`, err);
-          ctx.analytics?.captureException(err, actor(c), swarm.organizationId, {
-            swarm_id: swarm.id,
-            swarm_task_id: task.id,
-            source: "swarm_task_start_over",
-          });
-          return c.json({
-            error: "The task's old sandbox could not be removed, so it was not started over. Its agent was stopped. Try again.",
-          }, 502);
-        }
-      }
       const retried = await retryLeaf(db(c, ctx), {
         task,
         actorUserId: actor(c),
@@ -1890,6 +1892,10 @@ export function swarmRoutes(ctx: AppContext) {
       if (await reactivateSwarmForRetry(db(c, ctx), swarm.id)) {
         saySwarmChanged(ctx, c, swarm, "running");
       }
+      // Starting over takes the old machine down in a job, not in this
+      // request: a slow provider would time the request out with the
+      // agent already stopped. The task reads "Restarting" until then.
+      if (fresh) deferAfterCommit(c, () => enqueueTaskStartOver(ctx, task.id));
       deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
       return c.json(retried);
     })
@@ -2297,23 +2303,6 @@ function finishedTaskMutationRefusal(
  * interrupted; its token is dead from here either way, so its tools
  * stop answering.
  */
-/**
- * Whether the swarm's branch went with its machine: the machine was a
- * clone provider's, where the branch lives only inside it, and it has
- * been destroyed. A host driver's swarm branch is in the project's
- * checkout and outlives the container.
- */
-async function swarmMachineGone(ctx: AppContext, sandboxId: string | null): Promise<boolean> {
-  if (!sandboxId) return false;
-  const [row] = await ctx.db
-    .select({ status: sandboxes.status, provider: sandboxes.provider })
-    .from(sandboxes)
-    .where(eq(sandboxes.id, sandboxId))
-    .limit(1);
-  if (!row) return false;
-  return row.status === "destroyed" && (row.provider === "sprite" || row.provider === "modal");
-}
-
 async function stopRunsOnTask(ctx: AppContext, c: Context, taskId: string): Promise<void> {
   const active = await db(c, ctx)
     .select({ id: agentRuns.id })

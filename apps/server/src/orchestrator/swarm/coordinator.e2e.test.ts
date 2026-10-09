@@ -1049,12 +1049,37 @@ test("a leaf whose machine could not be made is started again, without waking th
   assert.equal((restarted?.detail as { reason?: string })?.reason, "sandbox");
 });
 
+test("a leaf whose machine failed past its restarts starts over once in a new machine", async () => {
+  const swarm = await makeSwarm({ status: "running" });
+  const leaf = await makeTask(swarm.id, {
+    title: "machine keeps failing",
+    status: "working",
+    flags: { sandboxRestarts: MAX_SANDBOX_RESTARTS },
+  });
+  await runOn(swarm.id, leaf.id, "failed", NO_MACHINE);
+
+  const deps = starter();
+  const result = await tickSwarm(ctx, swarm.id, deps);
+  const row = await read(leaf.id);
+  const flags = row.flags as { startingOver?: boolean; autoStartedOver?: boolean; sandboxRestarts?: number };
+  assert.equal(row.status, "assigned", "not failed: the sandbox failed, not the work");
+  assert.equal(flags.startingOver, true, "its old machine is taken down first");
+  assert.equal(flags.autoStartedOver, true, "and only once");
+  assert.equal(flags.sandboxRestarts, undefined);
+  assert.equal(result?.plannerRunId, null, "the planner is not woken for it");
+  assert.equal(deps.calls.filter((call) => call.role === "worker").length, 0, "no agent until the old machine is gone");
+  assert.ok(
+    queued.some((job) => job.queue === "swarm.task-start-over" && (job.data as { taskId?: string }).taskId === leaf.id),
+    "the job that takes the old machine down is queued",
+  );
+});
+
 test("a leaf whose machine could not be made is handed to the planner once its restarts are spent", async () => {
   const swarm = await makeSwarm({ status: "running" });
   const leaf = await makeTask(swarm.id, {
     title: "still no machine",
     status: "working",
-    flags: { sandboxRestarts: MAX_SANDBOX_RESTARTS },
+    flags: { sandboxRestarts: MAX_SANDBOX_RESTARTS, autoStartedOver: true },
   });
   await runOn(swarm.id, leaf.id, "failed", NO_MACHINE);
 
@@ -1409,40 +1434,35 @@ test("a leaf already accepted or marked done is not handed to a planner again", 
   assert.equal(result?.plannerRunId, null);
 });
 
-test("the tick that finishes a swarm asks for it to be published, once", async () => {
+test("the tick that finishes a swarm pushes its branch once, and opens no pull request", async () => {
   /**
-   * The one thing a swarm does that leaves Bento, and the only door to
-   * it. Keyed on the transition rather than on the status, because a
-   * tick runs again for all sorts of reasons and a job per tick on a
+   * The pull requests are a person's choice once the swarm is done (one
+   * for the swarm, or one per task), so finishing only pushes the
+   * branch. Keyed on the transition rather than on the status, because
+   * a tick runs again for all sorts of reasons and a job per tick on a
    * finished swarm is a push per tick.
    */
   const swarm = await makeSwarm();
   const leaf = await makeTask(swarm.id, { status: "working" });
+  const pushes = () =>
+    queued.filter(
+      (job) => job.queue === "swarm.push" && (job.data as { kind?: string; swarmId?: string }).swarmId === swarm.id,
+    );
 
   const working = await tickSwarm(ctx, swarm.id, starter());
   assert.equal(working?.becameDone, false);
-  assert.equal(
-    queued.filter((job) => job.queue === "swarm.publish").length,
-    0,
-    "a swarm still working is not published",
-  );
+  assert.equal(pushes().length, 0, "a swarm still working is not pushed by the tick");
 
   await db.update(swarmTasks).set({ status: "done" }).where(eq(swarmTasks.id, leaf.id));
   const finished = await tickSwarm(ctx, swarm.id, starter());
   assert.equal(finished?.status, "done");
   assert.equal(finished?.becameDone, true);
-  const asked = queued.filter((job) => job.queue === "swarm.publish");
-  assert.equal(asked.length, 1, "the transition is what asks");
-  assert.equal((asked[0]!.data as { swarmId?: string }).swarmId, swarm.id);
+  assert.equal(pushes().length, 1, "the transition is what asks");
+  assert.equal(queued.filter((job) => job.queue === "swarm.publish").length, 0, "and nothing opens a pull request");
 
-  // And again, on a swarm that has been done since the last tick.
   const again = await tickSwarm(ctx, swarm.id, starter());
   assert.equal(again?.becameDone, false);
-  assert.equal(
-    queued.filter((job) => job.queue === "swarm.publish").length,
-    1,
-    "a second tick on a finished swarm does not publish it a second time",
-  );
+  assert.equal(pushes().length, 1, "a second tick on a finished swarm does not push it a second time");
 });
 
 /* ---------------------------------------------------------------- *

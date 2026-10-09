@@ -125,6 +125,8 @@ import { asPipelineRun, isPipelineRun, type PipelineRun } from "./pipeline-run.j
 import { describeRunSubject, type RunSubject } from "./run-subject.js";
 import { SWARM_TICK_QUEUE, tickAllLiveSwarms } from "./swarm/coordinator.js";
 import { SWARM_LAND_QUEUE, resumeClaimedLandings } from "./swarm/landing.js";
+import { SWARM_PUSH_QUEUE, ensureSwarmPushWorker, remoteBranchBundles } from "./swarm/remote-branches.js";
+import { SWARM_START_OVER_QUEUE } from "./swarm/start-over.js";
 import {
   claimQueuedMessages,
   confirmDelivered,
@@ -450,6 +452,15 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
        */
       ...(subject.kind === "swarm" && subject.task && subject.swarm.branchName && driver.workspace === "clone"
         ? { startFromBundles: await swarmBranchBundles(ctx, subject.swarm, repoRows) }
+        : {}),
+      /**
+       * And the swarm's own machine, made again after it was lost, is
+       * made on the branch GitHub holds for it, so every task that
+       * landed is still there. A first machine, or one still standing,
+       * has nothing to restore.
+       */
+      ...(subject.kind === "swarm" && !subject.task && driver.workspace === "clone"
+        ? await swarmRestoreBundles(ctx, subject.swarm, repoRows)
         : {}),
       say: saySystem,
     };
@@ -1899,7 +1910,17 @@ async function swarmBranchBundles(
 ): Promise<Map<string, { branch: string; data: Buffer }>> {
   if (!swarm.sandboxId) return new Map();
   const [row] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, swarm.sandboxId)).limit(1);
-  if (!row || row.status === "destroyed") return new Map();
+  // The swarm's machine is gone: its branch is read back from GitHub,
+  // where every landing pushed it, rather than the worker quietly
+  // starting from the base branch.
+  if (!row || row.status === "destroyed") {
+    return remoteBranchBundles(ctx, {
+      organizationId: swarm.organizationId,
+      branch: swarm.branchName ?? swarmBranchName(swarm.slug),
+      pushedHeads: swarm.pushedHeads,
+      repoRows,
+    });
+  }
   await wakeSwarmSandbox(ctx, row, swarm, swarm.plannerProfileId);
   return exportSwarmBranch(
     driverForSandbox(ctx.drivers, row),
@@ -1930,6 +1951,29 @@ async function leftoverAgentCommands(ctx: AppContext, taskId: string, argv: stri
     commands.push([binary]);
   }
   return commands;
+}
+
+/**
+ * The swarm's branch from GitHub, for remaking the swarm's own machine
+ * after the one that held it was destroyed. Nothing when the machine
+ * is still there (a hibernated one is restored from its snapshot) or
+ * nothing was ever pushed.
+ */
+async function swarmRestoreBundles(
+  ctx: AppContext,
+  swarm: typeof swarms.$inferSelect,
+  repoRows: (typeof repositories.$inferSelect)[],
+): Promise<{ startFromBundles?: Map<string, { branch: string; data: Buffer }> }> {
+  if (!swarm.sandboxId || Object.keys(swarm.pushedHeads ?? {}).length === 0) return {};
+  const [row] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, swarm.sandboxId)).limit(1);
+  if (row && row.status !== "destroyed") return {};
+  const bundles = await remoteBranchBundles(ctx, {
+    organizationId: swarm.organizationId,
+    branch: swarm.branchName ?? swarmBranchName(swarm.slug),
+    pushedHeads: swarm.pushedHeads,
+    repoRows,
+  });
+  return bundles.size > 0 ? { startFromBundles: bundles } : {};
 }
 
 /** Whether the planner has written the design note a worker is told to read. */
@@ -3130,6 +3174,10 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
    * this one's.
    */
   await ctx.boss.createQueue(SWARM_LAND_QUEUE, { name: SWARM_LAND_QUEUE, policy: "short" });
+  // Pushes of a swarm's branches to GitHub. "short" keyed by what is
+  // pushed, so a push already waiting is not queued twice.
+  await ctx.boss.createQueue(SWARM_PUSH_QUEUE, { name: SWARM_PUSH_QUEUE, policy: "short" });
+  await ctx.boss.createQueue(SWARM_START_OVER_QUEUE, { name: SWARM_START_OVER_QUEUE, policy: "short" });
   await ctx.boss.createQueue(HIBERNATE_SANDBOX_QUEUE);
   await ctx.boss.createQueue(MODAL_SWEEP_QUEUE);
 
@@ -3149,6 +3197,12 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
    */
   const claimed = await resumeClaimedLandings(ctx);
   if (claimed > 0) console.log(`resumed ${claimed} landing(s) a restart left claimed`);
+  /**
+   * Pushes a restart left waiting. The worker starts on first use, so
+   * without this a branch queued for GitHub before a deploy would wait
+   * for the next push anyone happened to ask for.
+   */
+  if ((await ctx.boss.getQueueSize(SWARM_PUSH_QUEUE, { before: "active" })) > 0) await ensureSwarmPushWorker(ctx);
   /**
    * Every swarm that is still working gets one tick, after recovery
    * rather than before it: the tick reads the runs, and it should read

@@ -1,4 +1,4 @@
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import {
   repositories,
   sandboxes,
@@ -9,7 +9,13 @@ import {
   type Db,
 } from "@bento/db";
 import { resolveRepositoryCommands } from "@bento/core";
-import { collectExec, repositoryPathIn, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
+import {
+  collectExec,
+  repositoryPathIn,
+  type RepositoryBundle,
+  type SandboxDriver,
+  type SandboxHandle,
+} from "@bento/sandbox";
 import { captureJobErrors } from "../../analytics.js";
 import type { AppContext } from "../../context.js";
 import { QUEUE_POLL_SECONDS } from "../queue.js";
@@ -32,6 +38,9 @@ import { queueSwarmSlackNotify } from "../slack-notify.js";
 import { swarmBranchName, swarmWorkspaceKey } from "./sandbox.js";
 import { driverForSandbox } from "../sandbox-driver.js";
 import { wakeSwarmSandbox } from "../hibernate-sandbox.js";
+import { enqueueSwarmPush, remoteBranchBundles } from "./remote-branches.js";
+import { enqueueTaskStartOver } from "./start-over.js";
+import { retryLeaf } from "./task-actions.js";
 
 /**
  * The merge queue's other half: what actually happens when a landing
@@ -89,6 +98,9 @@ export const SANDBOX_LANDING_FAILURES: ReadonlySet<LandingFailureCode> = new Set
   "transfer_unsupported",
   "wake_failed",
 ]);
+
+/** The landing failures a new machine can answer, so the task starts over once by itself. */
+const AUTO_START_OVER_LANDING_FAILURES: ReadonlySet<LandingFailureCode> = new Set(["task_sandbox_gone", "wake_failed"]);
 
 /**
  * How long a landing sent back to the queue waits before it is
@@ -253,6 +265,8 @@ export async function performLanding(ctx: AppContext, landingId: string): Promis
   }
 
   const landed: string[] = [];
+  /** The swarm's head after this landing, per repository it changed: the landed form of this task's branch. */
+  const landedHeads: Record<string, string> = {};
   const problems: { repo: string; outcome: LandFailure }[] = [];
   let remoteHandles: RemoteHandles | null = null;
   if (clone) {
@@ -282,7 +296,7 @@ export async function performLanding(ctx: AppContext, landingId: string): Promis
         found.missing === "swarm" ? "swarm_sandbox_gone" : "task_sandbox_gone",
       );
     }
-    if (!landingDriver?.exportRepository || !landingDriver.importRepository || !found.workerDriver.exportRepository) {
+    if (!landingDriver?.exportRepository || !landingDriver.importRepository || !found.exportWorker) {
       return finish(
         ctx,
         landing,
@@ -307,14 +321,13 @@ export async function performLanding(ctx: AppContext, landingId: string): Promis
      * land read as "already an ancestor" and cost nothing.
      */
     const outcome = remoteHandles
-      ? await landSandboxBranch({ swarm: landingDriver!, worker: remoteHandles.workerDriver }, {
+      ? await landSandboxBranch(landingDriver!, remoteHandles.exportWorker!, {
           repoName: repo.name,
           baseBranch: repo.defaultBranch,
           swarmBranch,
           policy,
           mergeMessage: landingMergeMessage(task),
           swarmHandle: remoteHandles.swarm,
-          workerHandle: remoteHandles.worker,
         })
       : await landWorkerBranch({
           repoPath: repo.localPath,
@@ -326,7 +339,10 @@ export async function performLanding(ctx: AppContext, landingId: string): Promis
           landingId: landing.id,
         });
     if (outcome.ok) {
-      if (outcome.commits > 0) landed.push(repo.name);
+      if (outcome.commits > 0) {
+        landed.push(repo.name);
+        landedHeads[repo.name] = outcome.head;
+      }
       continue;
     }
     // A worker that committed nothing in this repository is the normal
@@ -351,7 +367,7 @@ export async function performLanding(ctx: AppContext, landingId: string): Promis
     const check = await runLandingTests(ctx, swarm, repoRows, task);
     if (check.kind === "failed") return failTests(ctx, landing, task, swarm, check.detail);
     if (check.kind === "unavailable") return finish(ctx, landing, "failed", check.detail, task, "checks_unavailable");
-    return succeed(ctx, landing, task, swarm, landed);
+    return succeed(ctx, landing, task, swarm, landed, landedHeads);
   }
 
   if (problem.outcome.reason === "moved") {
@@ -390,11 +406,15 @@ export async function performLanding(ctx: AppContext, landingId: string): Promis
   return finish(ctx, landing, "failed", `${problem.repo}: ${problem.outcome.detail}`, task, "landing_error");
 }
 
-/** The two machines a remote landing reconciles, and the driver that owns the worker's. */
+/**
+ * The swarm's machine a remote landing imports into, and where the
+ * worker's branch is read from: the worker's own machine through the
+ * driver that owns it, or GitHub when that machine is gone. "empty" is
+ * a repository the worker did not change. Absent when neither can say.
+ */
 interface RemoteHandles {
   swarm: SandboxHandle;
-  worker: SandboxHandle;
-  workerDriver: SandboxDriver;
+  exportWorker?: (repoName: string, baseBranch: string) => Promise<RepositoryBundle | null | "empty">;
 }
 
 /** A hibernated machine this landing needed could not be started. */
@@ -473,7 +493,36 @@ async function landingSandboxHandles(
   const workerRows = await ctx.db.select().from(sandboxes).where(eq(sandboxes.swarmTaskId, task.id));
   const workerSandbox = workerRows.find((row) => row.status !== "destroyed");
   if (!swarmSandbox || swarmSandbox.status === "destroyed") return { missing: "swarm" };
-  if (!workerSandbox) return { missing: "worker" };
+  if (!workerSandbox) {
+    /*
+     * The worker's machine is gone, but its branch went to GitHub when
+     * its run ended: the landing reads it from there. A repository the
+     * worker pushed nothing to is one it did not change.
+     */
+    const pushed = (task.flags as { pushedHeads?: Record<string, string> }).pushedHeads;
+    const repoRows = await ctx.db.select().from(repositories).where(eq(repositories.projectId, swarm.projectId));
+    const bundles = await remoteBranchBundles(ctx, {
+      organizationId: swarm.organizationId,
+      branch: task.branchName ?? workerBranchName(swarm.branchName ?? swarmBranchName(swarm.slug), task.id),
+      pushedHeads: pushed,
+      repoRows,
+      selfContained: true,
+    });
+    if (bundles.size === 0) return { missing: "worker" };
+    try {
+      await wakeSwarmSandbox(ctx, swarmSandbox, swarm, swarm.plannerProfileId);
+    } catch (err) {
+      throw new LandingWakeFailed(err);
+    }
+    return {
+      swarm: { externalId: swarmSandbox.externalId, provider: swarmSandbox.provider, workdir: swarmSandbox.workdir },
+      exportWorker: async (repoName) => {
+        const bundle = bundles.get(repoName);
+        if (!bundle) return "empty";
+        return { baseSha: bundle.baseSha, headSha: bundle.headSha, data: bundle.data };
+      },
+    };
+  }
   /**
    * A hibernated machine is still the branch, only asleep. A worker
    * whose report the planner took longer than the warm window to
@@ -489,20 +538,27 @@ async function landingSandboxHandles(
   } catch (err) {
     throw new LandingWakeFailed(err);
   }
+  const workerDriver = driverForSandbox(ctx.drivers, workerSandbox);
+  const workerHandle: SandboxHandle = {
+    externalId: workerSandbox.externalId,
+    provider: workerSandbox.provider,
+    workdir: workerSandbox.workdir,
+  };
   return {
     swarm: {
       externalId: swarmSandbox.externalId,
       provider: swarmSandbox.provider,
       workdir: swarmSandbox.workdir,
     },
-    worker: {
-      externalId: workerSandbox.externalId,
-      provider: workerSandbox.provider,
-      workdir: workerSandbox.workdir,
-    },
-    workerDriver: driverForSandbox(ctx.drivers, workerSandbox),
+    ...(workerDriver.exportRepository
+      ? {
+          exportWorker: (repoName: string, baseBranch: string) =>
+            workerDriver.exportRepository!(workerHandle, repoName, baseBranch, { selfContained: true }),
+        }
+      : {}),
   };
 }
+
 
 /**
  * Lands one repository whose object stores live in two sandboxes.
@@ -514,7 +570,8 @@ async function landingSandboxHandles(
  * swarm; the import is always the swarm's.
  */
 async function landSandboxBranch(
-  drivers: { swarm: SandboxDriver; worker: SandboxDriver },
+  swarmDriver: SandboxDriver,
+  exportWorker: NonNullable<RemoteHandles["exportWorker"]>,
   input: {
     repoName: string;
     baseBranch: string;
@@ -522,19 +579,19 @@ async function landSandboxBranch(
     policy: ReturnType<typeof landingPolicyFor>;
     mergeMessage: string;
     swarmHandle: SandboxHandle;
-    workerHandle: SandboxHandle;
   },
 ): Promise<LandOutcome> {
   let swarmBundle;
   let workerBundle;
   try {
     [swarmBundle, workerBundle] = await Promise.all([
-      drivers.swarm.exportRepository!(input.swarmHandle, input.repoName, input.baseBranch, { selfContained: true }),
-      drivers.worker.exportRepository!(input.workerHandle, input.repoName, input.baseBranch, { selfContained: true }),
+      swarmDriver.exportRepository!(input.swarmHandle, input.repoName, input.baseBranch, { selfContained: true }),
+      exportWorker(input.repoName, input.baseBranch),
     ]);
   } catch (err) {
     return { ok: false, reason: "moved", detail: `could not export the sandbox branches: ${String(err)}` };
   }
+  if (workerBundle === "empty") return { ok: false, reason: "empty" };
   if (!swarmBundle || !workerBundle) {
     return { ok: false, reason: "error", detail: "a sandbox returned no snapshot for its checked out branch." };
   }
@@ -549,7 +606,7 @@ async function landSandboxBranch(
 
   let imported;
   try {
-    imported = await drivers.swarm.importRepository!(
+    imported = await swarmDriver.importRepository!(
       input.swarmHandle,
       input.repoName,
       reconciled.bundle,
@@ -690,12 +747,19 @@ async function succeed(
   task: typeof swarmTasks.$inferSelect,
   swarm: typeof swarms.$inferSelect,
   landed: string[],
+  landedHeads: Record<string, string>,
 ): Promise<LandingResult | null> {
   const now = new Date();
   let claimed = false;
   await ctx.db.transaction(async (tx) => {
     claimed = await claimOutcome(tx, landing, { status: "landed", error: null, endedAt: now, updatedAt: now });
     if (!claimed) return;
+    // Merged into the flags rather than written over them, so nothing
+    // else on the task is read and written back.
+    await tx
+      .update(swarmTasks)
+      .set({ flags: sql`coalesce(${swarmTasks.flags}, '{}'::jsonb) || ${JSON.stringify({ landedHeads })}::jsonb` })
+      .where(eq(swarmTasks.id, task.id));
     /**
      * The leaf is done now, and not when the planner accepted it.
      *
@@ -735,6 +799,13 @@ async function succeed(
    * so a provider that is slow or down does not fail a landing that
    * has already succeeded.
    */
+  /**
+   * The swarm's branch, and this task's in the form it landed, to
+   * GitHub, before anything else can happen to the machine that holds
+   * them. The worker's machine goes next; what it held is on the
+   * swarm's branch, and the swarm's branch is about to be on GitHub.
+   */
+  await enqueueSwarmPush(ctx, { kind: "swarm", swarmId: swarm.id, landedTaskId: task.id });
   await queueSwarmTaskSandboxReap(ctx, task.id);
   await queueSwarmSlackNotify(ctx, { type: "swarm_landed", swarmId: swarm.id, taskId: task.id });
   await enqueueSwarmTick(ctx, swarm.id);
@@ -797,6 +868,9 @@ async function failTests(
   });
   if (!claimed) return null;
   reportLandingFailure(ctx, landing, "checks_failed", failure);
+  // The fast forward stays (see above), so the swarm's branch moved and
+  // goes to GitHub as it is.
+  await enqueueSwarmPush(ctx, { kind: "swarm", swarmId: swarm.id });
   ctx.bus.emitBoardEvent({
     type: "swarm_task_updated",
     projectId: swarm.projectId,
@@ -992,10 +1066,29 @@ async function finish(
   const now = new Date();
   const errorCode = status === "failed" ? (code ?? "landing_error") : null;
   let claimed = false;
+  /*
+   * A landing that failed because a machine could not be reached or
+   * was gone is started over once, in a new machine, before the
+   * planner or a person is asked: the work is not what failed.
+   */
+  const startOver =
+    status === "failed" &&
+    task !== undefined &&
+    errorCode !== null &&
+    AUTO_START_OVER_LANDING_FAILURES.has(errorCode) &&
+    !(task.flags as { autoStartedOver?: boolean }).autoStartedOver;
+  let startedOver = false;
   await ctx.db.transaction(async (tx) => {
     claimed = await claimOutcome(tx, landing, { status, error: reason, errorCode, endedAt: now, updatedAt: now });
     if (!claimed) return;
     if (!task || status !== "failed") return;
+    if (startOver) {
+      const restarted = await retryLeaf(tx as unknown as Parameters<typeof retryLeaf>[0], { task, fresh: true, auto: true, now });
+      if (!("refused" in restarted)) {
+        startedOver = true;
+        return;
+      }
+    }
     await handLeafToPlanner(tx, {
       task,
       status: "failed",
@@ -1007,6 +1100,7 @@ async function finish(
   });
   if (!claimed) return null;
   if (errorCode) reportLandingFailure(ctx, landing, errorCode, reason);
+  if (startedOver) await enqueueTaskStartOver(ctx, landing.taskId);
   /**
    * A withdrawn leaf's machine, for the reason a landed one's is asked
    * for: the branch it holds is never going onto the swarm's branch, so

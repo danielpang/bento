@@ -1780,6 +1780,14 @@ export const swarms = pgTable(
      */
     startedBy: text("started_by").references(() => user.id, { onDelete: "set null" }),
     /** Set when a finished swarm is put away. The rows stay. */
+    /**
+     * The commit Bento last pushed to the swarm's branch on GitHub, per
+     * repository url. The branch goes to the remote after every landing
+     * so a lost machine loses nothing, and this is the lease each later
+     * push holds: a push that finds anything else there refuses rather
+     * than overwrite a person's commits.
+     */
+    pushedHeads: jsonb("pushed_heads").$type<Record<string, string>>().notNull().default({}),
     archivedAt: timestamp("archived_at", { withTimezone: true }),
     /** Drives "pick up where you left off" without touching updatedAt. */
     lastOpenedAt: timestamp("last_opened_at", { withTimezone: true }),

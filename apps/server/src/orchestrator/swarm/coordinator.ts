@@ -23,7 +23,9 @@ import { swarmHasActiveRun } from "./reopen.js";
 import { ACTIVE_RUN_STATUSES, projectHasRepositories, SWARM_FULL, startRunIfIdle, type NewRun, type OutOfCompute } from "../start-run.js";
 import { plannerWakeMessage, type PlannerWakeItem } from "./planner-prompt.js";
 import { enqueueLanding } from "./landing.js";
-import { enqueueSwarmPublish } from "./complete.js";
+import { enqueueSwarmPush } from "./remote-branches.js";
+import { resumeStartOvers } from "./start-over.js";
+import { retryLeaf } from "./task-actions.js";
 import { ensureFinalCheck, isFinalCheck } from "./final-check.js";
 import {
   assembleSwarmDocumentInSandbox,
@@ -378,6 +380,8 @@ export async function tickSwarm(
         throw err;
       }
     }
+    // Every task waiting to start over has its job; one a restart lost is asked for again.
+    await resumeStartOvers(ctx, swarmId);
     /*
      * Assembly touches git and may talk to a remote sandbox, so it is
      * outside the transaction. Its assigned task is the durable claim:
@@ -390,17 +394,20 @@ export async function tickSwarm(
       return executed ? tickSwarm(ctx, swarmId, deps) : result;
     }
     /**
-     * A swarm that just finished has one thing left to do, and it is
-     * the only thing in a swarm that leaves Bento: push the branch and
-     * open the pull requests.
-     *
-     * On its own queue rather than inline, because it clones, pushes
-     * and talks to GitHub, and the tick worker runs one job at a time
-     * for every swarm on the deployment. After the commit, because the
-     * job reads the swarm's status and refuses anything but "done".
+     * A swarm that just finished has its branch pushed once more, on
+     * the push queue rather than inline, because it clones, pushes and
+     * talks to GitHub, and the tick worker runs one job at a time for
+     * every swarm on the deployment. The pull requests are a person's
+     * choice now (POST /api/swarms/:id/publish), so nothing opens one.
+     */
+    /*
+     * Pushed, not published: the branch goes to GitHub (it has been
+     * going after every landing; this catches anything since), and the
+     * pull requests wait for a person to choose one for the swarm or
+     * one per task.
      */
     if (result.becameDone) {
-      await enqueueSwarmPublish(ctx, swarmId);
+      await enqueueSwarmPush(ctx, { kind: "swarm", swarmId });
       await queueSwarmSlackNotify(ctx, { type: "swarm_completed", swarmId });
     }
     /*
@@ -847,6 +854,26 @@ async function settleWorkedLeaves(
     if (run && restarts !== null && restarts < MAX_SANDBOX_RESTARTS) {
       await restartAfterSandboxFailure(tx, swarm, task, run, restarts + 1, events, now);
       continue;
+    }
+    /*
+     * Its machine failed past its restarts. Once per task, before the
+     * planner or a person is asked, the task starts over in a new
+     * machine: the failure is the sandbox's, never the work's, and the
+     * work is already on GitHub. A job takes the old machine down
+     * (resumeStartOvers asks for it after this tick commits).
+     */
+    if (
+      run &&
+      restarts !== null &&
+      task.nodeType === "leaf" &&
+      !(task.flags as { autoStartedOver?: boolean }).autoStartedOver
+    ) {
+      const restarted = await retryLeaf(tx as unknown as Parameters<typeof retryLeaf>[0], { task, fresh: true, auto: true, now });
+      if (!("refused" in restarted)) {
+        Object.assign(task, restarted);
+        events.push({ type: "swarm_task_updated", projectId: swarm.projectId, swarmId: swarm.id, taskId: task.id, status: task.status });
+        continue;
+      }
     }
     if (task.nodeType === "leaf" && run?.status === "succeeded") {
       const [lastMessage] = await tx
@@ -1719,6 +1746,8 @@ async function spawnWorkers(
   const byId = new Map(tasks.map((task) => [task.id, task]));
   const ready = tasks.filter(
     (task) => task.nodeType === "leaf" && task.status === "assigned" &&
+      // Starting over: its old machine is being taken down first.
+      !(task.flags as { startingOver?: boolean }).startingOver &&
       !isDocumentAssembly(task) && leafAncestorsDone(task, byId),
   );
   if (ready.length === 0) return { runIds, refusal: null, cap: null };
