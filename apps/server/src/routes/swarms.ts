@@ -33,7 +33,7 @@ import type { AppContext } from "../context.js";
 import type { BoardEvent } from "../events.js";
 import { actor } from "../middleware/actor.js";
 import { deferAfterCommit, deferOnRollback, tenantDb as db } from "../middleware/tenant.js";
-import { queueSwarmSandboxReap, reapSwarmSandbox } from "../orchestrator/reap-sandbox.js";
+import { discardSwarmTaskWork, queueSwarmSandboxReap, reapSwarmSandbox } from "../orchestrator/reap-sandbox.js";
 import { driverForProject, driverForSandbox } from "../orchestrator/sandbox-driver.js";
 import { markCancelled } from "../orchestrator/run-executor.js";
 import { enqueueSwarmTick } from "../orchestrator/swarm/coordinator.js";
@@ -1824,8 +1824,11 @@ export function swarmRoutes(ctx: AppContext) {
       if ("refusal" in found) return found.refusal;
       const { swarm, task } = found;
       const body = await c.req.json().catch(() => ({}));
-      const parsed = z.object({ reason: z.string().trim().min(1).max(4000).optional() }).safeParse(body);
+      const parsed = z
+        .object({ reason: z.string().trim().min(1).max(4000).optional(), fresh: z.boolean().optional() })
+        .safeParse(body);
       if (!parsed.success) return c.json({ error: "Invalid retry request" }, 400);
+      const fresh = parsed.data.fresh === true;
       const finished = swarm.status === "failed" ? null : finishedTaskMutationRefusal(c, swarm);
       if (finished) return finished;
 
@@ -1847,8 +1850,42 @@ export function swarmRoutes(ctx: AppContext) {
        * agent on a branch the first one is still committing to, which
        * is the one thing the merge queue cannot sort out afterwards.
        */
+      /*
+       * Starting over is cut from the swarm's branch, which on a clone
+       * driver exists only in the swarm's own machine. With that machine
+       * gone a new worker would quietly start from the base branch and
+       * its work could never land, so it is refused before anything is
+       * stopped or thrown away.
+       */
+      if (fresh && (await swarmMachineGone(ctx, swarm.sandboxId))) {
+        return c.json({
+          error: "This swarm's sandbox is gone, so there is no swarm branch to start this task over from.",
+          code: "SWARM_SANDBOX_GONE",
+        }, 409);
+      }
+
       await stopRunsOnTask(ctx, c, task.id);
-      const retried = await retryLeaf(db(c, ctx), { task, actorUserId: actor(c), ...(parsed.data.reason ? { reason: parsed.data.reason } : {}) });
+      if (fresh) {
+        try {
+          await discardSwarmTaskWork(ctx, { swarmTaskId: task.id, branch: task.branchName });
+        } catch (err) {
+          console.warn(`could not discard the sandbox of swarm task ${task.id}:`, err);
+          ctx.analytics?.captureException(err, actor(c), swarm.organizationId, {
+            swarm_id: swarm.id,
+            swarm_task_id: task.id,
+            source: "swarm_task_start_over",
+          });
+          return c.json({
+            error: "The task's old sandbox could not be removed, so it was not started over. Its agent was stopped. Try again.",
+          }, 502);
+        }
+      }
+      const retried = await retryLeaf(db(c, ctx), {
+        task,
+        actorUserId: actor(c),
+        ...(parsed.data.reason ? { reason: parsed.data.reason } : {}),
+        ...(fresh ? { fresh: true } : {}),
+      });
       if ("refused" in retried) return c.json({ error: retried.refused, code: "NOT_A_LEAF" }, 409);
       if (await reactivateSwarmForRetry(db(c, ctx), swarm.id)) {
         saySwarmChanged(ctx, c, swarm, "running");
@@ -2260,6 +2297,23 @@ function finishedTaskMutationRefusal(
  * interrupted; its token is dead from here either way, so its tools
  * stop answering.
  */
+/**
+ * Whether the swarm's branch went with its machine: the machine was a
+ * clone provider's, where the branch lives only inside it, and it has
+ * been destroyed. A host driver's swarm branch is in the project's
+ * checkout and outlives the container.
+ */
+async function swarmMachineGone(ctx: AppContext, sandboxId: string | null): Promise<boolean> {
+  if (!sandboxId) return false;
+  const [row] = await ctx.db
+    .select({ status: sandboxes.status, provider: sandboxes.provider })
+    .from(sandboxes)
+    .where(eq(sandboxes.id, sandboxId))
+    .limit(1);
+  if (!row) return false;
+  return row.status === "destroyed" && (row.provider === "sprite" || row.provider === "modal");
+}
+
 async function stopRunsOnTask(ctx: AppContext, c: Context, taskId: string): Promise<void> {
   const active = await db(c, ctx)
     .select({ id: agentRuns.id })

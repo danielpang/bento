@@ -58,6 +58,7 @@ import {
   SANDBOX_GONE_AGENT_PREFIX,
   SANDBOX_REFUSED_AGENT_PREFIX,
   SANDBOX_STALLED_AGENT_PREFIX,
+  PREVIOUS_AGENT_RUNNING_PREFIX,
   unbilledReason,
 } from "../unbilled-reasons.js";
 import { githubConnectionFor, reviewForBranch } from "../github.js";
@@ -108,6 +109,7 @@ import { ACTIVE_RUN_STATUSES, projectHasRepositories, startRunIfIdle } from "./s
 import { enqueueRun, INTERACTIVE_POLL_SECONDS, QUEUE_POLL_SECONDS, RUN_WORKER_POLL_SECONDS } from "./queue.js";
 import { HIBERNATE_SANDBOX_QUEUE, MODAL_SWEEP_QUEUE, scheduleModalHibernation, hibernateSandbox, sweepOrphanModalSandboxes, wakeSwarmSandbox } from "./hibernate-sandbox.js";
 import { modalNetworkForProject, organizationRestrictsNetwork } from "./sandbox-network.js";
+import { stopLeftoverAgent } from "./leftover-agent.js";
 import { pipelineAgentBinaries } from "./pipeline-agents.js";
 import { appendRunEvent } from "./transcript.js";
 import { isPersisted, loadPersistedIds, recoverMissedMessages } from "./recover-session.js";
@@ -678,6 +680,27 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       sessionId: run.cliSessionId,
       cwd: workdir,
     });
+  }
+
+  /**
+   * One task, one agent, in the machine as well as in the rows. A
+   * restart that could not reattach closed its run and left the agent
+   * running, and a second one started here would commit to the same
+   * branch beside it. A machine made for this run cannot hold one.
+   */
+  if (subject.kind === "swarm" && subject.task && sandboxOrigin !== "new" && driver.attach) {
+    const leftover = await stopLeftoverAgent(driver, handle, argv);
+    if (leftover === "stopped") {
+      await saySystem("An agent from an earlier run of this task was still running in its sandbox, so it was stopped first.");
+    } else if (leftover === "running") {
+      await finishRun(ctx, runId, {
+        ok: false,
+        error: `${PREVIOUS_AGENT_RUNNING_PREFIX}, so a second agent was not started beside it.`,
+      }, null);
+      emitBoard("failed");
+      await subject.settle(ctx);
+      return;
+    }
   }
 
   let result;

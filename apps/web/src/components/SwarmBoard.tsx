@@ -482,6 +482,7 @@ export function SwarmBoard({
           agents={agents}
           onRetry={(id) => selectedId && act(() => swarmApi.retryTask(selectedId, id), true)}
           onRetryLanding={(id) => selectedId && act(() => swarmApi.retryLanding(selectedId, id), true)}
+          onStartOver={(id) => selectedId && act(() => swarmApi.startTaskOver(selectedId, id), true)}
           onFixForward={(id, reason) => selectedId && act(() => swarmApi.retryTask(selectedId, id, reason), true)}
           onOpenRun={(runId) => {
             setWorkerOutput({ runId, taskTitle: task.title });

@@ -1,5 +1,7 @@
+import { execFile } from "node:child_process";
 import { readdir } from "node:fs/promises";
 import path from "node:path";
+import { promisify } from "node:util";
 import { and, eq, inArray, isNull, lt, ne, or } from "drizzle-orm";
 import { agentRuns, features, repositories, sandboxes, swarmTasks, swarms } from "@bento/db";
 import type { SandboxDriver } from "@bento/sandbox";
@@ -8,6 +10,8 @@ import { sweepOrphanModalSandboxes } from "./hibernate-sandbox.js";
 import { driverForSandbox, SandboxDriverUnavailable } from "./sandbox-driver.js";
 import { ACTIVE_RUN_STATUSES } from "./start-run.js";
 import { swarmTaskWorkspaceKey } from "./swarm/sandbox.js";
+
+const execFileAsync = promisify(execFile);
 
 /** The queue a finished card's sandbox goes through on its way out. */
 export const REAP_SANDBOX_QUEUE = "sandbox.reap";
@@ -407,6 +411,46 @@ export async function reapSwarmTaskSandbox(ctx: AppContext, swarmTaskId: string)
   }
 
   await removeSwarmTaskWorkspace(ctx, swarmTaskId);
+}
+
+/**
+ * Throws away everything a leaf's earlier attempts left, so the next
+ * agent on it starts over from the swarm's branch in a new machine.
+ *
+ * The machine goes through the leaf's own reap, which refuses while an
+ * agent is still in it (stop the runs first) and only marks the row
+ * destroyed once the driver says the machine is gone. A clone driver's
+ * branch lived only in that machine. A host driver's branch outlives
+ * its worktree in the project's checkout, and the next worktree would
+ * check that branch out again with the old commits on it, so it is
+ * deleted there too. A branch that is not there is already what this
+ * wants.
+ */
+export async function discardSwarmTaskWork(
+  ctx: AppContext,
+  input: { swarmTaskId: string; branch: string | null },
+): Promise<void> {
+  await reapSwarmTaskSandbox(ctx, input.swarmTaskId);
+  if (!input.branch) return;
+  const [task] = await ctx.db
+    .select({ projectId: swarms.projectId })
+    .from(swarmTasks)
+    .innerJoin(swarms, eq(swarms.id, swarmTasks.swarmId))
+    .where(eq(swarmTasks.id, input.swarmTaskId))
+    .limit(1);
+  if (!task) return;
+  const repos = await ctx.db
+    .select({ localPath: repositories.localPath })
+    .from(repositories)
+    .where(eq(repositories.projectId, task.projectId));
+  for (const repo of repos) {
+    if (!repo.localPath) continue;
+    try {
+      await execFileAsync("git", ["-C", repo.localPath, "branch", "-D", input.branch]);
+    } catch {
+      // Not a checkout on this host, or no such branch: nothing to remove.
+    }
+  }
 }
 
 /**

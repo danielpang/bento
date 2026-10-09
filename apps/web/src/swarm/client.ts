@@ -113,6 +113,12 @@ export interface SwarmApi {
    * for saying the wrong thing fails again against the same words.
    */
   retryTask(swarmId: string, taskId: string, reason?: string): Promise<void>;
+  /**
+   * Starts a leaf over: its sandbox and branch are discarded, and a new
+   * agent in a new sandbox does the work again from the swarm's branch.
+   * The answer to any failure, a merge queue failure included.
+   */
+  startTaskOver(swarmId: string, taskId: string): Promise<void>;
   retryLanding(swarmId: string, taskId: string): Promise<void>;
   cancelTask(swarmId: string, taskId: string): Promise<void>;
   splitTask(swarmId: string, taskId: string, children: { title: string; description?: string }[]): Promise<void>;
@@ -444,6 +450,16 @@ export function fixtureSwarmApi(clock: () => number = () => Date.now()): Fixture
                 flags: reason ? { ...task.flags, rejection: reason } : task.flags }
             : task,
         );
+      });
+    },
+    startTaskOver(swarmId, taskId) {
+      return mutate(swarmId, (detail) => {
+        detail.tasks = detail.tasks.map((task) => {
+          if (task.id !== taskId) return task;
+          const retries = Number((task.flags as { retries?: unknown }).retries ?? 0);
+          return { ...task, status: "assigned", attention: "none", report: null, endedAt: null,
+            flags: { ...task.flags, landingError: undefined, retries: retries + 1 } };
+        });
       });
     },
     retryLanding(swarmId, taskId) {
@@ -1049,6 +1065,9 @@ export function httpSwarmApi(
     },
     async retryTask(swarmId, taskId, reason) {
       await post(`/api/swarms/${swarmId}/tasks/${taskId}/retry`, reason ? { reason } : {});
+    },
+    async startTaskOver(swarmId, taskId) {
+      await post(`/api/swarms/${swarmId}/tasks/${taskId}/retry`, { fresh: true });
     },
     async retryLanding(swarmId, taskId) {
       await post(`/api/swarms/${swarmId}/tasks/${taskId}/landing/retry`);

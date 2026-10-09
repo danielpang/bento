@@ -695,6 +695,13 @@ export const agentRuns = pgTable(
   billable: boolean("billable").notNull().default(true),
   },
   (t) => [
+    /**
+     * One agent working a swarm task at a time, whatever its role. The
+     * backstop to startRunIfIdle's check under the swarm lock.
+     */
+    uniqueIndex("agent_runs_one_active_per_swarm_task_idx")
+      .on(t.swarmTaskId)
+      .where(sql`${t.swarmTaskId} is not null and ${t.status} in ('queued', 'starting', 'running')`),
     // "This card's runs, newest first" is the shape of every
     // conversation, resume, and session query; without this it is a
     // table scan per ask.

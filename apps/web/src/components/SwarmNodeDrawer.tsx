@@ -33,6 +33,7 @@ export function SwarmNodeDrawer({
   onMarkDone,
   onRetry,
   onRetryLanding,
+  onStartOver,
   onFixForward,
   onOpenRun,
   onCancel,
@@ -76,6 +77,12 @@ export function SwarmNodeDrawer({
    */
   onRetry?: (taskId: string) => void;
   onRetryLanding?: (taskId: string) => void;
+  /**
+   * Starts a failed leaf over in a new sandbox with a new agent, its
+   * old sandbox and branch discarded. Offered for every failure, a
+   * merge queue failure included.
+   */
+  onStartOver?: (taskId: string) => void;
   onFixForward?: (taskId: string, reason: string) => void;
   onOpenRun?: (runId: string) => void;
   onCancel?: (taskId: string) => void;
@@ -96,6 +103,7 @@ export function SwarmNodeDrawer({
 }) {
   const panel = useDismissable<HTMLElement>(onClose);
   const [confirming, setConfirming] = useState(false);
+  const [confirmingStartOver, setConfirmingStartOver] = useState(false);
   const [tab, setTab] = useState("overview");
   const mergeQueueFailure = task.nodeType === "leaf" && typeof task.flags.landingError === "string";
   const attention = isAttention(node.attention);
@@ -126,19 +134,23 @@ export function SwarmNodeDrawer({
   const canMarkDone = !!onMarkDone && task.nodeType === "leaf" && task.status !== "done";
   const canRetry = !!onRetry && task.nodeType === "leaf" && !mergeQueueFailure && !["cancelled", "done", "landed"].includes(task.status);
   const canRetryLanding = !!onRetryLanding && mergeQueueFailure;
+  const canStartOver = !!onStartOver && task.nodeType === "leaf" && task.status === "failed";
   const canEdit = !!onEdit;
   const canSplit = !!onSplit && task.nodeType === "leaf" && task.status !== "done";
   const canAdd = !!onAddTask && task.status !== "done" && task.status !== "cancelled";
   const canCancel = !!onCancel && task.status !== "cancelled";
   const workerActive = task.nodeType === "leaf" && task.status === "working";
-  const primaryAction = canRetryLanding ? "landing"
+  const primaryAction = canStartOver ? "startOver"
+    : canRetryLanding ? "landing"
     : canFixForward ? "fix"
     : (task.status === "failed" || (task.status === "assigned" && task.assignedRunId)) && canRetry ? "retry"
     : workerActive ? null : canAdd && task.nodeType === "plan" ? "add" : canEdit ? "edit" : canRetry ? "retry" : null;
   const hasMoreActions = canMarkDone || (canRetry && primaryAction !== "retry") ||
+    (canRetryLanding && primaryAction !== "landing") || (canFixForward && primaryAction !== "fix") ||
     (canEdit && primaryAction !== "edit") || canSplit || (canAdd && primaryAction !== "add") ||
     canCancel || (!!onReassign && task.nodeType === "leaf" && agents.length > 0);
   const nextStep = mergeQueueFailure ? MERGE_QUEUE_FAILURE
+    : primaryAction === "startOver" ? "Start this task over in a new sandbox, or open More actions for other options."
     : primaryAction === "fix" ? "Tell the worker what to change."
     : primaryAction === "retry" ? (task.status === "assigned" ? "Start a new worker attempt." : null)
     : workerActive ? (node.agentActive ? "The worker is running. Open Worker logs to follow its progress." : "Waiting for an agent to start.")
@@ -152,7 +164,8 @@ export function SwarmNodeDrawer({
   }
 
   function runPrimaryAction() {
-    if (primaryAction === "landing") onRetryLanding?.(task.id);
+    if (primaryAction === "startOver") setConfirmingStartOver(true);
+    else if (primaryAction === "landing") onRetryLanding?.(task.id);
     else if (primaryAction === "fix") setFixingForward((open) => !open);
     else if (primaryAction === "retry") onRetry?.(task.id);
     else if (primaryAction === "add") setAdding((open) => !open);
@@ -220,7 +233,8 @@ export function SwarmNodeDrawer({
           {primaryAction && (
             <div className="action-grid">
               <button className="btn btn-primary" type="button" disabled={busy} onClick={runPrimaryAction}>
-                {primaryAction === "landing" ? "Retry merge queue"
+                {primaryAction === "startOver" ? (busy ? "Retrying task…" : retries > 0 ? `Retry task (${retries} so far)` : "Retry task")
+                  : primaryAction === "landing" ? "Retry merge queue"
                   : primaryAction === "fix" ? "Fix forward"
                   : primaryAction === "retry" ? (busy ? "Retrying worker…" : retries > 0 ? `Retry worker (${retries} so far)` : "Retry worker")
                   : primaryAction === "add" ? "Add task" : "Edit task"}
@@ -256,9 +270,21 @@ export function SwarmNodeDrawer({
                 {canMarkDone && (
                   <button className="btn" type="button" disabled={busy} onClick={() => setConfirming(true)}>Mark done</button>
                 )}
+                {canRetryLanding && primaryAction !== "landing" && (
+                  <button className="btn" type="button" disabled={busy} title="Try landing this task's branch again, from the sandbox it is in." onClick={() => onRetryLanding?.(task.id)}>
+                    Retry merge queue
+                  </button>
+                )}
+                {canFixForward && primaryAction !== "fix" && (
+                  <button className="btn" type="button" disabled={busy} title="Tell the worker what to change. It continues on this task's branch." onClick={() => setFixingForward((open) => !open)}>
+                    Fix forward
+                  </button>
+                )}
                 {canRetry && primaryAction !== "retry" && (
-                  <button className="btn" type="button" disabled={busy} title="Put this task back in the queue. The agent on it stops, and its report is cleared." onClick={() => onRetry?.(task.id)}>
-                    {retries > 0 ? `Retry (${retries} so far)` : "Retry"}
+                  <button className="btn" type="button" disabled={busy} title={canStartOver
+                    ? "Put this task back in the queue in the same sandbox, keeping the work on its branch. The agent on it stops, and its report is cleared."
+                    : "Put this task back in the queue. The agent on it stops, and its report is cleared."} onClick={() => onRetry?.(task.id)}>
+                    {canStartOver ? "Retry in the same sandbox" : retries > 0 ? `Retry (${retries} so far)` : "Retry"}
                   </button>
                 )}
                 {canEdit && primaryAction !== "edit" && (
@@ -558,6 +584,29 @@ export function SwarmNodeDrawer({
         </Tabs.Content>
 
       </div>
+
+      {confirmingStartOver && (
+        <div className="swarm-confirm" role="alertdialog" aria-label="Retry this task">
+          <p>
+            Retrying starts this task over. Its sandbox and the commits on its branch are discarded,
+            and a new agent in a new sandbox does the work again from the swarm&apos;s branch.
+          </p>
+          <div className="actions">
+            <button className="btn btn-ghost" onClick={() => setConfirmingStartOver(false)}>
+              Cancel
+            </button>
+            <button
+              className="btn btn-primary"
+              onClick={() => {
+                setConfirmingStartOver(false);
+                onStartOver?.(task.id);
+              }}
+            >
+              Retry task
+            </button>
+          </div>
+        </div>
+      )}
 
       {confirming && (
         <div className="swarm-confirm" role="alertdialog" aria-label="Mark this task done">

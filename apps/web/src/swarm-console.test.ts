@@ -689,6 +689,28 @@ test("a merge queue failure keeps its worker report and offers to retry landing"
   assert.doesNotMatch(html, /This swarm worker failed/);
 });
 
+test("any failed leaf leads with starting the task over, and keeps the other ways back", () => {
+  const landing = { ...tasks().find((row) => row.id === "slow")!, status: "failed" as const,
+    flags: { landingError: "the swarm or worker sandbox is unavailable" } };
+  const landingModel = buildSwarmModel([landing], { now: NOW });
+  const landingHtml = renderToStaticMarkup(createElement(SwarmNodeDrawer, {
+    task: landing, node: landingModel.byId.get("slow")!, onClose: () => {},
+    onStartOver: () => {}, onRetryLanding: () => {}, onRetry: () => {}, onFixForward: () => {},
+  }));
+  assert.match(landingHtml, /class="btn btn-primary"[^>]*>Retry task</, "a merge queue failure is retried as a new attempt");
+  assert.match(landingHtml, /Retry merge queue/, "landing the same branch again is still there");
+
+  const worker = { ...tasks().find((row) => row.id === "slow")!, status: "failed" as const, flags: {} };
+  const workerModel = buildSwarmModel([worker], { now: NOW });
+  const workerHtml = renderToStaticMarkup(createElement(SwarmNodeDrawer, {
+    task: worker, node: workerModel.byId.get("slow")!, onClose: () => {},
+    onStartOver: () => {}, onRetry: () => {}, onFixForward: () => {},
+  }));
+  assert.match(workerHtml, /class="btn btn-primary"[^>]*>Retry task</);
+  assert.match(workerHtml, /Fix forward/);
+  assert.match(workerHtml, /Retry in the same sandbox/);
+});
+
 test("a failed plan drawer calls the recoverable parent stalled", () => {
   const plan = { ...tasks().find((row) => row.nodeType === "plan")!, status: "failed" as const, attention: "failed" as const };
   const model = buildSwarmModel([plan], { now: NOW });

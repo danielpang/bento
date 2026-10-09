@@ -340,6 +340,27 @@ attempts. A hibernation job also waits out the warm window from the
 row's `lastUsedAt`, because a job armed again while a run was going can
 fire seconds after that run ends.
 
+A swarm task has one agent at a time, whatever its role. `insertSwarmRun`
+refuses any run naming a task that already has a queued, starting, or
+running run, and the partial unique index
+`agent_runs_one_active_per_swarm_task_idx` refuses it in the database
+if a path ever skips that lock. The rows are not the whole story: a
+restart that could not reattach closes its run and leaves the agent
+running in the machine. So before a task run launches in a machine it
+did not just make, `stopLeftoverAgent` attaches to any agent of the
+same command, aborts it, and confirms it is gone; one that cannot be
+stopped fails the new run as `PREVIOUS_AGENT_RUNNING_PREFIX`, which is
+unbilled, rather than putting a second agent on the branch.
+
+Retrying a failed leaf has two meanings. "Retry task" (the retry route
+with `fresh: true`) starts it over: the agent stops, the task's machine
+is reaped through `discardSwarmTaskWork` (and on a host driver its
+branch is deleted from the checkout), and the next agent is cut from
+the swarm's branch in a new machine. It is the answer to any failure, a
+merge queue failure included, and it is refused when the swarm's own
+clone machine is gone, because there is then no swarm branch to start
+from. The plain retry continues in the same machine on the same branch.
+
 ## Starting a run goes through startRunIfIdle, never a bare insert
 
 One card, one agent. Every door that starts a run (the runs route,

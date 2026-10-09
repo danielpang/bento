@@ -157,6 +157,44 @@ test("a sub planner is refused per group, not per swarm", async () => {
   );
 });
 
+test("one agent per task, whatever the role", async () => {
+  const swarm = await makeSwarm();
+  const leaf = await makeTask(swarm.id, "leaf");
+  const worker = await start({ swarmId: swarm.id, role: "worker", swarmTaskId: leaf.id });
+  assert.ok(isRun(worker));
+  assert.equal(
+    await start({ swarmId: swarm.id, role: "judge", swarmTaskId: leaf.id }),
+    "busy",
+    "a judge does not start on a leaf its worker is still working",
+  );
+  assert.equal(await start({ swarmId: swarm.id, role: "subplanner", swarmTaskId: leaf.id }), "busy");
+
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.id, worker.id));
+  assert.ok(isRun(await start({ swarmId: swarm.id, role: "judge", swarmTaskId: leaf.id })), "and does once it is done");
+});
+
+test("the database refuses a second active run on a task even past the lock", async () => {
+  const swarm = await makeSwarm();
+  const leaf = await makeTask(swarm.id, "leaf");
+  const first = await start({ swarmId: swarm.id, role: "worker", swarmTaskId: leaf.id });
+  assert.ok(isRun(first));
+  const row = {
+    type: "swarm" as const,
+    swarmId: swarm.id,
+    swarmTaskId: leaf.id,
+    role: "judge" as const,
+    agentProfileId: LOCAL_PROFILE,
+    prompt: "",
+  };
+  await assert.rejects(db.insert(agentRuns).values({ ...row, status: "queued" }), (err: unknown) => {
+    const cause = (err as { cause?: { constraint?: string } }).cause;
+    assert.equal(cause?.constraint, "agent_runs_one_active_per_swarm_task_idx");
+    return true;
+  });
+  // A finished run on the same task is history, not a second agent.
+  await db.insert(agentRuns).values({ ...row, status: "failed" });
+});
+
 test("a sub planner or worker without a task is a caller bug, said loudly", async () => {
   const swarm = await makeSwarm();
   await assert.rejects(

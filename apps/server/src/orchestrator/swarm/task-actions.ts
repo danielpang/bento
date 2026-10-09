@@ -327,7 +327,19 @@ export async function retryLeaf(
    * the event so the drawer can tell it from a failed leaf assigned
    * again with a reason, which writes the same status change.
    */
-  input: { task: Task; now?: Date; reason?: string; rejected?: boolean } & Asker,
+  input: {
+    task: Task;
+    now?: Date;
+    reason?: string;
+    rejected?: boolean;
+    /**
+     * Started over: the caller has already discarded the task's machine
+     * and branch, so the next agent is cut fresh from the swarm's branch.
+     * Clears what the old attempt failed with, a merge queue failure
+     * included, because none of it is about the work that comes next.
+     */
+    fresh?: boolean;
+  } & Asker,
 ): Promise<Task | SplitRefusal> {
   const { task } = input;
   const now = input.now ?? new Date();
@@ -355,6 +367,9 @@ export async function retryLeaf(
         plannerToldAt: undefined,
         plannerToldBy: undefined,
         plannerRetells: undefined,
+        ...(input.fresh
+          ? { landingError: undefined, workerStopped: undefined, rejection: undefined, sandboxRestarts: undefined }
+          : {}),
         ...(input.reason !== undefined ? { rejection: input.reason } : {}),
       },
       updatedAt: now,
@@ -371,6 +386,7 @@ export async function retryLeaf(
       retry: Number.isFinite(retries) ? retries + 1 : 1,
       ...(input.reason ? { rejection: input.reason } : {}),
       ...(input.rejected ? { rejected: true } : {}),
+      ...(input.fresh ? { fresh: true } : {}),
     },
   });
   return updated ?? task;
