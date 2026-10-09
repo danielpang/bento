@@ -42,7 +42,7 @@ import { SANDBOX_PROVISIONED_EVENT, SANDBOX_PROVISION_FAILED_EVENT, SANDBOX_READ
 import { recordingAnalytics } from "./test-analytics.js";
 import { EventBus } from "./events.js";
 import { loadEnv } from "./env.js";
-import { createFeatureFlags } from "./feature-flags.js";
+import { FeatureFlags, createFeatureFlags } from "./feature-flags.js";
 import {
   deliverQueuedMessage,
   markCancelled,
@@ -558,6 +558,19 @@ test("a card's sandbox wait is measured from queueing, new first and reused afte
     await app.request(`/api/features/${feature.id}`),
   );
   assert.equal(card.runs.find((r) => r.id === first.id)?.sandboxProvider, "local-process", "and so does the card");
+  // Anyone who is not a beta tester gets neither, the way the console
+  // shows it to testers only.
+  const flags = ctx.featureFlags;
+  ctx.featureFlags = new FeatureFlags(null, false);
+  try {
+    const hiddenRun = await json<Record<string, unknown>>(await app.request(`/api/runs/${first.id}`));
+    assert.equal("sandboxProvider" in hiddenRun, false, "the run route leaves it out");
+    const hiddenCard = await json<{ runs: Record<string, unknown>[] }>(await app.request(`/api/features/${feature.id}`));
+    assert.ok(hiddenCard.runs.length > 0);
+    assert.ok(hiddenCard.runs.every((r) => !("sandboxProvider" in r)), "and so does the card");
+  } finally {
+    ctx.featureFlags = flags;
+  }
 
   // The same card again. Its sandbox row is still there and the
   // local driver has no machine to speak of, so the row answers:

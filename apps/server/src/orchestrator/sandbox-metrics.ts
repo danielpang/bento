@@ -1,3 +1,4 @@
+import type { agentRuns } from "@bento/db";
 import type { Analytics } from "../analytics.js";
 
 /**
@@ -23,8 +24,8 @@ export type SandboxSelection = "auto" | "project" | "default" | "existing";
  */
 export interface SandboxRun {
   id: string;
-  role: string;
-  type: "pipeline" | "swarm";
+  role: (typeof agentRuns.$inferSelect)["role"];
+  type: (typeof agentRuns.$inferSelect)["type"];
 }
 
 /** A run as the sandbox events name it; nothing when there is no run. */
@@ -235,9 +236,8 @@ export function sandboxOrigin(input: { createdSandbox?: boolean | undefined; had
 }
 
 export interface SandboxReady {
-  runId: string;
-  /** The run's role: stage, judge, rebase, or a swarm role. */
-  role: string;
+  /** The run whose agent came up, named the way every sandbox event names it. */
+  run: SandboxRun;
   provider: string;
   selection?: SandboxSelection;
   origin: SandboxOrigin;
@@ -275,13 +275,12 @@ export function reportSandboxReady(analytics: Analytics | null | undefined, info
         sandbox_origin: info.origin,
         provider: info.provider,
         ...(info.selection ? { selection: info.selection } : {}),
-        role: info.role,
-        run_id: info.runId,
+        ...runProperties(info.run),
         project_id: info.projectId,
         ...runOwnerProperties(info.owner, info.stageId),
       },
     });
   } catch (err) {
-    console.warn(`could not record the sandbox wait for run ${info.runId}:`, err);
+    console.warn(`could not record the sandbox wait for run ${info.run.id}:`, err);
   }
 }

@@ -179,3 +179,18 @@ function withBudget<T>(promise: Promise<T>, ms: number): Promise<T | null> {
     );
   });
 }
+
+/**
+ * Runs as a caller may read them. Which provider ran a run is Bento's
+ * business and not the card's: the console shows it to beta testers
+ * only, and the field is dropped here for everyone else, so the API is
+ * not a way around the console.
+ */
+export async function runsForCaller<T extends { sandboxProvider?: string | null }>(
+  ctx: AppContext,
+  c: Context,
+  runs: T[],
+): Promise<T[]> {
+  if (runs.length === 0 || (await getBetaTester(ctx, c))) return runs;
+  return runs.map(({ sandboxProvider: _hidden, ...rest }) => rest as T);
+}

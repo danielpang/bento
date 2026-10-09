@@ -438,6 +438,15 @@ test("a clone URL the server cannot reach fails the run before any provider is a
   );
   assert.deepEqual(asked, [], "no machine is made for a repository nobody can reach");
   assert.deepEqual(said, []);
+  const finals = analytics.events.filter(
+    (e) => e.event === SANDBOX_PROVISION_FAILED_EVENT && e.properties?.feature_id === featureId,
+  );
+  assert.equal(finals.length, 1, "it still counts as a provision that got no machine");
+  assert.equal(finals[0]?.properties?.kind, "final");
+  assert.equal(finals[0]?.properties?.phase, "preflight");
+  assert.equal(finals[0]?.properties?.blame, "project");
+  assert.equal(finals[0]?.properties?.attempts, 0);
+  assert.equal(finals[0]?.properties?.provider, "sprite", "named by the provider it would have asked first");
 });
 
 test("a clone URL the server can reach passes the check and the drivers are asked", async () => {
@@ -477,6 +486,13 @@ test("a locked network with no driver that honors it refuses before asking any",
 
   await assert.rejects(provisionOn(featureId, sprite, [other], said, true), /without network access/);
   assert.deepEqual(asked, []);
+  const finals = analytics.events.filter(
+    (e) => e.event === SANDBOX_PROVISION_FAILED_EVENT && e.properties?.feature_id === featureId,
+  );
+  assert.equal(finals.length, 1);
+  assert.equal(finals[0]?.properties?.phase, "preflight");
+  assert.equal(finals[0]?.properties?.blame, "policy");
+  assert.equal(finals[0]?.properties?.attempts, 0);
 });
 
 test("a sprite that failed is destroyed by name when the loop moves on to Modal, whatever the failure", async () => {

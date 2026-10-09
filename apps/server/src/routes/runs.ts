@@ -17,6 +17,7 @@ import type { SandboxDriver } from "@bento/sandbox";
 import { driverForSandbox, SandboxDriverUnavailable } from "../orchestrator/sandbox-driver.js";
 import { canAccessProject, getAccessibleFeature, getAccessibleRun, getAccessibleRunOutput } from "../access.js";
 import { requireSwarms } from "../orchestrator/swarm/gate.js";
+import { runsForCaller } from "../feature-flags.js";
 
 const createRun = z.object({
   featureId: z.string().uuid(),
@@ -79,7 +80,8 @@ export function runRoutes(ctx: AppContext) {
     .get("/:id", async (c) => {
       const found = await getAccessibleRun(ctx, c, c.req.param("id"));
       if (!found) return c.json({ error: "not found" }, 404);
-      return c.json(found.run);
+      const [run] = await runsForCaller(ctx, c, [found.run]);
+      return c.json(run);
     })
     /**
      * Continues a finished run in the same CLI session, so the agent

@@ -296,8 +296,34 @@ export async function provisionWorkspace(
    * repository with a seed bundle was just read from GitHub to make
    * it, so it is proven already; the rest are asked for their HEAD.
    */
+  /*
+   * A provision refused before any provider is asked still ends without
+   * a machine, so it is a `final` too, with no attempts and the phase
+   * "preflight", named by the provider the run would have asked first.
+   */
+  const refusedBeforeAsking = (err: unknown, blame: "project" | "policy"): void =>
+    reportSandboxProvisionFailed(ctx.analytics, {
+      kind: "final",
+      provider: driver.provider,
+      selection: input.selection ?? "default",
+      phase: "preflight",
+      blame,
+      errorKind: sandboxErrorKind(err),
+      errorName: errorClassName(err),
+      attempts: 0,
+      projectId: input.projectId,
+      organizationId: input.organizationId,
+      userId: input.startedBy ?? null,
+      owner: input.owner,
+      run: input.run,
+    });
   if (driver.workspace === "clone") {
-    await verifyCloneUrls(repoRows.filter((r) => r.repoUrl && !seedBundles.has(r.id)));
+    try {
+      await verifyCloneUrls(repoRows.filter((r) => r.repoUrl && !seedBundles.has(r.id)));
+    } catch (err) {
+      refusedBeforeAsking(err, "project");
+      throw err;
+    }
   }
 
   /**
@@ -319,9 +345,11 @@ export async function provisionWorkspace(
   const restrictNetwork = input.restrictNetwork && !keepsOpenNetwork;
   const usable = restrictNetwork ? lockable : candidates;
   if (usable.length === 0) {
-    throw new Error(
+    const refused = new Error(
       "This organization requires agents to run without network access, and this deployment has no restricted network configured. Set BENTO_SANDBOX_RESTRICTED_NETWORK, or turn the setting off under Team.",
     );
+    refusedBeforeAsking(refused, "policy");
+    throw refused;
   }
   if (keepsOpenNetwork) {
     await input.say(
@@ -448,7 +476,7 @@ export async function provisionWorkspace(
         source: "sandbox_provision_fallback",
         provider: candidate.provider,
         next_provider: next.provider,
-        error_kind: sandboxErrorKind(reason),
+        error_kind: failedEvent.errorKind,
         ...(err instanceof ProvisionFailure ? { phase: err.phase, blame: err.blame } : {}),
         ...provisionFailureContext(err),
         project_id: input.projectId,
@@ -524,6 +552,21 @@ export async function provisionWorkspace(
       origin: sandboxOrigin({ createdSandbox: handle.createdSandbox, hadMachine }),
     };
   } catch (err) {
+    // The provision ends without a machine here too: the run fails and
+    // a machine it made is destroyed below, so it counts as a final.
+    reportSandboxProvisionFailed(ctx.analytics, {
+      kind: "final",
+      provider: handle.provider,
+      selection: input.selection ?? "default",
+      errorKind: sandboxErrorKind(err),
+      errorName: errorClassName(err),
+      attempts,
+      projectId: input.projectId,
+      organizationId: input.organizationId,
+      userId: input.startedBy ?? null,
+      owner: input.owner,
+      run: input.run,
+    });
     // A machine this attempt created, and then failed to record, would
     // bill with nobody looking.
     if (handle.createdSandbox) {

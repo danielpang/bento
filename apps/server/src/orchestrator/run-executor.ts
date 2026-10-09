@@ -787,8 +787,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
    */
   const reportAgentUp = () =>
     reportSandboxReady(ctx.analytics, {
-      runId,
-      role: run.role,
+      run: { id: runId, role: run.role, type: run.type },
       provider: handle.provider,
       selection: chosenDrivers.selection,
       origin: sandboxOrigin,

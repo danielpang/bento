@@ -333,8 +333,7 @@ export function runnerRoutes(ctx: AppContext) {
           });
         if (timing && owner) {
           reportSandboxReady(ctx.analytics, {
-            runId,
-            role: run.role,
+            run: { id: runId, role: run.role, type: run.type },
             provider: sandbox?.provider ?? "runner",
             origin: sandboxOrigin({ createdSandbox: sandbox?.createdSandbox }),
             queueWaitMs: timing.queueWaitMs,

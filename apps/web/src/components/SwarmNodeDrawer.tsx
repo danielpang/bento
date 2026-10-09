@@ -540,12 +540,7 @@ export function SwarmNodeDrawer({
                     <strong>Attempt {runs.length - index}</strong>
                     <span className="status"><span className="dot" data-state={run.status === "succeeded" ? "succeeded" : run.status === "failed" ? "failed" : "running"} />{run.status}</span>
                     <time dateTime={run.queuedAt}>{new Date(run.queuedAt).toLocaleString()}</time>
-                    {/* The provider is an operator's detail; see sandbox-provider.ts. */}
-                    {sandboxProviderWords(run.sandboxProvider) && (
-                      <BetaOnly>
-                        <span className="muted">{sandboxProviderWords(run.sandboxProvider)}</span>
-                      </BetaOnly>
-                    )}
+                    <SandboxProviderNote provider={run.sandboxProvider} />
                   </div>
                   {run.error && <p className="swarm-attempt-error">{run.error}</p>}
                   {onOpenRun && <button className="swarm-output-link" type="button" onClick={() => onOpenRun(run.id)}>View output</button>}
@@ -651,6 +646,17 @@ export function SwarmNodeDrawer({
       )}
     </aside>
     </Tabs.Root>
+  );
+}
+
+/** The provider an attempt ran on, for beta testers: an operator's detail, see sandbox-provider.ts. */
+function SandboxProviderNote({ provider }: { provider: string | null | undefined }) {
+  const words = sandboxProviderWords(provider);
+  if (!words) return null;
+  return (
+    <BetaOnly>
+      <span className="muted">{words}</span>
+    </BetaOnly>
   );
 }
 

@@ -197,12 +197,17 @@ Every provision emits `sandbox provisioned` to PostHog with the
 also goes to error tracking as `sandbox_provision_fallback`. Every
 provider that fails emits `sandbox provision failed` (`kind`
 "attempt", with `next_provider` when "auto" moved on), and a provision
-that ends without a machine emits one more (`kind` "final"); it
-carries the error's kind and class, never its text. All of these name
-the run (`run_id`, `role`, `run_type`), which `provisionWorkspace`
-takes as `run`, and the run itself records the provider that answered
-in `agent_runs.sandbox_provider`, because the sandboxes row is
-rewritten when a machine is made again. A new
+that ends without a machine emits one more (`kind` "final"),
+including one refused before any provider was asked (`phase`
+"preflight", `attempts` 0: an unreachable clone URL, or a network lock
+nothing can honor); it carries the error's kind and class, never its
+text. All of these, and `sandbox ready`, name the run (`run_id`,
+`role`, `run_type`), which `provisionWorkspace` takes as `run`, and
+the run itself records the provider that answered in
+`agent_runs.sandbox_provider`, because the sandboxes row is rewritten
+when a machine is made again. The console shows that provider to beta
+testers only, and the routes that return whole run rows drop it for
+everyone else (`runsForCaller`). A new
 place that provisions must go through `provisionWorkspace` so it is
 counted. The executor then emits `sandbox ready` once the agent has
 come up in the machine (its first event for a streamed CLI, its spawn
