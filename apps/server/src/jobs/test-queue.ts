@@ -11,6 +11,10 @@ const DEFAULT_REDIS_URL = "redis://127.0.0.1:6379";
  * Backends the real-queue suites run against. `JOB_QUEUE_BACKENDS` can
  * narrow that to one side while debugging; CI leaves it unset so both
  * adapters run.
+ *
+ * Used by contract.test.ts plus the suites whose subject is a real
+ * queue (linear inbound/outbound, slack-sync, pg-bus). Product suites
+ * that only need JobQueue as AppContext plumbing stay on pg-boss.
  */
 export function realQueueBackends(): readonly RealQueueBackend[] {
   const raw = process.env.JOB_QUEUE_BACKENDS?.trim();
