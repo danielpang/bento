@@ -1730,6 +1730,7 @@ export function swarmRoutes(ctx: AppContext) {
           startedAt: agentRuns.startedAt,
           endedAt: agentRuns.endedAt,
           error: agentRuns.error,
+          sandboxProvider: agentRuns.sandboxProvider,
         })
         .from(agentRuns)
         .where(and(eq(agentRuns.swarmTaskId, task.id), eq(agentRuns.role, "worker")))

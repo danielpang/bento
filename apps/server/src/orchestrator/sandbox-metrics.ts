@@ -8,11 +8,29 @@ import type { Analytics } from "../analytics.js";
  * count where `fell_back_from` is set says how often Fly could not
  * provide one. `selection` is why that provider was chosen: the
  * project's "auto" order, a provider the project named, the
- * deployment default, or a machine the card already had.
+ * deployment default, or a machine the card already had. `run_id`,
+ * `role` and `run_type` name the run it was made for, which is what
+ * joins it to `sandbox ready` and to the run's own row.
  */
 export const SANDBOX_PROVISIONED_EVENT = "sandbox provisioned";
 
 export type SandboxSelection = "auto" | "project" | "default" | "existing";
+
+/**
+ * The run a provision was for, so an event about a machine can be
+ * joined to the run that asked for it. `type` is the board (a card's
+ * pipeline or a swarm), `role` the run's job within it.
+ */
+export interface SandboxRun {
+  id: string;
+  role: string;
+  type: "pipeline" | "swarm";
+}
+
+/** A run as the sandbox events name it; nothing when there is no run. */
+function runProperties(run: SandboxRun | null | undefined): Record<string, string> {
+  return run ? { run_id: run.id, role: run.role, run_type: run.type } : {};
+}
 
 export interface SandboxProvisioned {
   /** The provider that made the machine. */
@@ -27,6 +45,8 @@ export interface SandboxProvisioned {
   /** The person who started the run, when there is one. */
   userId: string | null;
   owner: SandboxOwner;
+  /** The run the machine was made for, when it was made for one. */
+  run?: SandboxRun | null;
 }
 
 /** The rows a machine belongs to, as the metrics name them. */
@@ -59,11 +79,96 @@ export function reportSandboxProvisioned(analytics: Analytics | null | undefined
         fell_back: info.fellBackFrom !== null,
         attempts: info.attempts,
         project_id: info.projectId,
+        ...runProperties(info.run),
         ...runOwnerProperties(info.owner),
       },
     });
   } catch (err) {
     console.warn(`could not record a sandbox provision on ${info.provider}:`, err);
+  }
+}
+
+/**
+ * A provider could not provision a run's sandbox.
+ *
+ * Two kinds, told apart by `kind`. An `attempt` is one driver that
+ * failed: one event per provider asked, so a count by `provider` says
+ * how often each one failed, including a sprite that "auto" then
+ * covered with Modal (`fell_back` true, `next_provider` the one asked
+ * next). A `final` is the provision ending without a machine: every
+ * provider asked failed, or one failed in a way the next would repeat
+ * (a checkout git refused is the project's, `blame` "project"). It
+ * comes once per failed provision, after its attempt events, and names
+ * the last provider asked. So a count of `final` is provisions that
+ * never got a machine, and a count of `attempt` is provider failures.
+ *
+ * Analytics, not error tracking: the exceptions captured beside it
+ * (`sandbox_provision_fallback`, `sandbox_provision`) keep the full
+ * reason. This carries only the error's class and kind, never its
+ * text, which can hold a URL or a token.
+ */
+export const SANDBOX_PROVISION_FAILED_EVENT = "sandbox provision failed";
+
+export interface SandboxProvisionFailed {
+  kind: "attempt" | "final";
+  /** The provider that failed; on a `final`, the last one asked. */
+  provider: string;
+  selection: SandboxSelection;
+  /** The phase and blame, when the driver tagged its failure. */
+  phase?: string | undefined;
+  blame?: string | undefined;
+  /** The error's short class, from sandboxErrorKind. */
+  errorKind: string;
+  /** The error's constructor name, when it is a plain identifier. */
+  errorName: string;
+  /** Which attempt this was, or on a `final`, how many were made. */
+  attempts: number;
+  /** On an attempt "auto" moved on from, the provider asked next. */
+  nextProvider?: string | undefined;
+  projectId: string;
+  organizationId: string | null;
+  userId: string | null;
+  owner: SandboxOwner;
+  run?: SandboxRun | null;
+}
+
+/**
+ * An error's name as an event may carry it. Only an identifier: a
+ * name is set by code, but a thrown value is not always an Error and
+ * a name is not always a constant.
+ */
+export function errorClassName(err: unknown): string {
+  const name = err instanceof Error ? err.name : typeof err;
+  return /^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(name) ? name : "Error";
+}
+
+export function reportSandboxProvisionFailed(
+  analytics: Analytics | null | undefined,
+  info: SandboxProvisionFailed,
+): void {
+  try {
+    analytics?.capture({
+      event: SANDBOX_PROVISION_FAILED_EVENT,
+      userId: info.userId,
+      organizationId: info.organizationId,
+      properties: {
+        kind: info.kind,
+        provider: info.provider,
+        selection: info.selection,
+        ...(info.phase ? { phase: info.phase } : {}),
+        ...(info.blame ? { blame: info.blame } : {}),
+        error_kind: info.errorKind,
+        error_name: info.errorName,
+        attempts: info.attempts,
+        ...(info.kind === "attempt" ? { fell_back: info.nextProvider !== undefined } : {}),
+        ...(info.nextProvider ? { next_provider: info.nextProvider } : {}),
+        project_id: info.projectId,
+        ...runProperties(info.run),
+        ...runOwnerProperties(info.owner),
+      },
+    });
+  } catch (err) {
+    console.warn(`could not record a failed sandbox provision on ${info.provider}:`, err);
   }
 }
 

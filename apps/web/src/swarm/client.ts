@@ -747,7 +747,15 @@ export interface WireNode {
     runId: string | null;
     detail: Record<string, unknown> | null;
   }[];
-  runs?: { id: string; status: string; queuedAt: string; startedAt: string | null; endedAt: string | null; error: string | null }[];
+  runs?: {
+    id: string;
+    status: string;
+    queuedAt: string;
+    startedAt: string | null;
+    endedAt: string | null;
+    error: string | null;
+    sandboxProvider?: string | null;
+  }[];
 }
 
 /** One pull request a finished swarm opened, as the detail sends it. */

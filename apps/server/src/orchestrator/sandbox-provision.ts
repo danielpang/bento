@@ -20,7 +20,15 @@ import type { AgentBinary } from "@bento/sandbox";
 import { githubConnectionFor } from "../github.js";
 import { duplicateRepositoryLocation } from "../repository-identity.js";
 import { createRepositorySeed } from "./publish.js";
-import { reportSandboxProvisioned, sandboxOrigin, type SandboxOrigin, type SandboxSelection } from "./sandbox-metrics.js";
+import {
+  errorClassName,
+  reportSandboxProvisioned,
+  reportSandboxProvisionFailed,
+  sandboxOrigin,
+  type SandboxOrigin,
+  type SandboxRun,
+  type SandboxSelection,
+} from "./sandbox-metrics.js";
 import { isolationRefusal, type WorkerIsolation } from "./swarm/sandbox.js";
 
 /**
@@ -143,6 +151,12 @@ export interface ProvisionWorkspaceInput {
   selection?: SandboxSelection;
   /** The person who started the run, for the metric. */
   startedBy?: string | null;
+  /**
+   * The run this machine is for, which the provision events carry so
+   * they join to it. Null for a provision no run asked for; stated
+   * either way, so a new caller cannot leave it out by accident.
+   */
+  run: SandboxRun | null;
 }
 
 export interface ProvisionedWorkspace {
@@ -395,7 +409,35 @@ export async function provisionWorkspace(
         ...(err instanceof ProvisionFailure ? { phase: err.phase, blame: err.blame } : {}),
         reason,
       };
-      if (!movingOn) throw new SandboxProvisionError(blame ?? "provider", [...earlierFailures, failure], err);
+      /**
+       * One analytics event per failed attempt, and one more when the
+       * provision ends without a machine. Only the error's kind and
+       * class go in: its text is for error tracking, which already
+       * records it below and in the caller.
+       */
+      const failedEvent = {
+        provider: candidate.provider,
+        selection: input.selection ?? "default",
+        phase: failure.phase,
+        blame: failure.blame,
+        errorKind: sandboxErrorKind(reason),
+        errorName: errorClassName(reason),
+        projectId: input.projectId,
+        organizationId: input.organizationId,
+        userId: input.startedBy ?? null,
+        owner: input.owner,
+        run: input.run,
+      };
+      reportSandboxProvisionFailed(ctx.analytics, {
+        ...failedEvent,
+        kind: "attempt",
+        attempts,
+        ...(movingOn && next ? { nextProvider: next.provider } : {}),
+      });
+      if (!movingOn) {
+        reportSandboxProvisionFailed(ctx.analytics, { ...failedEvent, kind: "final", attempts });
+        throw new SandboxProvisionError(blame ?? "provider", [...earlierFailures, failure], err);
+      }
       fellBackFrom ??= candidate.provider;
       earlierFailures.push(failure);
       console.warn(
@@ -471,6 +513,7 @@ export async function provisionWorkspace(
       organizationId: input.organizationId,
       userId: input.startedBy ?? null,
       owner: input.owner,
+      run: input.run,
     });
 
     return {

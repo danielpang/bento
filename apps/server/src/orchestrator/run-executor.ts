@@ -1,6 +1,6 @@
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
-import { and, asc, desc, eq, inArray, lt, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lt, ne, sql } from "drizzle-orm";
 import {
   WORKSPACE_ARTIFACT_DIR,
   type AgentCli,
@@ -387,6 +387,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       fallbackDrivers: chosenDrivers.fallbacks,
       selection: chosenDrivers.selection,
       startedBy: run.startedBy,
+      run: { id: runId, role: run.role, type: run.type },
       projectId: project.id,
       organizationId: subject.organizationId,
       workspaceKey: subject.workspaceKey,
@@ -482,10 +483,17 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
 
     // Link the run to its sandbox so rollback can find it later. The
     // upsert always returns the row, so there is no fallback select to
-    // race with anything.
-    if (workspace.sandboxRow) {
-      await ctx.db.update(agentRuns).set({ sandboxId: workspace.sandboxRow.id }).where(eq(agentRuns.id, runId));
-    }
+    // race with anything. The provider goes on the run as well, from
+    // the handle the driver that answered returned: the sandbox row's
+    // provider is rewritten when the owner's machine is made again, so
+    // only the run can say later which provider it ran on.
+    await ctx.db
+      .update(agentRuns)
+      .set({
+        sandboxProvider: workspace.handle.provider,
+        ...(workspace.sandboxRow ? { sandboxId: workspace.sandboxRow.id } : {}),
+      })
+      .where(eq(agentRuns.id, runId));
   } catch (err) {
     /**
      * The log and error tracking get every attempt with its provider,
@@ -2975,6 +2983,21 @@ async function resumeInterruptedRun(
   }
 
   ctx.running.set(run.id, controller);
+
+  /**
+   * Nothing is provisioned here, so the provider the run recorded when
+   * it provisioned stands. A run that provisioned before the column
+   * existed has none, and the machine just reattached to is the one
+   * its agent is in, so its driver is the answer. Best effort: a run
+   * that cannot record it still has its agent.
+   */
+  if (!run.sandboxProvider) {
+    await ctx.db
+      .update(agentRuns)
+      .set({ sandboxProvider: driver.provider })
+      .where(and(eq(agentRuns.id, run.id), isNull(agentRuns.sandboxProvider)))
+      .catch((err) => console.warn(`could not record the sandbox provider of resumed run ${run.id}:`, err));
+  }
 
   const sayAsUser = (text: string) =>
     appendRunEvent(ctx, run.id, { type: "message", role: "user", text });

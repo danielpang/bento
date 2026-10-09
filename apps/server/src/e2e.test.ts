@@ -38,7 +38,7 @@ import { linkGitHubRemotes } from "./orchestrator/repo-remote.js";
 import { SecretBox } from "./secrets.js";
 import { ensureLocalUser, type AppContext } from "./context.js";
 import { singleDriver } from "./orchestrator/sandbox-driver.js";
-import { SANDBOX_READY_EVENT } from "./orchestrator/sandbox-metrics.js";
+import { SANDBOX_PROVISIONED_EVENT, SANDBOX_PROVISION_FAILED_EVENT, SANDBOX_READY_EVENT } from "./orchestrator/sandbox-metrics.js";
 import { recordingAnalytics } from "./test-analytics.js";
 import { EventBus } from "./events.js";
 import { loadEnv } from "./env.js";
@@ -542,6 +542,23 @@ test("a card's sandbox wait is measured from queueing, new first and reused afte
   assert.ok(queueWait <= duration, "the queue's share is inside the whole wait");
   assert.ok(provision <= duration - queueWait, "the driver's share is inside the time since the claim");
 
+  // The provision is tied to its run, and the run keeps its provider.
+  const provisioned = analytics.events.filter(
+    (e) => e.event === SANDBOX_PROVISIONED_EVENT && e.properties?.run_id === first.id,
+  );
+  assert.equal(provisioned.length, 1, "one provision event per run that provisioned");
+  assert.equal(provisioned[0]!.properties?.role, "stage");
+  assert.equal(provisioned[0]!.properties?.run_type, "pipeline");
+  assert.equal(provisioned[0]!.properties?.provider, "local-process");
+  const [firstRow] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, first.id));
+  assert.equal(firstRow?.sandboxProvider, "local-process");
+  const runBody = await json<{ sandboxProvider: string | null }>(await app.request(`/api/runs/${first.id}`));
+  assert.equal(runBody.sandboxProvider, "local-process", "the run route says which provider ran it");
+  const card = await json<{ runs: { id: string; sandboxProvider: string | null }[] }>(
+    await app.request(`/api/features/${feature.id}`),
+  );
+  assert.equal(card.runs.find((r) => r.id === first.id)?.sandboxProvider, "local-process", "and so does the card");
+
   // The same card again. Its sandbox row is still there and the
   // local driver has no machine to speak of, so the row answers:
   // the workspace is reopened rather than made.
@@ -552,6 +569,112 @@ test("a card's sandbox wait is measured from queueing, new first and reused afte
   assert.equal(secondEvents[0]!.properties?.run_id, second.id);
   assert.equal(secondEvents[0]!.properties?.sandbox_origin, "reused");
   assert.equal(secondEvents[0]!.properties?.selection, "existing");
+});
+
+test("a run that auto moved from a sprite to Modal records Modal as its provider", { timeout: 90_000 }, async () => {
+  const { project } = await setupProject("Auto fallback provider");
+  const feature = await createFeature(project.id, "Fallback card");
+  const profile = await fakeProfile("fallback-fake");
+  await app.request(`/api/features/${feature.id}/advance`, { method: "POST" });
+
+  /*
+   * Fly cannot make a sprite, and "Modal" is the local driver under
+   * another name, so the agent still runs. Both share the host
+   * workspace shape, which is what lets the loop move between them.
+   */
+  const local = new LocalProcessDriver();
+  const sprite = {
+    provider: "sprite" as const,
+    workspace: "host" as const,
+    async provision(): Promise<never> {
+      throw new Error("sprites API returned 503");
+    },
+    exec(): AsyncIterable<never> {
+      throw new Error("a sprite that was never made runs nothing");
+    },
+    async destroy() {},
+  } as unknown as SandboxDriver;
+  const modal = Object.create(local) as SandboxDriver;
+  Object.defineProperty(modal, "provider", { value: "modal" });
+  modal.provision = async (spec) => ({ ...(await local.provision(spec)), provider: "modal" });
+  const drivers: AppContext["drivers"] = {
+    default: sprite,
+    get: (provider) => (provider === "sprite" ? sprite : provider === "modal" ? modal : undefined),
+    selectable: () => ["sprite", "modal"],
+  };
+  const failedBefore = analytics.events.length;
+  const previousDrivers = ctx.drivers;
+  ctx.drivers = drivers;
+  try {
+    const started = await json<{ id: string }>(
+      await app.request("/api/runs", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ featureId: feature.id, agentProfileId: profile.id, prompt: "hello" }),
+      }),
+    );
+    assert.equal(await waitForRun(started.id), "succeeded");
+
+    const [row] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, started.id));
+    assert.equal(row?.sandboxProvider, "modal", "the provider that made the machine, not the first one asked");
+
+    const events = analytics.events.slice(failedBefore);
+    const failed = events.filter((e) => e.event === SANDBOX_PROVISION_FAILED_EVENT);
+    assert.equal(failed.length, 1, "one failed attempt, and no final: the run got a machine");
+    assert.equal(failed[0]?.properties?.kind, "attempt");
+    assert.equal(failed[0]?.properties?.provider, "sprite");
+    assert.equal(failed[0]?.properties?.next_provider, "modal");
+    assert.equal(failed[0]?.properties?.run_id, started.id);
+    assert.equal(failed[0]?.properties?.run_type, "pipeline");
+    const provisioned = events.filter((e) => e.event === SANDBOX_PROVISIONED_EVENT);
+    assert.equal(provisioned[0]?.properties?.provider, "modal");
+    assert.equal(provisioned[0]?.properties?.fell_back_from, "sprite");
+    assert.equal(provisioned[0]?.properties?.run_id, started.id);
+  } finally {
+    ctx.drivers = previousDrivers;
+  }
+});
+
+test("a run whose sandbox never came up records no provider, and says so once in analytics", { timeout: 90_000 }, async () => {
+  const { project } = await setupProject("No provider");
+  const feature = await createFeature(project.id, "Nothing provisions");
+  const profile = await fakeProfile("down-fake");
+  await app.request(`/api/features/${feature.id}/advance`, { method: "POST" });
+
+  const failing = new LocalProcessDriver();
+  failing.provision = async () => {
+    throw new Error("no machine today");
+  };
+  const before = analytics.events.length;
+  const previousDrivers = ctx.drivers;
+  ctx.drivers = singleDriver(failing);
+  try {
+    const started = await json<{ id: string }>(
+      await app.request("/api/runs", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ featureId: feature.id, agentProfileId: profile.id, prompt: "hello" }),
+      }),
+    );
+    assert.equal(await waitForRun(started.id), "failed");
+    const [row] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, started.id));
+    assert.equal(row?.sandboxProvider, null);
+    const failed = analytics.events
+      .slice(before)
+      .filter((e) => e.event === SANDBOX_PROVISION_FAILED_EVENT && e.properties?.run_id === started.id);
+    assert.deepEqual(
+      failed.map((e) => [e.properties?.kind, e.properties?.provider, e.properties?.selection]),
+      [
+        ["attempt", "local-process", "default"],
+        ["final", "local-process", "default"],
+      ],
+    );
+    assert.equal(failed[1]?.properties?.feature_id, feature.id);
+    assert.equal(failed[1]?.properties?.project_id, project.id);
+    assert.equal(failed[1]?.properties?.role, "stage");
+  } finally {
+    ctx.drivers = previousDrivers;
+  }
 });
 
 test("changes exclude work inherited from the branch point", async () => {
@@ -1437,6 +1560,10 @@ test("a restart reattaches to a run still working in its sandbox", { timeout: 60
     assert.doesNotMatch(transcript, /so the run ended here/, "no interrupted close on a run that survived");
     assert.equal(attached.length, 1, "recovery attached exactly once");
     assert.equal(attached[0]?.externalId, `bento-${feature.id}`, "the attach went to the run's own sandbox");
+    // The run predates the column, so it has no provider; the machine
+    // it was reattached to answers for it.
+    const [resumed] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, running!.id));
+    assert.equal(resumed?.sandboxProvider, "sprite", "a reattached run without a provider records its machine's");
   } finally {
     ctx.drivers = previousDrivers;
   }
@@ -6150,10 +6277,14 @@ test("a runner executes work the server holds for it", { timeout: 90_000 }, asyn
         { type: "init", sessionId: "runner-session-1" },
         { type: "message", role: "assistant", text: "Working locally." },
       ],
+      sandbox: { provider: "docker", createdSandbox: true, provisionMs: 1200 },
     }),
   });
-  const running = await json<{ status: string }>(await app.request(`/api/runs/${created.id}`));
+  const running = await json<{ status: string; sandboxProvider: string | null }>(
+    await app.request(`/api/runs/${created.id}`),
+  );
   assert.equal(running.status, "running", "events move a claimed run into running");
+  assert.equal(running.sandboxProvider, "docker", "the provider the runner reported is the run's");
 
   const transcript = await (await app.request(`/api/runs/${created.id}/transcript`)).text();
   assert.match(transcript, /Working locally\./);
