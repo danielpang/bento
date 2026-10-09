@@ -705,13 +705,52 @@ test("bento-exec stdin accepts a write after start has exited", async () => {
   }
 });
 
+test("bento-exec stdin carries bytes and EOF to the command", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "bento-exec-feed-"));
+  const script = path.join(dir, "bento-exec");
+  await writeFile(script, BENTO_EXEC_PYTHON, { mode: 0o755 });
+  const work = path.join(dir, "run");
+  const started = await run(script, ["start", work, "--", "python3", "-c", "import sys; sys.stdout.write(sys.stdin.read())"]);
+  assert.equal(started.code, 0, started.stderr);
+  const fed = await runPython([script, "stdin", work], "payload\n");
+  assert.equal(fed.code, 0, fed.stderr);
+  const closed = await run(script, ["eof", work]);
+  assert.equal(closed.code, 0, closed.stderr);
+  const followed = await run(script, ["follow", work, "0"]);
+  const frames = new FrameDecoder().push(Buffer.from(followed.stdout));
+  assert.equal(frames[0]?.kind === "stdout" ? frames[0].data : "", "payload\n");
+  assert.equal(frames.at(-1)?.kind === "exit" ? frames.at(-1)?.exitCode : -1, 0);
+});
+
+test("bento-exec stdin quits when its command exits, even if its own input never ends", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "bento-exec-orphan-"));
+  const script = path.join(dir, "bento-exec");
+  await writeFile(script, BENTO_EXEC_PYTHON, { mode: 0o755 });
+  const work = path.join(dir, "run");
+  const started = await run(script, ["start", work, "--", "python3", "-c", "import sys; sys.stdin.readline()"]);
+  assert.equal(started.code, 0, started.stderr);
+  // One line reaches the command and it exits; the feeder's input stays
+  // open, which is what a lost EOF looks like from inside the sandbox.
+  const fed = await runPython([script, "stdin", work], "line\n", { keepStdinOpen: true });
+  assert.equal(fed.code, 0, fed.stderr);
+  await stat(path.join(work, "exit"));
+});
+
 function run(script: string, args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
   return runPython([script, ...args]);
 }
 
-function runPython(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+function runPython(
+  args: string[],
+  input?: string,
+  options?: { keepStdinOpen?: boolean },
+): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn("python3", args, { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn("python3", args, { stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"] });
+    if (input !== undefined) {
+      child.stdin?.write(input);
+      if (!options?.keepStdinOpen) child.stdin?.end();
+    }
     let stdout = "";
     let stderr = "";
     const timer = setTimeout(() => {
