@@ -59,7 +59,9 @@ import {
   SANDBOX_GONE_AGENT_PREFIX,
   SANDBOX_REFUSED_AGENT_PREFIX,
   SANDBOX_STALLED_AGENT_PREFIX,
+  RESTART_BEFORE_AGENT_PREFIX,
   PREVIOUS_AGENT_RUNNING_PREFIX,
+  SWARM_BRANCH_LOST_MESSAGE,
   unbilledReason,
 } from "../unbilled-reasons.js";
 import { githubConnectionFor, reviewForBranch } from "../github.js";
@@ -108,7 +110,7 @@ import { shouldIncludeStageNotes, shouldShareAgentAuth } from "../settings.js";
 import { captureRunQueueDepth } from "./queue-snapshot.js";
 import { ACTIVE_RUN_STATUSES, projectHasRepositories, startRunIfIdle } from "./start-run.js";
 import { enqueueRun, INTERACTIVE_POLL_SECONDS, QUEUE_POLL_SECONDS, RUN_WORKER_POLL_SECONDS } from "./queue.js";
-import { HIBERNATE_SANDBOX_QUEUE, MODAL_SWEEP_QUEUE, scheduleModalHibernation, hibernateSandbox, sweepOrphanModalSandboxes, wakeSwarmSandbox } from "./hibernate-sandbox.js";
+import { HIBERNATE_SANDBOX_QUEUE, MODAL_SWEEP_QUEUE, SandboxGone, scheduleModalHibernation, hibernateSandbox, sweepOrphanModalSandboxes, wakeSwarmSandbox } from "./hibernate-sandbox.js";
 import { modalNetworkForProject, organizationRestrictsNetwork } from "./sandbox-network.js";
 import { stopLeftoverAgent } from "./leftover-agent.js";
 import { pipelineAgentBinaries } from "./pipeline-agents.js";
@@ -123,7 +125,7 @@ import { REAP_SANDBOX_QUEUE, reapFinishedSandboxes, reapFinishedSwarmSandboxes, 
 import { latestConversationRun, resolveFollowUpRun } from "./stage-agent.js";
 import { asPipelineRun, isPipelineRun, type PipelineRun } from "./pipeline-run.js";
 import { describeRunSubject, type RunSubject } from "./run-subject.js";
-import { SWARM_TICK_QUEUE, tickAllLiveSwarms } from "./swarm/coordinator.js";
+import { enqueueSwarmTick, SWARM_TICK_QUEUE, tickAllLiveSwarms } from "./swarm/coordinator.js";
 import { SWARM_LAND_QUEUE, resumeClaimedLandings } from "./swarm/landing.js";
 import { SWARM_PUSH_QUEUE, ensureSwarmPushWorker, remoteBranchBundles } from "./swarm/remote-branches.js";
 import { SWARM_START_OVER_QUEUE } from "./swarm/start-over.js";
@@ -495,6 +497,28 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       })
       .where(eq(agentRuns.id, runId));
   } catch (err) {
+    /*
+     * The swarm's branch is gone with tasks landed on it, and nothing
+     * was provisioned: a machine made now would hold a branch without
+     * them. Its own sentence, in the transcript and on the record,
+     * which the unbilled rules read (no agent ran), and its own source
+     * in error tracking, because it is landed work lost, not a
+     * provider having a bad minute.
+     */
+    if (err instanceof SwarmBranchLost) {
+      console.error(`run ${runId} refused: ${err.message}`);
+      ctx.analytics?.captureException(err, run.startedBy, subject.organizationId, {
+        run_id: runId,
+        swarm_id: err.swarmId,
+        ...runOwnerProperties(subject.sandboxOwner),
+        source: "swarm_branch_lost",
+      });
+      await saySystem(SWARM_BRANCH_LOST_MESSAGE);
+      await finishRun(ctx, runId, { ok: false, error: SWARM_BRANCH_LOST_MESSAGE }, null);
+      emitBoard("failed");
+      await subject.settle(ctx);
+      return;
+    }
     /**
      * The log and error tracking get every attempt with its provider,
      * phase and blame. The run record gets what the person can act
@@ -1917,24 +1941,62 @@ async function swarmBranchBundles(
 ): Promise<Map<string, { branch: string; data: Buffer }>> {
   if (!swarm.sandboxId) return new Map();
   const [row] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, swarm.sandboxId)).limit(1);
+  if (row && row.status !== "destroyed") {
+    try {
+      await wakeSwarmSandbox(ctx, row, swarm, swarm.plannerProfileId);
+      return await exportSwarmBranch(
+        driverForSandbox(ctx.drivers, row),
+        { externalId: row.externalId, provider: row.provider, workdir: row.workdir },
+        repoRows.map((repo) => ({ name: repo.name, defaultBranch: repo.defaultBranch })),
+        swarm.branchName ?? swarmBranchName(swarm.slug),
+      );
+    } catch (err) {
+      // The row said live and the machine was not there. The wake has
+      // marked it destroyed, and the branch comes from GitHub below.
+      if (!(err instanceof SandboxGone)) throw err;
+    }
+  }
   // The swarm's machine is gone: its branch is read back from GitHub,
   // where every landing pushed it, rather than the worker quietly
   // starting from the base branch.
-  if (!row || row.status === "destroyed") {
-    return remoteBranchBundles(ctx, {
-      organizationId: swarm.organizationId,
-      branch: swarm.branchName ?? swarmBranchName(swarm.slug),
-      pushedHeads: swarm.pushedHeads,
-      repoRows,
-    });
+  const bundles = await remoteBranchBundles(ctx, {
+    organizationId: swarm.organizationId,
+    branch: swarm.branchName ?? swarmBranchName(swarm.slug),
+    pushedHeads: swarm.pushedHeads,
+    repoRows,
+  });
+  // Nothing on GitHub either. With nothing landed yet the swarm's
+  // branch is still its base and the seed is right; with tasks landed
+  // it is a branch that no longer exists anywhere, and a worker cut
+  // from the base would write against code the swarm had moved past.
+  if (bundles.size === 0 && (await swarmHasLandedWork(ctx, swarm.id))) throw new SwarmBranchLost(swarm.id);
+  return bundles;
+}
+
+/**
+ * The swarm's branch was lost with its machine, tasks had landed on
+ * it, and GitHub holds no copy. A run that meets this is refused
+ * before a machine is made, with SWARM_BRANCH_LOST_MESSAGE, rather
+ * than started on a fresh clone that silently lacks the landed work.
+ */
+export class SwarmBranchLost extends Error {
+  readonly swarmId: string;
+
+  constructor(swarmId: string) {
+    super(SWARM_BRANCH_LOST_MESSAGE);
+    this.name = "SwarmBranchLost";
+    this.swarmId = swarmId;
   }
-  await wakeSwarmSandbox(ctx, row, swarm, swarm.plannerProfileId);
-  return exportSwarmBranch(
-    driverForSandbox(ctx.drivers, row),
-    { externalId: row.externalId, provider: row.provider, workdir: row.workdir },
-    repoRows.map((repo) => ({ name: repo.name, defaultBranch: repo.defaultBranch })),
-    swarm.branchName ?? swarmBranchName(swarm.slug),
-  );
+}
+
+/** Whether any task has landed on the swarm's branch. */
+async function swarmHasLandedWork(ctx: AppContext, swarmId: string): Promise<boolean> {
+  const [landed] = await ctx.db
+    .select({ id: swarmLandings.id })
+    .from(swarmLandings)
+    .where(and(eq(swarmLandings.swarmId, swarmId), eq(swarmLandings.status, "landed")))
+    .limit(1);
+  return Boolean(landed);
 }
 
 /**
@@ -1964,23 +2026,54 @@ async function leftoverAgentCommands(ctx: AppContext, taskId: string, argv: stri
  * The swarm's branch from GitHub, for remaking the swarm's own machine
  * after the one that held it was destroyed. Nothing when the machine
  * is still there (a hibernated one is restored from its snapshot) or
- * nothing was ever pushed.
+ * the swarm has nothing landed to restore.
+ *
+ * Throws SwarmBranchLost when the machine is gone, tasks have landed
+ * on its branch, and GitHub gives nothing back. Production made a
+ * fresh clone there: the sprite that held two landed tasks was reaped,
+ * the fallback provider cloned the base branch, and the swarm went on
+ * landing onto a branch without them, with nothing to say so.
  */
 async function swarmRestoreBundles(
   ctx: AppContext,
   swarm: typeof swarms.$inferSelect,
   repoRows: (typeof repositories.$inferSelect)[],
 ): Promise<{ startFromBundles?: Map<string, { branch: string; data: Buffer }> }> {
-  if (!swarm.sandboxId || Object.keys(swarm.pushedHeads ?? {}).length === 0) return {};
-  const [row] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, swarm.sandboxId)).limit(1);
-  if (row && row.status !== "destroyed") return {};
+  const [row] = swarm.sandboxId
+    ? await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, swarm.sandboxId)).limit(1)
+    : [];
+  if (row && row.status !== "destroyed") {
+    /*
+     * A row that says the machine is there is asked, once the swarm has
+     * landed work to lose: a sprite deleted outside Bento, or a Modal box
+     * past its 24 hour cap with no snapshot, would otherwise be made
+     * again by name as a fresh clone, and the planner would go on from
+     * a branch without the landed tasks. The wake marks such a row
+     * destroyed, and the restore below then reads GitHub or says the
+     * branch is lost.
+     */
+    if (!(await swarmHasLandedWork(ctx, swarm.id))) return {};
+    try {
+      await wakeSwarmSandbox(ctx, row, swarm, swarm.plannerProfileId);
+      return {};
+    } catch (err) {
+      if (!(err instanceof SandboxGone)) {
+        // A provider that could not answer: provisioning asks it again
+        // and fails the run its own way if it is still down.
+        console.warn(`could not confirm swarm ${swarm.id}'s machine before its run:`, err);
+        return {};
+      }
+    }
+  }
   const bundles = await remoteBranchBundles(ctx, {
     organizationId: swarm.organizationId,
     branch: swarm.branchName ?? swarmBranchName(swarm.slug),
     pushedHeads: swarm.pushedHeads,
     repoRows,
   });
-  return bundles.size > 0 ? { startFromBundles: bundles } : {};
+  if (bundles.size > 0) return { startFromBundles: bundles };
+  if (await swarmHasLandedWork(ctx, swarm.id)) throw new SwarmBranchLost(swarm.id);
+  return {};
 }
 
 /** Whether the planner has written the design note a worker is told to read. */
@@ -2563,6 +2656,20 @@ export async function markCancelled(ctx: AppContext, runId: string): Promise<voi
   ctx.bus.emitRunDone(runId, "cancelled");
   await requeueUndelivered(ctx.db, runId);
   await deliverQueuedMessage(ctx, runId);
+  /*
+   * A swarm hears about it through a tick, as from every other way a
+   * run ends. Not every caller settles after this (the executor's own
+   * abort path does not), and a swarm whose planner was stopped and
+   * whose tick never came sat with that planner's news and messages
+   * until something else happened to tick it. The tick is keyed by the
+   * swarm, so a caller that also settles costs nothing extra.
+   */
+  if (closed.swarmId) {
+    await enqueueSwarmTick(ctx, closed.swarmId).catch((err: unknown) => {
+      console.warn(`could not tick swarm ${closed.swarmId} after cancelling run ${runId}:`, err);
+      ctx.analytics?.captureException(err, null, null, { run_id: runId, source: "swarm_tick" });
+    });
+  }
 }
 
 /**
@@ -2681,20 +2788,53 @@ export async function recoverInterruptedRuns(ctx: AppContext): Promise<void> {
  * race a run that finished or was cancelled while recovery deliberated,
  * and the loser must change nothing.
  */
+/**
+ * Whether a run's agent never started: it was never exec'd, and nothing
+ * but the executor's own lines (system lines, the prompt it writes as a
+ * user line) is in its transcript. Both, the way reapStalledRuns reads a
+ * stall, so a run from before the stamp existed is not mistaken for one.
+ */
+async function agentNeverStarted(ctx: AppContext, run: typeof agentRuns.$inferSelect): Promise<boolean> {
+  if (run.agentStartedAt) return false;
+  const [spoke] = await ctx.db
+    .select({ id: runEvents.id })
+    .from(runEvents)
+    .where(
+      and(
+        eq(runEvents.runId, run.id),
+        sql`not (${runEvents.type} = 'message' and ${runEvents.payload} ->> 'role' in ('system', 'user'))`,
+      ),
+    )
+    .limit(1);
+  return !spoke;
+}
+
 async function failRunAsInterrupted(
   ctx: AppContext,
   run: typeof agentRuns.$inferSelect,
-  how: { error: string; transcript: string } = {
-    error: "interrupted by a server restart",
-    transcript: "Bento restarted while this run was working, so the run ended here. Send a message to pick up where it left off.",
-  },
+  given?: { error: string; transcript: string },
 ): Promise<void> {
+  const how = given ?? ((await agentNeverStarted(ctx, run))
+    ? {
+        // Nothing ran yet: the restart is Bento's, not the work's, and is
+        // neither billed nor handed to a planner as a failure.
+        error: `${RESTART_BEFORE_AGENT_PREFIX}, so no agent ran.`,
+        transcript: "Bento restarted before the agent started, so the run ended here. Nothing was changed. Try the run again.",
+      }
+    : {
+        error: "interrupted by a server restart",
+        transcript: "Bento restarted while this run was working, so the run ended here. Send a message to pick up where it left off.",
+      });
+  const unbilled = unbilledReason(how.error) !== null;
   const [closed] = await ctx.db
     .update(agentRuns)
     .set({
       status: "failed",
       endedAt: new Date(),
       error: how.error,
+      // The column the team's hours and a swarm's spend read. Left at its
+      // default, a run the reaper closed before any agent ran was counted.
+      billable: !unbilled,
     })
     .where(and(eq(agentRuns.id, run.id), inArray(agentRuns.status, ["starting", "running"])))
     .returning({ id: agentRuns.id });
@@ -2710,7 +2850,7 @@ async function failRunAsInterrupted(
   // as long as the run said it was, and a restart is not a refund.
   // Not billed when the reason is on the unbilled list: a run the
   // reaper closed before its agent was launched ran nothing.
-  await announceRunFinished(ctx, run.id, "failed", unbilledReason(how.error) === null);
+  await announceRunFinished(ctx, run.id, "failed", !unbilled);
 
   await appendRunEvent(ctx, run.id, {
     type: "message",
@@ -2734,7 +2874,17 @@ async function failRunAsInterrupted(
    * tell.
    */
   const subject = await describeRunSubject(ctx, run).catch(() => null);
-  if (!subject) return;
+  if (!subject) {
+    /*
+     * Its swarm is still there to tell when only something the subject
+     * reads went (its profile, its project's checkout rows): a tick
+     * reads the swarm's rows, not the run's, and without it the run's
+     * end went unheard and the swarm waited on a run that was over. A
+     * swarm that is gone too makes this a tick that finds nothing.
+     */
+    if (run.swarmId) await enqueueSwarmTick(ctx, run.swarmId);
+    return;
+  }
   subject.emitBoard("failed");
   if (subject.kind === "pipeline") {
     await requeueUndelivered(ctx.db, run.id);
@@ -2841,6 +2991,51 @@ export async function reapStalledRuns(ctx: AppContext, stallMin: number = STALLE
   }
   if (closed.length > 0) console.warn(`closed ${closed.length} run(s) that stalled before their agent started`);
   return closed;
+}
+
+/**
+ * Minutes a server run may sit queued before its run.execute job is
+ * presumed lost and sent again.
+ *
+ * Longer than any wait for a free run worker a deployment ordinarily
+ * has, so the common case sends nothing, and short against a swarm
+ * that would otherwise wait for a reboot.
+ */
+export const QUEUED_RUN_REQUEUE_MIN = 10;
+
+/**
+ * Sends run.execute again for server runs that have sat queued too long.
+ *
+ * A queued row is only a run once a job carries it, and a job can be
+ * lost: a send that failed after its transaction committed, a job that
+ * pg-boss expired or archived while every worker was busy. Boot used to
+ * be the only place that asked again (requeueWaitingRuns), so such a
+ * run waited for the next deploy, and a swarm whose planner or worker
+ * it was waited with it: an active run holds the planner's slot and the
+ * swarm's ceiling alike.
+ *
+ * Safe to send twice. executeRun claims the run with a compare and set
+ * from queued to starting, so of every job carrying one run exactly one
+ * runs the agent, and the rest read a run that is no longer queued and
+ * stop. Measured on the database's clock, against its own queued_at.
+ */
+export async function requeueStrandedRuns(
+  ctx: AppContext,
+  afterMin: number = QUEUED_RUN_REQUEUE_MIN,
+): Promise<string[]> {
+  const stranded = await ctx.db
+    .select({ id: agentRuns.id })
+    .from(agentRuns)
+    .where(
+      and(
+        eq(agentRuns.executor, "server"),
+        eq(agentRuns.status, "queued"),
+        sql`${agentRuns.queuedAt} < now() - make_interval(mins => ${afterMin})`,
+      ),
+    );
+  for (const row of stranded) await enqueueRun(ctx, row.id);
+  if (stranded.length > 0) console.warn(`sent ${stranded.length} run(s) that had waited queued with no worker on them again`);
+  return stranded.map((row) => row.id);
 }
 
 /**
@@ -3263,11 +3458,25 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
     MODAL_SWEEP_QUEUE,
     { pollingIntervalSeconds: QUEUE_POLL_SECONDS },
     captureJobErrors(ctx.analytics, MODAL_SWEEP_QUEUE, async () => {
-      await sweepOrphanModalSandboxes(ctx);
-      // Nightly too, not only at boot: a failed swarm's machine is
-      // reaped once its grace has run out, and that has to happen on
-      // a server nobody redeploys.
-      await reapFinishedSwarmSandboxes(ctx);
+      /*
+       * Nightly too, not only at boot: a failed swarm's machine is
+       * reaped once its grace has run out, and that has to happen on
+       * a server nobody redeploys. First, and each step on its own: the
+       * orphan sweep once threw on a swarm machine's tag, and the
+       * swarm reap after it never ran on any night.
+       */
+      const steps: [string, () => Promise<void>][] = [
+        ["swarm_reap", () => reapFinishedSwarmSandboxes(ctx)],
+        ["modal_sweep", () => sweepOrphanModalSandboxes(ctx)],
+      ];
+      for (const [source, step] of steps) {
+        try {
+          await step();
+        } catch (err) {
+          console.warn(`the nightly ${source} step did not finish:`, err);
+          ctx.analytics?.captureException(err, null, null, { queue: MODAL_SWEEP_QUEUE, source });
+        }
+      }
     }),
   );
   /**
@@ -3365,6 +3574,8 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
     // rather than a new one, because every scheduled job is a query a
     // poll on a database that should be allowed to sleep.
     await reapStalledRuns(ctx);
+    // And runs that never got that far: queued, with their job lost.
+    await requeueStrandedRuns(ctx);
   }));
 
   /**

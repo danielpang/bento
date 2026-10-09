@@ -154,8 +154,9 @@ test("one swarm reads back with its plan, its spend and what is working", async 
   assert.deepEqual(read.tasks[0]!.cost, { measuredUsd: 1.5, estimatedUsd: 0.25, assumedUsd: 0 , notionalUsd: 0});
   assert.equal(read.tasks[0]!.attention, "none");
   assert.equal(read.tasks[1]!.attention, "question", "the server's own reason, not a severity it was flattened into");
-  assert.deepEqual(read.runningTaskIds, ["t-1"], "only a run whose agent is in the sandbox; t-1 is the root, so the planner is the same node");
-  assert.deepEqual(read.agentStartedAt, { "t-1": "2026-09-04T12:05:00.000Z" }, "the earlier agent start is the clock when two runs share the root");
+  assert.deepEqual(read.runningTaskIds, ["t-1"], "only a run whose agent is in the sandbox");
+  assert.deepEqual(read.agentStartedAt, { "t-1": "2026-09-04T12:10:00.000Z" }, "the planner is on no node, so its clock is not the root's");
+  assert.equal(read.activeRunCount, 4, "every active run, the planner's included");
 
   // Nothing is invented for the surfaces the routes do not serve.
   assert.deepEqual(read.landings, []);
@@ -422,7 +423,11 @@ test("a swarm's status is said in the console's words, and a budget stop says so
   assert.equal(status({ status: "planning" }), "planning");
   assert.equal(status({ status: "running" }), "running");
   assert.equal(status({ status: "paused", pausedReason: "manual" }), "paused");
-  assert.equal(status({ status: "paused", pausedReason: "budget" }), "budget_exhausted");
+  // An older server's budget stop: resuming is what moves that row.
+  assert.equal(status({ status: "paused", pausedReason: "budget" }), "paused");
+  // The two ceilings used to fall through to planning, and offer Approve plan.
+  assert.equal(status({ status: "budget_exhausted", pausedReason: "budget" }), "budget_exhausted");
+  assert.equal(status({ status: "timed_out", pausedReason: "time_limit" }), "timed_out");
   assert.equal(status({ status: "blocked" }), "waiting");
   assert.equal(status({ status: "cancelled" }), "stopped");
   assert.equal(status({ status: "done" }), "done");
@@ -453,7 +458,7 @@ test("a swarm with no plan and no runs still draws", () => {
   assert.equal(read.swarm.startedAt, null, "the header falls back to when it was created");
 });
 
-test("working is the agent in the sandbox, and a planner with no task is the root", () => {
+test("working is the agent in the sandbox, and a planner with no task is on no node", () => {
   const read = toDetail({
     swarm: wireSwarm(),
     tasks: [
@@ -467,11 +472,26 @@ test("working is the agent in the sandbox, and a planner with no task is the roo
       { id: "install", role: "worker", status: "starting", swarmTaskId: "setup", agentStartedAt: null },
     ],
   });
-  assert.deepEqual(read.runningTaskIds, ["root", "leaf"]);
-  assert.deepEqual(read.agentStartedAt, {
-    root: "2026-09-04T12:00:00.000Z",
-    leaf: "2026-09-04T12:20:00.000Z",
+  // The planner used to be painted on the first top level task, so a
+  // flat plan's first leaf read "working" while only the planner ran.
+  assert.deepEqual(read.runningTaskIds, ["leaf"]);
+  assert.deepEqual(read.agentStartedAt, { leaf: "2026-09-04T12:20:00.000Z" });
+});
+
+test("the route's merge queue retry answer and a landing's backoff reach the page", () => {
+  const read = toDetail({
+    swarm: wireSwarm(),
+    tasks: [wireTask({ id: "yes", canRetryLanding: true }), wireTask({ id: "older" })],
+    activeRuns: [],
+    landings: [{
+      id: "l1", taskId: "yes", branchName: "b", position: 0, status: "queued", attempt: 1, error: null,
+      resolverRunId: null, notBefore: "2026-09-04T12:05:00.000Z", startedAt: null, endedAt: null,
+    }],
   });
+  assert.equal(read.tasks[0]!.canRetryLanding, true);
+  assert.equal(read.tasks[1]!.canRetryLanding, false, "a server that sends no answer offers no retry");
+  assert.equal(read.landings[0]!.notBefore, "2026-09-04T12:05:00.000Z");
+  assert.equal(read.activeRunCount, 0);
 });
 
 test("the long-run clock is the earlier agent, and a missing stamp falls back to the claim", () => {

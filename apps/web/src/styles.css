@@ -8165,6 +8165,7 @@ a.hours-person-name:hover {
   margin: 0;
   padding: 0 14px 10px;
 }
+.swarm-queue-actions { display: flex; gap: 8px; padding: 0 14px 10px; }
 .swarm-queue-technical { padding: 0 14px 10px; color: var(--text-dim); font-size: 11px; }
 .swarm-queue-technical summary { cursor: pointer; }
 .swarm-queue-technical .swarm-queue-error { padding: 9px 0 0; }

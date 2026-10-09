@@ -7,6 +7,7 @@ import {
   canResume,
   canStart,
   canStop,
+  ceilingAction,
   diagramAttentionWords,
   diagramTaskTone,
   diagramTaskWords,
@@ -99,6 +100,12 @@ test("a task says working only while an agent is running, and pending or complet
   assert.equal(diagramTaskWords("working", "plan"), "pending");
   assert.equal(diagramTaskTone("assigned", "leaf"), "idle");
   assert.equal(diagramTaskTone("working", "plan"), "idle");
+  assert.equal(diagramTaskWords("working", "leaf", false, "waiting"), "waiting to land", "an accepted leaf is not pending");
+  assert.equal(diagramTaskWords("working", "leaf", false, "failed"), "landing failed");
+  assert.equal(diagramTaskWords("working", "leaf", false, "review"), "waiting for review", "a reported leaf is not pending");
+  assert.equal(diagramTaskTone("working", "leaf", false, "review"), "idle");
+  assert.equal(diagramTaskWords("working", "leaf", true, "review"), "working", "an agent in the sandbox is working");
+  assert.equal(diagramTaskTone("working", "leaf", false, "failed"), "failed");
   assert.equal(diagramTaskWords("working", "leaf", true), "working");
   assert.equal(diagramTaskTone("working", "leaf", true), "running");
   assert.equal(diagramTaskWords("landed", "leaf", true), "working", "a resolver is an agent in the sandbox");
@@ -251,7 +258,12 @@ test("the controls a swarm offers follow the state it is in", () => {
   assert.equal(canPause("paused"), false);
   assert.equal(canPause("done"), false);
   assert.equal(canResume("paused"), true);
-  assert.equal(canResume("budget_exhausted"), true);
+  // The start route refuses both ceilings: raising one is what moves it.
+  assert.equal(canResume("budget_exhausted"), false);
+  assert.equal(canResume("timed_out"), false);
+  assert.equal(ceilingAction("budget_exhausted"), "Raise budget");
+  assert.equal(ceilingAction("timed_out"), "Raise time limit");
+  assert.equal(ceilingAction("paused"), null);
   assert.equal(canResume("running"), false);
   /*
    * Starting is not resuming, and a planned swarm needs it.

@@ -1,10 +1,11 @@
 import { and, eq, sql } from "drizzle-orm";
-import { swarmTasks } from "@bento/db";
+import { swarmTasks, swarms } from "@bento/db";
 import { captureJobErrors } from "../../analytics.js";
 import type { AppContext } from "../../context.js";
 import { QUEUE_POLL_SECONDS } from "../queue.js";
 import { discardSwarmTaskWork, SandboxReapDeferred } from "../reap-sandbox.js";
 import { enqueueSwarmTick } from "./coordinator.js";
+import { reactivateSwarmForRetry } from "./task-actions.js";
 
 /**
  * Starting a task over, after the request that asked for it.
@@ -105,7 +106,32 @@ export async function performTaskStartOver(ctx: AppContext, taskId: string): Pro
       updatedAt: new Date(),
     })
     .where(eq(swarmTasks.id, task.id));
+  await reactivateFailedSwarm(ctx, task.swarmId);
   await enqueueSwarmTick(ctx, task.swarmId);
+}
+
+/**
+ * A swarm that failed while this task was starting over is running
+ * again now that the task can start.
+ *
+ * A failed swarm spawns nothing, and a tick that read the task as
+ * waiting beside a failed sibling (before the rollup counted a task
+ * starting over as in flight, or in a tick that raced the restart) had
+ * written the swarm failed: the task this job just cleared would then
+ * sit assigned with nothing that would ever start it. Only a failed
+ * swarm. reactivateSwarmForRetry also resumes a person's pause, and a
+ * restart Bento started by itself is not a person resuming anything.
+ */
+async function reactivateFailedSwarm(ctx: AppContext, swarmId: string): Promise<void> {
+  const [swarm] = await ctx.db
+    .select({ id: swarms.id, projectId: swarms.projectId, status: swarms.status })
+    .from(swarms)
+    .where(eq(swarms.id, swarmId))
+    .limit(1);
+  if (swarm?.status !== "failed") return;
+  if (await reactivateSwarmForRetry(ctx.db, swarmId)) {
+    ctx.bus.emitBoardEvent({ type: "swarm_updated", projectId: swarm.projectId, swarmId, status: "running" });
+  }
 }
 
 async function setFlags(ctx: AppContext, taskId: string, flags: Record<string, unknown>): Promise<void> {

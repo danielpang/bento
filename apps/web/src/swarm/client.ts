@@ -485,7 +485,7 @@ export function fixtureSwarmApi(clock: () => number = () => Date.now()): Fixture
       return mutate(swarmId, (detail) => {
         detail.swarm.status = "running";
         detail.tasks = detail.tasks.map((task) => task.id === taskId
-          ? { ...task, status: "landed", attention: "none", flags: { ...task.flags, landingError: undefined } }
+          ? { ...task, status: "landed", attention: "none", canRetryLanding: false, flags: { ...task.flags, landingError: undefined } }
           : task);
         detail.landings = detail.landings.map((landing) => landing.taskId === taskId && landing.status === "failed"
           ? { ...landing, status: "queued", error: null }
@@ -670,6 +670,8 @@ export interface WireTask {
   followUpInstruction?: string | null;
   startedAt: string | null;
   endedAt: string | null;
+  /** The landing retry route's own answer for this task. Absent from an older server. */
+  canRetryLanding?: boolean;
 }
 
 /** One row of the merge queue, as the detail sends it. */
@@ -683,6 +685,7 @@ export interface WireLanding {
   error: string | null;
   errorCode?: string | null;
   resolverRunId: string | null;
+  notBefore?: string | null;
   startedAt: string | null;
   endedAt: string | null;
 }
@@ -788,12 +791,23 @@ const number = (value: string | null | undefined): number =>
  *
  * Two rows differ. A swarm the server calls blocked is one waiting for
  * a person, which is what "waiting" means here; a cancelled one is
- * stopped. A swarm paused because it ran out of budget says so, which
- * is a different sentence and a different button from a swarm somebody
- * paused by hand.
+ * stopped.
+ *
+ * The two ceilings are their own words. They used to fall through to
+ * "planning", so a swarm out of money offered "Approve plan", whose
+ * start put it back to running until the next tick ended it again.
+ * Raising the ceiling is what moves one, and the header says so.
+ *
+ * A row paused for its budget is an older server's way of saying the
+ * same thing, and nothing writes it now. It stays "paused", because
+ * resuming is what moves that row: the start route takes a paused
+ * swarm, and the next tick ends it properly if the budget still stands.
+ * The header's sentence still names the budget.
  */
 export function swarmStatusOf(row: { status: string; pausedReason: Swarm["pausedReason"] }): SwarmStatus {
-  if (row.status === "paused") return row.pausedReason === "budget" ? "budget_exhausted" : "paused";
+  if (row.status === "paused") return "paused";
+  if (row.status === "budget_exhausted") return "budget_exhausted";
+  if (row.status === "timed_out") return "timed_out";
   if (row.status === "cancelled") return "stopped";
   if (row.status === "done") return "done";
   if (row.status === "failed") return "failed";
@@ -888,6 +902,7 @@ export function toTask(row: WireTask): SwarmTask {
     startedAt: row.startedAt,
     endedAt: row.endedAt,
     commits: [],
+    canRetryLanding: row.canRetryLanding === true,
   };
 }
 
@@ -1182,6 +1197,7 @@ export function toDetail(detail: WireDetail): SwarmDetail {
     pullRequests: (detail.pullRequests ?? []).map(toPullRequest),
     planSources: (detail.planSources ?? []).map((row) => toPlanSource(row, detail.swarm.id)),
     ...agentsInSandbox(detail),
+    activeRunCount: detail.activeRuns.length,
   };
 }
 
@@ -1190,8 +1206,10 @@ export function toDetail(detail: WireDetail): SwarmDetail {
  *
  * Status `running` is that moment: the executor sets it as it execs
  * the agent, after provisioning and setup. A queued or starting run
- * is not in the list. A planner has no task of its own, so its run
- * is said on the root, which is where the long-run clock says it.
+ * is not in the list. A planner has no task of its own, so its run is
+ * on no node: it used to be painted on the first top level task, and
+ * a flat plan's first leaf then read "working" while only the planner
+ * ran. The planner's own row above the plan says it is at work.
  *
  * The clock is the agent start, and the claim time only when that
  * stamp was never written. Two agents on one node keep the earlier
@@ -1202,14 +1220,11 @@ export function agentsInSandbox(detail: Pick<WireDetail, "tasks" | "activeRuns">
   runningTaskIds: string[];
   agentStartedAt: Record<string, string>;
 } {
-  const rootId = detail.tasks
-    .filter((task) => task.parentId === null)
-    .sort((a, b) => a.position - b.position)[0]?.id ?? null;
   const runningTaskIds: string[] = [];
   const agentStartedAt: Record<string, string> = {};
   for (const run of detail.activeRuns) {
     if (run.status !== "running") continue;
-    const taskId = run.swarmTaskId ?? rootId;
+    const taskId = run.swarmTaskId;
     if (!taskId) continue;
     if (!runningTaskIds.includes(taskId)) runningTaskIds.push(taskId);
     const clock = run.agentStartedAt ?? run.startedAt ?? null;
@@ -1309,6 +1324,7 @@ function toLanding(landing: WireLanding): SwarmLanding {
     error: landing.error,
     errorCode: landing.errorCode ?? null,
     resolverRunId: landing.resolverRunId,
+    notBefore: landing.notBefore ?? null,
     startedAt: landing.startedAt,
     endedAt: landing.endedAt,
   };

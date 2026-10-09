@@ -1421,6 +1421,8 @@ test(
           prompt: "half finished work",
           status,
           executor,
+          // A running run's agent was exec'd; a starting one's was not.
+          ...(status === "running" ? { agentStartedAt: new Date() } : {}),
         })
         .returning();
       return run!;
@@ -1463,8 +1465,16 @@ test(
       assert.match(after.error ?? "", /restart/);
       assert.ok(after.endedAt, "the close is timestamped");
       const transcript = await (await app.request(`/api/runs/${orphan.id}/transcript`)).text();
-      assert.match(transcript, /restarted while this run was working/, "the transcript says why the run ended");
+      assert.match(
+        transcript,
+        orphan === working ? /restarted while this run was working/ : /restarted before the agent started/,
+        "the transcript says why the run ended",
+      );
     }
+    const [startingRow] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, starting.id));
+    assert.equal(startingRow!.billable, false, "a run whose agent never started is not billed for the restart");
+    const [workingRow] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, working.id));
+    assert.equal(workingRow!.billable, true, "one whose agent was working is");
     assert.ok(
       closed.includes(`${working.id}:failed`) && closed.includes(`${starting.id}:failed`),
       "a stream that reconnected mid-recovery still hears the close",
@@ -1783,6 +1793,7 @@ test("a restart closes runs the sandbox cannot give back", { timeout: 60_000 }, 
         executor: "server",
         sandboxId: sandbox!.id,
         startedAt: new Date(),
+        ...(status === "running" ? { agentStartedAt: new Date() } : {}),
       })
       .returning();
     return run!;
@@ -1814,7 +1825,11 @@ test("a restart closes runs the sandbox cannot give back", { timeout: 60_000 }, 
       const detail = await json<{ error: string | null }>(await app.request(`/api/runs/${run.id}`));
       assert.match(detail.error ?? "", /restart/);
       const transcript = await (await app.request(`/api/runs/${run.id}/transcript`)).text();
-      assert.match(transcript, /restarted while this run was working/, "the close still explains itself");
+      assert.match(
+        transcript,
+        run === gone ? /restarted while this run was working/ : /restarted before the agent started/,
+        "the close still explains itself",
+      );
     }
     assert.equal(asked, 1, "a run that had not reached running is never attached");
   } finally {

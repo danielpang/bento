@@ -14,6 +14,7 @@ import {
   sandboxes,
   swarmLandings,
   swarmMessages,
+  swarmTaskEvents,
   swarmTasks,
   swarms,
   type Db,
@@ -501,6 +502,38 @@ test("accepting queues the branch once, and rejecting sends the leaf back with t
   );
 });
 
+test("accepting a leaf whose earlier landing failed queues its branch again", async () => {
+  // Production's shape: the landing failed, the planner retried the leaf,
+  // the worker reported again, and the accept left the failed row alone,
+  // so the leaf sat "working" with nothing in the queue to land it.
+  const { token, swarmId } = await agentOn("planner");
+  const leaf = await makeTask(swarmId, { status: "working", branchName: "swarm/s/again", report: "redone" });
+  await db.insert(swarmLandings).values({ swarmId, taskId: leaf.id, branchName: "swarm/s/again", position: 0 });
+  const [other] = await db.insert(swarmLandings)
+    .values({ swarmId, taskId: (await makeTask(swarmId, { status: "done" })).id, position: 1, status: "landed" })
+    .returning();
+  await db.update(swarmLandings)
+    .set({ status: "failed", error: "the sandbox is unavailable", errorCode: "swarm_sandbox_gone", attempt: 6, endedAt: new Date() })
+    .where(eq(swarmLandings.taskId, leaf.id));
+  await db.update(swarmTasks)
+    .set({ flags: { landingError: "the sandbox is unavailable", landingErrorCode: "swarm_sandbox_gone" } })
+    .where(eq(swarmTasks.id, leaf.id));
+
+  await call(token, "accept", { taskId: leaf.id });
+
+  const landings = await db.select().from(swarmLandings).where(eq(swarmLandings.taskId, leaf.id));
+  assert.equal(landings.length, 1, "the same row, not a second one");
+  assert.equal(landings[0]!.status, "queued");
+  assert.equal(landings[0]!.error, null);
+  assert.equal(landings[0]!.errorCode, null);
+  assert.equal(landings[0]!.attempt, 0, "the new branch gets its own tries");
+  assert.ok(landings[0]!.position > other!.position, "and goes to the back of the queue");
+  const flags = (await task(leaf.id))!.flags as { landingError?: string; landingErrorCode?: string; accepted?: boolean };
+  assert.equal(flags.accepted, true);
+  assert.equal(flags.landingError, undefined, "the old attempt's failure no longer shows");
+  assert.equal(flags.landingErrorCode, undefined);
+});
+
 test("a planner fixes a failed leaf forward on the same task", async () => {
   const { token, swarmId } = await agentOn("planner");
   const leaf = await makeTask(swarmId, { status: "failed", report: null, flags: { workerStopped: "no report" } });
@@ -864,4 +897,67 @@ test("a sub planner cannot hand over a node outside the part it was given", asyn
   const inside = await call(sub.token, "delegate", { taskId: under.id });
   assert.ok(!inside.isError, inside.text);
   assert.equal((await task(under.id))!.status, "assigned");
+});
+
+/**
+ * report is a tool call, not the end of a turn. An accept made while
+ * the worker is still committing landed the branch as it stood halfway
+ * through its last commit.
+ */
+test("a leaf cannot be accepted while an agent is still on it", async () => {
+  const { token, swarmId } = await agentOn("planner");
+  const leaf = await makeTask(swarmId, { status: "working", report: "did it", branchName: "swarm/s/2" });
+  const [worker] = await db
+    .insert(agentRuns)
+    .values({ type: "swarm", swarmId, swarmTaskId: leaf.id, role: "worker", agentProfileId: PROFILE, prompt: "", status: "running" })
+    .returning();
+
+  const refused = await call(token, "accept", { taskId: leaf.id });
+  assert.ok(refused.isError);
+  assert.match(refused.text, /still working/);
+  assert.equal(((await task(leaf.id))!.flags as { accepted?: boolean }).accepted, undefined);
+  assert.equal((await db.select().from(swarmLandings).where(eq(swarmLandings.swarmId, swarmId))).length, 0);
+
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.id, worker!.id));
+  const accepted = await call(token, "accept", { taskId: leaf.id });
+  assert.match(accepted.text, /in the merge queue/);
+});
+
+/**
+ * A failed leaf keeps its report. Accepted, it stayed "failed" with
+ * accepted set and its old landing row failed, so nothing ever landed
+ * it and the board read it as both failed and waiting to land.
+ */
+test("accepting a failed leaf puts it back in flight and back in the merge queue", async () => {
+  const { token, swarmId } = await agentOn("planner");
+  const leaf = await makeTask(swarmId, {
+    status: "failed",
+    attention: "failed",
+    report: "did it",
+    branchName: "swarm/s/3",
+    flags: { landingError: "a sandbox could not be started", landingErrorCode: "wake_failed" },
+  });
+  const [old] = await db
+    .insert(swarmLandings)
+    .values({ swarmId, taskId: leaf.id, branchName: "swarm/s/3", status: "failed", attempt: 5, error: "gone", errorCode: "wake_failed" })
+    .returning();
+
+  const accepted = await call(token, "accept", { taskId: leaf.id });
+  assert.equal(accepted.isError, false);
+  const row = await task(leaf.id);
+  assert.equal(row!.status, "working", "an accepted leaf waiting to land is in flight");
+  assert.equal(row!.attention, null);
+  const flags = row!.flags as { accepted?: boolean; landingError?: string; landingErrorCode?: string };
+  assert.equal(flags.accepted, true);
+  assert.equal(flags.landingError, undefined, "the old failure no longer stands");
+  assert.equal(flags.landingErrorCode, undefined);
+  const events = await db.select().from(swarmTaskEvents).where(eq(swarmTaskEvents.taskId, leaf.id));
+  assert.ok(events.some((event) => event.kind === "status_changed" && event.fromStatus === "failed" && event.toStatus === "working"));
+
+  const landings = await db.select().from(swarmLandings).where(eq(swarmLandings.swarmId, swarmId));
+  assert.equal(landings.length, 1, "the task's row is reused rather than a second one added");
+  assert.equal(landings[0]!.id, old!.id);
+  assert.equal(landings[0]!.status, "queued");
+  assert.equal(landings[0]!.attempt, 0);
+  assert.equal(landings[0]!.errorCode, null);
 });
