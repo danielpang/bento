@@ -7,6 +7,12 @@ const envSchema = z.object({
   /** 0 asks the OS for any free port, which embedded mode uses. */
   PORT: z.coerce.number().int().min(0).max(65535).default(4400),
   DATABASE_URL: z.string().default("postgres://postgres:postgres@localhost:5439/app"),
+  /**
+   * Redis for BullMQ. Required in multi mode; ignored in local mode
+   * (laptop, TUI, Mac app), even if a leftover URL is in the
+   * environment. Local and desktop always use pg-boss.
+   */
+  REDIS_URL: z.string().optional(),
   /** Where worktrees and other server state live. */
   BENTO_DATA_DIR: z.string().default(path.join(os.homedir(), ".bento")),
   /**

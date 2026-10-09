@@ -8,7 +8,7 @@ import { startLogExport } from "./log-export.js";
 import { attachPgBus } from "./pg-bus.js";
 import { WorktreeManager } from "@bento/sandbox";
 import PgBoss from "pg-boss";
-import { PgBossQueue } from "./jobs/index.js";
+import { createRuntimeJobQueue, jobQueueBackend, requireRedisUrl } from "./jobs/runtime.js";
 import { createApp } from "./app.js";
 import { createArtifactStore } from "./artifact-store.js";
 import { createAuth, type AuthHooks } from "./auth.js";
@@ -78,6 +78,9 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   // inbox) are deliberately unknown to this schema.
   const rawEnv = { ...process.env, ...options.env } as NodeJS.ProcessEnv;
   const env = loadEnv(rawEnv);
+  // Multi mode selects BullMQ by mode, not by REDIS_URL existing. Fail
+  // here so a missing or invalid URL never reaches the database pool.
+  if (jobQueueBackend(env) === "bullmq") requireRedisUrl(env);
   await applyInitialAgentAuthSharing({ env }, options.initialShareAgentAuth);
 
   if (options.migrate) await runMigrations(env.DATABASE_URL);
@@ -100,28 +103,34 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     const pool = createPool(env.DATABASE_URL, { max: poolMax });
     const db = createDb(pool);
 
-    // pg-boss 10 would otherwise `new pg.Pool(config)` with only a
-    // connection string, which is how Timekeeper.onCron reused a
-    // Neon-dropped socket and surfaced `read ETIMEDOUT`. This pool
-    // is the same factory as `pool` above. pg-boss will not close it.
-    const bossPool = createPool(env.DATABASE_URL, {
-      // Polling does not need one connection per worker. Enough that a
-      // burst of completions is not queued behind the default 10.
-      max: Math.min(poolMax, Math.max(10, Math.ceil(env.BENTO_MAX_CONCURRENT_RUNS / 2))),
-    });
-    const boss = new PgBoss({
-      db: pgBossDatabase(bossPool),
-      schema: "pgboss",
-      // Idle workers poll slowly so an idle database can be idle; see
-      // orchestrator/queue.ts for why, and for the run workers' own pace.
-      pollingIntervalSeconds: QUEUE_POLL_SECONDS,
-    });
-    boss.on("error", (err) => {
-      console.error("pg-boss error:", err);
-      analytics?.captureException(err, null, null, { source: "pg-boss" });
-    });
-    await boss.start();
-    const jobs = new PgBossQueue(boss);
+    // Local, TUI, and the Mac app always construct PgBossQueue. Multi
+    // mode constructs BullMqQueue and never starts pg-boss.
+    let bossPool: ReturnType<typeof createPool> | undefined;
+    let boss: PgBoss | undefined;
+    if (jobQueueBackend(env) === "pg-boss") {
+      // pg-boss 10 would otherwise `new pg.Pool(config)` with only a
+      // connection string, which is how Timekeeper.onCron reused a
+      // Neon-dropped socket and surfaced `read ETIMEDOUT`. This pool
+      // is the same factory as `pool` above. pg-boss will not close it.
+      bossPool = createPool(env.DATABASE_URL, {
+        // Polling does not need one connection per worker. Enough that a
+        // burst of completions is not queued behind the default 10.
+        max: Math.min(poolMax, Math.max(10, Math.ceil(env.BENTO_MAX_CONCURRENT_RUNS / 2))),
+      });
+      boss = new PgBoss({
+        db: pgBossDatabase(bossPool),
+        schema: "pgboss",
+        // Idle workers poll slowly so an idle database can be idle; see
+        // orchestrator/queue.ts for why, and for the run workers' own pace.
+        pollingIntervalSeconds: QUEUE_POLL_SECONDS,
+      });
+      boss.on("error", (err) => {
+        console.error("pg-boss error:", err);
+        analytics?.captureException(err, null, null, { source: "pg-boss" });
+      });
+      await boss.start();
+    }
+    const jobs = await createRuntimeJobQueue(env, boss ?? null);
 
     // Local mode has a single implicit user; multi mode uses better-auth.
     const userId = env.BENTO_MODE === "multi" ? "" : await ensureLocalUser(db);
@@ -387,7 +396,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
         await analytics?.shutdown().catch(() => {});
         await featureFlags.shutdown().catch(() => {});
         await logExport?.stop().catch(() => {});
-        await bossPool.end().catch(() => {});
+        await bossPool?.end().catch(() => {});
         await pool.end().catch(() => {});
       },
     };

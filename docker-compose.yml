@@ -5,6 +5,7 @@ name: bento
 #
 #   docker compose up --build          everything
 #   docker compose up -d postgres      just the database, for `pnpm dev`
+#   docker compose up -d postgres redis  database + Redis, for multi mode or BullMQ tests
 #
 # The database alone is the older workflow and still the one to use when
 # developing, because the server then runs from source with hot reload.
@@ -24,6 +25,18 @@ services:
       - bento-pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # BullMQ in multi mode. Local mode and the Mac app ignore REDIS_URL
+  # and keep pg-boss, so this service is optional for `pnpm dev`.
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -73,6 +86,8 @@ services:
       # Reaching Postgres by service name, not the published port: that
       # one is for tools on the host.
       - DATABASE_URL=postgres://postgres:postgres@postgres:5432/app
+      # Required when BENTO_MODE=multi. Local mode ignores it.
+      - REDIS_URL=redis://redis:6379
       - PORT=4400
       # Loopback inside a container is unreachable from outside it.
       - BENTO_HOST=0.0.0.0
@@ -138,6 +153,8 @@ services:
       migrate:
         condition: service_completed_successfully
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
       # Not a runtime dependency: the server never talks to this
       # container. Waiting on it is what guarantees the image exists

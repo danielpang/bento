@@ -2,6 +2,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadEnv, logExportTarget, parseOtlpHeaders, posthogApiKey } from "./env.js";
 
+test("REDIS_URL is optional and empty values read as absent", () => {
+  assert.equal(loadEnv({}).REDIS_URL, undefined);
+  assert.equal(loadEnv({ BENTO_MODE: "local" }).REDIS_URL, undefined);
+  assert.equal(loadEnv({ BENTO_MODE: "multi" }).REDIS_URL, undefined);
+  assert.equal(loadEnv({ REDIS_URL: "" }).REDIS_URL, undefined);
+  assert.equal(loadEnv({ REDIS_URL: "redis://127.0.0.1:6379" }).REDIS_URL, "redis://127.0.0.1:6379");
+});
+
 test("posthogApiKey is null when the key is unset", () => {
   assert.equal(posthogApiKey(loadEnv({ BENTO_MODE: "multi" })), null);
   assert.equal(posthogApiKey(loadEnv({})), null);
