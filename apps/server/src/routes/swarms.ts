@@ -790,6 +790,7 @@ export function swarmRoutes(ctx: AppContext) {
         status: swarmLandings.status,
         attempt: swarmLandings.attempt,
         error: swarmLandings.error,
+        errorCode: swarmLandings.errorCode,
         resolverRunId: swarmLandings.resolverRunId,
         startedAt: swarmLandings.startedAt,
         endedAt: swarmLandings.endedAt,

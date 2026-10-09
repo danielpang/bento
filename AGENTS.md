@@ -353,13 +353,43 @@ stopped fails the new run as `PREVIOUS_AGENT_RUNNING_PREFIX`, which is
 unbilled, rather than putting a second agent on the branch.
 
 Retrying a failed leaf has two meanings. "Retry task" (the retry route
-with `fresh: true`) starts it over: the agent stops, the task's machine
-is reaped through `discardSwarmTaskWork` (and on a host driver its
-branch is deleted from the checkout), and the next agent is cut from
-the swarm's branch in a new machine. It is the answer to any failure, a
-merge queue failure included, and it is refused when the swarm's own
-clone machine is gone, because there is then no swarm branch to start
-from. The plain retry continues in the same machine on the same branch.
+with `fresh: true`) starts it over: the agent stops, the task is marked
+`startingOver`, and a job on `swarm.task-start-over` takes its machine
+down through `discardSwarmTaskWork` (on a host driver it also deletes the
+branch from the checkout) before the coordinator, which skips a task
+so marked, puts a new agent on it cut from the swarm's branch. Done in
+the request, a slow provider timed the request out after the agent was
+already stopped. Every tick re-queues the job for any task still marked,
+so a job a restart lost is not a task stuck restarting. Bento starts a
+task over by itself once (`autoStartedOver`) when its sandbox failed past
+`MAX_SANDBOX_RESTARTS` or its landing failed because a machine was gone
+or could not be started, before the planner is told. The plain retry
+continues in the same machine on the same branch.
+
+## A swarm's branches are on GitHub as soon as there is anything on them
+
+The swarm's machine used to hold the only copy of every landed task until
+the swarm finished, and a reaped machine lost them all. Now
+`swarm/remote-branches.ts` pushes, through the retried `swarm.push`
+queue: a worker's (or resolver's) branch when its run ends, failed runs
+included, from the subject's `settle`; and after every landing, the
+swarm's branch plus the landed task's branch set to the swarm's head at
+that landing (`landedHeads` on the task), so task N's branch is exactly
+task N-1's plus task N. A push holds a lease against the commit Bento
+last pushed (`swarms.pushed_heads`, the task's `pushedHeads`) and refuses
+when anything else is on the branch, and the combined publish reads the
+same lease. A project with no GitHub connection or no remote is left as
+it was. A machine that is gone is rebuilt from those pushes:
+`remoteBranchBundles` reads a branch back as a bundle, the swarm's own
+machine is made again on it (`swarmRestoreBundles`), a worker whose
+swarm machine is gone starts from it, and a landing whose worker machine
+is gone lands the worker's pushed branch.
+
+Nothing opens a pull request when a swarm finishes. A person chooses on
+the swarm's header, through `POST /api/swarms/:id/publish`: `combined`
+is one pull request of the swarm's branch, `stacked` is one per landed
+task, each against the task that landed before it, recorded on the task
+as `pullRequests`.
 
 ## Starting a run goes through startRunIfIdle, never a bare insert
 

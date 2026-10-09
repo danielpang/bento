@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { SwarmLanding, SwarmTask } from "../swarm/types.js";
-import { MERGE_QUEUE_FAILURE } from "../swarm/failures.js";
+import { MERGE_QUEUE_FAILURE, landingFailureWords } from "../swarm/failures.js";
 
 /**
  * The merge queue, as a person needs to read it.
@@ -280,7 +280,12 @@ function Row({
           </button>
         )}
       </div>
-      {landing.status === "failed" && <p className="swarm-queue-note">{MERGE_QUEUE_FAILURE}</p>}
+      {landing.status === "failed" && (
+        <p className="swarm-queue-note">{landingFailureWords(landing.errorCode) ?? MERGE_QUEUE_FAILURE}</p>
+      )}
+      {landing.status === "landing" && (
+        <p className="swarm-queue-note">Landing. If a sandbox holding this branch is asleep, Bento starts it first, which can take a minute.</p>
+      )}
       {landing.error && landing.status === "failed" && (
         <details className="swarm-queue-technical"><summary>Technical details</summary><pre className="swarm-queue-error swarm-text">{landing.error}</pre></details>
       )}

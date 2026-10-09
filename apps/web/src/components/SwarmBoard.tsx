@@ -442,6 +442,7 @@ export function SwarmBoard({
             onRetryPlanner: () => selectedId && act(() => swarmApi.retryPlanner(selectedId)),
             onStop: () => selectedId && act(() => swarmApi.stopSwarm(selectedId)),
             onReleaseBranch: () => selectedId && act(() => swarmApi.releaseSwarmBranch(selectedId)),
+            onPublish: (mode) => selectedId && act(() => swarmApi.publishSwarm(selectedId, mode)),
             onReopen: () => setReopening(true),
             onDelete: () => selectedId && setDeleting({ id: selectedId, name: detail.swarm.name }),
             onArchive: () => selectedId && act(() => swarmApi.archiveSwarm(selectedId)),

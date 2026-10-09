@@ -11,6 +11,7 @@ import { formatElapsed } from "../swarm/time.js";
 import type { ModeSurfaces } from "../swarm/plan.js";
 import type { SwarmArtifact, SwarmDetail, SwarmPlanSource } from "../swarm/types.js";
 import { formatBytes } from "@bento/core";
+import { externalHttpUrl } from "../external-url.js";
 import { browserStorage, readBriefOpen, rememberBriefOpen, type StorageLike, type SwarmView } from "../swarm/view-state.js";
 
 /** Ticks the header's clock, and only while there is something running. */
@@ -58,13 +59,11 @@ export interface SwarmActions {
   onStop: () => void;
   onReleaseBranch?: () => void;
   /**
-   * Opens a pull request for the swarm's branch.
-   *
-   * Optional, and absent is the answer today: no route does it, so the
-   * button says so by being unavailable rather than by doing nothing
-   * when it is pressed.
+   * Opens the pull requests of a finished swarm, in the shape a person
+   * chooses: one for the swarm, or one per task, stacked. The branches
+   * are already on GitHub; this only asks for the pull requests.
    */
-  onCreatePullRequest?: () => void;
+  onPublish?: (mode: "combined" | "stacked") => void;
   /**
    * Opens the reopen dialog for a swarm that has finished.
    *
@@ -393,7 +392,6 @@ export function SwarmPage({
                   <button className="btn" disabled={busy} onClick={actions.onArchive}>Archive</button>
                 )
               )}
-              {actions.onCreatePullRequest && <button className="btn" disabled={busy} onClick={actions.onCreatePullRequest}>Create PR</button>}
               <button className="btn btn-danger-quiet" disabled={busy} onClick={actions.onDelete}>
                 Delete swarm
               </button>
@@ -461,6 +459,39 @@ export function SwarmPage({
         deliverable={swarm.deliverable}
         onOpen={onOpenArtifact}
       />
+
+      {swarm.status === "failed" && swarm.endedAt && (
+        <p className="muted swarm-grace-note">
+          This swarm&apos;s sandbox is kept until about {graceDate(swarm.endedAt)} so its tasks and merge queue can be
+          retried. Its branches are also on GitHub when the project has a GitHub connection.
+        </p>
+      )}
+
+      {swarm.status === "done" && actions.onPublish && detail.pullRequests.length === 0 && stackedPullRequests(detail.tasks).length === 0 && (
+        <div className="swarm-publish" role="group" aria-label="Open pull requests">
+          <p>Every branch is on GitHub. Open the pull requests as one for the swarm, or one per task, stacked in the order the tasks landed.</p>
+          <div className="actions">
+            <button className="btn btn-primary" disabled={busy} onClick={() => actions.onPublish?.("combined")}>One pull request</button>
+            <button className="btn" disabled={busy} onClick={() => actions.onPublish?.("stacked")}>One per task, stacked</button>
+          </div>
+        </div>
+      )}
+
+      {stackedPullRequests(detail.tasks).length > 0 && (
+        <div className="swarm-prs" aria-label="Stacked pull requests">
+          {stackedPullRequests(detail.tasks).map((pr) =>
+            pr.url ? (
+              <a key={pr.key} className="chip chip-link" href={pr.url} target="_blank" rel="noreferrer" title={pr.repoUrl}>
+                {pr.title} #{pr.number}
+              </a>
+            ) : (
+              <span key={pr.key} className="chip" title="This pull request's address is not a web link, so it is shown without one.">
+                {pr.title} #{pr.number}
+              </span>
+            ),
+          )}
+        </div>
+      )}
 
       {detail.pullRequests.length > 0 && (
         <div className="swarm-prs">
@@ -739,4 +770,37 @@ function PlannerQuestionBanner({
       </form>
     </div>
   );
+}
+
+/** When a failed swarm's sandbox is reaped, a week after it ended, as a date. */
+function graceDate(endedAt: string): string {
+  const date = new Date(new Date(endedAt).getTime() + 7 * 24 * 60 * 60 * 1000);
+  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+/**
+ * The per-task pull requests of a swarm published as a stack, in the
+ * order the tasks were laid out. Each task records its own, per
+ * repository; the address goes through the same check every other
+ * link here does.
+ */
+export function stackedPullRequests(
+  tasks: SwarmDetail["tasks"],
+): { key: string; title: string; repoUrl: string; number: number; url: string | null }[] {
+  const out: { key: string; title: string; repoUrl: string; number: number; url: string | null }[] = [];
+  for (const task of tasks) {
+    const prs = (task.flags as { pullRequests?: Record<string, { number?: unknown; url?: unknown }> }).pullRequests;
+    if (!prs || typeof prs !== "object") continue;
+    for (const [repoUrl, pr] of Object.entries(prs)) {
+      if (typeof pr?.number !== "number") continue;
+      out.push({
+        key: `${task.id}:${repoUrl}`,
+        title: task.title,
+        repoUrl,
+        number: pr.number,
+        url: typeof pr.url === "string" ? externalHttpUrl(pr.url) : null,
+      });
+    }
+  }
+  return out;
 }

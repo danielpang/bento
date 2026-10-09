@@ -7,7 +7,7 @@ import { attentionNote, diagramAttentionWords, diagramTaskTone, diagramTaskWords
 import { formatCompletion, type SwarmNode } from "../swarm/layout.js";
 import { cappedUsd, formatUsd } from "../swarm/money.js";
 import { formatElapsed } from "../swarm/time.js";
-import { MERGE_QUEUE_FAILURE } from "../swarm/failures.js";
+import { MERGE_QUEUE_FAILURE, landingFailureWords } from "../swarm/failures.js";
 import type { SwarmNodeDetail, SwarmTask, SwarmTaskEvent } from "../swarm/types.js";
 
 /**
@@ -132,9 +132,14 @@ export function SwarmNodeDrawer({
   const runs = detail?.runs ?? [];
   const canFixForward = !!onFixForward && task.nodeType === "leaf" && task.status === "failed" && !mergeQueueFailure;
   const canMarkDone = !!onMarkDone && task.nodeType === "leaf" && task.status !== "done";
-  const canRetry = !!onRetry && task.nodeType === "leaf" && !mergeQueueFailure && !["cancelled", "done", "landed"].includes(task.status);
+  // Starting over is already under way: nothing else is offered until it is done.
+  const startingOver = (task.flags as { startingOver?: unknown }).startingOver === true;
+  const canRetry = !!onRetry && task.nodeType === "leaf" && !mergeQueueFailure && !startingOver &&
+    !["cancelled", "done", "landed"].includes(task.status);
   const canRetryLanding = !!onRetryLanding && mergeQueueFailure;
-  const canStartOver = !!onStartOver && task.nodeType === "leaf" && task.status === "failed";
+  const onGitHub = Object.keys((task.flags as { pushedHeads?: Record<string, string> }).pushedHeads ?? {}).length > 0;
+  const landingFailure = landingFailureWords(task.flags.landingErrorCode) ?? MERGE_QUEUE_FAILURE;
+  const canStartOver = !!onStartOver && task.nodeType === "leaf" && task.status === "failed" && !startingOver;
   const canEdit = !!onEdit;
   const canSplit = !!onSplit && task.nodeType === "leaf" && task.status !== "done";
   const canAdd = !!onAddTask && task.status !== "done" && task.status !== "cancelled";
@@ -149,7 +154,11 @@ export function SwarmNodeDrawer({
     (canRetryLanding && primaryAction !== "landing") || (canFixForward && primaryAction !== "fix") ||
     (canEdit && primaryAction !== "edit") || canSplit || (canAdd && primaryAction !== "add") ||
     canCancel || (!!onReassign && task.nodeType === "leaf" && agents.length > 0);
-  const nextStep = mergeQueueFailure ? MERGE_QUEUE_FAILURE
+  const nextStep = startingOver
+    ? "Restarting. The old sandbox is being removed, then a new agent starts on a fresh branch from the swarm's."
+    : mergeQueueFailure ? landingFailure
+    : task.nodeType === "leaf" && task.status === "landed"
+      ? "Waiting to land. If the sandbox holding this branch is asleep, Bento starts it first, which can take a minute."
     : primaryAction === "startOver" ? "Start this task over in a new sandbox, or open More actions for other options."
     : primaryAction === "fix" ? "Tell the worker what to change."
     : primaryAction === "retry" ? (task.status === "assigned" ? "Start a new worker attempt." : null)
@@ -191,6 +200,7 @@ export function SwarmNodeDrawer({
           <div className="feature-branch">
             <span className="meta-label">Branch</span>
             <code title={task.branchName}>{task.branchName}</code>
+            {onGitHub && <span className="chip" title="Bento pushed this branch to GitHub, so it survives its sandbox.">On GitHub</span>}
           </div>
         )}
         <div className="swarm-node-summary">
@@ -478,7 +488,7 @@ export function SwarmNodeDrawer({
               <span className="label">Worker logs</span>
               {mergeQueueFailure && (
                 <div className="swarm-failure-detail" role="status">
-                  <strong>{MERGE_QUEUE_FAILURE}</strong>
+                  <strong>{landingFailure}</strong>
                   <p>The worker finished its attempt. Its branch could not be landed on the swarm branch.</p>
                   <details><summary>Technical details</summary><pre>{String(task.flags.landingError)}</pre></details>
                 </div>
@@ -588,8 +598,9 @@ export function SwarmNodeDrawer({
       {confirmingStartOver && (
         <div className="swarm-confirm" role="alertdialog" aria-label="Retry this task">
           <p>
-            Retrying starts this task over. Its sandbox and the commits on its branch are discarded,
-            and a new agent in a new sandbox does the work again from the swarm&apos;s branch.
+            Retrying starts this task over. Its sandbox is removed, and a new agent in a new sandbox does
+            the work again on a fresh branch from the swarm&apos;s.
+            {onGitHub ? " The previous attempt's branch on GitHub is replaced by the new one." : ""}
           </p>
           <div className="actions">
             <button className="btn btn-ghost" onClick={() => setConfirmingStartOver(false)}>

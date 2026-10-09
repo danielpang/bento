@@ -335,6 +335,8 @@ export interface SwarmLanding {
   status: "queued" | "landing" | "landed" | "conflicted" | "failed" | "cancelled";
   attempt: number;
   error: string | null;
+  /** Why a failed landing failed, as the server's stable code. Null otherwise. */
+  errorCode?: string | null;
   /** The agent reconciling this branch, when one was started. */
   resolverRunId: string | null;
   startedAt: string | null;
