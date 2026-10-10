@@ -10,6 +10,7 @@ import {
 import {
   collectExec,
   execTimeoutMessage,
+  isExecTimeout,
   type ExecChunk,
   type ExecOptions,
   type ProvisionSpec,
@@ -1512,7 +1513,27 @@ export class SpriteDriver implements SandboxDriver {
     baseBranch: string,
     options: RepositoryExportOptions = {},
   ): Promise<RepositoryBundle | null> {
+    const sprite = await this.openSprite(handle.externalId);
     const dir = `${handle.workdir}/${repositoryName}`;
+    const id = randomUUID();
+    const bundlePath = `/tmp/bento-export-${id}.bundle`;
+    const metaPath = `/tmp/bento-export-${id}.meta`;
+    /**
+     * The sprite lists a session by the foreground process. While
+     * `git bundle create` runs, that line is `git bundle create <path>`,
+     * not `sh`, and a reattach that only looks for `sh` reports the
+     * process gone. Production lost a swarm branch push that way: the
+     * socket dropped during the export, the listing showed git rather
+     * than sh, and the bundle (base64 on that same socket) went with it.
+     *
+     * The bundle now stays on the sprite's disk, the way Modal reads
+     * it, and the exec only prints the two commit ids. A drop while git
+     * is the foreground process reattaches to that git line. A drop
+     * after git has finished, whose exit frame never arrived, reads the
+     * files. A drop that killed the process starts the script again: it
+     * removes its own files first, so a second run is the same export.
+     */
+    const gitLine = `git bundle create ${bundlePath}`;
     const script = [
       "set -eu",
       `cd ${shellQuote(dir)}`,
@@ -1521,27 +1542,52 @@ export class SpriteDriver implements SandboxDriver {
       'base_sha=$(git merge-base "$base" HEAD 2>/dev/null || git rev-parse "$base^{commit}")',
       'head_sha=$(git rev-parse "HEAD^{commit}")',
       ...(options.selfContained ? [] : ['if [ "$base_sha" = "$head_sha" ]; then exit 3; fi']),
-      'tmp=$(mktemp /tmp/bento-bundle.XXXXXX)',
-      'trap \'rm -f "$tmp"\' EXIT',
+      `bundle=${shellQuote(bundlePath)}`,
+      `meta=${shellQuote(metaPath)}`,
+      'rm -f "$bundle" "$meta"',
       // HEAD, not the branch name. The checkout fetches whichever
       // ref the bundle lists (HEAD, or refs/heads/<branch> for a
       // range bundle). Asking this one for the branch ref is exit 128.
       options.selfContained
-        ? 'git bundle create "$tmp" HEAD >/dev/null'
-        : 'git bundle create "$tmp" HEAD "^$base_sha" >/dev/null',
+        ? 'git bundle create "$bundle" HEAD >/dev/null'
+        : 'git bundle create "$bundle" HEAD "^$base_sha" >/dev/null',
+      // After git returns, so a reader that finds the meta file knows
+      // the bundle beside it is complete.
+      'printf "%s\\n%s\\n" "$base_sha" "$head_sha" > "$meta"',
       'printf "%s\\n%s\\n" "$base_sha" "$head_sha"',
-      'base64 "$tmp"',
     ].join("\n");
-    const result = await collectExec(this.exec(handle, ["sh", "-lc", script], { timeoutMs: 60_000 }));
-    if (result.exitCode === 3) return null;
-    if (result.exitCode !== 0) {
-      throw new Error(`could not export ${repositoryName}: ${result.stderr.trim() || `exit ${result.exitCode}`}`);
+
+    try {
+      let lastReason = "the export did not finish";
+      for (let attempt = 0; attempt < EXPORT_ATTEMPTS; attempt++) {
+        const result = await collectExec(
+          this.exec(handle, ["sh", "-lc", script], { timeoutMs: 60_000, sessionCommands: [gitLine] }),
+        );
+        if (result.exitCode === 3) return null;
+        if (result.exitCode === 0) {
+          return await readCompletedExport(sprite, repositoryName, bundlePath, metaPath, result.stdout);
+        }
+        const reason = result.stderr.trim() || `exit ${result.exitCode}`;
+        lastReason = reason;
+        // A negative code is the socket, not the script. A script's
+        // own failure (git's 128, a missing checkout) is not retried.
+        if (result.exitCode < 0 && !isExecTimeout(result.stderr)) {
+          const recovered = await readExportIfReady(sprite, bundlePath, metaPath);
+          if (recovered) return recovered;
+          // The listing can miss git for a moment and then show it.
+          // Starting another copy would delete the file that git is
+          // writing. The queue tries the whole push again later.
+          if (await exportSessionListed(sprite, gitLine, bundlePath)) break;
+          // Unreachable already walked the reattach ladder. Walking it
+          // twice more would hold the push job for minutes.
+          if (!result.stderr.includes("stayed unreachable") && attempt < EXPORT_ATTEMPTS - 1) continue;
+        }
+        break;
+      }
+      throw new Error(`could not export ${repositoryName}: ${lastReason}`);
+    } finally {
+      await removeExportFiles(sprite, bundlePath, metaPath);
     }
-    const [baseSha, headSha, ...encoded] = result.stdout.trim().split("\n");
-    if (!baseSha || !headSha || encoded.length === 0) {
-      throw new Error(`could not export ${repositoryName}: malformed bundle response`);
-    }
-    return { baseSha, headSha, data: Buffer.from(encoded.join(""), "base64") };
   }
 
   /**
@@ -1801,6 +1847,108 @@ interface ExecLaunch {
 }
 
 /**
+ * How many times an export whose socket dropped, and whose process was
+ * gone, is started again. The script deletes its own files first, so
+ * the second run is the same export. A git failure is not in this.
+ */
+const EXPORT_ATTEMPTS = 3;
+
+function parseExportShas(text: string): { baseSha: string; headSha: string } | null {
+  const [baseSha, headSha] = text.trim().split("\n");
+  if (!baseSha || !headSha) return null;
+  if (baseSha.includes(" ") || headSha.includes(" ")) return null;
+  return { baseSha, headSha };
+}
+
+function exportFileMissing(err: unknown): boolean {
+  if (!(err instanceof FilesystemError)) return false;
+  if (err.code === "ENOENT") return true;
+  return err.code === "UNKNOWN" && /no such file or directory/i.test(err.message);
+}
+
+function asExportBytes(data: unknown): Buffer {
+  if (Buffer.isBuffer(data)) return data;
+  if (data instanceof Uint8Array) return Buffer.from(data);
+  throw new Error("the export file was not bytes");
+}
+
+async function readSpriteText(sprite: Sprite, path: string): Promise<string | null> {
+  try {
+    const data = await callFilesystem(() => sprite.filesystem("/").readFile(path, "utf8"), "reading an export file");
+    return data;
+  } catch (err) {
+    if (exportFileMissing(err)) return null;
+    throw err;
+  }
+}
+
+async function readSpriteBytes(sprite: Sprite, path: string, missing: "null" | "throw"): Promise<Buffer | null> {
+  try {
+    const data = await callFilesystem(() => sprite.filesystem("/").readFile(path), "reading an export file");
+    return asExportBytes(data);
+  } catch (err) {
+    if (missing === "null" && exportFileMissing(err)) return null;
+    throw err;
+  }
+}
+
+async function readCompletedExport(
+  sprite: Sprite,
+  repositoryName: string,
+  bundlePath: string,
+  metaPath: string,
+  stdout: string,
+): Promise<RepositoryBundle> {
+  let shas = parseExportShas(stdout);
+  if (!shas) {
+    const text = await readSpriteText(sprite, metaPath);
+    shas = text ? parseExportShas(text) : null;
+  }
+  if (!shas) throw new Error(`could not export ${repositoryName}: malformed bundle response`);
+  const data = await readSpriteBytes(sprite, bundlePath, "throw");
+  if (!data || data.length === 0) throw new Error(`could not export ${repositoryName}: the bundle file was missing`);
+  return { baseSha: shas.baseSha, headSha: shas.headSha, data };
+}
+
+/** The files git left behind when the exit frame did not. Null when it had not finished. */
+async function readExportIfReady(
+  sprite: Sprite,
+  bundlePath: string,
+  metaPath: string,
+): Promise<RepositoryBundle | null> {
+  const text = await readSpriteText(sprite, metaPath);
+  if (!text) return null;
+  const shas = parseExportShas(text);
+  if (!shas) return null;
+  const data = await readSpriteBytes(sprite, bundlePath, "null");
+  if (!data || data.length === 0) return null;
+  return { baseSha: shas.baseSha, headSha: shas.headSha, data };
+}
+
+/**
+ * Whether the export's git is still the foreground process.
+ *
+ * A listing that fails is treated as yes: that is not "no such
+ * process", and another copy would race the one the listing could
+ * not see.
+ */
+async function exportSessionListed(sprite: Sprite, gitLine: string, bundlePath: string): Promise<boolean> {
+  try {
+    const sessions = await sprite.listSessions();
+    if (newestSessionFor(sessions, [gitLine])) return true;
+    return sessions.some((session) => !session.tty && session.command.includes(bundlePath));
+  } catch {
+    return true;
+  }
+}
+
+async function removeExportFiles(sprite: Sprite, bundlePath: string, metaPath: string): Promise<void> {
+  for (const path of [bundlePath, metaPath]) {
+    await callFilesystem(() => sprite.filesystem("/").rm(path, { force: true }), "removing an export file").catch(() => {});
+  }
+}
+
+/**
  * IS_SANDBOX says the sandbox is the security boundary, which a sprite
  * is. Claude Code checks it before accepting
  * --dangerously-skip-permissions as root, and sprites run commands as
@@ -1811,12 +1959,27 @@ function execEnvironment(opts: ExecOptions | undefined): Record<string, string> 
   return { IS_SANDBOX: "1", ...opts?.env };
 }
 
+/**
+ * Command lines a reattach may find this process under.
+ *
+ * The first is argv's first word. `sessionCommands` are the foreground
+ * processes a shell may be listed as instead (see ExecOptions).
+ */
+function sessionCommandLines(command: string, opts: ExecOptions | undefined): string[] {
+  const lines = [command];
+  for (const extra of opts?.sessionCommands ?? []) {
+    if (extra && !lines.includes(extra)) lines.push(extra);
+  }
+  return lines;
+}
+
 export function planExecLaunch(argv: string[], opts: ExecOptions | undefined): ExecLaunch {
   const [command, ...args] = argv;
   if (!command) throw new Error("empty argv");
   const env = execEnvironment(opts);
+  const lines = sessionCommandLines(command, opts);
   if (execUrlBytes(command, args, env, opts?.cwd) <= EXEC_URL_MAX_BYTES) {
-    return { label: command, spawn: { command, args, env }, commandLines: [command] };
+    return { label: command, spawn: { command, args, env }, commandLines: lines };
   }
   const path = launcherPath(opts?.sessionKey ?? randomUUID());
   return {
@@ -1828,9 +1991,10 @@ export function planExecLaunch(argv: string[], opts: ExecOptions | undefined): E
      * test saw a staged command listed as what the launcher had
      * exec'd into. The launcher's line covers the moment before the
      * exec; the command's line is the rule an unstaged run already
-     * lives by.
+     * lives by. sessionCommands covers a shell whose foreground
+     * process is something else again.
      */
-    commandLines: [launcherCommandLine(path), command],
+    commandLines: [launcherCommandLine(path), ...lines],
     launcher: { path, script: launcherScript(command, args, env) },
   };
 }
@@ -1844,8 +2008,11 @@ export function planExecLaunch(argv: string[], opts: ExecOptions | undefined): E
 function planAttachLaunch(argv: string[], opts: ExecOptions | undefined): ExecLaunch {
   const [command, ...args] = argv;
   if (!command) throw new Error("empty argv");
-  const commandLines = [command];
-  if (opts?.sessionKey) commandLines.push(launcherCommandLine(launcherPath(opts.sessionKey)));
+  const commandLines = sessionCommandLines(command, opts);
+  if (opts?.sessionKey) {
+    const launcher = launcherCommandLine(launcherPath(opts.sessionKey));
+    if (!commandLines.includes(launcher)) commandLines.push(launcher);
+  }
   return { label: command, spawn: { command, args, env: undefined }, commandLines };
 }
 

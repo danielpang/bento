@@ -247,6 +247,17 @@ export interface ExecOptions {
   stdin?: AsyncIterable<string>;
   /** A stable run id enables Docker's durable output and reattachment. */
   sessionKey?: string;
+  /**
+   * Extra command lines a sprite may list this process as.
+   *
+   * The sprite names a session by the process that is running, not by
+   * the argv that started it. A shell whose foreground command is
+   * `git bundle create /tmp/bento-export-....bundle` is listed as that
+   * git line, and a reattach that only looks for `sh` concludes the
+   * process is gone. Callers that know those lines pass them here.
+   * Other drivers ignore this.
+   */
+  sessionCommands?: string[];
   /** Last output record committed to the transcript. Only used by attach. */
   afterCursor?: number;
 }
