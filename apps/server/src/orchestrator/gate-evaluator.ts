@@ -8,7 +8,7 @@ import type { AppContext } from "../context.js";
 import { githubConnectionFor } from "../github.js";
 import { featurePullRequestTargets } from "../feature-prs.js";
 import { ACTIVE_RUN_STATUSES, NO_REPOSITORIES, projectHasRepositories, startRunIfIdle } from "./start-run.js";
-import { enqueueRun } from "./queue.js";
+import { enqueueGateEvaluate, enqueueRun } from "./queue.js";
 import { queueLinearOutbound } from "./linear-sync.js";
 import { gatedReasonJob, queueSlackNotify } from "./slack-notify.js";
 import { queueSandboxReap } from "./reap-sandbox.js";
@@ -492,7 +492,7 @@ export async function advanceFeature(
    * criteria that need no agent, and otherwise say why it cannot.
    */
   if (nextStage && !nextStage.defaultAgentProfileId) {
-    await ctx.jobs.send("gate.evaluate", { featureId: feature.id });
+    await enqueueGateEvaluate(ctx, feature.id);
   }
 
   // Hand off to the next stage's agent when one is configured. If a run
@@ -609,7 +609,7 @@ export async function moveFeatureTo(
   if (target) {
     if (!forward) await stopRunsOutsideStage(ctx, feature, target.id);
     if (forward && !target.defaultAgentProfileId) {
-      await ctx.jobs.send("gate.evaluate", { featureId: feature.id });
+      await enqueueGateEvaluate(ctx, feature.id);
     } else if (forward) {
       // Forward arrives ready for the stage, so its agent starts, the
       // same as advance. A drag during a run on the same stage starts

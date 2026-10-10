@@ -56,6 +56,20 @@ test("coalesceKey is singletonKey on a short-policy queue", async () => {
   assert.equal((send?.args[2] as { singletonKey?: string }).singletonKey, "s1");
 });
 
+test("gate.evaluate coalesceKey is singletonKey on a short-policy queue", async () => {
+  const { boss, calls } = stubBoss();
+  const jobs = new PgBossQueue(boss);
+  await jobs.send("gate.evaluate", { featureId: "f1" }, { coalesceKey: "f1" });
+  assert.deepEqual(calls[0], {
+    op: "createQueue",
+    args: ["gate.evaluate", { name: "gate.evaluate", policy: "short" }],
+  });
+  const send = calls.find((c) => c.op === "send");
+  assert.equal(send?.args[0], "gate.evaluate");
+  assert.deepEqual(send?.args[1], { featureId: "f1" });
+  assert.equal((send?.args[2] as { singletonKey?: string }).singletonKey, "f1");
+});
+
 test("dedupeKey is singletonKey on a standard queue", async () => {
   const { boss, calls } = stubBoss();
   const jobs = new PgBossQueue(boss);

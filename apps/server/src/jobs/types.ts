@@ -36,7 +36,13 @@ export type QueueName = (typeof QUEUE_NAMES)[number];
  * job that is already running does not swallow the next send. pg-boss
  * "short" plus singletonKey; BullMQ coalesceKey plus a rerun flag.
  */
-export const COALESCE_QUEUES = new Set<QueueName>(["swarm.tick", "swarm.land", "swarm.push", "swarm.task-start-over"]);
+export const COALESCE_QUEUES = new Set<QueueName>([
+  "gate.evaluate",
+  "swarm.tick",
+  "swarm.land",
+  "swarm.push",
+  "swarm.task-start-over",
+]);
 
 export interface SendOptions {
   /** pg-boss startAfter · BullMQ delay. */

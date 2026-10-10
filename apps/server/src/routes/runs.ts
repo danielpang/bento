@@ -12,7 +12,7 @@ import { markCancelled } from "../orchestrator/run-executor.js";
 import { modalNetworkForProject } from "../orchestrator/sandbox-network.js";
 import { markSandboxAwake } from "../orchestrator/hibernate-sandbox.js";
 import { CARD_BUSY, NO_REPOSITORIES, projectHasRepositories, startRunIfIdle } from "../orchestrator/start-run.js";
-import { enqueueRun } from "../orchestrator/queue.js";
+import { enqueueGateEvaluate, enqueueRun } from "../orchestrator/queue.js";
 import type { SandboxDriver } from "@bento/sandbox";
 import { driverForSandbox, SandboxDriverUnavailable } from "../orchestrator/sandbox-driver.js";
 import { canAccessProject, getAccessibleFeature, getAccessibleRun, getAccessibleRunOutput } from "../access.js";
@@ -233,7 +233,7 @@ export function runRoutes(ctx: AppContext) {
       // The filesystem went back, so the gate decision made from it is
       // stale: re-evaluate rather than leaving the card showing checks
       // that passed against code no longer there.
-      await ctx.jobs.send("gate.evaluate", { featureId: run.featureId });
+      deferAfterCommit(c, () => enqueueGateEvaluate(ctx, run.featureId));
       return c.json({ ok: true, restoredTo: run.checkpointId });
     })
     /**

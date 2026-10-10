@@ -10,6 +10,7 @@
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
 import pg from "pg";
+import { enqueueGateEvaluate } from "../orchestrator/queue.js";
 import { createTestJobQueue, realQueueBackends, type RealQueueBackend } from "./test-queue.js";
 import type { JobQueue, QueueName } from "./types.js";
 
@@ -159,6 +160,30 @@ for (const backend of realQueueBackends()) {
         release.resolve();
         await waitFor(() => seen.length === 2);
         assert.equal(seen.length, 2);
+      });
+    });
+
+    test("gate.evaluate coalesceKey keeps one waiting job and queues exactly one rerun while active", { timeout: 20_000 }, async () => {
+      await withJobs(backend, async (jobs) => {
+        const seen: string[] = [];
+        const started = deferred();
+        const release = deferred();
+        await jobs.work("gate.evaluate", workOpts, async (data: { featureId: string }) => {
+          seen.push(data.featureId);
+          if (seen.length === 1) {
+            started.resolve();
+            await release.promise;
+          }
+        });
+        await enqueueGateEvaluate({ jobs }, "feat-1");
+        await enqueueGateEvaluate({ jobs }, "feat-1");
+        await started.promise;
+        assert.deepEqual(seen, ["feat-1"]);
+        await enqueueGateEvaluate({ jobs }, "feat-1");
+        await enqueueGateEvaluate({ jobs }, "feat-1");
+        release.resolve();
+        await waitFor(() => seen.length === 2);
+        assert.deepEqual(seen, ["feat-1", "feat-1"]);
       });
     });
 

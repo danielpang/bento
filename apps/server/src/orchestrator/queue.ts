@@ -61,3 +61,19 @@ export async function enqueueRun(ctx: Pick<AppContext, "jobs">, runId: string): 
   if (ctx.jobs.kind === "bullmq") return;
   ctx.jobs.wake("run.execute");
 }
+
+/**
+ * Queues a gate evaluation for one card.
+ *
+ * Every door uses this rather than a bare send: two evaluations of
+ * the same card are the same work, and a send that lands while an
+ * evaluation is already running must still produce one more look.
+ * The coalesce key is the card. Routes that write the row the
+ * evaluation will read call this after commit.
+ */
+export async function enqueueGateEvaluate(
+  ctx: Pick<AppContext, "jobs">,
+  featureId: string,
+): Promise<void> {
+  await ctx.jobs.send("gate.evaluate", { featureId }, { coalesceKey: featureId });
+}

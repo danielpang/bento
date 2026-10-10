@@ -5,10 +5,11 @@ import { parseIssueWebhook, verifyLinearWebhookSignature } from "@bento/linear";
 import { verifySlackSignature } from "@bento/slack";
 import { features, githubInstallations, projects, slackConnections, slackPendingMentions } from "@bento/db";
 import type { AppContext } from "../context.js";
-import { tenantDb as db } from "../middleware/tenant.js";
+import { deferAfterCommit, tenantDb as db } from "../middleware/tenant.js";
 import { linearConnectionRow } from "../linear.js";
 import { slackClientFor, slackConnectionByTeam } from "../slack.js";
 import { interactiveChannelId, interactiveTeamId, isUuid, parseReviewTarget, projectPickFromInteractive, rejectModal } from "../orchestrator/slack-notify.js";
+import { enqueueGateEvaluate } from "../orchestrator/queue.js";
 import type { SlackInboundJob } from "../orchestrator/slack-sync.js";
 
 /**
@@ -103,7 +104,7 @@ export function webhookRoutes(ctx: AppContext) {
       const featureRows = await db(c, ctx).select().from(features).where(eq(features.projectId, project.id));
       for (const feature of featureRows) {
         if (feature.prNumber !== target.prNumber) continue;
-        await ctx.jobs.send("gate.evaluate", { featureId: feature.id });
+        deferAfterCommit(c, () => enqueueGateEvaluate(ctx, feature.id));
         matched += 1;
       }
     }

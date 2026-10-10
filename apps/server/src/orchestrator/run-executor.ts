@@ -109,7 +109,7 @@ import { sweepExpiredOAuth } from "../mcp/oauth-sweep.js";
 import { shouldIncludeStageNotes, shouldShareAgentAuth } from "../settings.js";
 import { captureRunQueueDepth } from "./queue-snapshot.js";
 import { ACTIVE_RUN_STATUSES, projectHasRepositories, startRunIfIdle } from "./start-run.js";
-import { enqueueRun, INTERACTIVE_POLL_SECONDS, QUEUE_POLL_SECONDS, RUN_WORKER_POLL_SECONDS } from "./queue.js";
+import { enqueueGateEvaluate, enqueueRun, INTERACTIVE_POLL_SECONDS, QUEUE_POLL_SECONDS, RUN_WORKER_POLL_SECONDS } from "./queue.js";
 import { HIBERNATE_SANDBOX_QUEUE, MODAL_SWEEP_QUEUE, SandboxGone, scheduleModalHibernation, hibernateSandbox, rearmReadyModalSandboxes, sweepOrphanModalSandboxes, wakeSwarmSandbox } from "./hibernate-sandbox.js";
 import { modalNetworkForProject, organizationRestrictsNetwork } from "./sandbox-network.js";
 import { stopLeftoverAgent } from "./leftover-agent.js";
@@ -3588,7 +3588,7 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
   await ctx.jobs.work("gate.sweep", {}, captureJobErrors(ctx.analytics, "gate.sweep", async () => {
     const gated = await ctx.db.select({ id: features.id }).from(features).where(eq(features.status, "gated"));
     for (const row of gated) {
-      await ctx.jobs.send("gate.evaluate", { featureId: row.id });
+      await enqueueGateEvaluate(ctx, row.id);
     }
     /**
      * Also here, not only at boot. A message parked because the team
