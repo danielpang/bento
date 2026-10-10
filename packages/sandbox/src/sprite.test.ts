@@ -2921,19 +2921,57 @@ test("Sprite provisioning fails rather than hangs when a filesystem call stalls"
   assert.match(result.message, /listing the workspace did not finish/);
 });
 
+function exportBundlePath(script: string): string {
+  const match = script.match(/bundle='([^']+)'/);
+  assert.ok(match, `the export script does not name its bundle: ${script}`);
+  return match[1]!;
+}
+
+function listedSession(command: string, id = "sess") {
+  return {
+    id,
+    command,
+    workdir: "/workspace",
+    created: new Date(0),
+    bytesPerSecond: 0,
+    isActive: true,
+    tty: false,
+  };
+}
+
+/**
+ * The second spawn of a reattach is wired only after its "spawn"
+ * event, so stdout has to follow that event by a turn.
+ */
+function finishAfterSpawn(child: FakeChild, write: () => void): void {
+  queueMicrotask(() => {
+    child.emit("spawn");
+    queueMicrotask(write);
+  });
+}
+
 test("Sprite repository export returns committed objects without credentials", async () => {
   const bundle = Buffer.from("bundle bytes");
   let script = "";
   const sprite = {
     spawn(_file: string, args: string[]) {
-      script = args[1] ?? "";
+      script = args[1] ?? script;
       const child = fakeChild();
       queueMicrotask(() => {
-        child.stdout.write(`base-sha\nhead-sha\n${bundle.toString("base64")}\n`);
+        child.stdout.write("base-sha\nhead-sha\n");
         child.stdout.end();
         child.emit("exit", 0);
       });
       return child;
+    },
+    filesystem() {
+      return {
+        async readFile(path: string) {
+          assert.equal(path, exportBundlePath(script));
+          return bundle;
+        },
+        async rm() {},
+      };
     },
   };
   const driver = new SpriteDriver({ token: "sprite-control-token" });
@@ -2947,6 +2985,8 @@ test("Sprite repository export returns committed objects without credentials", a
   assert.equal(exported?.baseSha, "base-sha");
   assert.equal(exported?.headSha, "head-sha");
   assert.deepEqual(exported?.data, bundle);
+  assert.match(script, /git bundle create "\$bundle" HEAD "\^\$base_sha"/);
+  assert.doesNotMatch(script, /base64/);
 
   await driver.exportRepository(
     { externalId: "sprite", provider: "sprite", workdir: "/workspace" },
@@ -2954,9 +2994,214 @@ test("Sprite repository export returns committed objects without credentials", a
     "main",
     { selfContained: true },
   );
-  assert.match(script, /git bundle create "\$tmp" HEAD/);
-  assert.doesNotMatch(script, /git bundle create "\$tmp" HEAD "\^\$base_sha"/);
+  assert.match(script, /git bundle create "\$bundle" HEAD/);
+  assert.doesNotMatch(script, /git bundle create "\$bundle" HEAD "\^\$base_sha"/);
   assert.doesNotMatch(script, /base_sha.*head_sha.*exit 3/);
+});
+
+/**
+ * The failure from production. The socket dropped while git bundle
+ * was the foreground process, so the session was listed as
+ * `git bundle create /tmp/...` rather than `sh`. Looking only for
+ * `sh` reported the process gone and threw the bundle away.
+ */
+test("Sprite repository export reattaches when the session is listed as git bundle", async () => {
+  const bundle = Buffer.from("bundle bytes");
+  let script = "";
+  const spawns: { sessionId?: string }[] = [];
+  const sprite = {
+    spawn(_file: string, args: string[], options?: { sessionId?: string }) {
+      spawns.push({ ...(options?.sessionId ? { sessionId: options.sessionId } : {}) });
+      if (args[1]) script = args[1];
+      const child = fakeChild();
+      if (options?.sessionId) {
+        finishAfterSpawn(child, () => {
+          child.stdout.write("base-sha\nhead-sha\n");
+          child.stdout.end();
+          child.emit("exit", 0);
+        });
+        return child;
+      }
+      queueMicrotask(() => child.emit("exit", -1));
+      return child;
+    },
+    async listSessions() {
+      const path = exportBundlePath(script);
+      return [listedSession(`git bundle create ${path} HEAD ^abc`)];
+    },
+    filesystem() {
+      return {
+        async readFile() {
+          return bundle;
+        },
+        async rm() {},
+      };
+    },
+  };
+  const driver = new SpriteDriver({ token: "sprite-control-token" });
+  stubClient(driver, sprite);
+
+  const exported = await driver.exportRepository(
+    { externalId: "sprite", provider: "sprite", workdir: "/workspace" },
+    "api",
+    "main",
+  );
+  assert.equal(exported?.baseSha, "base-sha");
+  assert.deepEqual(exported?.data, bundle);
+  assert.equal(spawns.length, 2, "the driver should have reattached to the git session");
+  assert.equal(spawns[1]?.sessionId, "sess");
+});
+
+/**
+ * The other half of the same drop: git finished, the exit frame never
+ * arrived, and the session is already gone. The bundle is on disk.
+ */
+test("Sprite repository export reads the bundle when the process exited before the exit frame", async () => {
+  const bundle = Buffer.from("bundle bytes");
+  let spawns = 0;
+  const sprite = {
+    spawn() {
+      spawns += 1;
+      const child = fakeChild();
+      queueMicrotask(() => child.emit("exit", -1));
+      return child;
+    },
+    async listSessions() {
+      return [];
+    },
+    filesystem() {
+      return {
+        async readFile(path: string, encoding?: string) {
+          if (encoding === "utf8") return "base-sha\nhead-sha\n";
+          assert.match(path, /\.bundle$/);
+          return bundle;
+        },
+        async rm() {},
+      };
+    },
+  };
+  const driver = new SpriteDriver({ token: "sprite-control-token" });
+  stubClient(driver, sprite);
+
+  const exported = await driver.exportRepository(
+    { externalId: "sprite", provider: "sprite", workdir: "/workspace" },
+    "api",
+    "main",
+  );
+  assert.equal(exported?.headSha, "head-sha");
+  assert.deepEqual(exported?.data, bundle);
+  assert.equal(spawns, 1, "a finished bundle must not be exported again");
+});
+
+test("Sprite repository export starts the script again when the drop left nothing behind", async () => {
+  const bundle = Buffer.from("bundle bytes");
+  let spawns = 0;
+  const sprite = {
+    spawn() {
+      spawns += 1;
+      const child = fakeChild();
+      const ready = spawns >= 2;
+      queueMicrotask(() => {
+        if (!ready) {
+          child.emit("exit", -1);
+          return;
+        }
+        child.stdout.write("base-sha\nhead-sha\n");
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    async listSessions() {
+      return [];
+    },
+    filesystem() {
+      return {
+        async readFile(path: string) {
+          if (spawns < 2) {
+            throw new FilesystemError(`open ${path}: no such file or directory`, "ENOENT", path, "readFile");
+          }
+          return bundle;
+        },
+        async rm() {},
+      };
+    },
+  };
+  const driver = new SpriteDriver({ token: "sprite-control-token" });
+  stubClient(driver, sprite);
+
+  const exported = await driver.exportRepository(
+    { externalId: "sprite", provider: "sprite", workdir: "/workspace" },
+    "api",
+    "main",
+  );
+  assert.deepEqual(exported?.data, bundle);
+  assert.equal(spawns, 2);
+});
+
+test("Sprite repository export does not start a second git while the first is still listed", async () => {
+  let script = "";
+  let listings = 0;
+  let spawns = 0;
+  const sprite = {
+    spawn(_file: string, args: string[]) {
+      spawns += 1;
+      if (args[1]) script = args[1];
+      const child = fakeChild();
+      queueMicrotask(() => child.emit("exit", -1));
+      return child;
+    },
+    async listSessions() {
+      listings += 1;
+      // The reattach's own listing misses it. The check after that
+      // sees git still running and must not launch another copy.
+      if (listings === 1) return [];
+      return [listedSession(`git bundle create ${exportBundlePath(script)} HEAD ^abc`)];
+    },
+    filesystem() {
+      return {
+        async readFile(path: string) {
+          throw new FilesystemError(`open ${path}: no such file or directory`, "ENOENT", path, "readFile");
+        },
+        async rm() {},
+      };
+    },
+  };
+  const driver = new SpriteDriver({ token: "sprite-control-token" });
+  stubClient(driver, sprite);
+
+  await assert.rejects(
+    () =>
+      driver.exportRepository({ externalId: "sprite", provider: "sprite", workdir: "/workspace" }, "api", "main"),
+    /process was gone when the driver tried to reattach/,
+  );
+  assert.equal(spawns, 1);
+});
+
+test("Sprite repository export does not retry a git failure", async () => {
+  let spawns = 0;
+  const sprite = {
+    spawn() {
+      spawns += 1;
+      const child = fakeChild();
+      queueMicrotask(() => {
+        child.stderr.write("fatal: not a git repository\n");
+        child.emit("exit", 128);
+      });
+      return child;
+    },
+    filesystem() {
+      return { async rm() {} };
+    },
+  };
+  const driver = new SpriteDriver({ token: "sprite-control-token" });
+  stubClient(driver, sprite);
+
+  await assert.rejects(
+    () =>
+      driver.exportRepository({ externalId: "sprite", provider: "sprite", workdir: "/workspace" }, "api", "main"),
+    /could not export api: fatal: not a git repository/,
+  );
+  assert.equal(spawns, 1);
 });
 
 test("Sprite repository import uploads a bundle and fast-forwards with a compare-and-swap", async () => {
@@ -4220,6 +4465,12 @@ test("a command that fits the exec URL rides it unchanged", () => {
     env: { IS_SANDBOX: "1", ANTHROPIC_API_KEY: "sk" },
   });
   assert.deepEqual(launch.commandLines, ["claude"]);
+  // A shell's foreground command is what the sprite lists, so the
+  // reattach has to be told that line as well as `sh`.
+  const shell = planExecLaunch(["sh", "-lc", "git bundle create /tmp/bento-export-1.bundle HEAD"], {
+    sessionCommands: ["git bundle create /tmp/bento-export-1.bundle"],
+  });
+  assert.deepEqual(shell.commandLines, ["sh", "git bundle create /tmp/bento-export-1.bundle"]);
 
   // Measured the way the SDK encodes it: "<p>" is seven bytes on the
   // URL, so this many of them pass the line that their length does not.
