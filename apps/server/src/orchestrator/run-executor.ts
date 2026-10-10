@@ -782,6 +782,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
         delivery: live.delivery,
         deliver: liveHold.deliver,
         waiting: liveHold.waiting,
+        close: liveHold.dispose,
       });
     }
     liveSession = liveHold;
@@ -909,7 +910,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
           // A completed turn confirms every message this run was
           // carrying; only then are new arrivals fed in.
           await confirmDelivered(ctx.db, runId);
-          await confirmSwarmMessagesDelivered(ctx.db, runId);
+          if (subject.kind === "swarm") await confirmSwarmMessagesDelivered(ctx.db, runId);
           await onTurnFinished(event.ok);
         }
         // The board shows what the agent last said, so a wall of
@@ -2332,7 +2333,8 @@ async function finishRun(
   // Messages the run took but never confirmed go back first, so the
   // delivery below hands them to the next run instead of losing them.
   await requeueUndelivered(ctx.db, runId);
-  await requeueUndeliveredNodeMessages(ctx.db, runId);
+  // A swarm run's node messages; a card's run has none to put back.
+  if (closed.swarmId) await requeueUndeliveredNodeMessages(ctx.db, runId);
   await deliverQueuedMessage(ctx, runId);
 
   await queueRunFinishedSlack(ctx, runId);
@@ -2691,7 +2693,8 @@ export async function markCancelled(ctx: AppContext, runId: string): Promise<voi
   await announceRunFinished(ctx, runId, "cancelled");
   ctx.bus.emitRunDone(runId, "cancelled");
   await requeueUndelivered(ctx.db, runId);
-  await requeueUndeliveredNodeMessages(ctx.db, runId);
+  // A swarm run's node messages; a card's run has none to put back.
+  if (closed.swarmId) await requeueUndeliveredNodeMessages(ctx.db, runId);
   await deliverQueuedMessage(ctx, runId);
   /*
    * A swarm hears about it through a tick, as from every other way a
@@ -3256,6 +3259,7 @@ async function resumeInterruptedRun(
         delivery: live.delivery,
         deliver: liveSession.deliver,
         waiting: liveSession.waiting,
+        close: liveSession.dispose,
       });
     }
   }
@@ -3344,7 +3348,7 @@ async function resumeInterruptedRun(
         await appendRunEvent(ctx, run.id, withDockerCursor(withTrustedCost(profile.cli, profile.model, event), cursor));
         if (event.type === "result") {
           await confirmDelivered(ctx.db, run.id);
-          await confirmSwarmMessagesDelivered(ctx.db, run.id);
+          if (subject.kind === "swarm") await confirmSwarmMessagesDelivered(ctx.db, run.id);
           await onTurnFinished(event.ok);
         }
         const spoken = runOutputPreview(event);

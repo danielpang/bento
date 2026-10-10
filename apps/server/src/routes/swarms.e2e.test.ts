@@ -2841,6 +2841,8 @@ test("a message to a node reaches a live worker now, and otherwise waits for the
     assert.equal(row!.runId, worker!.id);
     // Nothing is left for the next agent's prompt: the running one has it.
     assert.deepEqual(await takeNodeMessages(db, task!.id, worker!.id), []);
+    // And the swarm hears about it: an answer can clear an attention pause.
+    assert.ok(queued.some((job) => job.queue === "swarm.tick"), "a live answer still ticks the swarm");
   } finally {
     ctx.liveInputs.delete(worker!.id);
   }
@@ -2860,6 +2862,15 @@ test("stopping a task's agent cancels its run and leaves the task for a retry", 
 
   // Nobody on it yet: nothing to stop.
   assert.equal((await post(`/api/swarms/${swarm.id}/tasks/${task!.id}/stop`)).status, 409);
+
+  // A resolver on the leaf is not a worker: Stop leaves the merge conflict's one try alone.
+  const [resolver] = await db
+    .insert(agentRuns)
+    .values({ type: "swarm", swarmId: swarm.id, swarmTaskId: task!.id, role: "resolver", agentProfileId: planner!.agentProfileId, prompt: "", status: "running" })
+    .returning();
+  assert.equal((await post(`/api/swarms/${swarm.id}/tasks/${task!.id}/stop`)).status, 409);
+  assert.equal((await db.select().from(agentRuns).where(eq(agentRuns.id, resolver!.id)))[0]!.status, "running");
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.id, resolver!.id));
 
   const [worker] = await db
     .insert(agentRuns)

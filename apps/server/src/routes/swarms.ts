@@ -1276,10 +1276,20 @@ export function swarmRoutes(ctx: AppContext) {
       const [run] = await db(c, ctx)
         .select({ id: agentRuns.id })
         .from(agentRuns)
-        .where(and(eq(agentRuns.swarmId, swarm.id), eq(agentRuns.swarmTaskId, task.id), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)))
+        .where(
+          and(
+            eq(agentRuns.swarmId, swarm.id),
+            eq(agentRuns.swarmTaskId, task.id),
+            // A worker only. A resolver on the same leaf is working a
+            // merge conflict, and stopping it would spend the conflict's
+            // one try; a judge is the swarm's final check.
+            eq(agentRuns.role, "worker"),
+            inArray(agentRuns.status, ACTIVE_RUN_STATUSES),
+          ),
+        )
         .orderBy(desc(agentRuns.queuedAt))
         .limit(1);
-      if (!run) return c.json({ error: "No agent is working this task." }, 409);
+      if (!run) return c.json({ error: "No worker is running on this task." }, 409);
 
       ctx.running.get(run.id)?.abort();
       await markCancelled(ctx, run.id);
@@ -1647,6 +1657,13 @@ export function swarmRoutes(ctx: AppContext) {
           text: body.text,
           userId: actor(c),
         });
+        /*
+         * A tick either way. Recording the answer may have cleared an
+         * attention pause, and only a tick rolls that up, emits the board
+         * event the console redraws from, and starts the workers the pause
+         * was holding back.
+         */
+        deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
         const liveWorker = workerRunId ? ctx.liveInputs.get(workerRunId) : undefined;
         if (liveWorker && workerRunId && (await liveWorker.deliver(body.text))) {
           const sentAt = new Date();
@@ -1656,7 +1673,6 @@ export function swarmRoutes(ctx: AppContext) {
             .where(eq(swarmMessages.id, message.id));
           return c.json({ ...message, status: "sent", runId: workerRunId, sentAt, live: true, delivery: liveWorker.delivery }, 201);
         }
-        deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
         return c.json({ ...message, live: false }, 201);
       },
     )

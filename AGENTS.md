@@ -503,16 +503,26 @@ The planner stays open between turns while its swarm is running and a
 leaf is assigned or being worked (`shouldHoldPlannerSession`, re-asked
 after every turn, `BENTO_SWARM_PLANNER_HOLD_SEC` per wait, and never
 past the run limit less a minute). A held planner keeps the swarm's
-machine awake and billing, which is why the hold ends by itself once
-there is nobody to wait for, and why a swarm paused on a question
-closes its planner. The coordinator's `deliverPlannerWake` writes the
-folded wake into a held planner (`deps.liveInputs`, only while
-`waiting()`, so a planner mid turn is told everything at once when it
-finishes) and reports it as `plannerToldLiveId`, never as
-`plannerRunId`: the tick enqueues `plannerRunId` for the run workers,
-and enqueueing a run that is already executing starts a second agent.
-The hold's `onWaiting` enqueues a tick, so a report that arrived during
-the turn is delivered the moment the turn ends. Everything a planner is
+machine awake and billing, which is why the hold is short (three
+minutes by default), ends by itself once there is nobody to wait for,
+and why a swarm paused on a question closes its planner. The
+coordinator's `deliverPlannerWake` hands the folded wake to a held
+planner (`deps.liveInputs`, only while `waiting()`, so a planner mid
+turn is told everything at once when it finishes) and reports it as
+`plannerToldLiveId`, never as `plannerRunId`: the tick enqueues
+`plannerRunId` for the run workers, and enqueueing a run that is
+already executing starts a second agent. That turn is paid for like a
+new run, so it is refused for the same reasons first
+(`swarmComputeRefusal`, the plan's hours then the budget); refused, the
+held planner is closed and the refusal pauses or ends the swarm as a
+refused run would. The wake is written to the planner only after the
+tick's transaction commits, and a write the session can no longer take
+puts the messages, latches and handover lines back (`undoLiveWake`), so
+the planner never hears news the rows do not say it was told. The
+hold's `onWaiting` enqueues a tick, so a report that arrived during the
+turn is delivered the moment the turn ends; it is best effort, because
+a throw there would fail a healthy planner run, and the watchdog's
+minute tick covers it. Everything a planner is
 told is still keyed by run id (`plannerToldBy`, `swarm_messages.run_id`),
 so a leaf told to a held planner that then finished its turn undecided
 is re-told only once that run ends, which the hold bounds.
@@ -523,7 +533,9 @@ planner. It is live so a message on its node reaches it while it works
 `assignedRunId`, queued behind the current turn by the adapter, and
 answers `live: true`); a worker nobody can reach now is handed the
 message in the next agent's prompt (`takeNodeMessages`), as before.
-Node messages follow the card lifecycle: sent while a run holds them,
+Node messages follow the card lifecycle: claimed and bound to the run
+in one statement (`claimNodeMessages`), so none is ever sent to nobody,
+sent while a run holds them,
 delivered on that run's next result (`confirmSwarmMessagesDelivered`),
 and back to queued when the run ends without one
 (`requeueUndeliveredNodeMessages`). A planner's unread messages are put

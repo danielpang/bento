@@ -1131,6 +1131,7 @@ test("every entity route refuses a foreign tenant", async () => {
     ["POST", `/api/swarms/${swarm.id}/tasks/${swarmTask!.id}/retry`],
     ["POST", `/api/swarms/${swarm.id}/tasks/${swarmTask!.id}/landing/retry`],
     ["POST", `/api/swarms/${swarm.id}/tasks/${swarmTask!.id}/cancel`],
+    ["POST", `/api/swarms/${swarm.id}/tasks/${swarmTask!.id}/stop`],
     [
       "POST",
       `/api/swarms/${swarm.id}/tasks/${swarmTask!.id}/split`,

@@ -6,7 +6,7 @@ import { isBetaRun } from "../../feature-flags.js";
 import type { LiveConversation } from "../live-session.js";
 import type { SwarmSubject } from "../run-subject.js";
 import { enqueueSwarmTick } from "./coordinator.js";
-import { bindSwarmMessages, claimNodeMessages, requeueSwarmMessages } from "./node-messages.js";
+import { claimNodeMessages, requeueSwarmMessages } from "./node-messages.js";
 
 /**
  * How a swarm's agents hold a live stdin conversation, where cards
@@ -80,10 +80,24 @@ export function plannerConversation(ctx: AppContext, input: { swarmId: string; i
         `The run ends after ${window} with nothing to do.`
       );
     },
-    // The hold is armed: anything that folded up while the turn ran
-    // (a worker that reported meanwhile, a message a person sent) is
-    // delivered by the tick this asks for.
-    onWaiting: () => enqueueSwarmTick(ctx, input.swarmId),
+    /*
+     * The hold is armed: anything that folded up while the turn ran (a
+     * worker that reported meanwhile, a message a person sent) is
+     * delivered by the tick this asks for.
+     *
+     * Best effort. It runs inside the agent's event handler, so a throw
+     * here (a pool timeout after a suspend) would fail a planner run that
+     * is fine. The watchdog ticks every live swarm once a minute, which
+     * delivers whatever this one would have.
+     */
+    onWaiting: async () => {
+      try {
+        await enqueueSwarmTick(ctx, input.swarmId);
+      } catch (err) {
+        console.warn(`could not enqueue a tick for swarm ${input.swarmId} as its planner began to wait:`, err);
+        ctx.analytics?.captureException(err, null, null, { swarm_id: input.swarmId, source: "planner_hold" });
+      }
+    },
   };
 }
 
@@ -92,8 +106,10 @@ export function workerConversation(
   input: { taskId: string; runId: string },
 ): LiveConversation {
   return {
-    claim: () => claimNodeMessages(ctx.db, input.taskId),
-    markSent: (ids) => bindSwarmMessages(ctx.db, ids, input.runId),
+    // Bound to this run as they are claimed, so a crash before the write
+    // leaves them on a run whose end puts them back.
+    claim: () => claimNodeMessages(ctx.db, input.taskId, input.runId),
+    markSent: async () => {},
     requeue: (ids) => requeueSwarmMessages(ctx.db, ids),
     // Never held: the run's end is what hands its report to the planner.
     holdFor: async () => 0,

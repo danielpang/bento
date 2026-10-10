@@ -4,13 +4,14 @@ import { swarmMessages, type Db } from "@bento/db";
 /**
  * Messages people leave on one node, and how they reach an agent.
  *
- * A swarm's worker is headless. It holds no live session, so unlike a
- * card's agent there is no channel to write into while it works, and
- * nothing a person types can reach it between the moment it starts and
- * the moment it reports. The rows wait instead, and the next agent put
- * on the leaf is handed them in its prompt: that is the agent that can
- * actually act on what was said, and the node drawer's composer
- * promises exactly that rather than implying the words arrived.
+ * A worker on a live adapter holds a stdin conversation, and a message
+ * sent while it works is written there (claimNodeMessages, from the
+ * worker's conversation in swarm/live.ts, or the message route itself).
+ * A worker nobody can reach now (a text mode adapter, another server
+ * holds it, no agent on the leaf yet) gets nothing live, and the rows
+ * wait: the next agent put on the leaf is handed them in its prompt
+ * (takeNodeMessages), which is the agent that can actually act on
+ * them.
  *
  * Messages addressed to the plan rather than to a node go somewhere
  * else entirely: the coordinator folds them into the planner's next
@@ -66,28 +67,33 @@ export async function takeNodeMessages(
  * in its prompt the way it always was.
  */
 
-/** Takes the messages waiting on one node for a live write, oldest first. */
-export async function claimNodeMessages(db: Db, taskId: string): Promise<{ id: string; text: string }[]> {
-  const waiting = await db
-    .select({ id: swarmMessages.id, text: swarmMessages.text })
-    .from(swarmMessages)
-    .where(and(eq(swarmMessages.taskId, taskId), eq(swarmMessages.status, "queued")))
-    .orderBy(asc(swarmMessages.createdAt));
-  if (waiting.length === 0) return [];
-  await db
-    .update(swarmMessages)
-    .set({ status: "sent", sentAt: new Date() })
-    .where(inArray(swarmMessages.id, waiting.map((row) => row.id)));
-  return waiting;
-}
-
-/** Binds messages written into a live session's stdin to the run that holds them. */
-export async function bindSwarmMessages(db: Db, ids: string[], runId: string): Promise<void> {
-  if (ids.length === 0) return;
-  await db
-    .update(swarmMessages)
-    .set({ status: "sent", runId, sentAt: new Date() })
-    .where(inArray(swarmMessages.id, ids));
+/**
+ * Takes the messages waiting on one node for a live write, oldest
+ * first, and binds them to the run that will carry them in the same
+ * statement.
+ *
+ * One statement, so there is no moment at which a message is sent to
+ * nobody: a crash after this leaves it sent to a run, and that run's
+ * end (requeueUndeliveredNodeMessages, or the boot sweep that closes
+ * an interrupted run) puts it back. SKIP LOCKED, so the message route
+ * and a finishing turn draining the same node split the queue rather
+ * than both writing it.
+ */
+export async function claimNodeMessages(db: Db, taskId: string, runId: string): Promise<{ id: string; text: string }[]> {
+  const result = await db.execute(sql`
+    update swarm_messages set status = 'sent', run_id = ${runId}, sent_at = now()
+    where id in (
+      select id from swarm_messages
+      where task_id = ${taskId} and status = 'queued'
+      for update skip locked
+    )
+    returning id, text, created_at
+  `);
+  const rows =
+    (result as unknown as { rows?: { id: string; text: string; created_at: string | Date }[] }).rows ?? [];
+  return rows
+    .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
+    .map((row) => ({ id: row.id, text: row.text }));
 }
 
 /** Puts messages a write could not deliver back for the next taker. */

@@ -34,6 +34,12 @@ export interface LiveInput {
    * rather than one message per tick.
    */
   waiting?(): boolean;
+  /**
+   * Ends the conversation once nothing is waiting to be read: stdin
+   * closes and the run finishes. The swarm coordinator uses it for a held
+   * planner refused another turn for plan hours or budget.
+   */
+  close?(): void;
 }
 
 /**

@@ -70,7 +70,7 @@ const envSchema = z.object({
    * being worked, and ends before the run limit. 0 closes the planner
    * after every turn, which is the one-run-per-wake behaviour.
    */
-  BENTO_SWARM_PLANNER_HOLD_SEC: z.coerce.number().int().min(0).default(900),
+  BENTO_SWARM_PLANNER_HOLD_SEC: z.coerce.number().int().min(0).default(180),
 
   /** Required in multi mode. Generate with: openssl rand -hex 32 */
   BETTER_AUTH_SECRET: z.string().optional(),
