@@ -1081,6 +1081,58 @@ test("the swarm workspace shows one spend estimate", () => {
   assert.ok(!html.includes("More than a quarter"));
 });
 
+const NO_SPEND = { measuredUsd: 0, estimatedUsd: 0, assumedUsd: 0, notionalUsd: 0 };
+
+test("the goal hides spend when nothing was reported and no budget was set", () => {
+  const html = pageHtml("multi", undefined, {
+    extra: (detail) => ({ swarm: { ...detail.swarm, budgetUsd: null, spend: NO_SPEND } }),
+  });
+  assert.ok(!html.includes("swarm-spend-summary"), "no placeholder dollar when there is nothing to show");
+  assert.ok(!html.includes("$0.00"), "and no zero figure standing in for unknown cost");
+  assert.ok(html.includes("swarm-worker-control"), "workers stay next to the goal");
+});
+
+test("the goal still shows a zero against a budget the swarm set", () => {
+  const html = pageHtml("multi", undefined, {
+    extra: (detail) => ({ swarm: { ...detail.swarm, budgetUsd: 40, spend: NO_SPEND } }),
+  });
+  assert.match(html, /Spend estimate<\/span><strong class="spend-figure">\$0\.00<\/strong>/);
+  assert.match(html, /\$40\.00 budget/);
+});
+
+test("the goal shows reported spend even when the swarm has no budget", () => {
+  const html = pageHtml("multi", undefined, {
+    extra: (detail) => ({
+      swarm: { ...detail.swarm, budgetUsd: null, spend: { measuredUsd: 2.5, estimatedUsd: 0, assumedUsd: 0, notionalUsd: 0 } },
+    }),
+  });
+  assert.match(html, /Spend estimate<\/span><strong class="spend-figure">\$2\.50<\/strong>/);
+  assert.match(html, /No budget cap/);
+});
+
+test("a worker with no reported cost hides the spend figure", () => {
+  const tree = renderToStaticMarkup(
+    createElement(SwarmTree, { model, selectedId: null, onSelect: () => {}, onToggle: () => {} }),
+  );
+  const outline = renderToStaticMarkup(
+    createElement(SwarmOutline, { model, selectedId: null, onSelect: () => {} }),
+  );
+  assert.match(tree, /class="swarm-node-cost"[^>]*>\$0\.70</);
+  assert.doesNotMatch(tree, /\$0\.00/);
+  assert.match(outline, /class="swarm-row-cost"[^>]*>\$0\.70</);
+  assert.doesNotMatch(outline, /\$0\.00/);
+
+  const empty = renderToStaticMarkup(
+    createElement(SwarmNodeDrawer, {
+      task: tasks()[2]!,
+      node: model.byId.get("s1")!,
+      onClose: () => {},
+    }),
+  );
+  assert.doesNotMatch(empty, /Spend estimate/);
+  assert.doesNotMatch(empty, /swarm-node-cost-line/);
+});
+
 /**
  * The one action a freshly planned swarm needs.
  *

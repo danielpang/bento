@@ -6,7 +6,7 @@ import { SwarmOutline } from "./SwarmOutline.js";
 import { SwarmTree } from "./SwarmTree.js";
 import { canPause, canReopen, canResume, canStop, ceilingAction, pausedWords, swarmTone, swarmWords } from "../swarm/status.js";
 import { idleWords } from "../swarm/waiting.js";
-import { cappedUsd, formatUsd } from "../swarm/money.js";
+import { cappedUsd, formatUsd, showSwarmSpend } from "../swarm/money.js";
 import { formatCompletion, type SwarmModel } from "../swarm/layout.js";
 import { formatElapsed } from "../swarm/time.js";
 import type { ModeSurfaces } from "../swarm/plan.js";
@@ -434,7 +434,9 @@ export function SwarmPage({
             {!briefOpen && <span className="swarm-brief-excerpt" title={swarm.goal}>{goalExcerpt(swarm.goal)}</span>}
             {briefOpen && (
               <div className="swarm-brief-metrics">
-                <div className="swarm-spend-summary"><span>Spend estimate</span><strong className="spend-figure">{formatUsd(cappedUsd(swarm.spend))}</strong><small>{swarm.budgetUsd === null ? "No budget cap" : `${formatUsd(swarm.budgetUsd)} budget`}</small></div>
+                {showSwarmSpend(swarm.spend, swarm.budgetUsd) && (
+                  <div className="swarm-spend-summary"><span>Spend estimate</span><strong className="spend-figure">{formatUsd(cappedUsd(swarm.spend))}</strong><small>{swarm.budgetUsd === null ? "No budget cap" : `${formatUsd(swarm.budgetUsd)} budget`}</small></div>
+                )}
                 <div className="swarm-worker-control"><span className="swarm-control-label">Workers</span><WorkerStepper workers={swarm.workers} active={swarm.workersActive} max={swarm.maxWorkers} disabledReason={busy ? "Wait for the current change to finish." : !canStop(swarm.status) ? "Worker count cannot change after the swarm ends." : null} onChange={actions.onWorkers} /></div>
               </div>
             )}

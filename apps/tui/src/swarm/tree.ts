@@ -74,12 +74,19 @@ export function swarmWords(swarm: Pick<SwarmRow, "status" | "pausedReason">): st
 }
 
 /** A swarm's spend, counted the way the budget counts it. */
-export function spentUsd(swarm: SwarmRow): number {
+export function spentUsd(swarm: Pick<SwarmRow, "spentMeasuredUsd" | "spentEstimatedUsd" | "spentAssumedUsd">): number {
   return (
     Number(swarm.spentMeasuredUsd ?? 0) +
     Number(swarm.spentEstimatedUsd ?? 0) +
     Number(swarm.spentAssumedUsd ?? 0)
   );
+}
+
+/** Whether the headline or list should print a spend figure. */
+export function showSwarmMoney(
+  swarm: Pick<SwarmRow, "budgetUsd" | "spentMeasuredUsd" | "spentEstimatedUsd" | "spentAssumedUsd">,
+): boolean {
+  return swarm.budgetUsd !== null || spentUsd(swarm) > 0;
 }
 
 /** One node's own charges, the same three tiers. */
@@ -240,9 +247,11 @@ export function swarmView(detail: SwarmDetailResponse): string[] {
   const head = [`${swarm.title}  (${swarm.slug})`, `  ${swarmWords(swarm)}`];
   head.push(`  ${done} of ${leaves.length} tasks`);
   if (workers > 0) head.push(`  ${workers} working`);
-  head.push(
-    `  ${money(spentUsd(swarm))}${swarm.budgetUsd === null ? "" : ` of ${money(Number(swarm.budgetUsd))}`}`,
-  );
+  if (showSwarmMoney(swarm)) {
+    head.push(
+      `  ${money(spentUsd(swarm))}${swarm.budgetUsd === null ? "" : ` of ${money(Number(swarm.budgetUsd))}`}`,
+    );
+  }
   if (swarm.branchName) head.push(`  ${swarm.branchName}`);
   if ((swarm.reopenCount ?? 0) > 0) {
     head.push(`  reopened ${swarm.reopenCount === 1 ? "once" : `${swarm.reopenCount} times`}`);

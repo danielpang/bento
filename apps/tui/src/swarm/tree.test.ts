@@ -182,6 +182,31 @@ test("the headline says where the swarm is, what it has done, and what it cost",
   assert.match(view[0]!, /reopened 2 times/);
 });
 
+test("the headline hides spend when nothing was reported and no budget was set", () => {
+  const view = swarmView(
+    detail([task({ id: "a", title: "One", status: "done" })], {
+      budgetUsd: null,
+      spentMeasuredUsd: "0",
+      spentEstimatedUsd: "0",
+      spentAssumedUsd: "0",
+      spentNotionalUsd: "0",
+    }),
+  );
+  assert.doesNotMatch(view[0]!, /\$0\.00/);
+});
+
+test("the headline still shows a zero against a budget the swarm set", () => {
+  const view = swarmView(
+    detail([task({ id: "a", title: "One", status: "done" })], {
+      budgetUsd: "40",
+      spentMeasuredUsd: "0",
+      spentEstimatedUsd: "0",
+      spentAssumedUsd: "0",
+    }),
+  );
+  assert.match(view[0]!, /\$0\.00 of \$40\.00/);
+});
+
 test("a swarm's state is said in the words the console uses", () => {
   assert.equal(swarmWords({ status: "cancelled", pausedReason: null }), "stopped");
   assert.equal(swarmWords({ status: "blocked", pausedReason: null }), "waiting on you");
@@ -229,6 +254,28 @@ test("a list row carries the state, the count, and the spend", () => {
     "4/6",
     "1 waiting on you",
     "$4.75 of $40.00",
+    "Rewrite the checkout",
+  ]);
+});
+
+test("a list row omits spend when nothing was reported and no budget was set", () => {
+  const line = summaryLine(
+    summary({
+      id: "sw-1",
+      slug: "checkout",
+      title: "Rewrite the checkout",
+      budgetUsd: null,
+      spentMeasuredUsd: "0",
+      spentEstimatedUsd: "0",
+      spentAssumedUsd: "0",
+    }),
+  );
+  assert.deepEqual(line.split("\t"), [
+    "checkout",
+    "running",
+    "1/2",
+    "",
+    "",
     "Rewrite the checkout",
   ]);
 });

@@ -1,7 +1,7 @@
 import { CompletionBar } from "./CompletionRing.js";
 import { formatCompletion, outlineRows, type SwarmModel } from "../swarm/layout.js";
 import { diagramAttentionWords, diagramTaskTone, diagramTaskWords, isAttention } from "../swarm/status.js";
-import { cappedUsd, formatUsd } from "../swarm/money.js";
+import { cappedUsd, formatUsd, hasReportedSpend } from "../swarm/money.js";
 import { formatElapsed } from "../swarm/time.js";
 import type { SwarmPlannerRun } from "../swarm/types.js";
 import { SwarmPlannerStep } from "./SwarmPlannerStep.js";
@@ -63,7 +63,7 @@ export function SwarmOutline({
         )}
         {rows.map((row) => {
           const attention = isAttention(row.attention);
-          const spend = formatUsd(cappedUsd(row.cost));
+          const spend = hasReportedSpend(row.cost) ? formatUsd(cappedUsd(row.cost)) : null;
           const note = diagramAttentionWords(row.status, row.nodeType, row.attention, row.agentActive);
           return (
             <li key={row.id}>
@@ -120,7 +120,7 @@ export function SwarmOutline({
                     </span>
                   ) : null}
                 </span>
-                <span className="swarm-row-cost" title={`Spend estimate ${spend}`}>
+                <span className="swarm-row-cost" title={spend ? `Spend estimate ${spend}` : undefined}>
                   {spend}
                 </span>
               </button>
