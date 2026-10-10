@@ -92,6 +92,11 @@ test("delayMs becomes startAfter and attempts map onto retryLimit", async () => 
   assert.equal(opts.retryBackoff, true);
 });
 
+test("kind is pg-boss", () => {
+  const { boss } = stubBoss();
+  assert.equal(new PgBossQueue(boss).kind, "pg-boss");
+});
+
 test("work concurrency registers that many workers, and wake notifies them", async () => {
   const { boss, calls } = stubBoss();
   const jobs = new PgBossQueue(boss);

@@ -16,6 +16,7 @@ const DEFAULT_REDIS_URL = "redis://127.0.0.1:6379";
  *   jobs/contract.test.ts
  *   linear-inbound.e2e.test.ts, linear-outbound.e2e.test.ts
  *   orchestrator/slack-sync.e2e.test.ts
+ *   orchestrator/non-swarm-queue.e2e.test.ts
  *   pg-bus.e2e.test.ts
  *
  * Stay single-backend:

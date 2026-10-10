@@ -42,7 +42,28 @@ export async function armModalHibernation(
   sandboxId: string,
   delayMs: number = MODAL_WARM_WINDOW_MS,
 ): Promise<void> {
-  await ctx.jobs.send(HIBERNATE_SANDBOX_QUEUE, { sandboxId }, { delayMs });
+  await ctx.jobs.send(HIBERNATE_SANDBOX_QUEUE, { sandboxId }, { delayMs, debounceKey: sandboxId });
+}
+
+/**
+ * Rebuild hibernation jobs from rows. Redis (and a dropped pg-boss
+ * queue) hold only timing: every ready Modal sandbox gets a job so a
+ * restart does not leave a machine running until Modal's cap.
+ *
+ * The remaining warm window is kept when `lastUsedAt` is recent. A
+ * window that has already passed fires immediately and the worker
+ * snapshots. debounceKey is the sandbox id, so a leftover delayed job
+ * is replaced rather than stacked.
+ */
+export async function rearmReadyModalSandboxes(ctx: AppContext): Promise<number> {
+  const rows = await ctx.db
+    .select({ id: sandboxes.id, lastUsedAt: sandboxes.lastUsedAt })
+    .from(sandboxes)
+    .where(and(eq(sandboxes.provider, "modal"), eq(sandboxes.status, "ready")));
+  for (const row of rows) {
+    await armModalHibernation(ctx, row.id, warmWindowLeftMs(row.lastUsedAt));
+  }
+  return rows.length;
 }
 
 /**

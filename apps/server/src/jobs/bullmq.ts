@@ -42,6 +42,7 @@ export interface BullMqQueueOptions {
  * same identities.
  */
 export class BullMqQueue implements JobQueue {
+  readonly kind = "bullmq" as const;
   private readonly prefix: string;
   private readonly connection: Redis;
   private readonly queues = new Map<QueueName, Queue>();
@@ -87,7 +88,10 @@ export class BullMqQueue implements JobQueue {
       {
         connection,
         prefix: this.prefix,
-        concurrency: Math.max(1, opts.concurrency ?? 1),
+        // One Worker, not one process per slot. batchSize is the
+        // pg-boss poll width; without an explicit concurrency it is
+        // how many jobs this Worker runs at once (gate.evaluate: 5).
+        concurrency: Math.max(1, opts.concurrency ?? opts.batchSize ?? 1),
       },
     );
     worker.on("completed", (job) => {

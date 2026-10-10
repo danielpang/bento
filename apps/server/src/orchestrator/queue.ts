@@ -11,6 +11,10 @@ import type { AppContext } from "../context.js";
  * seventeen transactions a second around the clock. On Neon that is
  * what held the compute above its smallest size and kept it from ever
  * scaling to zero, which was most of the bill.
+ *
+ * BullMQ (multi mode) is push-based. These poll constants stay on the
+ * pg-boss path only: local, desktop, TUI, and the Mac app. enqueueRun
+ * does not wake a BullMQ queue.
  */
 
 /**
@@ -41,17 +45,19 @@ export const INTERACTIVE_POLL_SECONDS = 2;
 export const RUN_WORKER_POLL_SECONDS = 30;
 
 /**
- * Queues a run for the `run.execute` workers and wakes this process's
- * own, so the run starts now rather than on their next poll.
+ * Queues a run for the `run.execute` workers.
  *
- * All of them are notified rather than one: a busy worker only acts
- * on the nudge once its run ends, and an idle one fetches once and
- * goes back to sleep, so the cost of waking every slot is a handful of
- * empty fetches at the moment a run is queued, which is when the
- * database is about to be busy anyway. A context without workers (a
- * viewer's machine, a test that never registered jobs) just queues.
+ * On pg-boss this also wakes this process's own workers, so the run
+ * starts now rather than on their next poll. All of them are notified
+ * rather than one: a busy worker only acts on the nudge once its run
+ * ends, and an idle one fetches once and goes back to sleep.
+ *
+ * On BullMQ the send is enough: one Worker with `BENTO_MAX_CONCURRENT_RUNS`
+ * is handed the job as soon as it is added. A context without workers
+ * (a viewer's machine, a test that never registered jobs) just queues.
  */
 export async function enqueueRun(ctx: Pick<AppContext, "jobs">, runId: string): Promise<void> {
   await ctx.jobs.send("run.execute", { runId });
+  if (ctx.jobs.kind === "bullmq") return;
   ctx.jobs.wake("run.execute");
 }

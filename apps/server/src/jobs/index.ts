@@ -8,6 +8,7 @@ export {
   QUEUE_NAMES,
   type JobCounts,
   type JobQueue,
+  type JobQueueKind,
   type QueueName,
   type SendOptions,
   type WorkOptions,

@@ -31,6 +31,7 @@ import {
   MODAL_SWEEP_GRACE_MS,
   MODAL_WARM_WINDOW_MS,
   hibernateSandbox,
+  rearmReadyModalSandboxes,
   scheduleModalHibernation,
   SandboxGone,
   sweepOrphanModalSandboxes,
@@ -865,4 +866,44 @@ test("the orphan sweep judges a swarm machine by its row, and one failure does n
   }
   assert.deepEqual(terminated.sort(), [swarmName, orphanName].sort(), "the swarm machine is judged, and the rest still are");
   assert.equal(captured.length, 1, "the one that could not be destroyed is recorded");
+});
+
+test("boot re-arms every ready Modal sandbox and no other row", async () => {
+  const ready = await seed({ title: "boot-ready", sandboxStatus: "ready" });
+  const usedAt = new Date();
+  await ctx.db.update(sandboxes).set({ lastUsedAt: usedAt }).where(eq(sandboxes.id, ready.sandboxId));
+  const busy = await seed({ title: "boot-busy", sandboxStatus: "busy" });
+  const hibernated = await seed({ title: "boot-hibernated", sandboxStatus: "hibernated" });
+  const sprite = await seed({ title: "boot-sprite", sandboxStatus: "ready", provider: "sprite" });
+  const before = jobs.sent.length;
+  await rearmReadyModalSandboxes(ctx);
+  const armed = jobs.sent.slice(before).filter((job) => job.queue === HIBERNATE_SANDBOX_QUEUE);
+  const ids = armed.map((job) => (job.data as { sandboxId: string }).sandboxId);
+  assert.ok(ids.includes(ready.sandboxId));
+  assert.equal(ids.includes(busy.sandboxId), false);
+  assert.equal(ids.includes(hibernated.sandboxId), false);
+  assert.equal(ids.includes(sprite.sandboxId), false);
+  const readyJob = armed.find((job) => (job.data as { sandboxId: string }).sandboxId === ready.sandboxId);
+  assert.equal(readyJob?.opts?.debounceKey, ready.sandboxId);
+  assert.ok(readyJob?.opts?.delayMs != null);
+  assert.ok(Math.abs((readyJob.opts.delayMs ?? 0) - MODAL_WARM_WINDOW_MS) < 5_000);
+});
+
+test("boot re-arm of a sandbox past its warm window fires immediately", async () => {
+  const stale = await seed({ title: "boot-stale", sandboxStatus: "ready" });
+  await ctx.db
+    .update(sandboxes)
+    .set({ lastUsedAt: new Date(Date.now() - MODAL_WARM_WINDOW_MS - 60_000) })
+    .where(eq(sandboxes.id, stale.sandboxId));
+  const before = jobs.sent.length;
+  await rearmReadyModalSandboxes(ctx);
+  const [job] = jobs.sent
+    .slice(before)
+    .filter(
+      (sent) =>
+        sent.queue === HIBERNATE_SANDBOX_QUEUE && (sent.data as { sandboxId?: string }).sandboxId === stale.sandboxId,
+    );
+  assert.ok(job);
+  assert.equal(job.opts?.delayMs, 0);
+  assert.equal(job.opts?.debounceKey, stale.sandboxId);
 });

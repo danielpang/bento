@@ -1,4 +1,4 @@
-import type { JobCounts, JobQueue, QueueName, SendOptions, WorkOptions } from "./types.js";
+import type { JobCounts, JobQueue, JobQueueKind, QueueName, SendOptions, WorkOptions } from "./types.js";
 
 /** One send recorded by FakeJobQueue, the shape swarm tests already assert. */
 export interface FakeJob {
@@ -21,6 +21,8 @@ export class FakeJobQueue implements JobQueue {
   readonly scheduled: Array<{ id: string; queue: QueueName; cron: string; data?: unknown }> = [];
   readonly unscheduled: string[] = [];
   stopped = false;
+
+  constructor(readonly kind: JobQueueKind = "fake") {}
 
   async send<T>(queue: QueueName, data: T, opts?: SendOptions): Promise<void> {
     this.sent.push(opts === undefined ? { queue, data } : { queue, data, opts });

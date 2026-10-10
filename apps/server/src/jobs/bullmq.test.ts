@@ -214,6 +214,34 @@ test("counts report waiting, active, and delayed", { timeout: 10_000 }, async ()
   });
 });
 
+test("batchSize without concurrency is how many jobs run at once", { timeout: 10_000 }, async () => {
+  await withJobs(async (jobs) => {
+    let active = 0;
+    let max = 0;
+    const held: Array<() => void> = [];
+    await jobs.work("gate.evaluate", { batchSize: 5, pollingIntervalSeconds: 30 }, async () => {
+      active += 1;
+      max = Math.max(max, active);
+      await new Promise<void>((resolve) => {
+        held.push(() => {
+          active -= 1;
+          resolve();
+        });
+      });
+    });
+    await Promise.all([
+      jobs.send("gate.evaluate", { featureId: "a" }),
+      jobs.send("gate.evaluate", { featureId: "b" }),
+      jobs.send("gate.evaluate", { featureId: "c" }),
+      jobs.send("gate.evaluate", { featureId: "d" }),
+      jobs.send("gate.evaluate", { featureId: "e" }),
+    ]);
+    await waitFor(() => held.length === 5);
+    assert.equal(max, 5);
+    for (const release of held) release();
+  });
+});
+
 test("work concurrency runs that many jobs at once", { timeout: 10_000 }, async () => {
   await withJobs(async (jobs) => {
     let active = 0;
@@ -283,6 +311,34 @@ test("environment prefixes isolate two queues on one Redis", { timeout: 10_000 }
     await a.stop();
     await b.stop();
   }
+});
+
+test("a high-concurrency worker is still one Worker, not one per slot", { timeout: 10_000 }, async () => {
+  await withJobs(async (jobs) => {
+    assert.equal(jobs.kind, "bullmq");
+    let active = 0;
+    let max = 0;
+    const held: Array<() => void> = [];
+    await jobs.work("previews", { concurrency: 4, batchSize: 1, pollingIntervalSeconds: 30 }, async () => {
+      active += 1;
+      max = Math.max(max, active);
+      await new Promise<void>((resolve) => {
+        held.push(() => {
+          active -= 1;
+          resolve();
+        });
+      });
+    });
+    await Promise.all([
+      jobs.send("previews", { runId: "a" }),
+      jobs.send("previews", { runId: "b" }),
+      jobs.send("previews", { runId: "c" }),
+      jobs.send("previews", { runId: "d" }),
+    ]);
+    await waitFor(() => held.length === 4);
+    assert.equal(max, 4);
+    for (const release of held) release();
+  });
 });
 
 test("wake and offWork are no-ops and do not stop a worker", { timeout: 10_000 }, async () => {

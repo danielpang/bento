@@ -513,8 +513,8 @@ export async function registerLinearJobs(ctx: AppContext): Promise<void> {
   }));
 
   // A person just changed an issue in Linear, or a card on the board.
-  // Same two second pace as gate.evaluate; the backlog sweep above can
-  // wait for the slow default.
+  // Same two second pg-boss pace as gate.evaluate; BullMQ ignores the
+  // poll. The backlog sweep above can wait for the slow default.
   await ctx.jobs.work<Parameters<typeof handleLinearInbound>[1]>("linear.inbound", { pollingIntervalSeconds: INTERACTIVE_POLL_SECONDS }, async (data) => {
     try {
       await handleLinearInbound(ctx, data);

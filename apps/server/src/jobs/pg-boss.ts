@@ -10,6 +10,7 @@ import { COALESCE_QUEUES, type JobCounts, type JobQueue, type QueueName, type Se
  * standard-policy singletonKey is not unique in pg-boss 10.
  */
 export class PgBossQueue implements JobQueue {
+  readonly kind = "pg-boss" as const;
   private readonly created = new Set<QueueName>();
   private readonly workersByQueue = new Map<QueueName, string[]>();
   private stopped = false;

@@ -110,7 +110,7 @@ import { shouldIncludeStageNotes, shouldShareAgentAuth } from "../settings.js";
 import { captureRunQueueDepth } from "./queue-snapshot.js";
 import { ACTIVE_RUN_STATUSES, projectHasRepositories, startRunIfIdle } from "./start-run.js";
 import { enqueueRun, INTERACTIVE_POLL_SECONDS, QUEUE_POLL_SECONDS, RUN_WORKER_POLL_SECONDS } from "./queue.js";
-import { HIBERNATE_SANDBOX_QUEUE, MODAL_SWEEP_QUEUE, SandboxGone, scheduleModalHibernation, hibernateSandbox, sweepOrphanModalSandboxes, wakeSwarmSandbox } from "./hibernate-sandbox.js";
+import { HIBERNATE_SANDBOX_QUEUE, MODAL_SWEEP_QUEUE, SandboxGone, scheduleModalHibernation, hibernateSandbox, rearmReadyModalSandboxes, sweepOrphanModalSandboxes, wakeSwarmSandbox } from "./hibernate-sandbox.js";
 import { modalNetworkForProject, organizationRestrictsNetwork } from "./sandbox-network.js";
 import { stopLeftoverAgent } from "./leftover-agent.js";
 import { pipelineAgentBinaries } from "./pipeline-agents.js";
@@ -3463,16 +3463,26 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
   });
 
   /**
-   * One worker per concurrent slot, each taking a single job.
+   * Hibernation jobs live only in the queue. A restart (or a Redis
+   * flush) would otherwise leave every ready Modal machine running
+   * until the 24 hour cap. Awaited: a send is cheap, and the first
+   * run after boot should see the same schedule a finish would have left.
+   */
+  const rearmed = await rearmReadyModalSandboxes(ctx);
+  if (rearmed > 0) console.log(`re-armed hibernation for ${rearmed} ready Modal sandbox(es)`);
+
+  /**
+   * Run workers.
    *
-   * A batched worker would fetch N jobs and wait for all of them before
-   * fetching more, so one thirty minute agent run would hold the other
-   * slots idle. Independent single-job workers free each slot the moment
-   * its run finishes. The count is this process's capacity, not a plan
-   * limit: hosted Fly raises it, a laptop stays at the default of 4.
+   * pg-boss (local/Mac): one worker per concurrent slot, each taking a
+   * single job. A batched worker would fetch N jobs and wait for all of
+   * them before fetching more, so one thirty minute agent run would hold
+   * the other slots idle. They poll slowly and enqueueRun wakes them.
    *
-   * The workers poll slowly and are woken by enqueueRun instead. A run
-   * queued through a bare jobs.send still runs, on the next poll.
+   * BullMQ (multi): one Worker with concurrency BENTO_MAX_CONCURRENT_RUNS.
+   * Jobs are handed over as soon as they are added, so there is no wake
+   * and no poll. The count is this process's capacity, not a plan limit:
+   * hosted Fly raises it, a laptop stays at the default of 4.
    */
   await ctx.jobs.work<{ runId: string }>(
     "run.execute",
@@ -3559,9 +3569,9 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
    * something to reconcile.
    */
 
-  // Polled at the interactive pace rather than the slow default: this
-  // is what moves a card once its run ends, and one worker every two
-  // seconds is cheap where a worker per slot was not.
+  // pg-boss polls at the interactive pace (batch of 5). BullMQ maps
+  // that batchSize to one Worker with concurrency 5 — same width, no
+  // poll. This is what moves a card once its run ends.
   await ctx.jobs.work<{ featureId: string }>("gate.evaluate", { batchSize: 5, pollingIntervalSeconds: INTERACTIVE_POLL_SECONDS }, async (data) => {
     try {
       await evaluateFeatureGate(ctx, data.featureId);

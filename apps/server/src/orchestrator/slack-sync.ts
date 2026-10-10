@@ -804,8 +804,8 @@ function slackDescription(channelId: string, ts: string): string {
 
 export async function registerSlackJobs(ctx: AppContext): Promise<void> {
   // A person is waiting on the mention, the project picker, Approve,
-  // or Reject. One worker at two seconds is the pace from before the
-  // idle poll change; ten seconds would be a visible pause in Slack.
+  // or Reject. pg-boss keeps the two second poll; BullMQ is handed the
+  // job immediately. Ten seconds would be a visible pause in Slack.
   await ctx.jobs.work<SlackInboundJob>("slack.inbound", { pollingIntervalSeconds: INTERACTIVE_POLL_SECONDS }, async (data) => {
     try {
       await handleSlackInbound(ctx, data);

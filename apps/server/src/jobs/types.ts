@@ -52,14 +52,24 @@ export interface SendOptions {
   backoffMs?: number;
 }
 
+export type JobQueueKind = "pg-boss" | "bullmq" | "fake";
+
 export interface WorkOptions {
   /**
-   * Independent workers on this process. `run.execute` uses one per
-   * concurrent slot so a long agent run does not hold the others idle.
+   * How many jobs this process runs at once.
+   *
+   * pg-boss starts that many independent workers (one per run slot).
+   * BullMQ uses one Worker with this concurrency. `run.execute` passes
+   * `BENTO_MAX_CONCURRENT_RUNS`.
    */
   concurrency?: number;
-  /** Jobs fetched per poll. Gate evaluation uses 5; most queues use 1. */
+  /**
+   * Jobs fetched per pg-boss poll. Gate evaluation uses 5; most queues
+   * use 1. BullMQ has no poll: it treats an unset concurrency as this
+   * value so the same registration stays concurrent on both backends.
+   */
   batchSize?: number;
+  /** pg-boss idle poll. Ignored on BullMQ, which is handed work immediately. */
   pollingIntervalSeconds?: number;
 }
 
@@ -73,10 +83,12 @@ export interface JobCounts {
  * The queue this process talks to.
  *
  * Payloads carry durable row ids. Callers receive no backend job id.
- * `wake` and `offWork` exist so Phase 0 can keep pg-boss's slow-poll
- * run workers and lazy swarm workers; BullMQ will no-op them.
+ * `wake` and `offWork` exist so local/Mac pg-boss can keep slow-poll
+ * run workers and lazy swarm workers. BullMQ is push-based: enqueueRun
+ * skips `wake`, and `offWork` is a no-op.
  */
 export interface JobQueue {
+  readonly kind: JobQueueKind;
   send<T>(queue: QueueName, data: T, opts?: SendOptions): Promise<void>;
   work<T>(queue: QueueName, opts: WorkOptions, handler: (data: T) => Promise<void>): Promise<void>;
   schedule(id: string, queue: QueueName, cron: string, data?: unknown): Promise<void>;
@@ -84,9 +96,9 @@ export interface JobQueue {
   counts(queue: QueueName): Promise<JobCounts>;
   stop(): Promise<void>;
   /**
-   * Nudges idle workers on `queue` so a just-sent job does not wait
-   * for the next poll. pg-boss run workers poll every 30s; enqueueRun
-   * wakes them. A queue with no workers is a no-op.
+   * Nudges idle pg-boss workers on `queue` so a just-sent job does not
+   * wait for the next poll. enqueueRun calls this only when `kind` is
+   * not `bullmq`. A queue with no workers is a no-op.
    */
   wake(queue: QueueName): void;
   /** Stops this process's worker on `queue`. Used by lazy swarm workers. */
