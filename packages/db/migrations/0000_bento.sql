@@ -355,11 +355,16 @@ CREATE UNIQUE INDEX "secrets_local_name_idx" ON "secrets" USING btree ("name") W
 CREATE UNIQUE INDEX "stages_pipeline_slug_idx" ON "stages" USING btree ("pipeline_id","slug");--> statement-breakpoint
 
 -- Requests switch to this role so Postgres applies row-level security.
+-- CREATE ROLE is not safe after a plain existence check: two test
+-- databases migrating at once both see no role and collide on
+-- pg_authid_rolname_index (unique_violation) rather than
+-- duplicate_object.
 DO $$
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'bento_user') THEN
-    CREATE ROLE bento_user NOLOGIN NOBYPASSRLS;
-  END IF;
+  CREATE ROLE bento_user NOLOGIN NOBYPASSRLS;
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+  WHEN unique_violation THEN NULL;
 END
 $$;--> statement-breakpoint
 
