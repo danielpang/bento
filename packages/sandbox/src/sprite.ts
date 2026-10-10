@@ -1875,7 +1875,7 @@ function asExportBytes(data: unknown): Buffer {
 async function readSpriteText(sprite: Sprite, path: string): Promise<string | null> {
   try {
     const data = await callFilesystem(() => sprite.filesystem("/").readFile(path, "utf8"), "reading an export file");
-    return typeof data === "string" ? data : data.toString("utf8");
+    return data;
   } catch (err) {
     if (exportFileMissing(err)) return null;
     throw err;
