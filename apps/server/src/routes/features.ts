@@ -50,7 +50,7 @@ import {
   activationRefusal,
 } from "../orchestrator/gate-evaluator.js";
 import { ACTIVE_RUN_STATUSES, CARD_BUSY, CARD_BUSY_DELETE, NO_REPOSITORIES, projectHasRepositories, startRunIfIdle } from "../orchestrator/start-run.js";
-import { enqueueRun } from "../orchestrator/queue.js";
+import { enqueueGateEvaluate, enqueueRun } from "../orchestrator/queue.js";
 import { queueLinearIssueCreate } from "../orchestrator/linear-sync.js";
 import {
   claimQueuedMessages,
@@ -1485,7 +1485,7 @@ export function featureRoutes(ctx: AppContext) {
         .where(eq(features.id, c.req.param("id")))
         .returning();
       if (!updated) return c.json({ error: "not found" }, 404);
-      await ctx.jobs.send("gate.evaluate", { featureId: updated.id });
+      deferAfterCommit(c, () => enqueueGateEvaluate(ctx, updated.id));
       return c.json(updated);
     })
     /**

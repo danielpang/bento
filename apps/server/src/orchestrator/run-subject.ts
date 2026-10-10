@@ -19,6 +19,7 @@ import {
   type WorkerIsolation,
 } from "./swarm/sandbox.js";
 import { workerBranchName } from "./swarm/branches.js";
+import { enqueueGateEvaluate } from "./queue.js";
 import { enqueueSwarmTick } from "./swarm/coordinator.js";
 import { enqueueSwarmPush } from "./swarm/remote-branches.js";
 import type { PipelineRun } from "./pipeline-run.js";
@@ -164,7 +165,7 @@ async function pipelineSubject(
         text,
       }),
     settle: async (context) => {
-      await context.jobs.send("gate.evaluate", { featureId: feature.id });
+      await enqueueGateEvaluate(context, feature.id);
     },
   };
 }

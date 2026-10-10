@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Queue } from "bullmq";
 import Redis from "ioredis";
+import { enqueueGateEvaluate } from "../orchestrator/queue.js";
 import {
   BullMqQueue,
   bullMqJobId,
@@ -140,6 +141,33 @@ test("coalesceKey keeps one waiting job and records exactly one Redis rerun whil
     await waitFor(() => seen.length === 2);
     assert.equal(seen.length, 2);
     assert.equal(seen[1]?.n, 3);
+    assert.equal(await redis.get(flag), null);
+  });
+});
+
+test("gate.evaluate coalesceKey records exactly one Redis rerun while active", { timeout: 15_000 }, async () => {
+  await withJobs(async (jobs, redis, environment) => {
+    const seen: string[] = [];
+    const started = deferred();
+    const release = deferred();
+    await jobs.work("gate.evaluate", { concurrency: 1 }, async (data: { featureId: string }) => {
+      seen.push(data.featureId);
+      if (seen.length === 1) {
+        started.resolve();
+        await release.promise;
+      }
+    });
+    await enqueueGateEvaluate({ jobs }, "feat-1");
+    await enqueueGateEvaluate({ jobs }, "feat-1");
+    await started.promise;
+    assert.deepEqual(seen, ["feat-1"]);
+    await enqueueGateEvaluate({ jobs }, "feat-1");
+    await enqueueGateEvaluate({ jobs }, "feat-1");
+    const flag = bullMqRerunKey(bullMqPrefix(environment), "gate.evaluate", "feat-1");
+    assert.equal(await redis.get(flag), "1");
+    release.resolve();
+    await waitFor(() => seen.length === 2);
+    assert.deepEqual(seen, ["feat-1", "feat-1"]);
     assert.equal(await redis.get(flag), null);
   });
 });

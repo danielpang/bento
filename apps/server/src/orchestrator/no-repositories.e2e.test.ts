@@ -161,14 +161,18 @@ test("a project with no repositories refuses a new run and cancels one already q
   );
   // Cancelling settles the card. The gate is what would have been
   // skipped, and a second delivery of the same job must not settle again.
-  assert.deepEqual(jobs.sent, [{ queue: "gate.evaluate", data: { featureId: FEATURE } }]);
+  assert.deepEqual(jobs.sent, [
+    { queue: "gate.evaluate", data: { featureId: FEATURE }, opts: { coalesceKey: FEATURE } },
+  ]);
 
   // A duplicate job, the shape a retry or a boot requeue would deliver,
   // finds the run already closed and writes nothing further.
   await executeRun(ctx, run!.id);
   const again = await db.select().from(runEvents).where(eq(runEvents.runId, run!.id));
   assert.equal(again.length, 0);
-  assert.deepEqual(jobs.sent, [{ queue: "gate.evaluate", data: { featureId: FEATURE } }]);
+  assert.deepEqual(jobs.sent, [
+    { queue: "gate.evaluate", data: { featureId: FEATURE }, opts: { coalesceKey: FEATURE } },
+  ]);
 
   const quick = await app.request(`/api/features/${FEATURE}/quick-run?cli=claude-code`, { method: "POST" });
   assert.equal(quick.status, 409, await quick.clone().text());
@@ -287,7 +291,9 @@ test("a project with no repositories refuses a new run and cancels one already q
   assert.equal(judgment?.status, "pending");
   assert.equal((judgment?.detail as { message?: string } | null)?.message, NO_REPOSITORIES);
 
-  assert.deepEqual(jobs.sent, [{ queue: "gate.evaluate", data: { featureId: FEATURE } }]);
+  assert.deepEqual(jobs.sent, [
+    { queue: "gate.evaluate", data: { featureId: FEATURE }, opts: { coalesceKey: FEATURE } },
+  ]);
 
   await db.insert(repositories).values({
     projectId: PROJECT,
@@ -305,4 +311,24 @@ test("a project with no repositories refuses a new run and cancels one already q
   const body = (await started.json()) as { id: string; status: string };
   assert.equal(body.status, "queued");
   assert.deepEqual(jobs.sent, [{ queue: "run.execute", data: { runId: body.id } }]);
+});
+
+test("linking a PR still queues a gate evaluation for the card", async () => {
+  jobs.sent.length = 0;
+  const linked = await app.request(`/api/features/${FEATURE}/link-pr`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prNumber: 7 }),
+  });
+  assert.equal(linked.status, 200, await linked.clone().text());
+  const again = await app.request(`/api/features/${FEATURE}/link-pr`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prNumber: 8 }),
+  });
+  assert.equal(again.status, 200, await again.clone().text());
+  assert.deepEqual(jobs.sent, [
+    { queue: "gate.evaluate", data: { featureId: FEATURE }, opts: { coalesceKey: FEATURE } },
+    { queue: "gate.evaluate", data: { featureId: FEATURE }, opts: { coalesceKey: FEATURE } },
+  ]);
 });

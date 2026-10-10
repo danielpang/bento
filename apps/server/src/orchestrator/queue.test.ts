@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { FakeJobQueue } from "../jobs/index.js";
-import { enqueueRun, INTERACTIVE_POLL_SECONDS, QUEUE_POLL_SECONDS, RUN_WORKER_POLL_SECONDS } from "./queue.js";
+import { enqueueGateEvaluate, enqueueRun, INTERACTIVE_POLL_SECONDS, QUEUE_POLL_SECONDS, RUN_WORKER_POLL_SECONDS } from "./queue.js";
 
 test("enqueueRun sends the job before it wakes pg-boss workers", async () => {
   const jobs = new FakeJobQueue();
@@ -23,6 +23,22 @@ test("enqueueRun does not wake a BullMQ queue", async () => {
   const jobs = new FakeJobQueue("bullmq");
   await enqueueRun({ jobs }, "run-1");
   assert.deepEqual(jobs.sent, [{ queue: "run.execute", data: { runId: "run-1" } }]);
+  assert.deepEqual(jobs.woken, []);
+});
+
+test("enqueueGateEvaluate coalesces on the feature id", async () => {
+  const jobs = new FakeJobQueue();
+  await enqueueGateEvaluate({ jobs }, "feat-1");
+  await enqueueGateEvaluate({ jobs }, "feat-1");
+  assert.deepEqual(jobs.sent, [
+    { queue: "gate.evaluate", data: { featureId: "feat-1" }, opts: { coalesceKey: "feat-1" } },
+    { queue: "gate.evaluate", data: { featureId: "feat-1" }, opts: { coalesceKey: "feat-1" } },
+  ]);
+});
+
+test("enqueueGateEvaluate does not wake workers", async () => {
+  const jobs = new FakeJobQueue();
+  await enqueueGateEvaluate({ jobs }, "feat-1");
   assert.deepEqual(jobs.woken, []);
 });
 
@@ -62,6 +78,34 @@ test("run.execute jobs go through enqueueRun, not a bare send", () => {
   };
   visit(srcRoot);
   assert.deepEqual(offenders, [], `bare run.execute send in ${offenders.join(", ")}`);
+});
+
+/**
+ * A bare send still works, and two of the same card would each run.
+ * The helper is what keeps a burst of webhooks and finishing runs
+ * one evaluation, plus one rerun if that evaluation is already going.
+ */
+test("gate.evaluate jobs go through enqueueGateEvaluate, not a bare send", () => {
+  const srcRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const offenders: string[] = [];
+  const visit = (dir: string) => {
+    for (const ent of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, ent.name);
+      if (ent.isDirectory()) {
+        if (ent.name === "jobs") continue;
+        visit(path);
+        continue;
+      }
+      if (!ent.name.endsWith(".ts")) continue;
+      if (ent.name === "queue.ts" || ent.name === "queue.test.ts") continue;
+      const src = readFileSync(path, "utf8");
+      if (src.includes('jobs.send("gate.evaluate"') || src.includes("jobs.send('gate.evaluate'")) {
+        offenders.push(path.slice(srcRoot.length + 1).replaceAll("\\", "/"));
+      }
+    }
+  };
+  visit(srcRoot);
+  assert.deepEqual(offenders, [], `bare gate.evaluate send in ${offenders.join(", ")}`);
 });
 
 /**

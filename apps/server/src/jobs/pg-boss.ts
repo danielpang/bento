@@ -146,11 +146,28 @@ export class PgBossQueue implements JobQueue {
   private async ensureQueue(name: QueueName): Promise<void> {
     if (this.created.has(name)) return;
     if (COALESCE_QUEUES.has(name)) {
-      await this.boss.createQueue(name, { name, policy: "short" });
+      await this.ensureCoalesceQueue(name);
     } else {
       await this.boss.createQueue(name);
     }
     this.created.add(name);
+  }
+
+  /**
+   * createQueue is ON CONFLICT DO NOTHING, so an install that already
+   * has gate.evaluate (or another coalesce queue) as standard keeps
+   * that policy. Upgrade in place: pending jobs stay, and new sends
+   * copy short from the queue row.
+   */
+  private async ensureCoalesceQueue(name: QueueName): Promise<void> {
+    const existing = await this.boss.getQueue(name);
+    if (!existing) {
+      await this.boss.createQueue(name, { name, policy: "short" });
+      return;
+    }
+    if (existing.policy !== "short") {
+      await this.boss.updateQueue(name, { name, policy: "short" });
+    }
   }
 }
 

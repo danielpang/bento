@@ -6,7 +6,7 @@ import { agentEvent, forgetsBetweenRuns, trustedCostUsd, withTrustedCost } from 
 import { agentProfiles, agentRuns, features, projects, repositories, runEvents, stages } from "@bento/db";
 import { canAccessProject, visibleProjectFilter } from "../access.js";
 import type { AppContext } from "../context.js";
-import { tenantDb as db } from "../middleware/tenant.js";
+import { deferAfterCommit, tenantDb as db } from "../middleware/tenant.js";
 import { buildStagePrompt } from "../orchestrator/prompt.js";
 import { compactedConversation } from "../orchestrator/conversation-history.js";
 import { customProviderRunEnv } from "../orchestrator/custom-provider.js";
@@ -15,6 +15,7 @@ import { appendRunEvent, isUniqueViolation } from "../orchestrator/transcript.js
 import { captureRunFinished, deliverQueuedMessage, runnerReportedError } from "../orchestrator/run-executor.js";
 import { runOutputPreview } from "../orchestrator/run-executor.js";
 import { queueRunFinishedSlack } from "../orchestrator/slack-notify.js";
+import { enqueueGateEvaluate } from "../orchestrator/queue.js";
 import { ACTIVE_RUN_STATUSES } from "../orchestrator/start-run.js";
 import { reportSandboxReady, sandboxOrigin } from "../orchestrator/sandbox-metrics.js";
 import { asPipelineRun, isPipelineRun } from "../orchestrator/pipeline-run.js";
@@ -472,7 +473,7 @@ export function runnerRoutes(ctx: AppContext) {
           runId,
           status: body.ok ? "succeeded" : "failed",
         });
-        await ctx.jobs.send("gate.evaluate", { featureId: feature.id });
+        deferAfterCommit(c, () => enqueueGateEvaluate(ctx, feature.id));
       }
       return c.json({ ok: true });
     });
