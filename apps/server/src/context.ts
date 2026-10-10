@@ -27,6 +27,19 @@ export interface LiveInput {
   delivery: "steer" | "queue";
   /** False when the session just closed; callers fall back to queueing. */
   deliver(text: string): Promise<boolean>;
+  /**
+   * Whether the process is between turns, held open for the next
+   * message. The swarm coordinator delivers a folded wake only then,
+   * so a planner mid turn is told everything at once when it is done
+   * rather than one message per tick.
+   */
+  waiting?(): boolean;
+  /**
+   * Ends the conversation once nothing is waiting to be read: stdin
+   * closes and the run finishes. The swarm coordinator uses it for a held
+   * planner refused another turn for plan hours or budget.
+   */
+  close?(): void;
 }
 
 /**

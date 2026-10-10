@@ -93,7 +93,7 @@ import { buildWorkerPrompt } from "./swarm/worker-prompt.js";
 import { isDocumentSwarm, SECTION_DIR } from "./swarm/deliverable.js";
 import { buildFinalCheckPrompt, finalCheckFor, tasksOf } from "./swarm/final-check.js";
 import { isSafeBranchName, taskTrailer } from "./swarm/branches.js";
-import { takeNodeMessages } from "./swarm/node-messages.js";
+import { confirmSwarmMessagesDelivered, requeueUndeliveredNodeMessages, takeNodeMessages } from "./swarm/node-messages.js";
 import { exportSwarmBranch, swarmBranchName } from "./swarm/sandbox.js";
 import { applyRunCharge, chargeForRun } from "./swarm/ledger.js";
 import { resolveAgentEnv } from "./agent-env.js";
@@ -117,7 +117,8 @@ import { pipelineAgentBinaries } from "./pipeline-agents.js";
 import { appendRunEvent } from "./transcript.js";
 import { isPersisted, loadPersistedIds, recoverMissedMessages } from "./recover-session.js";
 import { compactedConversation } from "./conversation-history.js";
-import { attachLiveConversation } from "./live-session.js";
+import { attachLiveConversation, cardConversation, headlessConversation, type LiveConversation, type LiveConversationHandle } from "./live-session.js";
+import { swarmLiveConversation } from "./swarm/live.js";
 import { registerLinearJobs } from "./linear-sync.js";
 import { registerModelCatalogJobs } from "./model-catalog.js";
 import { queueRunFinishedSlack } from "./slack-notify.js";
@@ -752,33 +753,38 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   const controller = new AbortController();
   ctx.running.set(runId, controller);
 
-  let liveSession: ReturnType<typeof attachLiveConversation> | null = null;
+  let liveSession: LiveConversationHandle | null = null;
   /**
-   * A live conversation is the card's: it parks messages on the card,
-   * asks the stage's gate whether to stay open, and delivers through
-   * the feature message route. A swarm's agents are spoken to through
-   * the swarm's own thread and its coordinator, so a swarm run is
-   * headless even on an adapter that could hold a session open.
+   * Every run on a live adapter gets a conversation, because the
+   * conversation is what ends the process: stdin stays open until this
+   * side closes it. A card's parks messages on the card and asks the
+   * stage's gate whether to stay open; a swarm planner's or worker's is
+   * decided in swarm/live.ts; every other role is headless and closes
+   * after its first turn. Only a run somebody can talk to is registered
+   * for delivery.
    */
-  if (live && liveChannel && subject.kind === "pipeline") {
+  if (live && liveChannel) {
+    const conversation = await liveConversationFor(ctx, subject);
     const liveHold = attachLiveConversation({
-      ctx,
       runId,
-      featureId: subject.feature.id,
-      role: run.role,
-      gateType: subject.stage.gateType,
-      idleSec: ctx.env.BENTO_LIVE_IDLE_SEC,
       live,
       liveChannel,
+      conversation: conversation ?? headlessConversation(),
+      holdUntil: Date.now() + ctx.env.BENTO_RUN_TIMEOUT_MIN * 60_000 - HOLD_MARGIN_MS,
       sayAsUser,
       saySystem,
     });
-    // The message route delivers through this handle; seq stays a
+    // The message route (a card's, or a swarm's for a node) and the
+    // swarm coordinator deliver through this handle; seq stays a
     // single-writer counter because the insert happens here.
-    ctx.liveInputs.set(runId, {
-      delivery: live.delivery,
-      deliver: liveHold.deliver,
-    });
+    if (conversation) {
+      ctx.liveInputs.set(runId, {
+        delivery: live.delivery,
+        deliver: liveHold.deliver,
+        waiting: liveHold.waiting,
+        close: liveHold.dispose,
+      });
+    }
     liveSession = liveHold;
   }
 
@@ -787,8 +793,10 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
    * finished turn, messages that parked meanwhile are fed in, oldest
    * first. On a manual stage with nothing waiting, the process stays
    * open for BENTO_LIVE_IDLE_SEC so the user can keep talking without
-   * a second run. Automatic stages, failed turns, and judge runs still
-   * close stdin immediately, because their gate has to run.
+   * a second run, and a swarm planner stays open while its workers are
+   * going. Automatic stages, failed turns, judge runs, and swarm
+   * workers still close stdin immediately, because their gate, or the
+   * planner, has to run.
    */
   const onTurnFinished = async (ok: boolean) => {
     if (!liveSession) return;
@@ -902,6 +910,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
           // A completed turn confirms every message this run was
           // carrying; only then are new arrivals fed in.
           await confirmDelivered(ctx.db, runId);
+          if (subject.kind === "swarm") await confirmSwarmMessagesDelivered(ctx.db, runId);
           await onTurnFinished(event.ok);
         }
         // The board shows what the agent last said, so a wall of
@@ -1546,6 +1555,32 @@ function execFailureReason(ctx: AppContext, err: unknown): string {
  * a first run, because a resumed process consumed it in its first life
  * and re-sending it would replay the whole task as a new user turn.
  */
+/**
+ * How far short of the run limit a live hold may reach. A hold that
+ * would still be waiting when the limit kills the process ends the run
+ * as timed out and, for a planner, requeues everything it was told; a
+ * minute leaves the CLI room to answer end of input and exit.
+ */
+const HOLD_MARGIN_MS = 60_000;
+
+/**
+ * Who a run on a live adapter is talking to, or null for a run nobody
+ * can message. A card's agent talks through its feature; a swarm's
+ * planner and workers through the swarm's thread (swarm/live.ts).
+ */
+async function liveConversationFor(ctx: AppContext, subject: RunSubject): Promise<LiveConversation | null> {
+  if (subject.kind === "pipeline") {
+    return cardConversation(ctx, {
+      featureId: subject.feature.id,
+      runId: subject.run.id,
+      role: subject.run.role,
+      gateType: subject.stage.gateType,
+      idleSec: ctx.env.BENTO_LIVE_IDLE_SEC,
+    });
+  }
+  return swarmLiveConversation(ctx, subject);
+}
+
 async function buildRunCommand(
   ctx: AppContext,
   input: {
@@ -2298,6 +2333,8 @@ async function finishRun(
   // Messages the run took but never confirmed go back first, so the
   // delivery below hands them to the next run instead of losing them.
   await requeueUndelivered(ctx.db, runId);
+  // A swarm run's node messages; a card's run has none to put back.
+  if (closed.swarmId) await requeueUndeliveredNodeMessages(ctx.db, runId);
   await deliverQueuedMessage(ctx, runId);
 
   await queueRunFinishedSlack(ctx, runId);
@@ -2656,6 +2693,8 @@ export async function markCancelled(ctx: AppContext, runId: string): Promise<voi
   await announceRunFinished(ctx, runId, "cancelled");
   ctx.bus.emitRunDone(runId, "cancelled");
   await requeueUndelivered(ctx.db, runId);
+  // A swarm run's node messages; a card's run has none to put back.
+  if (closed.swarmId) await requeueUndeliveredNodeMessages(ctx.db, runId);
   await deliverQueuedMessage(ctx, runId);
   /*
    * A swarm hears about it through a tick, as from every other way a
@@ -2891,6 +2930,8 @@ async function failRunAsInterrupted(
     await requeueUndelivered(ctx.db, run.id);
     await deliverQueuedMessage(ctx, run.id);
     await queueRunFinishedSlack(ctx, run.id);
+  } else {
+    await requeueUndeliveredNodeMessages(ctx.db, run.id);
   }
   await subject.settle(ctx);
 }
@@ -3199,26 +3240,28 @@ async function resumeInterruptedRun(
   const saySystem = (text: string) =>
     appendRunEvent(ctx, run.id, { type: "message", role: "system", text });
 
-  let liveSession: ReturnType<typeof attachLiveConversation> | null = null;
-  // The card's conversation, for the reason the first run's is: a swarm
-  // is spoken to through its own thread and its coordinator.
-  if (live && liveChannel && subject.kind === "pipeline") {
+  let liveSession: LiveConversationHandle | null = null;
+  // The same conversation the first life had, for the reason the first
+  // run attaches one: it is what ends the process.
+  if (live && liveChannel) {
+    const conversation = await liveConversationFor(ctx, subject);
     liveSession = attachLiveConversation({
-      ctx,
       runId: run.id,
-      featureId: subject.feature.id,
-      role: run.role,
-      gateType: subject.stage.gateType,
-      idleSec: ctx.env.BENTO_LIVE_IDLE_SEC,
       live,
       liveChannel,
+      conversation: conversation ?? headlessConversation(),
+      holdUntil: Date.now() + timeoutMs - HOLD_MARGIN_MS,
       sayAsUser,
       saySystem,
     });
-    ctx.liveInputs.set(run.id, {
-      delivery: live.delivery,
-      deliver: liveSession.deliver,
-    });
+    if (conversation) {
+      ctx.liveInputs.set(run.id, {
+        delivery: live.delivery,
+        deliver: liveSession.deliver,
+        waiting: liveSession.waiting,
+        close: liveSession.dispose,
+      });
+    }
   }
   const onTurnFinished = async (ok: boolean) => {
     if (!liveSession) return;
@@ -3305,6 +3348,7 @@ async function resumeInterruptedRun(
         await appendRunEvent(ctx, run.id, withDockerCursor(withTrustedCost(profile.cli, profile.model, event), cursor));
         if (event.type === "result") {
           await confirmDelivered(ctx.db, run.id);
+          if (subject.kind === "swarm") await confirmSwarmMessagesDelivered(ctx.db, run.id);
           await onTurnFinished(event.ok);
         }
         const spoken = runOutputPreview(event);

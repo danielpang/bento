@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type PointerEvent as Reac
 import { CompletionRing } from "./CompletionRing.js";
 import { NODE_HEIGHT, NODE_WIDTH, visibleNodes, type SwarmModel, type SwarmNode } from "../swarm/layout.js";
 import { diagramAttentionWords, diagramTaskTone, diagramTaskWords, isAttention } from "../swarm/status.js";
+import { AgentOrb } from "./AgentOrb.js";
 import { cappedUsd, formatUsd } from "../swarm/money.js";
 import { formatElapsed } from "../swarm/time.js";
 import type { SwarmPlannerRun } from "../swarm/types.js";
@@ -306,7 +307,7 @@ function TreeNode({
         )}
         <span className="swarm-node-foot">
           <span className="status">
-            <span className="dot" data-state={tone} />
+            {node.agentActive ? <AgentOrb label="Agent working" /> : <span className="dot" data-state={tone} />}
             {node.collapsed && !node.frontierPath ? `${node.doneLeaves} done` : words}
           </span>
           <span className="swarm-node-cost" title={`Spend estimate ${spend}`}>

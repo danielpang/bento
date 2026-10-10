@@ -1,4 +1,5 @@
 import { CompletionBar } from "./CompletionRing.js";
+import { AgentOrb } from "./AgentOrb.js";
 import { formatCompletion, outlineRows, type SwarmModel } from "../swarm/layout.js";
 import { diagramAttentionWords, diagramTaskTone, diagramTaskWords, isAttention } from "../swarm/status.js";
 import { cappedUsd, formatUsd } from "../swarm/money.js";
@@ -107,7 +108,9 @@ export function SwarmOutline({
                 </span>
                 <span className="swarm-row-pct">{formatCompletion(row.completion)}</span>
                 <span className="status swarm-row-status">
-                  <span className="dot" data-state={diagramTaskTone(row.status, row.nodeType, row.agentActive, row.landing)} />
+                  {row.agentActive
+                    ? <AgentOrb label="Agent working" />
+                    : <span className="dot" data-state={diagramTaskTone(row.status, row.nodeType, row.agentActive, row.landing)} />}
                   {diagramTaskWords(row.status, row.nodeType, row.agentActive, row.landing)}
                 </span>
                 {/* Attention is its own column, never folded into the

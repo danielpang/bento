@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as Menu from "@radix-ui/react-dropdown-menu";
-import { ThinkingOrb, type OrbState } from "thinking-orbs";
+import { ThinkingOrb } from "thinking-orbs";
 import type { AgentProfile, AgentRun, BentoClient, Stage } from "@bento/api-client";
 import {
   forgetsBetweenRuns,
@@ -18,19 +18,8 @@ import { StopButton } from "./IconButtons.js";
 import { LIVE_TOOLS } from "./ui.js";
 import { toolActivity, type ToolActivity } from "../tool-activity.js";
 import { ToolActivityGroup } from "./ToolActivityGroup.js";
-
-/** Animation is decoration; a stilled frame carries the same meaning. */
-const REDUCED_MOTION =
-  typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-
-/** Which orb animation fits what the agent is doing right now. */
-function orbStateFor(tool: string | null): OrbState {
-  if (!tool) return "shaping";
-  if (/read|grep|glob|search|fetch|ls|find/i.test(tool)) return "searching";
-  if (/edit|write|patch|notebook/i.test(tool)) return "composing";
-  if (/task|todo|plan|agent|think/i.test(tool)) return "solving";
-  return "working";
-}
+import { REDUCED_MOTION, orbStateFor } from "./AgentOrb.js";
+import { SendMark, growComposer } from "./ChatComposer.js";
 
 const TERMINAL_RUN = new Set(["succeeded", "failed", "cancelled"]);
 
@@ -40,13 +29,6 @@ const TERMINAL_RUN = new Set(["succeeded", "failed", "cancelled"]);
  * reader is somewhere further up and is offered the way back down.
  */
 const AT_BOTTOM_SLACK = 120;
-
-/**
- * How tall the composer may grow, in pixels, before it scrolls.
- * Long enough to read a wrapped paragraph, short enough that it
- * cannot eat the transcript above it.
- */
-const COMPOSER_MAX_HEIGHT = 160;
 
 /**
  * The conversation is rendered from these, never from raw events: a
@@ -887,21 +869,6 @@ export function toChatItems(
 }
 
 /**
- * Grows the conversation composer to fit what has been typed.
- *
- * A long line used to vanish into a one-line field. Height is reset
- * before it is measured, or the box could only ever grow; past the
- * cap it scrolls rather than pushing the transcript off the screen.
- */
-function growComposer(el: HTMLTextAreaElement | null): void {
-  if (!el) return;
-  el.style.height = "auto";
-  const content = el.scrollHeight;
-  el.style.height = `${Math.min(content, COMPOSER_MAX_HEIGHT)}px`;
-  el.style.overflowY = content > COMPOSER_MAX_HEIGHT ? "auto" : "hidden";
-}
-
-/**
  * What the composer field says. Naming the agent ("Message Claude")
  * made the box look like a DM, and hid whether the words go now or
  * wait. Send vs queue is the distinction the box needs to make: idle
@@ -947,26 +914,6 @@ export function runWords(status: string): string {
  * other marks, and used instead of a worded button so the composer's
  * width goes to the input.
  */
-function SendMark() {
-  return (
-    <svg
-      viewBox="0 0 16 16"
-      width="16"
-      height="16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.8"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-      focusable="false"
-    >
-      <path d="M8 13.25V3.25" />
-      <path d="M3.75 7.5 8 3.25 12.25 7.5" />
-    </svg>
-  );
-}
-
 /** "Jul 29, 11:42 PM": enough to tell runs apart without a full ISO stamp. */
 export function runTime(iso: string): string {
   return new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });

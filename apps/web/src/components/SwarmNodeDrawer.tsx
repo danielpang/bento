@@ -4,6 +4,9 @@ import { Markdown } from "./Markdown.js";
 import { BetaOnly } from "../beta.js";
 import { sandboxProviderWords } from "../sandbox-provider.js";
 import { CompletionRing } from "./CompletionRing.js";
+import { AgentOrb } from "./AgentOrb.js";
+import { ChatComposer } from "./ChatComposer.js";
+import { WorkingRow, type RunActivity } from "./SwarmRunOutput.js";
 import { useDismissable } from "./ui.js";
 import {
   attentionNote,
@@ -52,6 +55,8 @@ export function SwarmNodeDrawer({
   onAddTask,
   onReassign,
   onEdit,
+  onMessage,
+  onStopWorker,
   agents = [],
   transcript,
   busy,
@@ -107,10 +112,25 @@ export function SwarmNodeDrawer({
   onAddTask?: (parentId: string, task: { title: string; description?: string }) => void;
   onReassign?: (taskId: string, agentProfileId: string | null) => void;
   onEdit?: (taskId: string, edit: { description: string }) => void;
+  /**
+   * Sends a message to the agent working this leaf. The answer says
+   * whether a running worker heard it now (a live session, queued
+   * behind its current turn) or whether the next agent on the leaf is
+   * handed it in its prompt, and the composer says which happened.
+   */
+  onMessage?: (taskId: string, text: string) => Promise<{ live: boolean }>;
+  /** Stops the agent on this leaf, beside the composer while one is working. */
+  onStopWorker?: (taskId: string) => void;
   /** The agents this project can put on a leaf, for Reassign. */
   agents?: { id: string; name: string }[];
-  /** Read-only output from the worker run assigned to this task. */
-  transcript?: ReactNode;
+  /**
+   * Read-only output from the worker run assigned to this task. A
+   * function is handed the setter for the working row above the
+   * composer, so the activity lives in this drawer: one is mounted per
+   * leaf, and a leaf that never had an agent starts with no working row
+   * rather than the last leaf's.
+   */
+  transcript?: ReactNode | ((onActivity: (activity: RunActivity) => void) => ReactNode);
   busy?: boolean;
   actionError?: string;
   /**
@@ -169,6 +189,10 @@ export function SwarmNodeDrawer({
   const [adding, setAdding] = useState(false);
   const [addTitle, setAddTitle] = useState("");
   const [addDetail, setAddDetail] = useState("");
+  const [workerActivity, setWorkerActivity] = useState<RunActivity>({ running: false, tool: null });
+  const [messageText, setMessageText] = useState("");
+  const [sending, setSending] = useState(false);
+  const [messageNote, setMessageNote] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
   const flags = Object.entries(task.flags).filter(([key]) => key !== "landingError");
   // The fetched list when there is one, and the plan row's otherwise.
   // A fetched empty list is an answer, not a missing one, so the
@@ -251,6 +275,29 @@ export function SwarmNodeDrawer({
     setEditing((open) => !open);
   }
 
+  // A leaf still has somebody to talk to until it is finished or
+  // withdrawn: a message to a leaf with no agent waits for the next one.
+  const canMessage = !!onMessage && task.nodeType === "leaf" && !["done", "cancelled"].includes(task.status);
+
+  async function sendMessage() {
+    const text = messageText.trim();
+    if (!text || sending || !onMessage) return;
+    setSending(true);
+    setMessageNote(null);
+    try {
+      const receipt = await onMessage(task.id, text);
+      setMessageText("");
+      setMessageNote({
+        tone: "ok",
+        text: receipt.live ? "Sent." : "Queued.",
+      });
+    } catch (error) {
+      setMessageNote({ tone: "error", text: error instanceof Error ? error.message : "Could not send your message." });
+    } finally {
+      setSending(false);
+    }
+  }
+
   function runPrimaryAction() {
     if (primaryAction === "startOver") setConfirmingStartOver(true);
     else if (primaryAction === "landing") onRetryLanding?.(task.id);
@@ -267,7 +314,9 @@ export function SwarmNodeDrawer({
         <div className="feature-topline">
           <span className="feature-kicker">{task.nodeType === "leaf" ? "Swarm task" : "Plan node"}</span>
           <span className="status swarm-node-header-status">
-            <span className="dot" data-state={diagramTaskTone(task.status, task.nodeType, node.agentActive, node.landing)} />
+            {node.agentActive
+              ? <AgentOrb label="Agent working" />
+              : <span className="dot" data-state={diagramTaskTone(task.status, task.nodeType, node.agentActive, node.landing)} />}
             {diagramTaskWords(task.status, task.nodeType, node.agentActive, node.landing)}
           </span>
           <button className="btn btn-ghost feature-close" onClick={onClose} aria-label="Close" title="Close (Esc)">
@@ -583,8 +632,30 @@ export function SwarmNodeDrawer({
                   <details><summary>Technical details</summary><pre>{String(task.flags.landingError)}</pre></details>
                 </div>
               )}
-              {transcript ?? <p className="muted">Worker logs will appear here when this task starts.</p>}
+              {(typeof transcript === "function" ? transcript(setWorkerActivity) : transcript) ??
+                <p className="muted">Worker logs will appear here when this task starts.</p>}
             </section>
+            {canMessage && (
+              <div className="swarm-node-compose composer-dock">
+                <WorkingRow activity={workerActivity} agentName="Worker agent" />
+                {messageNote && (
+                  <p className={messageNote.tone === "error" ? "error" : "muted swarm-node-compose-note"} role={messageNote.tone === "error" ? "alert" : "status"}>
+                    {messageNote.text}
+                  </p>
+                )}
+                <ChatComposer
+                  id="swarm-node-message"
+                  value={messageText}
+                  onChange={setMessageText}
+                  onSend={() => void sendMessage()}
+                  onStop={node.agentActive && onStopWorker && !busy ? () => onStopWorker(task.id) : undefined}
+                  busy={sending}
+                  maxLength={20_000}
+                  placeholder="Ask for clarification or build something else"
+                  ariaLabel="Message the worker"
+                />
+              </div>
+            )}
           </Tabs.Content>
         )}
 

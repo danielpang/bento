@@ -7,6 +7,7 @@ import {
   hasNoLiveTranscript,
   quietRunMessage,
   shouldHoldLiveSession,
+  shouldHoldPlannerSession,
 } from "./conversation.js";
 
 test("a fresh stage run is the stage prompt", () => {
@@ -148,4 +149,16 @@ test("a live session holds only a successful turn on a manual stage", () => {
   // session open would delay the publish it exists for.
   assert.equal(shouldHoldLiveSession({ ok: true, role: "rebase", gateType: "manual", idleSec: 90 }), false);
   assert.equal(shouldHoldLiveSession({ ok: true, role: "stage", gateType: "manual", idleSec: 0 }), false);
+});
+
+test("a planner session holds only a successful turn of a running swarm with leaves in progress", () => {
+  assert.equal(shouldHoldPlannerSession({ ok: true, swarmStatus: "running", leavesInProgress: 2, idleSec: 900 }), true);
+  // Nobody to wait for: the next wake starts a run the ordinary way.
+  assert.equal(shouldHoldPlannerSession({ ok: true, swarmStatus: "running", leavesInProgress: 0, idleSec: 900 }), false);
+  // A swarm paused on a question would bill a machine for a planner
+  // waiting on a person.
+  assert.equal(shouldHoldPlannerSession({ ok: true, swarmStatus: "paused", leavesInProgress: 2, idleSec: 900 }), false);
+  assert.equal(shouldHoldPlannerSession({ ok: true, swarmStatus: "planning", leavesInProgress: 2, idleSec: 900 }), false);
+  assert.equal(shouldHoldPlannerSession({ ok: false, swarmStatus: "running", leavesInProgress: 2, idleSec: 900 }), false);
+  assert.equal(shouldHoldPlannerSession({ ok: true, swarmStatus: "running", leavesInProgress: 2, idleSec: 0 }), false);
 });

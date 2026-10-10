@@ -1254,6 +1254,49 @@ export function swarmRoutes(ctx: AppContext) {
       saySwarmChanged(ctx, c, swarm);
       return c.json({ runId: run.id, status: "cancelled" });
     })
+    /**
+     * Stops the agent on one leaf, the way the card conversation's stop
+     * ends a run: the attempt is cancelled, and the coordinator reads a
+     * worker that stopped without reporting as a failed leaf, which the
+     * planner is told about. The leaf itself is not cancelled; a retry
+     * puts a new agent on it.
+     */
+    .post("/:id/tasks/:taskId/stop", async (c) => {
+      const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
+      if (!swarm) return c.json({ error: "not found" }, 404);
+      const refusal = await requireSwarms(ctx, c, swarm.organizationId);
+      if (refusal) return c.json(refusal.body, refusal.status);
+      const [task] = await db(c, ctx)
+        .select({ id: swarmTasks.id })
+        .from(swarmTasks)
+        .where(and(eq(swarmTasks.id, c.req.param("taskId")), eq(swarmTasks.swarmId, swarm.id)))
+        .limit(1);
+      if (!task) return c.json({ error: "not found" }, 404);
+
+      const [run] = await db(c, ctx)
+        .select({ id: agentRuns.id })
+        .from(agentRuns)
+        .where(
+          and(
+            eq(agentRuns.swarmId, swarm.id),
+            eq(agentRuns.swarmTaskId, task.id),
+            // A worker only. A resolver on the same leaf is working a
+            // merge conflict, and stopping it would spend the conflict's
+            // one try; a judge is the swarm's final check.
+            eq(agentRuns.role, "worker"),
+            inArray(agentRuns.status, ACTIVE_RUN_STATUSES),
+          ),
+        )
+        .orderBy(desc(agentRuns.queuedAt))
+        .limit(1);
+      if (!run) return c.json({ error: "No worker is running on this task." }, 409);
+
+      ctx.running.get(run.id)?.abort();
+      await markCancelled(ctx, run.id);
+      deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
+      saySwarmChanged(ctx, c, swarm);
+      return c.json({ runId: run.id, status: "cancelled" });
+    })
     .post("/:id/start", async (c) => {
       const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
       if (!swarm) return c.json({ error: "not found" }, 404);
@@ -1576,10 +1619,16 @@ export function swarmRoutes(ctx: AppContext) {
      * Sends a message into the swarm: to the planner by default, or to
      * one node when a task is named.
      *
-     * Queued rather than delivered. A headless agent cannot hear mid
-     * turn, so the coordinator folds everything waiting into one wake
-     * message when the planner is next idle, which is also what makes
-     * five answers in a minute one turn rather than five.
+     * Queued first, whoever it is for: the row is the message's
+     * identity, and the tick is what hands it on. A message to the
+     * planner is folded by the coordinator into its next wake, which
+     * reaches a planner held open between turns at once and otherwise
+     * starts a run, and that folding is what makes five answers in a
+     * minute one turn rather than five. A message to a node whose
+     * worker holds a live session is written into it here, queued
+     * behind the worker's current turn by its adapter; a worker with
+     * no live session, or one held by another server, is handed the
+     * message in the prompt of the next agent on the leaf.
      */
     .post(
       "/:id/messages",
@@ -1591,13 +1640,15 @@ export function swarmRoutes(ctx: AppContext) {
         if (refusal) return c.json(refusal.body, refusal.status);
         const body = c.req.valid("json");
 
+        let workerRunId: string | null = null;
         if (body.taskId) {
           const [task] = await db(c, ctx)
-            .select({ id: swarmTasks.id })
+            .select({ id: swarmTasks.id, assignedRunId: swarmTasks.assignedRunId })
             .from(swarmTasks)
             .where(and(eq(swarmTasks.id, body.taskId), eq(swarmTasks.swarmId, swarm.id)))
             .limit(1);
           if (!task) return c.json({ error: "not found" }, 404);
+          workerRunId = task.assignedRunId;
         }
 
         const message = await recordSwarmAnswer(db(c, ctx), {
@@ -1606,8 +1657,23 @@ export function swarmRoutes(ctx: AppContext) {
           text: body.text,
           userId: actor(c),
         });
+        /*
+         * A tick either way. Recording the answer may have cleared an
+         * attention pause, and only a tick rolls that up, emits the board
+         * event the console redraws from, and starts the workers the pause
+         * was holding back.
+         */
         deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
-        return c.json(message, 201);
+        const liveWorker = workerRunId ? ctx.liveInputs.get(workerRunId) : undefined;
+        if (liveWorker && workerRunId && (await liveWorker.deliver(body.text))) {
+          const sentAt = new Date();
+          await db(c, ctx)
+            .update(swarmMessages)
+            .set({ status: "sent", runId: workerRunId, sentAt })
+            .where(eq(swarmMessages.id, message.id));
+          return c.json({ ...message, status: "sent", runId: workerRunId, sentAt, live: true, delivery: liveWorker.delivery }, 201);
+        }
+        return c.json({ ...message, live: false }, 201);
       },
     )
     /**

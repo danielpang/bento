@@ -2469,3 +2469,110 @@ test("a resolver whose machine keeps failing is counted as the try once its rest
   assert.equal(row!.status, "landing", "tried again as before, where a second conflict fails the leaf");
   assert.equal(row!.resolverRunId, dead!.id);
 });
+
+/**
+ * A planner held open between turns hears the wake in its own process.
+ *
+ * The live session registers a handle under the run's id (swarm/live.ts
+ * through the executor), and the tick writes the folded wake into it
+ * instead of starting a run: the same bookkeeping, the same run id on
+ * the messages and the leaf's latch, and nothing queued for the run
+ * workers, because the run is already executing. Only while the
+ * session is between turns: a planner mid turn still holds the wake,
+ * and so does a planner some other process holds.
+ */
+test("a planner held open between turns is told live, and nothing is queued for it", async () => {
+  const swarm = await makeSwarm({ status: "running" });
+  const task = await makeTask(swarm.id, { status: "working", report: "did it" });
+  await db.insert(swarmMessages).values({ swarmId: swarm.id, text: "please also do X", userId: "u1" });
+  const held = await plannerRun(swarm.id, "running");
+
+  const heard: string[] = [];
+  let waiting = false;
+  const liveInputs = new Map([
+    [held.id, { delivery: "queue" as const, deliver: async (text: string) => { heard.push(text); return true; }, waiting: () => waiting }],
+  ]);
+
+  // Mid turn: held, exactly as a headless planner would be.
+  const busy = await tickSwarm(ctx, swarm.id, { ...starter(), liveInputs });
+  assert.equal(busy?.plannerRunId, null);
+  assert.equal(busy?.plannerToldLiveId, null, "a planner mid turn is not interrupted");
+  assert.equal(heard.length, 0);
+
+  // Between turns: the wake goes into the process.
+  waiting = true;
+  const deps = { ...starter(), liveInputs };
+  const told = await tickSwarm(ctx, swarm.id, deps);
+  assert.equal(told?.plannerRunId, null, "no run was started");
+  assert.equal(told?.plannerToldLiveId, held.id, "the held planner was told");
+  assert.equal(deps.calls.length, 0);
+  assert.equal(heard.length, 1);
+  assert.match(heard[0]!, /please also do X/, "the person's message is in the wake");
+  assert.match(heard[0]!, /did it/, "and so is the report");
+  assert.deepEqual(queuedRunIds(), [], "and nothing was queued for the run workers");
+
+  const [sent] = await db.select().from(swarmMessages).where(eq(swarmMessages.swarmId, swarm.id));
+  assert.equal(sent!.status, "sent");
+  assert.equal(sent!.runId, held.id, "the message is bound to the held run");
+  assert.equal((await read(task.id)).flags.plannerToldBy, held.id, "and so is the leaf's latch");
+
+  // Folded once: the next tick has nothing left to say.
+  const again = await tickSwarm(ctx, swarm.id, { ...starter(), liveInputs });
+  assert.equal(again?.plannerToldLiveId, null);
+  assert.equal(heard.length, 1);
+});
+
+test("a wake the held planner could not take waits for the next tick", async () => {
+  const swarm = await makeSwarm({ status: "running" });
+  await makeTask(swarm.id, { status: "working", report: "did it" });
+  const held = await plannerRun(swarm.id, "running");
+  // The session closed between the check and the write.
+  const liveInputs = new Map([[held.id, { delivery: "queue" as const, deliver: async () => false, waiting: () => true }]]);
+
+  const refused = await tickSwarm(ctx, swarm.id, { ...starter(), liveInputs });
+  assert.equal(refused?.plannerToldLiveId, null);
+  assert.equal(refused?.plannerRunId, null);
+  // The rows are written before the planner is, so a write it could not
+  // take is put back: no latch, no handover line on the leaf's log.
+  const [leaf] = await db.select().from(swarmTasks).where(eq(swarmTasks.swarmId, swarm.id));
+  assert.equal(leaf!.flags.plannerToldBy, undefined, "the leaf is not marked told");
+  const handovers = await db.select().from(swarmTaskEvents).where(eq(swarmTaskEvents.taskId, leaf!.id));
+  assert.deepEqual(handovers.map((event) => event.kind), [], "and no handover is logged");
+
+  // The run ends, and the ordinary path starts a planner on the same news.
+  await db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.id, held.id));
+  const started = await tickSwarm(ctx, swarm.id, starter());
+  assert.ok(started?.plannerRunId, "the news reached a new planner");
+  const [run] = await db.select().from(agentRuns).where(eq(agentRuns.id, started.plannerRunId!));
+  assert.match(run!.prompt, /did it/);
+});
+
+/**
+ * Another turn of a held planner costs what a new run costs, so it is
+ * refused for the same reasons. Refused, the wake is not written, the
+ * swarm records the refusal the way a refused run does, and the held
+ * planner is closed so the run ends and the ceiling decides what is next.
+ */
+test("a held planner refused for budget is closed, and its news waits", async () => {
+  const swarm = await makeSwarm({ status: "running" });
+  const task = await makeTask(swarm.id, { status: "working", report: "did it" });
+  const held = await plannerRun(swarm.id, "running");
+  const heard: string[] = [];
+  let closed = 0;
+  const liveInputs = new Map([[held.id, {
+    delivery: "queue" as const,
+    deliver: async (text: string) => { heard.push(text); return true; },
+    waiting: () => true,
+    close: () => { closed += 1; },
+  }]]);
+
+  const result = await tickSwarm(ctx, swarm.id, {
+    ...starter(),
+    liveInputs,
+    checkCompute: async () => ({ outOfCompute: "This swarm has spent its budget.", cap: "budget" as const }),
+  });
+  assert.equal(heard.length, 0, "the planner is not given another paid turn");
+  assert.equal(closed, 1, "it is closed instead");
+  assert.equal(result?.plannerToldLiveId, null);
+  assert.equal((await read(task.id)).flags.plannerToldBy, undefined, "the news waits for whatever starts next");
+});

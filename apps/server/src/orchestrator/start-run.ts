@@ -351,6 +351,35 @@ async function insertSwarmRun(
     }
   }
 
+  const refused = await computeRefusalFor(swarm, entitlements);
+  if (refused) return refused;
+
+  const [run] = await tx.insert(agentRuns).values(values).returning();
+  if (!run) throw new Error("run insert returned no row");
+  return run;
+}
+
+/** The swarm row's ceilings, as computeRefusalFor reads them. */
+interface SwarmCeilings {
+  organization_id: string | null;
+  budget_usd: string | null;
+  spent_measured_usd: string;
+  spent_estimated_usd: string;
+  spent_assumed_usd: string;
+  spent_notional_usd: string;
+}
+
+/**
+ * Whether the swarm may take another agent turn: the plan's hours,
+ * then the swarm's own budget. Null when it may.
+ *
+ * Shared by the two ways a swarm's agent is given work: a new run
+ * (insertSwarmRun) and a wake written into a planner held open between
+ * turns (the coordinator, through swarmComputeRefusal). A held planner
+ * that skipped this took paid turns the ordinary path would refuse.
+ */
+async function computeRefusalFor(swarm: SwarmCeilings, entitlements?: Entitlements): Promise<OutOfCompute | null> {
+  const organizationId = swarm.organization_id ?? null;
   // The organization comes off the locked row, never off the caller:
   // the same reason as the card's path, and it is what makes the plan
   // question about the team whose swarm this is.
@@ -388,8 +417,25 @@ async function insertSwarmRun(
     },
   );
   if (budget) return { outOfCompute: budget, cap: "budget" };
+  return null;
+}
 
-  const [run] = await tx.insert(agentRuns).values(values).returning();
-  if (!run) throw new Error("run insert returned no row");
-  return run;
+/**
+ * The same check for a swarm by id, with its row locked the way a run
+ * insert locks it, so a concurrent spawn reads the spend as this one
+ * leaves it. Null for a swarm that is gone: there is nothing to refuse.
+ */
+export async function swarmComputeRefusal(
+  tx: Pick<Db, "execute">,
+  swarmId: string,
+  entitlements?: Entitlements,
+): Promise<OutOfCompute | null> {
+  const locked = await tx.execute(
+    sql`select organization_id, budget_usd,
+               spent_measured_usd, spent_estimated_usd, spent_assumed_usd, spent_notional_usd
+          from swarms where id = ${swarmId} for update`,
+  );
+  const swarm = locked.rows[0] as SwarmCeilings | undefined;
+  if (!swarm) return null;
+  return computeRefusalFor(swarm, entitlements);
 }
