@@ -1786,7 +1786,7 @@ test("a leaf's drawer offers a message to its worker, and says where it goes", (
   assert.match(html, /class="composer"/, "the card conversation's composer: field, stop and send on one line");
   assert.match(html, /aria-label="Stop the agent"/, "a working leaf offers Stop beside the field");
   assert.match(html, /Worker agent is working: Edit/, "the orb row sits above the composer");
-  assert.match(html, /The worker reads this once its current step ends/);
+  assert.doesNotMatch(html, /composer-hint/, "nothing under the field: the receipt says where a message went");
   assertNoDashes(html, "the worker composer");
   // No handler, no composer: a drawer with nowhere to send it offers nothing.
   const bare = renderToStaticMarkup(createElement(SwarmNodeDrawer, { task, node: model.byId.get("slow")!, onClose: () => {} }));

@@ -649,11 +649,6 @@ export function SwarmNodeDrawer({
                   placeholder="Ask for clarification or build something else"
                   ariaLabel="Message the worker"
                 />
-                <p className="muted composer-hint">
-                  {node.agentActive
-                    ? "The worker reads this once its current step ends. If it cannot hear now, the next agent on this task is handed it. Stop ends this attempt, and the planner is told."
-                    : "The next agent on this task is handed your message when it starts."}
-                </p>
               </div>
             )}
           </Tabs.Content>
