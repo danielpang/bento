@@ -285,9 +285,7 @@ export function SwarmNodeDrawer({
       setMessageText("");
       setMessageNote({
         tone: "ok",
-        text: receipt.live
-          ? "Sent. The worker reads it once its current step ends, and its reply appears in the logs above."
-          : "Queued. The next agent on this task is handed it when it starts.",
+        text: receipt.live ? "Sent." : "Queued.",
       });
     } catch (error) {
       setMessageNote({ tone: "error", text: error instanceof Error ? error.message : "Could not send your message." });
@@ -648,7 +646,7 @@ export function SwarmNodeDrawer({
                   onStop={node.agentActive && onStopWorker && !busy ? () => onStopWorker(task.id) : undefined}
                   busy={sending}
                   maxLength={20_000}
-                  placeholder="Point the worker at something, or tell it what to change"
+                  placeholder="Ask for clarification or build something else"
                   ariaLabel="Message the worker"
                 />
                 <p className="muted composer-hint">
