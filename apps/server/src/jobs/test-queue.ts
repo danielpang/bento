@@ -12,9 +12,21 @@ const DEFAULT_REDIS_URL = "redis://127.0.0.1:6379";
  * narrow that to one side while debugging; CI leaves it unset so both
  * adapters run.
  *
- * Used by contract.test.ts plus the suites whose subject is a real
- * queue (linear inbound/outbound, slack-sync, pg-bus). Product suites
- * that only need JobQueue as AppContext plumbing stay on pg-boss.
+ * Dual-run (this helper):
+ *   jobs/contract.test.ts
+ *   linear-inbound.e2e.test.ts, linear-outbound.e2e.test.ts
+ *   orchestrator/slack-sync.e2e.test.ts
+ *   pg-bus.e2e.test.ts
+ *
+ * Stay single-backend:
+ *   pool-recycle.e2e.test.ts talks to pg-boss Timekeeper/executeSql, not
+ *   JobQueue (comment is on that test).
+ *   e2e.test.ts, auth.e2e.test.ts, mcp.e2e.test.ts,
+ *   mcp-server.e2e.test.ts, mcp/gateway.e2e.test.ts construct PgBossQueue
+ *   so registerJobs has a live queue. Their subject is product/auth/MCP,
+ *   not adapter parity; dual-running would only re-prove send/work that
+ *   contract.test.ts already covers.
+ *   Swarm suites use FakeJobQueue so they can assert sent/worked/offWork.
  */
 export function realQueueBackends(): readonly RealQueueBackend[] {
   const raw = process.env.JOB_QUEUE_BACKENDS?.trim();
@@ -24,6 +36,11 @@ export function realQueueBackends(): readonly RealQueueBackend[] {
     .map((part) => part.trim())
     .filter((part): part is RealQueueBackend => part === "pg-boss" || part === "bullmq");
   return picked.length > 0 ? picked : REAL_QUEUE_BACKENDS;
+}
+
+/** Postgres database name unique to one adapter, so dual-run files can drop in parallel. */
+export function testDatabaseName(base: string, backend: RealQueueBackend): string {
+  return `${base}_${backend.replace(/-/g, "_")}`;
 }
 
 export function testRedisUrl(): string {

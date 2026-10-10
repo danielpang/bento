@@ -19,7 +19,7 @@ import {
 import { LocalProcessDriver, WorktreeManager } from "@bento/sandbox";
 import { singleDriver } from "./orchestrator/sandbox-driver.js";
 import { createApp } from "./app.js";
-import { createTestJobQueue, realQueueBackends } from "./jobs/test-queue.js";
+import { createTestJobQueue, realQueueBackends, testDatabaseName } from "./jobs/test-queue.js";
 import { DiskArtifactStore } from "./artifact-store.js";
 import { SecretBox } from "./secrets.js";
 import { ensureLocalUser, type AppContext } from "./context.js";
@@ -42,8 +42,7 @@ import { registerLinearJobs } from "./orchestrator/linear-sync.js";
  */
 
 const baseUrl = process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5439/app";
-const testDbName = "linear_outbound_test";
-const testUrl = baseUrl.replace(/\/[^/]+$/, `/${testDbName}`);
+const testDbBase = "linear_outbound_test";
 
 let ctx: AppContext;
 let app: ReturnType<typeof createApp>;
@@ -69,6 +68,8 @@ async function pipelineFor(project: string): Promise<string> {
 }
 
 for (const backend of realQueueBackends()) {
+const testDbName = testDatabaseName(testDbBase, backend);
+const testUrl = baseUrl.replace(/\/[^/]+$/, `/${testDbName}`);
 describe(`queue:${backend}`, () => {
 before(async () => {
   filed.length = 0;

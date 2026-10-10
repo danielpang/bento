@@ -24,7 +24,7 @@ import { LocalProcessDriver, WorktreeManager } from "@bento/sandbox";
 import { singleDriver } from "./orchestrator/sandbox-driver.js";
 import type { LinearWebhookIssue } from "@bento/linear";
 import { createApp } from "./app.js";
-import { createTestJobQueue, realQueueBackends } from "./jobs/test-queue.js";
+import { createTestJobQueue, realQueueBackends, testDatabaseName } from "./jobs/test-queue.js";
 import { DiskArtifactStore } from "./artifact-store.js";
 import { SecretBox } from "./secrets.js";
 import { ensureLocalUser, type AppContext } from "./context.js";
@@ -48,8 +48,7 @@ import {
  */
 
 const baseUrl = process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5439/app";
-const testDbName = "linear_inbound_test";
-const testUrl = baseUrl.replace(/\/[^/]+$/, `/${testDbName}`);
+const testDbBase = "linear_inbound_test";
 const webhookSecret = "hook-secret";
 
 let ctx: AppContext;
@@ -62,6 +61,8 @@ const originalFetch = globalThis.fetch;
 const backlogIssues: { id: string; identifier: string; title: string; url: string }[] = [];
 
 for (const backend of realQueueBackends()) {
+const testDbName = testDatabaseName(testDbBase, backend);
+const testUrl = baseUrl.replace(/\/[^/]+$/, `/${testDbName}`);
 describe(`queue:${backend}`, () => {
 before(async () => {
   backlogIssues.length = 0;

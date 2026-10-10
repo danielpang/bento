@@ -29,7 +29,7 @@ import {
 import { LocalProcessDriver, WorktreeManager } from "@bento/sandbox";
 import { singleDriver } from "./sandbox-driver.js";
 import { DiskArtifactStore } from "../artifact-store.js";
-import { createTestJobQueue, realQueueBackends } from "../jobs/test-queue.js";
+import { createTestJobQueue, realQueueBackends, testDatabaseName } from "../jobs/test-queue.js";
 import { SecretBox } from "../secrets.js";
 import { ensureLocalUser, LOCAL_USER_ID, type AppContext } from "../context.js";
 import { EventBus } from "../events.js";
@@ -45,8 +45,7 @@ import { handleSlackNotify, queueSlackNotify, type SlackNotifyJob } from "./slac
  */
 
 const baseUrl = process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5439/app";
-const testDbName = "slack_sync_test";
-const testUrl = baseUrl.replace(/\/[^/]+$/, `/${testDbName}`);
+const testDbBase = "slack_sync_test";
 
 const TEAM = "TTEST";
 const BOT = "UBOT";
@@ -70,6 +69,8 @@ const notifyJobs: SlackNotifyJob[] = [];
 let realSend: AppContext["jobs"]["send"];
 
 for (const backend of realQueueBackends()) {
+const testDbName = testDatabaseName(testDbBase, backend);
+const testUrl = baseUrl.replace(/\/[^/]+$/, `/${testDbName}`);
 describe(`queue:${backend}`, () => {
 before(async () => {
   slackCalls.length = 0;

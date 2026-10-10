@@ -13,7 +13,7 @@ import { LocalProcessDriver, WorktreeManager } from "@bento/sandbox";
 import { singleDriver } from "./orchestrator/sandbox-driver.js";
 import pg from "pg";
 import { createApp } from "./app.js";
-import { createTestJobQueue, realQueueBackends, type RealQueueBackend } from "./jobs/test-queue.js";
+import { createTestJobQueue, realQueueBackends, testDatabaseName, type RealQueueBackend } from "./jobs/test-queue.js";
 import { DiskArtifactStore } from "./artifact-store.js";
 import { SecretBox } from "./secrets.js";
 import { ensureLocalUser, type AppContext } from "./context.js";
@@ -34,8 +34,7 @@ const run = promisify(execFile);
  */
 
 const baseUrl = process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5439/app";
-const testDbName = "pg_bus_e2e_test";
-const testUrl = baseUrl.replace(/\/[^/]+$/, `/${testDbName}`);
+const testDbBase = "pg_bus_e2e_test";
 
 let ctxA: AppContext;
 let ctxB: AppContext;
@@ -45,7 +44,7 @@ let pgBusA: PgBus;
 let pgBusB: PgBus;
 let repoDir: string;
 
-async function makeContext(backend: RealQueueBackend): Promise<AppContext> {
+async function makeContext(backend: RealQueueBackend, testUrl: string, testDbName: string): Promise<AppContext> {
   const dataDir = await mkdtemp(path.join(tmpdir(), "bento-pgbus-data-"));
   const env = loadEnv({
     BENTO_MODE: "local",
@@ -79,7 +78,7 @@ async function makeContext(backend: RealQueueBackend): Promise<AppContext> {
   };
 }
 
-function replicate(ctx: AppContext): Promise<PgBus> {
+function replicate(ctx: AppContext, testUrl: string): Promise<PgBus> {
   return attachPgBus({
     bus: ctx.bus,
     pool: ctx.pool,
@@ -96,6 +95,8 @@ function replicate(ctx: AppContext): Promise<PgBus> {
 }
 
 for (const backend of realQueueBackends()) {
+const testDbName = testDatabaseName(testDbBase, backend);
+const testUrl = baseUrl.replace(/\/[^/]+$/, `/${testDbName}`);
 describe(`queue:${backend}`, () => {
 before(async () => {
   const admin = new pg.Client({ connectionString: baseUrl });
@@ -111,13 +112,13 @@ before(async () => {
   await run("git", ["-C", repoDir, "add", "-A"]);
   await run("git", ["-C", repoDir, "-c", "user.email=t@t.test", "-c", "user.name=t", "commit", "-qm", "init"]);
 
-  ctxA = await makeContext(backend);
-  ctxB = await makeContext(backend);
+  ctxA = await makeContext(backend, testUrl, testDbName);
+  ctxB = await makeContext(backend, testUrl, testDbName);
   // Only A works the queue, so every run executes there; B is purely
   // a viewer's machine.
   await registerJobs(ctxA);
-  pgBusA = await replicate(ctxA);
-  pgBusB = await replicate(ctxB);
+  pgBusA = await replicate(ctxA, testUrl);
+  pgBusB = await replicate(ctxB, testUrl);
   appA = createApp(ctxA);
   appB = createApp(ctxB);
 });
