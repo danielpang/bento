@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
-import { parseRepoUrl, summarizeChecks, summarizeMergeState } from "./app-client.js";
+import { parseRepoUrl, resolveVisibleRepository, summarizeChecks, summarizeMergeState } from "./app-client.js";
 import { verifyWebhookSignature, webhookTarget } from "./webhook.js";
 
 test("summarizeChecks counts pending and failed", () => {
@@ -41,6 +41,51 @@ test("parseRepoUrl keeps dots in repository names", () => {
   assert.deepEqual(parseRepoUrl("https://github.com/acme/design.system"), { owner: "acme", repo: "design.system" });
   assert.deepEqual(parseRepoUrl("git@github.com:acme/foo.bar.git"), { owner: "acme", repo: "foo.bar" });
   assert.deepEqual(parseRepoUrl("https://github.com/acme/docs.github.io/"), { owner: "acme", repo: "docs.github.io" });
+});
+
+const visibleRepo = {
+  id: 42,
+  name: "bento-cloud",
+  full_name: "danielpang/bento-cloud",
+  html_url: "https://github.com/danielpang/bento-cloud",
+  clone_url: "https://github.com/danielpang/bento-cloud.git",
+  default_branch: "main",
+  owner: { login: "danielpang" },
+};
+
+test("resolveVisibleRepository returns null when GitHub will not show the repository", async () => {
+  const result = await resolveVisibleRepository(async () => {
+    throw Object.assign(new Error("Not Found"), { status: 404 });
+  }, { owner: "danielpang", repo: "bento-cloud" });
+  assert.equal(result, null);
+});
+
+test("resolveVisibleRepository keeps the repository GitHub returns now", async () => {
+  const result = await resolveVisibleRepository(async () => visibleRepo, {
+    owner: "danielpang",
+    repo: "old-name",
+  });
+  assert.equal(result?.id, 42);
+  assert.equal(result?.fullName, "danielpang/bento-cloud");
+  assert.equal(result?.cloneUrl, "https://github.com/danielpang/bento-cloud.git");
+  assert.equal(result?.canClone, true);
+});
+
+test("resolveVisibleRepository reports a repository the token cannot read", async () => {
+  const result = await resolveVisibleRepository(
+    async () => ({ ...visibleRepo, permissions: { pull: false } }),
+    { owner: "danielpang", repo: "bento-cloud" },
+  );
+  assert.equal(result?.canClone, false);
+});
+
+test("resolveVisibleRepository lets other GitHub errors through", async () => {
+  await assert.rejects(
+    resolveVisibleRepository(async () => {
+      throw Object.assign(new Error("GitHub down"), { status: 500 });
+    }, { owner: "acme", repo: "app" }),
+    /GitHub down/,
+  );
 });
 
 test("webhook signature verification accepts valid and rejects tampered", () => {

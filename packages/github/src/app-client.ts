@@ -6,6 +6,7 @@ import type {
   GitHubPublisher,
   GitHubRepository,
   MergeStateSummary,
+  VisibleRepository,
   OpenPullRequest,
   OpenPullRequestOnBranch,
   PullRequestDetails,
@@ -364,6 +365,13 @@ export class GitHubAppClient implements GitHubClient, GitHubPublisher {
     return createPullRequestCommentVia(this.octokit, ref, body);
   }
 
+  resolveRepository(input: { owner: string; repo: string }): Promise<VisibleRepository | null> {
+    return resolveVisibleRepository(async (owner, repo) => {
+      const response = await this.octokit.repos.get({ owner, repo });
+      return response.data;
+    }, input);
+  }
+
   async listRepositories(): Promise<GitHubRepository[]> {
     const rows = await this.octokit.paginate(this.octokit.apps.listReposAccessibleToInstallation, {
       per_page: 100,
@@ -386,6 +394,60 @@ export class GitHubAppClient implements GitHubClient, GitHubPublisher {
     })) as { token: string };
     return auth.token;
   }
+}
+
+/**
+ * The fields a repository lookup needs. GitHub's own payload is larger.
+ * This is the slice the seed clone acts on.
+ */
+export interface GitHubRepoPayload {
+  id: number;
+  name: string;
+  full_name: string;
+  html_url: string;
+  clone_url: string;
+  default_branch: string;
+  owner: { login: string };
+  permissions?: { pull?: boolean };
+}
+
+/**
+ * Whether this connection can see `owner/repo`, and under what name.
+ *
+ * Null is GitHub's 404, which is also what it says for a private
+ * repository the token cannot see. Any other failure is left to the
+ * caller: a 500 is not a reason to tell someone their repository is gone.
+ */
+export async function resolveVisibleRepository(
+  lookup: (owner: string, repo: string) => Promise<GitHubRepoPayload>,
+  input: { owner: string; repo: string },
+): Promise<VisibleRepository | null> {
+  try {
+    return toVisibleRepository(await lookup(input.owner, input.repo));
+  } catch (err) {
+    if (isGitHubNotFound(err)) return null;
+    throw err;
+  }
+}
+
+export function isGitHubNotFound(err: unknown): boolean {
+  if (typeof err !== "object" || err === null) return false;
+  return (err as { status?: unknown }).status === 404;
+}
+
+function toVisibleRepository(repo: GitHubRepoPayload): VisibleRepository {
+  return {
+    id: repo.id,
+    name: repo.name,
+    fullName: repo.full_name,
+    owner: repo.owner.login,
+    url: repo.html_url,
+    cloneUrl: repo.clone_url,
+    defaultBranch: repo.default_branch,
+    // Absent permissions still get a clone attempt. An explicit false
+    // is the token seeing the repository and being unable to read it.
+    canClone: repo.permissions?.pull !== false,
+  };
 }
 
 function installationNumber(value: string): number {
