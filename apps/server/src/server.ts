@@ -8,6 +8,7 @@ import { startLogExport } from "./log-export.js";
 import { attachPgBus } from "./pg-bus.js";
 import { WorktreeManager } from "@bento/sandbox";
 import PgBoss from "pg-boss";
+import { importPgbossPayloadJobs } from "./jobs/import-pgboss.js";
 import { createRuntimeJobQueue, jobQueueBackend, requireRedisUrl } from "./jobs/runtime.js";
 import { createApp } from "./app.js";
 import { createArtifactStore } from "./artifact-store.js";
@@ -131,6 +132,15 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
       await boss.start();
     }
     const jobs = await createRuntimeJobQueue(env, boss ?? null);
+    // Payload-only pg-boss jobs cannot be rebuilt from rows. Copy them
+    // before workers start so a cutover does not drop Slack or Linear
+    // work, and so a crash here still finds the same ids on retry.
+    if (jobs.kind === "bullmq") {
+      const copied = await importPgbossPayloadJobs({ pool, jobs });
+      if (copied.imported > 0) {
+        console.log(`imported ${copied.imported} payload-only pg-boss job(s)`);
+      }
+    }
 
     // Local mode has a single implicit user; multi mode uses better-auth.
     const userId = env.BENTO_MODE === "multi" ? "" : await ensureLocalUser(db);

@@ -1,5 +1,6 @@
 import { Queue, Worker, type JobsOptions } from "bullmq";
 import Redis from "ioredis";
+import { importedPgbossJobId } from "./import-pgboss.js";
 import type { JobCounts, JobQueue, QueueName, SendOptions, WorkOptions } from "./types.js";
 
 /** pg-boss 10 default retryLimit is 2, so 3 attempts including the first. */
@@ -150,6 +151,36 @@ export class BullMqQueue implements JobQueue {
   async offWork(_queue: QueueName): Promise<void> {
     // Closing a Worker from inside its own processor deadlocks. Idle
     // workers cost Redis nothing, so lazy offWork is a no-op here.
+  }
+
+  /**
+   * One pg-boss payload job, identified by that row's id. A waiting,
+   * active, delayed, or finished job with the same id is left alone so
+   * a repeat cutover (or a boot that resumes after a crash) cannot
+   * duplicate work. Completed imports stay in Redis for that reason.
+   */
+  async importOnce<T>(
+    queue: QueueName,
+    data: T,
+    opts: SendOptions & { sourceId: string },
+  ): Promise<"imported" | "skipped"> {
+    this.assertOpen();
+    const jobId = importedPgbossJobId(opts.sourceId);
+    const q = await this.queue(queue);
+    const existing = await q.getJob(jobId);
+    if (existing) {
+      const state = await existing.getState();
+      if (state !== "unknown") return "skipped";
+      await existing.remove().catch(() => {});
+    }
+    const { sourceId: _sourceId, ...sendOpts } = opts;
+    await q.add("job", asJobData(data), {
+      ...this.jobOpts(sendOpts),
+      jobId,
+      removeOnComplete: false,
+      removeOnFail: false,
+    });
+    return "imported";
   }
 
   private async sendCoalesce(

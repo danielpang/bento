@@ -159,6 +159,7 @@ test("local startup does not import Redis", () => {
     "jobs/bullmq.ts",
     "jobs/bullmq.test.ts",
     "jobs/contract.test.ts",
+    "jobs/import-pgboss.test.ts",
     "jobs/test-queue.ts",
   ]);
   const forbidden =
