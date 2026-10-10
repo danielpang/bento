@@ -1,10 +1,12 @@
-import { Fragment, useState, type FormEvent, type ReactNode } from "react";
+import { Fragment, useState, type ReactNode } from "react";
 import * as Tabs from "@radix-ui/react-tabs";
 import { Markdown } from "./Markdown.js";
 import { BetaOnly } from "../beta.js";
 import { sandboxProviderWords } from "../sandbox-provider.js";
 import { CompletionRing } from "./CompletionRing.js";
 import { AgentOrb } from "./AgentOrb.js";
+import { ChatComposer } from "./ChatComposer.js";
+import { WorkingRow, type RunActivity } from "./SwarmRunOutput.js";
 import { useDismissable } from "./ui.js";
 import {
   attentionNote,
@@ -54,6 +56,8 @@ export function SwarmNodeDrawer({
   onReassign,
   onEdit,
   onMessage,
+  onStopWorker,
+  workerActivity,
   agents = [],
   transcript,
   busy,
@@ -116,6 +120,10 @@ export function SwarmNodeDrawer({
    * handed it in its prompt, and the composer says which happened.
    */
   onMessage?: (taskId: string, text: string) => Promise<{ live: boolean }>;
+  /** Stops the agent on this leaf, beside the composer while one is working. */
+  onStopWorker?: (taskId: string) => void;
+  /** What the worker's streamed run is doing, for the orb row above the composer. */
+  workerActivity?: RunActivity;
   /** The agents this project can put on a leaf, for Reassign. */
   agents?: { id: string; name: string }[];
   /** Read-only output from the worker run assigned to this task. */
@@ -267,8 +275,7 @@ export function SwarmNodeDrawer({
   // withdrawn: a message to a leaf with no agent waits for the next one.
   const canMessage = !!onMessage && task.nodeType === "leaf" && !["done", "cancelled"].includes(task.status);
 
-  async function sendMessage(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  async function sendMessage() {
     const text = messageText.trim();
     if (!text || sending || !onMessage) return;
     setSending(true);
@@ -626,33 +633,30 @@ export function SwarmNodeDrawer({
               {transcript ?? <p className="muted">Worker logs will appear here when this task starts.</p>}
             </section>
             {canMessage && (
-              <form className="swarm-planner-compose swarm-node-compose" onSubmit={(event) => void sendMessage(event)}>
+              <div className="swarm-node-compose composer-dock">
+                {workerActivity && <WorkingRow activity={workerActivity} agentName="Worker agent" />}
                 {messageNote && (
                   <p className={messageNote.tone === "error" ? "error" : "muted swarm-node-compose-note"} role={messageNote.tone === "error" ? "alert" : "status"}>
                     {messageNote.text}
                   </p>
                 )}
-                <label className="meta-label" htmlFor="swarm-node-message">Message the worker</label>
-                <textarea
+                <ChatComposer
                   id="swarm-node-message"
-                  className="input"
-                  rows={3}
-                  maxLength={20_000}
                   value={messageText}
-                  onChange={(event) => setMessageText(event.target.value)}
+                  onChange={setMessageText}
+                  onSend={() => void sendMessage()}
+                  onStop={node.agentActive && onStopWorker && !busy ? () => onStopWorker(task.id) : undefined}
+                  busy={sending}
+                  maxLength={20_000}
                   placeholder="Point the worker at something, or tell it what to change"
+                  ariaLabel="Message the worker"
                 />
-                <div className="swarm-planner-compose-bottom">
-                  <span className="muted">
-                    {node.agentActive
-                      ? "The worker reads this once its current step ends. If it cannot hear now, the next agent on this task is handed it."
-                      : "The next agent on this task is handed your message when it starts."}
-                  </span>
-                  <button className="btn btn-primary" type="submit" disabled={sending || messageText.trim() === ""}>
-                    {sending ? "Sending..." : "Send"}
-                  </button>
-                </div>
-              </form>
+                <p className="muted composer-hint">
+                  {node.agentActive
+                    ? "The worker reads this once its current step ends. If it cannot hear now, the next agent on this task is handed it. Stop ends this attempt, and the planner is told."
+                    : "The next agent on this task is handed your message when it starts."}
+                </p>
+              </div>
             )}
           </Tabs.Content>
         )}

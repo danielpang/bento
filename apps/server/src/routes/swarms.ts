@@ -1254,6 +1254,39 @@ export function swarmRoutes(ctx: AppContext) {
       saySwarmChanged(ctx, c, swarm);
       return c.json({ runId: run.id, status: "cancelled" });
     })
+    /**
+     * Stops the agent on one leaf, the way the card conversation's stop
+     * ends a run: the attempt is cancelled, and the coordinator reads a
+     * worker that stopped without reporting as a failed leaf, which the
+     * planner is told about. The leaf itself is not cancelled; a retry
+     * puts a new agent on it.
+     */
+    .post("/:id/tasks/:taskId/stop", async (c) => {
+      const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
+      if (!swarm) return c.json({ error: "not found" }, 404);
+      const refusal = await requireSwarms(ctx, c, swarm.organizationId);
+      if (refusal) return c.json(refusal.body, refusal.status);
+      const [task] = await db(c, ctx)
+        .select({ id: swarmTasks.id })
+        .from(swarmTasks)
+        .where(and(eq(swarmTasks.id, c.req.param("taskId")), eq(swarmTasks.swarmId, swarm.id)))
+        .limit(1);
+      if (!task) return c.json({ error: "not found" }, 404);
+
+      const [run] = await db(c, ctx)
+        .select({ id: agentRuns.id })
+        .from(agentRuns)
+        .where(and(eq(agentRuns.swarmId, swarm.id), eq(agentRuns.swarmTaskId, task.id), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)))
+        .orderBy(desc(agentRuns.queuedAt))
+        .limit(1);
+      if (!run) return c.json({ error: "No agent is working this task." }, 409);
+
+      ctx.running.get(run.id)?.abort();
+      await markCancelled(ctx, run.id);
+      deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
+      saySwarmChanged(ctx, c, swarm);
+      return c.json({ runId: run.id, status: "cancelled" });
+    })
     .post("/:id/start", async (c) => {
       const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
       if (!swarm) return c.json({ error: "not found" }, 404);

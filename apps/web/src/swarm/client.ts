@@ -61,6 +61,8 @@ export interface SwarmApi {
   resumeSwarm(swarmId: string): Promise<void>;
   retryPlanner(swarmId: string): Promise<void>;
   stopPlanner(swarmId: string): Promise<void>;
+  /** Stops the agent on one leaf. The coordinator then fails the leaf, and a retry puts a new agent on it. */
+  stopTaskWorker(swarmId: string, taskId: string): Promise<void>;
   stopSwarm(swarmId: string): Promise<void>;
   releaseSwarmBranch(swarmId: string): Promise<void>;
   /**
@@ -295,6 +297,12 @@ export function fixtureSwarmApi(clock: () => number = () => Date.now()): Fixture
         if (detail.plannerRun && ["queued", "starting", "running"].includes(detail.plannerRun.status)) {
           detail.plannerRun.status = "cancelled";
         }
+      });
+    },
+    stopTaskWorker(swarmId, taskId) {
+      return mutate(swarmId, (detail) => {
+        const task = detail.tasks.find((row) => row.id === taskId);
+        if (task) task.assignedRunId = null;
       });
     },
     resumeSwarm(swarmId) {
@@ -1071,6 +1079,9 @@ export function httpSwarmApi(
     },
     async stopPlanner(swarmId) {
       await post(`/api/swarms/${swarmId}/planner/stop`);
+    },
+    async stopTaskWorker(swarmId, taskId) {
+      await post(`/api/swarms/${swarmId}/tasks/${taskId}/stop`);
     },
     async stopSwarm(swarmId) {
       await post(`/api/swarms/${swarmId}/cancel`);

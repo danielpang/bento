@@ -2852,3 +2852,31 @@ test("a message to a node reaches a live worker now, and otherwise waits for the
   assert.equal(later.status, "queued", "no session to write into, so the next agent is handed it");
   assert.deepEqual((await takeNodeMessages(db, task!.id, worker!.id)).map((row) => row.text), ["and the refund path"]);
 });
+
+test("stopping a task's agent cancels its run and leaves the task for a retry", async () => {
+  const swarm = await createSwarm();
+  const [planner] = await db.select().from(agentRuns).where(eq(agentRuns.swarmId, swarm.id));
+  const [task] = await db.insert(swarmTasks).values({ swarmId: swarm.id, title: "Empty cart state", status: "working" }).returning();
+
+  // Nobody on it yet: nothing to stop.
+  assert.equal((await post(`/api/swarms/${swarm.id}/tasks/${task!.id}/stop`)).status, 409);
+
+  const [worker] = await db
+    .insert(agentRuns)
+    .values({ type: "swarm", swarmId: swarm.id, swarmTaskId: task!.id, role: "worker", agentProfileId: planner!.agentProfileId, prompt: "", status: "running" })
+    .returning();
+  const controller = new AbortController();
+  ctx.running.set(worker!.id, controller);
+  queued.length = 0;
+  const stopped = await post(`/api/swarms/${swarm.id}/tasks/${task!.id}/stop`);
+  assert.equal(stopped.status, 200, await stopped.clone().text());
+  assert.equal(controller.signal.aborted, true, "the agent's process was told to stop");
+  const [run] = await db.select().from(agentRuns).where(eq(agentRuns.id, worker!.id));
+  assert.equal(run!.status, "cancelled");
+  assert.ok(queued.some((job) => job.queue === "swarm.tick"), "and the coordinator decides what the stop means for the leaf");
+
+  // Another swarm's task is not this swarm's to stop.
+  const other = await createSwarm({ title: "Other" });
+  const [foreign] = await db.insert(swarmTasks).values({ swarmId: other.id, title: "theirs" }).returning();
+  assert.equal((await post(`/api/swarms/${swarm.id}/tasks/${foreign!.id}/stop`)).status, 404);
+});

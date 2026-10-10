@@ -10082,11 +10082,10 @@ a.hours-person-name:hover {
 .swarm-worker-output-head .swarm-output-link { flex: none; }
 .swarm-planner-history { border-bottom: 1px solid var(--line); padding-bottom: 12px; }
 .swarm-planner-history summary { cursor: pointer; color: var(--text-dim); font-size: 11px; margin-bottom: 8px; }
-.swarm-planner-compose { display: flex; flex-direction: column; gap: 9px; padding: 16px 24px; border-top: 1px solid var(--line); background: var(--panel); }
-.swarm-planner-compose textarea { resize: vertical; min-height: 74px; max-height: 40vh; }
-.swarm-planner-compose-bottom { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
-.swarm-planner-compose-bottom .muted { flex: 1 1 100%; margin: 0; font-size: 11px; }
-.swarm-planner-compose-bottom .btn { flex: none; }
+/* The card conversation's composer dock, at the foot of the drawer. */
+.swarm-planner-compose { padding: 10px 24px 6px; border-top: 1px solid var(--line); background: var(--panel); }
+.swarm-planner-compose .working-row { margin-top: 0; }
+.swarm-planner-compose .composer { margin-top: 6px; }
 
 @media (max-width: 720px) { .swarm-planner-compose { padding: 12px 16px max(12px, env(safe-area-inset-bottom)); } }
 .swarm-node-header-status { margin-right: 4px; }
@@ -10094,8 +10093,10 @@ a.hours-person-name:hover {
 .status .agent-orb-inline { flex: none; margin-right: 2px; }
 .swarm-node-foot .status .agent-orb-inline,
 .swarm-row-status .agent-orb-inline { width: 16px !important; height: 16px !important; }
-.swarm-node-compose { padding: 12px 0 0; border-top: 0; background: transparent; }
-.swarm-node-compose-note { margin: 0; }
+.swarm-node-compose { padding: 10px 0 0; }
+.swarm-node-compose .working-row { margin-top: 0; }
+.swarm-node-compose .composer { margin-top: 6px; }
+.swarm-node-compose-note { margin: 6px 0 0; }
 .swarm-node-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; color: var(--text-dim); font-size: 11px; font-variant-numeric: tabular-nums; }
 .swarm-node-summary-divider { width: 1px; height: 14px; background: var(--line-bright); }
 .swarm-node-attention { color: var(--gated); }

@@ -7,7 +7,7 @@ import { DeleteSwarmDialog } from "./DeleteSwarmDialog.js";
 import { ReopenDialog } from "./ReopenDialog.js";
 import { SwarmEmpty, SwarmStrip } from "./SwarmStrip.js";
 import { SwarmNodeDrawer } from "./SwarmNodeDrawer.js";
-import { SwarmRunOutput, SwarmRunOutputDrawer, SwarmWorkerOutputDrawer } from "./SwarmRunOutput.js";
+import { SwarmRunOutput, SwarmRunOutputDrawer, SwarmWorkerOutputDrawer, type RunActivity } from "./SwarmRunOutput.js";
 import { SwarmPage } from "./SwarmPage.js";
 import { SwarmPageSkeleton } from "./Skeleton.js";
 import { swarmApi, type SwarmAgent } from "../swarm/client.js";
@@ -114,6 +114,8 @@ export function SwarmBoard({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [taskActionError, setTaskActionError] = useState("");
+  /** What the open node's worker is doing, read off its log stream for the drawer's orb row. */
+  const [workerActivity, setWorkerActivity] = useState<RunActivity>({ running: false, tool: null });
   /**
    * The instant the model is built for, moved on a slow tick rather
    * than every second. It only decides which leaves have crossed the
@@ -501,7 +503,9 @@ export function SwarmBoard({
           }
           onEdit={(id, edit) => selectedId && act(() => swarmApi.editTask(selectedId, id, edit), true)}
           onMessage={(id, text) => selectedId ? swarmApi.messageTask(selectedId, id, text) : Promise.resolve({ live: false })}
-          transcript={task.assignedRunId || node?.runs?.[0]?.id ? <SwarmRunOutput client={client} runId={task.assignedRunId ?? node!.runs![0]!.id} agentName="Worker agent" /> : undefined}
+          onStopWorker={(id) => selectedId && act(() => swarmApi.stopTaskWorker(selectedId, id), true)}
+          workerActivity={workerActivity}
+          transcript={task.assignedRunId || node?.runs?.[0]?.id ? <SwarmRunOutput client={client} runId={task.assignedRunId ?? node!.runs![0]!.id} agentName="Worker agent" onActivity={setWorkerActivity} /> : undefined}
         />
       )}
 

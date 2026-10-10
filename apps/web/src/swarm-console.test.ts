@@ -843,8 +843,9 @@ test("the planner conversation has guidance input and worker output stays read-o
     swarmId: "sw-1", swarmStatus: "planning", runId: "run-2", runStatus: "running",
     agentName: "Planner agent", onMessageSent: () => {}, onStop: () => {}, onClose: () => {},
   }));
-  assert.match(activePlanner, /Stop planner/);
-  assert.doesNotMatch(planner, /Stop planner/, "a finished planner has no running turn to stop");
+  assert.match(activePlanner, /aria-label="Stop the agent"/, "Stop sits beside the field while the planner works, as on a card");
+  assert.match(activePlanner, /class="composer"/, "the card conversation's one-line composer");
+  assert.doesNotMatch(planner, /aria-label="Stop the agent"/, "a finished planner has no running turn to stop");
 });
 
 test("a checkout failure offers retry and keeps its error in technical details", () => {
@@ -1778,9 +1779,13 @@ test("a leaf's drawer offers a message to its worker, and says where it goes", (
   const model = buildSwarmModel(tasks(), { now: 60 * 60 * 1000, runningTaskIds: new Set(["slow"]) });
   const task = tasks().find((row) => row.id === "slow")!;
   const html = renderToStaticMarkup(createElement(SwarmNodeDrawer, {
-    task, node: model.byId.get("slow")!, onClose: () => {}, onMessage: async () => ({ live: true }),
+    task, node: model.byId.get("slow")!, onClose: () => {}, onMessage: async () => ({ live: true }), onStopWorker: () => {},
+    workerActivity: { running: true, tool: "Edit" },
   }));
-  assert.match(html, /Message the worker/);
+  assert.match(html, /aria-label="Message the worker"/);
+  assert.match(html, /class="composer"/, "the card conversation's composer: field, stop and send on one line");
+  assert.match(html, /aria-label="Stop the agent"/, "a working leaf offers Stop beside the field");
+  assert.match(html, /Worker agent is working: Edit/, "the orb row sits above the composer");
   assert.match(html, /The worker reads this once its current step ends/);
   assertNoDashes(html, "the worker composer");
   // No handler, no composer: a drawer with nowhere to send it offers nothing.
