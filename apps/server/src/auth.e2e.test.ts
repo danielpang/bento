@@ -3719,6 +3719,9 @@ test("sign in and sign up outcomes reach PostHog through better-auth's own hooks
   assert.equal(started.status, 200);
   assert.equal(events[4]?.event, "sign in started");
   assert.deepEqual(events[4]?.properties, { method: "github", route: "/sign-in/social" });
+  const stateCookie = started.headers.getSetCookie().find((header) => header.includes(".state="));
+  assert.ok(stateCookie, "github sign in sets the oauth state cookie");
+  assert.match(stateCookie, /Max-Age=600/i, "the state cookie lasts as long as the verification row");
 
   // A provider nobody configured is a fault, and its name is not a property value.
   const missing = await post("/api/auth/sign-in/social", { provider: "gitlab", callbackURL: "/" });
@@ -3738,8 +3741,8 @@ test("sign in and sign up outcomes reach PostHog through better-auth's own hooks
   assert.match(callback.headers.get("location") ?? "", /error=state_mismatch/);
   assert.equal(events[6]?.event, "sign in failed");
   assert.deepEqual(events[6]?.properties, { method: "github", route: "/callback/:id", status: 302, code: "state_mismatch" });
-  assert.equal(exceptions.length, 2);
-  assert.equal(exceptions[1].properties?.$exception_fingerprint, "sign in failed:github:state_mismatch");
+  assert.equal(exceptions.length, 1, "a callback with no matching state cookie is not an auth outage");
+  assert.equal(exceptions[0].properties?.$exception_fingerprint, "sign in failed:unknown:PROVIDER_NOT_FOUND");
 
   // The same refusal while signed in is the account-link flow, which is not a sign in.
   const sessionCookie = right.headers
