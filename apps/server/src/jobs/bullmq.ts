@@ -1,5 +1,5 @@
 import { Queue, Worker, type JobsOptions } from "bullmq";
-import Redis from "ioredis";
+import { Redis } from "ioredis";
 import type { JobCounts, JobQueue, QueueName, SendOptions, WorkOptions } from "./types.js";
 
 /** pg-boss 10 default retryLimit is 2, so 3 attempts including the first. */
@@ -166,12 +166,12 @@ export class BullMqQueue implements JobQueue {
       if (state === "active") {
         await this.markRerun(queue, key, data);
         const again = await existing.getState();
-        if (again !== "active" && again !== "waiting" && again !== "delayed" && again !== "paused") {
+        if (again !== "active" && again !== "waiting" && again !== "delayed") {
           await this.consumeRerun(q, queue, key, data, jobOpts);
         }
         return;
       }
-      if (state === "waiting" || state === "delayed" || state === "paused") return;
+      if (state === "waiting" || state === "delayed") return;
       await existing.remove().catch(() => {});
     }
     await q.add("job", data, { ...jobOpts, jobId });
@@ -231,9 +231,9 @@ export class BullMqQueue implements JobQueue {
     const attempts = opts?.attempts ?? DEFAULT_ATTEMPTS;
     return {
       attempts,
-      delay: opts?.delayMs,
       removeOnComplete: true,
       removeOnFail: true,
+      ...(opts?.delayMs !== undefined ? { delay: opts.delayMs } : {}),
       ...(opts?.backoffMs !== undefined
         ? { backoff: { type: "exponential" as const, delay: opts.backoffMs } }
         : {}),
