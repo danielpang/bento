@@ -10090,6 +10090,12 @@ a.hours-person-name:hover {
 
 @media (max-width: 720px) { .swarm-planner-compose { padding: 12px 16px max(12px, env(safe-area-inset-bottom)); } }
 .swarm-node-header-status { margin-right: 4px; }
+/* The orb sits where a status dot would, on the text's baseline. */
+.status .agent-orb-inline { flex: none; margin-right: 2px; }
+.swarm-node-foot .status .agent-orb-inline,
+.swarm-row-status .agent-orb-inline { width: 16px !important; height: 16px !important; }
+.swarm-node-compose { padding: 12px 0 0; border-top: 0; background: transparent; }
+.swarm-node-compose-note { margin: 0; }
 .swarm-node-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; color: var(--text-dim); font-size: 11px; font-variant-numeric: tabular-nums; }
 .swarm-node-summary-divider { width: 1px; height: 14px; background: var(--line-bright); }
 .swarm-node-attention { color: var(--gated); }

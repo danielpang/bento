@@ -485,6 +485,54 @@ is one pull request of the swarm's branch, `stacked` is one per landed
 task, each against the task that landed before it, recorded on the task
 as `pullRequests`.
 
+## A swarm's planner and workers hold a live session, and stdin is what ends a run
+
+A run on a live adapter (Claude Code, pi) reads its prompt from stdin
+and keeps reading until this side closes it; nothing in the CLI ends
+the process after a result. So every run on such an adapter attaches a
+conversation (`attachLiveConversation` in `orchestrator/live-session.ts`),
+because the conversation is what closes stdin. A card's is
+`cardConversation`; a swarm planner's and worker's come from
+`orchestrator/swarm/live.ts`; every other swarm role gets
+`headlessConversation`, which closes after the first finished turn.
+Before this, swarm runs attached nothing, so a planner on Claude Code
+sat idle after its result until the run limit. Do not add a role that
+builds a live channel and attaches no conversation.
+
+The planner stays open between turns while its swarm is running and a
+leaf is assigned or being worked (`shouldHoldPlannerSession`, re-asked
+after every turn, `BENTO_SWARM_PLANNER_HOLD_SEC` per wait, and never
+past the run limit less a minute). A held planner keeps the swarm's
+machine awake and billing, which is why the hold ends by itself once
+there is nobody to wait for, and why a swarm paused on a question
+closes its planner. The coordinator's `deliverPlannerWake` writes the
+folded wake into a held planner (`deps.liveInputs`, only while
+`waiting()`, so a planner mid turn is told everything at once when it
+finishes) and reports it as `plannerToldLiveId`, never as
+`plannerRunId`: the tick enqueues `plannerRunId` for the run workers,
+and enqueueing a run that is already executing starts a second agent.
+The hold's `onWaiting` enqueues a tick, so a report that arrived during
+the turn is delivered the moment the turn ends. Everything a planner is
+told is still keyed by run id (`plannerToldBy`, `swarm_messages.run_id`),
+so a leaf told to a held planner that then finished its turn undecided
+is re-told only once that run ends, which the hold bounds.
+
+A worker is never held: its run's end is what hands its report to the
+planner. It is live so a message on its node reaches it while it works
+(the swarm message route writes into `ctx.liveInputs` for the task's
+`assignedRunId`, queued behind the current turn by the adapter, and
+answers `live: true`); a worker nobody can reach now is handed the
+message in the next agent's prompt (`takeNodeMessages`), as before.
+Node messages follow the card lifecycle: sent while a run holds them,
+delivered on that run's next result (`confirmSwarmMessagesDelivered`),
+and back to queued when the run ends without one
+(`requeueUndeliveredNodeMessages`). A planner's unread messages are put
+back by the coordinator instead, which reads how the run ended to decide
+whether they wake another planner.
+
+Both are behind the beta testers flag (`isBetaRun` in
+`swarmLiveConversation`), because a held planner is a held machine.
+
 ## Starting a run goes through startRunIfIdle, never a bare insert
 
 One card, one agent. Every door that starts a run (the runs route,

@@ -1,9 +1,10 @@
-import { Fragment, useState, type ReactNode } from "react";
+import { Fragment, useState, type FormEvent, type ReactNode } from "react";
 import * as Tabs from "@radix-ui/react-tabs";
 import { Markdown } from "./Markdown.js";
 import { BetaOnly } from "../beta.js";
 import { sandboxProviderWords } from "../sandbox-provider.js";
 import { CompletionRing } from "./CompletionRing.js";
+import { AgentOrb } from "./AgentOrb.js";
 import { useDismissable } from "./ui.js";
 import {
   attentionNote,
@@ -52,6 +53,7 @@ export function SwarmNodeDrawer({
   onAddTask,
   onReassign,
   onEdit,
+  onMessage,
   agents = [],
   transcript,
   busy,
@@ -107,6 +109,13 @@ export function SwarmNodeDrawer({
   onAddTask?: (parentId: string, task: { title: string; description?: string }) => void;
   onReassign?: (taskId: string, agentProfileId: string | null) => void;
   onEdit?: (taskId: string, edit: { description: string }) => void;
+  /**
+   * Sends a message to the agent working this leaf. The answer says
+   * whether a running worker heard it now (a live session, queued
+   * behind its current turn) or whether the next agent on the leaf is
+   * handed it in its prompt, and the composer says which happened.
+   */
+  onMessage?: (taskId: string, text: string) => Promise<{ live: boolean }>;
   /** The agents this project can put on a leaf, for Reassign. */
   agents?: { id: string; name: string }[];
   /** Read-only output from the worker run assigned to this task. */
@@ -169,6 +178,9 @@ export function SwarmNodeDrawer({
   const [adding, setAdding] = useState(false);
   const [addTitle, setAddTitle] = useState("");
   const [addDetail, setAddDetail] = useState("");
+  const [messageText, setMessageText] = useState("");
+  const [sending, setSending] = useState(false);
+  const [messageNote, setMessageNote] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
   const flags = Object.entries(task.flags).filter(([key]) => key !== "landingError");
   // The fetched list when there is one, and the plan row's otherwise.
   // A fetched empty list is an answer, not a missing one, so the
@@ -251,6 +263,32 @@ export function SwarmNodeDrawer({
     setEditing((open) => !open);
   }
 
+  // A leaf still has somebody to talk to until it is finished or
+  // withdrawn: a message to a leaf with no agent waits for the next one.
+  const canMessage = !!onMessage && task.nodeType === "leaf" && !["done", "cancelled"].includes(task.status);
+
+  async function sendMessage(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const text = messageText.trim();
+    if (!text || sending || !onMessage) return;
+    setSending(true);
+    setMessageNote(null);
+    try {
+      const receipt = await onMessage(task.id, text);
+      setMessageText("");
+      setMessageNote({
+        tone: "ok",
+        text: receipt.live
+          ? "Sent. The worker reads it once its current step ends, and its reply appears in the logs above."
+          : "Queued. The next agent on this task is handed it when it starts.",
+      });
+    } catch (error) {
+      setMessageNote({ tone: "error", text: error instanceof Error ? error.message : "Could not send your message." });
+    } finally {
+      setSending(false);
+    }
+  }
+
   function runPrimaryAction() {
     if (primaryAction === "startOver") setConfirmingStartOver(true);
     else if (primaryAction === "landing") onRetryLanding?.(task.id);
@@ -267,7 +305,9 @@ export function SwarmNodeDrawer({
         <div className="feature-topline">
           <span className="feature-kicker">{task.nodeType === "leaf" ? "Swarm task" : "Plan node"}</span>
           <span className="status swarm-node-header-status">
-            <span className="dot" data-state={diagramTaskTone(task.status, task.nodeType, node.agentActive, node.landing)} />
+            {node.agentActive
+              ? <AgentOrb label="Agent working" />
+              : <span className="dot" data-state={diagramTaskTone(task.status, task.nodeType, node.agentActive, node.landing)} />}
             {diagramTaskWords(task.status, task.nodeType, node.agentActive, node.landing)}
           </span>
           <button className="btn btn-ghost feature-close" onClick={onClose} aria-label="Close" title="Close (Esc)">
@@ -585,6 +625,35 @@ export function SwarmNodeDrawer({
               )}
               {transcript ?? <p className="muted">Worker logs will appear here when this task starts.</p>}
             </section>
+            {canMessage && (
+              <form className="swarm-planner-compose swarm-node-compose" onSubmit={(event) => void sendMessage(event)}>
+                {messageNote && (
+                  <p className={messageNote.tone === "error" ? "error" : "muted swarm-node-compose-note"} role={messageNote.tone === "error" ? "alert" : "status"}>
+                    {messageNote.text}
+                  </p>
+                )}
+                <label className="meta-label" htmlFor="swarm-node-message">Message the worker</label>
+                <textarea
+                  id="swarm-node-message"
+                  className="input"
+                  rows={3}
+                  maxLength={20_000}
+                  value={messageText}
+                  onChange={(event) => setMessageText(event.target.value)}
+                  placeholder="Point the worker at something, or tell it what to change"
+                />
+                <div className="swarm-planner-compose-bottom">
+                  <span className="muted">
+                    {node.agentActive
+                      ? "The worker reads this once its current step ends. If it cannot hear now, the next agent on this task is handed it."
+                      : "The next agent on this task is handed your message when it starts."}
+                  </span>
+                  <button className="btn btn-primary" type="submit" disabled={sending || messageText.trim() === ""}>
+                    {sending ? "Sending..." : "Send"}
+                  </button>
+                </div>
+              </form>
+            )}
           </Tabs.Content>
         )}
 

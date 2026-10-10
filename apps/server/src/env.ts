@@ -62,6 +62,15 @@ const envSchema = z.object({
    * this: their gate has to run when the turn ends.
    */
   BENTO_LIVE_IDLE_SEC: z.coerce.number().int().min(0).default(90),
+  /**
+   * After a swarm planner finishes a turn while its workers are still
+   * going, how long to keep its process open for the next report or
+   * message, in seconds. The hold keeps the swarm's machine awake, so
+   * it is re-armed after every turn only while a leaf is assigned or
+   * being worked, and ends before the run limit. 0 closes the planner
+   * after every turn, which is the one-run-per-wake behaviour.
+   */
+  BENTO_SWARM_PLANNER_HOLD_SEC: z.coerce.number().int().min(0).default(900),
 
   /** Required in multi mode. Generate with: openssl rand -hex 32 */
   BETTER_AUTH_SECRET: z.string().optional(),

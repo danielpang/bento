@@ -5,6 +5,7 @@ import type { SwarmApi, SwarmPlannerMessage } from "../swarm/client.js";
 import type { SwarmStatus } from "../swarm/types.js";
 import { plannerFailure } from "../swarm/failures.js";
 import { ChatRow, toChatItems } from "./AgentSession.js";
+import { AgentOrb } from "./AgentOrb.js";
 import { useDismissable } from "./ui.js";
 
 /** The same persisted run events as the board conversation, with no composer. */
@@ -18,6 +19,8 @@ export function SwarmRunOutput({ client, runId, agentName, plannerMessages = [] 
   const [draft, setDraft] = useState("");
   const [status, setStatus] = useState("loading");
   const [error, setError] = useState("");
+  /** The tool the agent is in, so the orb can say what kind of work it is. */
+  const [tool, setTool] = useState<string | null>(null);
   const lastSeq = useRef(0);
   const draftRef = useRef("");
   const chatRef = useRef<HTMLDivElement>(null);
@@ -59,6 +62,7 @@ export function SwarmRunOutput({ client, runId, agentName, plannerMessages = [] 
     setDraft("");
     setError("");
     setStatus("loading");
+    setTool(null);
     lastSeq.current = 0;
     draftRef.current = "";
     stickToBottom.current = true;
@@ -70,6 +74,11 @@ export function SwarmRunOutput({ client, runId, agentName, plannerMessages = [] 
         if (event.type === "result" || (event.type === "message" && event.role === "assistant")) {
           draftRef.current = "";
           setDraft("");
+        }
+        if (event.type === "tool") {
+          if (event.phase === "start" && event.name !== "tool_result") setTool(event.name);
+        } else {
+          setTool(null);
         }
         setEvents((previous) => [...previous, event]);
         setStatus("running");
@@ -105,6 +114,14 @@ export function SwarmRunOutput({ client, runId, agentName, plannerMessages = [] 
         {items.map((item) => <ChatRow key={item.key} item={item} showDetail={false} />)}
         {draft && <div className="chat-row chat-row-assistant"><div className="chat-bubble chat-bubble-assistant" data-draft><span className="chat-meta">{agentName}</span><span className="chat-text">{draft}</span></div></div>}
         {queuedMessages.map((message) => <PlannerMessageRow key={message.id} message={message} />)}
+        {/* The agent is still in its sandbox: the orb says so between
+            spoken lines, the way the card conversation's does. */}
+        {status === "running" && (
+          <div className="working-row" role="status">
+            <AgentOrb tool={tool} label={`${agentName} working`} />
+            <span className="muted">{agentName} is working{tool ? `: ${tool}` : ""}</span>
+          </div>
+        )}
         {scrolledUp && (
           <div className="chat-jump-anchor">
             <button type="button" className="chat-jump" onClick={jumpToBottom}>Jump to latest ↓</button>
@@ -180,9 +197,11 @@ export function SwarmRunOutputDrawer({ client, api, swarmId, swarmStatus, runId,
 
   const helper = swarmStatus === "paused"
     ? "Your message waits until the swarm resumes."
-    : runStatus === "queued" || runStatus === "starting" || runStatus === "running"
-      ? "Your message waits for this planner run to finish."
-      : "Your message starts another planner turn.";
+    : runStatus === "running"
+      ? "Your message reaches the planner when its current turn ends."
+      : runStatus === "queued" || runStatus === "starting"
+        ? "Your message waits for this planner run to start."
+        : "Your message starts another planner turn.";
   return (
     <aside className="drawer swarm-output-drawer" role="dialog" aria-label={`${agentName} conversation`} ref={panel}>
       <header className="drawer-head">

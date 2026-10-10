@@ -76,6 +76,27 @@ export function shouldHoldLiveSession(input: {
 }
 
 /**
+ * Whether a swarm planner's live session stays open after a finished
+ * turn, so the next report from a worker, and the next message from a
+ * person, reach the same process instead of starting a run.
+ *
+ * Only while there is somebody to wait for: the swarm is running and a
+ * leaf is assigned or being worked. A held process keeps the swarm's
+ * machine awake, and the machine bills for every minute of it, so a
+ * planner whose swarm is paused on a question, or has no worker left,
+ * closes and the next wake starts a run the ordinary way. A failed
+ * turn has nothing to wait for. idleSec 0 disables the hold.
+ */
+export function shouldHoldPlannerSession(input: {
+  ok: boolean;
+  swarmStatus: string;
+  leavesInProgress: number;
+  idleSec: number;
+}): boolean {
+  return input.ok && input.swarmStatus === "running" && input.leavesInProgress > 0 && input.idleSec > 0;
+}
+
+/**
  * The prompt an agent process actually receives.
  *
  * A fresh stage run (no follow-up) is the stage prompt. A resumed

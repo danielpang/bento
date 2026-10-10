@@ -10,6 +10,7 @@ import { SwarmEmpty, SwarmStrip } from "./components/SwarmStrip.js";
 import { SwarmPageSkeleton } from "./components/Skeleton.js";
 import { SwarmTree } from "./components/SwarmTree.js";
 import { SwarmOutline } from "./components/SwarmOutline.js";
+import { SwarmPlannerStep } from "./components/SwarmPlannerStep.js";
 import { SwarmNodeDrawer } from "./components/SwarmNodeDrawer.js";
 import { SwarmRunOutput, SwarmRunOutputDrawer, SwarmWorkerOutputDrawer } from "./components/SwarmRunOutput.js";
 import { stackedPullRequests, SwarmArtifacts, SwarmPage, SwarmPlanBrief, WorkerStepper } from "./components/SwarmPage.js";
@@ -1736,4 +1737,59 @@ test("a withdrawn row says why, and a queued row waiting out a backoff says how 
   assert.equal(backoffMinutes(new Date(NOW - 1000).toISOString(), NOW), null, "a backoff that has passed is no wait");
   assert.equal(backoffMinutes(null, NOW), null);
   assertNoDashes(html, "the merge queue notes");
+});
+
+/**
+ * An agent in its sandbox is drawn as the orb, on the planner and on
+ * every node it is working, in both views and in the node's drawer.
+ * The dot stays for everything that is not an agent processing: a
+ * planner waiting for a run slot, a leaf waiting on its sandbox.
+ */
+test("a working planner and a working leaf draw the orb; waiting ones keep the dot", () => {
+  const planner = (status: SwarmPlannerRun["status"]): SwarmPlannerRun => ({
+    id: "p", status, error: null, agent: { name: "Planner", cli: "claude-code", model: "opus" },
+    queuedAt: new Date(0).toISOString(), startedAt: new Date(0).toISOString(), endedAt: null,
+  });
+  const running = renderToStaticMarkup(createElement(SwarmPlannerStep, {
+    run: planner("running"), now: 1000, onRetry: () => {}, canRetry: false, variant: "tree",
+  }));
+  assert.match(running, /aria-label="Planner working"/);
+  assert.doesNotMatch(running, /class="dot"/);
+  const queued = renderToStaticMarkup(createElement(SwarmPlannerStep, {
+    run: planner("queued"), now: 1000, onRetry: () => {}, canRetry: false, variant: "tree",
+  }));
+  assert.doesNotMatch(queued, /aria-label="Planner working"/);
+  assert.match(queued, /class="dot" data-state="running"/);
+
+  const active = buildSwarmModel(tasks(), { now: 60 * 60 * 1000, runningTaskIds: new Set(["slow"]) });
+  const idle = buildSwarmModel(tasks(), { now: 60 * 60 * 1000, runningTaskIds: new Set() });
+  const task = tasks().find((row) => row.id === "slow")!;
+  for (const [model, orbs] of [[active, 1], [idle, 0]] as const) {
+    const tree = renderToStaticMarkup(createElement(SwarmTree, { model, selectedId: null, onSelect: () => {}, onToggle: () => {} }));
+    const outline = renderToStaticMarkup(createElement(SwarmOutline, { model, selectedId: null, onSelect: () => {} }));
+    const drawer = renderToStaticMarkup(createElement(SwarmNodeDrawer, { task, node: model.byId.get("slow")!, onClose: () => {} }));
+    for (const html of [tree, outline, drawer]) {
+      assert.equal(html.match(/aria-label="Agent working"/g)?.length ?? 0, orbs);
+    }
+  }
+});
+
+test("a leaf's drawer offers a message to its worker, and says where it goes", () => {
+  const model = buildSwarmModel(tasks(), { now: 60 * 60 * 1000, runningTaskIds: new Set(["slow"]) });
+  const task = tasks().find((row) => row.id === "slow")!;
+  const html = renderToStaticMarkup(createElement(SwarmNodeDrawer, {
+    task, node: model.byId.get("slow")!, onClose: () => {}, onMessage: async () => ({ live: true }),
+  }));
+  assert.match(html, /Message the worker/);
+  assert.match(html, /The worker reads this once its current step ends/);
+  assertNoDashes(html, "the worker composer");
+  // No handler, no composer: a drawer with nowhere to send it offers nothing.
+  const bare = renderToStaticMarkup(createElement(SwarmNodeDrawer, { task, node: model.byId.get("slow")!, onClose: () => {} }));
+  assert.doesNotMatch(bare, /Message the worker/);
+  // A finished leaf has nobody to talk to.
+  const done = { ...task, status: "done" as const };
+  const finished = renderToStaticMarkup(createElement(SwarmNodeDrawer, {
+    task: done, node: model.byId.get("slow")!, onClose: () => {}, onMessage: async () => ({ live: false }),
+  }));
+  assert.doesNotMatch(finished, /Message the worker/);
 });

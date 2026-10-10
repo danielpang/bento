@@ -1,6 +1,7 @@
 import type { SwarmPlannerRun } from "../swarm/types.js";
 import { elapsedSince, formatElapsed } from "../swarm/time.js";
 import { plannerFailure } from "../swarm/failures.js";
+import { AgentOrb } from "./AgentOrb.js";
 
 const STATUS: Record<SwarmPlannerRun["status"], string> = {
   queued: "Queued",
@@ -36,7 +37,11 @@ export function SwarmPlannerStep({
       <div className="swarm-planner-step-head">
         <span className="swarm-planner-step-kicker">Planner agent</span>
         <span className="status">
-          <span className="dot" data-state={run.status === "failed" ? "failed" : active ? "running" : run.status === "cancelled" ? "idle" : "succeeded"} />
+          {/* The orb while the agent is in its sandbox; a dot for every
+              other state, including the wait for a run slot. */}
+          {run.status === "running"
+            ? <AgentOrb label="Planner working" />
+            : <span className="dot" data-state={run.status === "failed" ? "failed" : active ? "running" : run.status === "cancelled" ? "idle" : "succeeded"} />}
           {run.status === "failed" ? failure.title : STATUS[run.status]}
         </span>
       </div>

@@ -12,7 +12,7 @@ import {
   swarms,
   type Db,
 } from "@bento/db";
-import type { AppContext } from "../../context.js";
+import type { AppContext, LiveInput } from "../../context.js";
 import { driverForSandbox } from "../sandbox-driver.js";
 import type { BoardEvent } from "../../events.js";
 import { captureJobErrors } from "../../analytics.js";
@@ -217,6 +217,14 @@ export interface SwarmTickDeps {
    */
   startLanding?(tx: Tx, landingId: string): Promise<void>;
   now?(): Date;
+  /**
+   * The live sessions this process holds, by run id. A planner held
+   * open between turns is on it, and the wake is written into that
+   * process rather than starting a run. Absent, or a planner held by
+   * another process, means the wake waits for the run to end the way
+   * it always did.
+   */
+  liveInputs?: Map<string, LiveInput>;
 }
 
 /** What one tick did, for the log and for the tests. */
@@ -225,6 +233,13 @@ export interface SwarmTickResult {
   changedTasks: number;
   /** The planner run this tick started, if it started one. */
   plannerRunId: string | null;
+  /**
+   * The planner run a wake was written into live, held open since its
+   * last turn. Separate from plannerRunId, which names a run this tick
+   * started and the caller then enqueues: a held planner is already
+   * executing, and enqueueing it again would start a second agent.
+   */
+  plannerToldLiveId: string | null;
   /** Worker runs started. */
   workerRunIds: string[];
   /** Resolver runs started on conflicted landings. */
@@ -341,6 +356,7 @@ export async function tickSwarm(
      * the tick returns.
      */
     startLanding: async () => {},
+    liveInputs: ctx.liveInputs,
   },
 ): Promise<SwarmTickResult | null> {
   const events: BoardEvent[] = [];
@@ -536,11 +552,14 @@ async function runTick(
    */
   const refusals: ComputeRefusal[] = [];
   let plannerRunId: string | null = null;
+  let plannerToldLiveId: string | null = null;
   if (canStartAgents) {
     plannerRunId = await restartPlannerAfterSandboxFailure(tx, swarm, deps, refusals, events, now);
     if (!plannerRunId) {
       await noticeIdleOpenLeaves(tx, swarm, changed.tasks, now);
-      plannerRunId = await deliverPlannerWake(tx, swarm, deps, now, refusals, events);
+      const woken = await deliverPlannerWake(tx, swarm, deps, now, refusals, events);
+      if (woken?.live) plannerToldLiveId = woken.runId;
+      else if (woken) plannerRunId = woken.runId;
     }
   }
   const spawned = canStartAgents
@@ -552,6 +571,7 @@ async function runTick(
   return {
     changedTasks: changed.changedCount,
     plannerRunId,
+    plannerToldLiveId,
     workerRunIds: spawned.runIds,
     resolverRunIds: landing.resolverRunIds,
     spawnRefusal: spawned.refusal,
@@ -1461,16 +1481,24 @@ function retellCount(flags: Record<string, unknown>): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
 }
 
+/** The planner a wake went to: a run this tick started, or one held open that heard it live. */
+interface PlannerWoken {
+  runId: string;
+  live: boolean;
+}
+
 /**
- * Everything waiting for the planner becomes one message and one run.
+ * Everything waiting for the planner becomes one message and one turn.
  *
- * Held while a planner run is active, for two reasons. A headless CLI
- * cannot hear mid turn, so a second wake would be a second run on a
- * tree the first one is still editing; and the folding is the point,
+ * Held while a planner run is mid turn, for two reasons. A CLI cannot
+ * hear mid turn (a live one queues the line behind the turn, a
+ * headless one not at all), so a second wake would be a second turn on
+ * a tree the first one is still editing; and the folding is the point,
  * because five workers finishing within a minute of each other is one
  * thing the planner needs to know, not five wake ups it pays for
- * separately. The run's settlement enqueues a tick, and this delivers
- * then.
+ * separately. A turn's end enqueues a tick, and this delivers then:
+ * into the process a planner held open between turns, or as the prompt
+ * of a new run when there is none.
  */
 async function deliverPlannerWake(
   tx: Tx,
@@ -1479,7 +1507,7 @@ async function deliverPlannerWake(
   now: Date,
   refusals: ComputeRefusal[],
   events: BoardEvent[],
-): Promise<string | null> {
+): Promise<PlannerWoken | null> {
   /*
    * A swarm paused on its plan's hours is the exception to the pause:
    * a refused wake is one of the things that pauses it, and the wake
@@ -1500,7 +1528,19 @@ async function deliverPlannerWake(
       ),
     )
     .limit(1);
-  if (activePlanner) return null;
+  /*
+   * A planner held open between turns (swarm/live.ts) hears the wake
+   * in the process it already has, with the session it already holds,
+   * so a worker's report reaches it without a machine wake, a spawn,
+   * and a session resume. Only while it is between turns: mid turn the
+   * wake waits, as above, and the turn's end asks for this tick again.
+   * A planner this process does not hold (another server's, or one on
+   * an adapter with no live mode) is simply active, and the wake waits
+   * for its run to end.
+   */
+  const held = activePlanner ? deps.liveInputs?.get(activePlanner.id) : undefined;
+  const hearsLive = activePlanner !== undefined && held !== undefined && held.waiting?.() === true;
+  if (activePlanner && !hearsLive) return null;
 
   /*
    * Messages handed to a planner that then failed or was stopped go
@@ -1687,33 +1727,48 @@ async function deliverPlannerWake(
     })),
   ];
 
-  const started = await deps.startRun(tx, {
-    type: "swarm",
-    swarmId: swarm.id,
-    role: "planner",
-    agentProfileId: profileId,
-    prompt: plannerWakeMessage(items),
-    // A swarm run is always this server's: a project on a runner
-    // cannot have swarms at all, which the create route refuses.
-    executor: "server",
-    // The person whose message woke it, so their own MCP connections
-    // are the ones this turn may use. Null when the tree woke it.
-    startedBy: pending[0]?.userId ?? null,
-  });
-  // The worker ceiling is a worker's answer and never a planner's, and
-  // it is folded in here so the wake stays held rather than being
-  // stamped as delivered by a run that does not exist.
-  if (started !== "busy" && started !== "gone" && started !== SWARM_FULL && "outOfCompute" in started) {
-    refusals.push({ refusal: started.outOfCompute, cap: started.cap ?? "plan" });
-    return null;
+  let runId: string;
+  if (hearsLive && activePlanner && held) {
+    /*
+     * Written last, after every read above, so the bookkeeping below
+     * is the only thing left between the write and the commit. The
+     * session can close between the waiting check and the write (the
+     * hold ran out, or the run is ending); then nothing was heard, and
+     * the run's settlement ticks again with everything still here.
+     */
+    const accepted = await held.deliver(plannerWakeMessage(items));
+    if (!accepted) return null;
+    runId = activePlanner.id;
+  } else {
+    const started = await deps.startRun(tx, {
+      type: "swarm",
+      swarmId: swarm.id,
+      role: "planner",
+      agentProfileId: profileId,
+      prompt: plannerWakeMessage(items),
+      // A swarm run is always this server's: a project on a runner
+      // cannot have swarms at all, which the create route refuses.
+      executor: "server",
+      // The person whose message woke it, so their own MCP connections
+      // are the ones this turn may use. Null when the tree woke it.
+      startedBy: pending[0]?.userId ?? null,
+    });
+    // The worker ceiling is a worker's answer and never a planner's, and
+    // it is folded in here so the wake stays held rather than being
+    // stamped as delivered by a run that does not exist.
+    if (started !== "busy" && started !== "gone" && started !== SWARM_FULL && "outOfCompute" in started) {
+      refusals.push({ refusal: started.outOfCompute, cap: started.cap ?? "plan" });
+      return null;
+    }
+    if (started === "busy" || started === "gone" || started === SWARM_FULL) return null;
+    await resumeFromPlanLimit(tx, swarm, events, now);
+    runId = started.id;
   }
-  if (started === "busy" || started === "gone" || started === SWARM_FULL) return null;
-  await resumeFromPlanLimit(tx, swarm, events, now);
 
   for (const message of pending) {
     await tx
       .update(swarmMessages)
-      .set({ status: "sent", runId: started.id, sentAt: now })
+      .set({ status: "sent", runId, sentAt: now })
       .where(eq(swarmMessages.id, message.id));
   }
   for (const task of news) {
@@ -1749,7 +1804,7 @@ async function deliverPlannerWake(
         flags: {
           ...task.flags,
           plannerToldAt: now.toISOString(),
-          plannerToldBy: started.id,
+          plannerToldBy: runId,
           ...(retold ? { plannerRetells: retellCount(task.flags) + 1 } : {}),
         },
       })
@@ -1764,7 +1819,7 @@ async function deliverPlannerWake(
     await tx.insert(swarmTaskEvents).values({
       taskId: task.id,
       kind: "review_requested",
-      runId: started.id,
+      runId,
       detail: {
         note:
           task.status === "failed"
@@ -1773,7 +1828,7 @@ async function deliverPlannerWake(
       },
     });
   }
-  return started.id;
+  return { runId, live: hearsLive };
 }
 
 /** How many of this swarm's latest planner runs failed in a row. */

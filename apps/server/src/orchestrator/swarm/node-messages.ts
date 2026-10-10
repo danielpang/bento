@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { swarmMessages, type Db } from "@bento/db";
 
 /**
@@ -51,4 +51,82 @@ export async function takeNodeMessages(
       ),
     );
   return waiting.map((row) => ({ text: row.text }));
+}
+
+/**
+ * The same rows, when the leaf's agent can hear them: a worker on a
+ * live adapter holds a stdin conversation, and a message sent while it
+ * works is written there rather than parked for the next agent.
+ *
+ * The lifecycle mirrors a card's (orchestrator/messages.ts): queued
+ * until a process takes it, sent while exactly one run holds it, and
+ * delivered once a result from that run confirms a turn completed
+ * with the message on the conversation. A run that ends with a message
+ * still sent puts it back, so the next agent on the leaf is handed it
+ * in its prompt the way it always was.
+ */
+
+/** Takes the messages waiting on one node for a live write, oldest first. */
+export async function claimNodeMessages(db: Db, taskId: string): Promise<{ id: string; text: string }[]> {
+  const waiting = await db
+    .select({ id: swarmMessages.id, text: swarmMessages.text })
+    .from(swarmMessages)
+    .where(and(eq(swarmMessages.taskId, taskId), eq(swarmMessages.status, "queued")))
+    .orderBy(asc(swarmMessages.createdAt));
+  if (waiting.length === 0) return [];
+  await db
+    .update(swarmMessages)
+    .set({ status: "sent", sentAt: new Date() })
+    .where(inArray(swarmMessages.id, waiting.map((row) => row.id)));
+  return waiting;
+}
+
+/** Binds messages written into a live session's stdin to the run that holds them. */
+export async function bindSwarmMessages(db: Db, ids: string[], runId: string): Promise<void> {
+  if (ids.length === 0) return;
+  await db
+    .update(swarmMessages)
+    .set({ status: "sent", runId, sentAt: new Date() })
+    .where(inArray(swarmMessages.id, ids));
+}
+
+/** Puts messages a write could not deliver back for the next taker. */
+export async function requeueSwarmMessages(db: Db, ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  await db
+    .update(swarmMessages)
+    .set({ status: "queued", runId: null, sentAt: null })
+    .where(inArray(swarmMessages.id, ids));
+}
+
+/**
+ * A result event from the run: every message it was carrying, a
+ * person's to the planner or to a node, has been on the conversation
+ * for a completed turn.
+ */
+export async function confirmSwarmMessagesDelivered(db: Db, runId: string): Promise<void> {
+  await db
+    .update(swarmMessages)
+    .set({ status: "delivered", deliveredAt: new Date() })
+    .where(and(eq(swarmMessages.runId, runId), eq(swarmMessages.status, "sent")));
+}
+
+/**
+ * The run ended with node messages still unconfirmed: no turn
+ * completed after they arrived, so they go back to queued and the next
+ * agent on the leaf is handed them. Only a node's: a planner's unread
+ * messages are put back by the coordinator, which reads how the run
+ * ended to decide whether they wake another planner.
+ */
+export async function requeueUndeliveredNodeMessages(db: Db, runId: string): Promise<void> {
+  await db
+    .update(swarmMessages)
+    .set({ status: "queued", runId: null, sentAt: null })
+    .where(
+      and(
+        eq(swarmMessages.runId, runId),
+        eq(swarmMessages.status, "sent"),
+        sql`${swarmMessages.taskId} is not null`,
+      ),
+    );
 }

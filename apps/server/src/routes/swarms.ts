@@ -1576,10 +1576,16 @@ export function swarmRoutes(ctx: AppContext) {
      * Sends a message into the swarm: to the planner by default, or to
      * one node when a task is named.
      *
-     * Queued rather than delivered. A headless agent cannot hear mid
-     * turn, so the coordinator folds everything waiting into one wake
-     * message when the planner is next idle, which is also what makes
-     * five answers in a minute one turn rather than five.
+     * Queued first, whoever it is for: the row is the message's
+     * identity, and the tick is what hands it on. A message to the
+     * planner is folded by the coordinator into its next wake, which
+     * reaches a planner held open between turns at once and otherwise
+     * starts a run, and that folding is what makes five answers in a
+     * minute one turn rather than five. A message to a node whose
+     * worker holds a live session is written into it here, queued
+     * behind the worker's current turn by its adapter; a worker with
+     * no live session, or one held by another server, is handed the
+     * message in the prompt of the next agent on the leaf.
      */
     .post(
       "/:id/messages",
@@ -1591,13 +1597,15 @@ export function swarmRoutes(ctx: AppContext) {
         if (refusal) return c.json(refusal.body, refusal.status);
         const body = c.req.valid("json");
 
+        let workerRunId: string | null = null;
         if (body.taskId) {
           const [task] = await db(c, ctx)
-            .select({ id: swarmTasks.id })
+            .select({ id: swarmTasks.id, assignedRunId: swarmTasks.assignedRunId })
             .from(swarmTasks)
             .where(and(eq(swarmTasks.id, body.taskId), eq(swarmTasks.swarmId, swarm.id)))
             .limit(1);
           if (!task) return c.json({ error: "not found" }, 404);
+          workerRunId = task.assignedRunId;
         }
 
         const message = await recordSwarmAnswer(db(c, ctx), {
@@ -1606,8 +1614,17 @@ export function swarmRoutes(ctx: AppContext) {
           text: body.text,
           userId: actor(c),
         });
+        const liveWorker = workerRunId ? ctx.liveInputs.get(workerRunId) : undefined;
+        if (liveWorker && workerRunId && (await liveWorker.deliver(body.text))) {
+          const sentAt = new Date();
+          await db(c, ctx)
+            .update(swarmMessages)
+            .set({ status: "sent", runId: workerRunId, sentAt })
+            .where(eq(swarmMessages.id, message.id));
+          return c.json({ ...message, status: "sent", runId: workerRunId, sentAt, live: true, delivery: liveWorker.delivery }, 201);
+        }
         deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
-        return c.json(message, 201);
+        return c.json({ ...message, live: false }, 201);
       },
     )
     /**

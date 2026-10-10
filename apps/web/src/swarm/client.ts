@@ -162,11 +162,11 @@ export interface SwarmApi {
    * Sends a message to the agent working one node.
    *
    * The same door the planner's messages go through, with the node
-   * named. Queued rather than delivered: a headless agent cannot hear
-   * mid turn, so the coordinator folds what is waiting into the next
-   * one. The composer says so rather than implying it arrived.
+   * named. `live` says a running worker heard it now, queued behind
+   * its current turn; otherwise the next agent on the leaf is handed
+   * it in its prompt, and the composer says which.
    */
-  messageTask(swarmId: string, taskId: string, text: string): Promise<void>;
+  messageTask(swarmId: string, taskId: string, text: string): Promise<{ live: boolean }>;
   /**
    * The swarm's own event stream, for as long as one is open.
    *
@@ -417,7 +417,7 @@ export function fixtureSwarmApi(clock: () => number = () => Date.now()): Fixture
       void swarmId;
       void taskId;
       void text;
-      return Promise.resolve();
+      return Promise.resolve({ live: false });
     },
     createPullRequest(swarmId) {
       const detail = find(swarmId);
@@ -1144,7 +1144,8 @@ export function httpSwarmApi(
       return toNode(taskId, node);
     },
     async messageTask(swarmId, taskId, text) {
-      await post(`/api/swarms/${swarmId}/messages`, { text, taskId });
+      const row = await post<{ live?: boolean }>(`/api/swarms/${swarmId}/messages`, { text, taskId });
+      return { live: row.live === true };
     },
     async listPlannerMessages(swarmId) {
       const rows = await call<SwarmPlannerMessage[]>(`/api/swarms/${swarmId}/messages`);

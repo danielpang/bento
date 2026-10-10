@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as Menu from "@radix-ui/react-dropdown-menu";
-import { ThinkingOrb, type OrbState } from "thinking-orbs";
+import { ThinkingOrb } from "thinking-orbs";
 import type { AgentProfile, AgentRun, BentoClient, Stage } from "@bento/api-client";
 import {
   forgetsBetweenRuns,
@@ -18,19 +18,7 @@ import { StopButton } from "./IconButtons.js";
 import { LIVE_TOOLS } from "./ui.js";
 import { toolActivity, type ToolActivity } from "../tool-activity.js";
 import { ToolActivityGroup } from "./ToolActivityGroup.js";
-
-/** Animation is decoration; a stilled frame carries the same meaning. */
-const REDUCED_MOTION =
-  typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-
-/** Which orb animation fits what the agent is doing right now. */
-function orbStateFor(tool: string | null): OrbState {
-  if (!tool) return "shaping";
-  if (/read|grep|glob|search|fetch|ls|find/i.test(tool)) return "searching";
-  if (/edit|write|patch|notebook/i.test(tool)) return "composing";
-  if (/task|todo|plan|agent|think/i.test(tool)) return "solving";
-  return "working";
-}
+import { REDUCED_MOTION, orbStateFor } from "./AgentOrb.js";
 
 const TERMINAL_RUN = new Set(["succeeded", "failed", "cancelled"]);
 

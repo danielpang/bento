@@ -2807,3 +2807,48 @@ test("a PDF or an image is refused where there is nowhere to put it, before the 
   assert.match(((await notPdf.json()) as { error: string }).error, /deck\.pdf could not be read as a PDF/);
   assert.deepEqual(await db.select().from(swarms), []);
 });
+
+/**
+ * A message to a node whose worker holds a live session is written into
+ * that session here, and the row says so: sent, bound to the run, and
+ * answered as live. A node whose worker has no session (another server
+ * holds it, or its adapter has no live mode) keeps the old answer:
+ * queued, and handed to the next agent on the leaf in its prompt.
+ */
+test("a message to a node reaches a live worker now, and otherwise waits for the next agent", async () => {
+  const swarm = await createSwarm();
+  const [planner] = await db.select().from(agentRuns).where(eq(agentRuns.swarmId, swarm.id));
+  const [task] = await db.insert(swarmTasks).values({ swarmId: swarm.id, title: "Empty cart state", status: "working" }).returning();
+  const [worker] = await db
+    .insert(agentRuns)
+    .values({ type: "swarm", swarmId: swarm.id, swarmTaskId: task!.id, role: "worker", agentProfileId: planner!.agentProfileId, prompt: "", status: "running" })
+    .returning();
+  await db.update(swarmTasks).set({ assignedRunId: worker!.id }).where(eq(swarmTasks.id, task!.id));
+
+  const heard: string[] = [];
+  ctx.liveInputs.set(worker!.id, { delivery: "queue", deliver: async (text) => { heard.push(text); return true; } });
+  try {
+    const live = await post(`/api/swarms/${swarm.id}/messages`, { text: "use the hosted field", taskId: task!.id });
+    assert.equal(live.status, 201, await live.clone().text());
+    const message = (await live.json()) as { id: string; status: string; runId: string | null; live: boolean; delivery?: string };
+    assert.equal(message.live, true);
+    assert.equal(message.delivery, "queue");
+    assert.equal(message.status, "sent");
+    assert.equal(message.runId, worker!.id);
+    assert.deepEqual(heard, ["use the hosted field"]);
+    const [row] = await db.select().from(swarmMessages).where(eq(swarmMessages.id, message.id));
+    assert.equal(row!.status, "sent");
+    assert.equal(row!.runId, worker!.id);
+    // Nothing is left for the next agent's prompt: the running one has it.
+    assert.deepEqual(await takeNodeMessages(db, task!.id, worker!.id), []);
+  } finally {
+    ctx.liveInputs.delete(worker!.id);
+  }
+
+  const parked = await post(`/api/swarms/${swarm.id}/messages`, { text: "and the refund path", taskId: task!.id });
+  assert.equal(parked.status, 201);
+  const later = (await parked.json()) as { status: string; live: boolean };
+  assert.equal(later.live, false);
+  assert.equal(later.status, "queued", "no session to write into, so the next agent is handed it");
+  assert.deepEqual((await takeNodeMessages(db, task!.id, worker!.id)).map((row) => row.text), ["and the refund path"]);
+});

@@ -500,6 +500,7 @@ export function SwarmBoard({
             selectedId && act(() => swarmApi.reassignTask(selectedId, id, agentProfileId), true)
           }
           onEdit={(id, edit) => selectedId && act(() => swarmApi.editTask(selectedId, id, edit), true)}
+          onMessage={(id, text) => selectedId ? swarmApi.messageTask(selectedId, id, text) : Promise.resolve({ live: false })}
           transcript={task.assignedRunId || node?.runs?.[0]?.id ? <SwarmRunOutput client={client} runId={task.assignedRunId ?? node!.runs![0]!.id} agentName="Worker agent" /> : undefined}
         />
       )}
