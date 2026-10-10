@@ -58,7 +58,8 @@ export const SWARM_PUBLISH_QUEUE = "swarm.publish";
 /**
  * Which JobQueue instances already have a publish worker. Keyed by the
  * queue for the reason the tick and landing sets are: the tests run
- * many contexts in one process, each with its own.
+ * many contexts in one process, each with its own. BullMQ fills this
+ * at boot; pg-boss still starts on the first enqueue.
  */
 const publishWorkers = new WeakSet<object>();
 
@@ -73,12 +74,12 @@ export interface SwarmPublishResult {
 /**
  * Starts the publish worker, if this process has not.
  *
- * Not at boot, and on the ordinary poll rather than the interactive
- * one, for the reasons the landing worker is neither: most deployments
- * have never finished a swarm, and the job is sent by the tick that
- * noticed the swarm was done, which is itself the end of an agent run
- * that took minutes. Ten seconds of pickup lag on top of that is not
- * something anybody can see.
+ * pg-boss: not at boot, and on the ordinary poll rather than the
+ * interactive one, for the reasons the landing worker is neither.
+ * Most local installs have never finished a swarm, and the job is
+ * sent by a person (or a tick) after minutes of agent work.
+ *
+ * BullMQ: registerJobs starts this at boot.
  */
 export async function ensureSwarmPublishWorker(ctx: AppContext): Promise<void> {
   if (publishWorkers.has(ctx.jobs)) return;
@@ -113,7 +114,7 @@ export async function enqueueSwarmPublish(
   swarmId: string,
   mode: SwarmPublishMode = "combined",
 ): Promise<void> {
-  await ensureSwarmPublishWorker(ctx);
+  if (ctx.jobs.kind !== "bullmq") await ensureSwarmPublishWorker(ctx);
   await ctx.jobs.send(SWARM_PUBLISH_QUEUE, { swarmId, mode }, { dedupeKey: `${swarmId}:${mode}` });
 }
 

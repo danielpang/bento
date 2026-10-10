@@ -148,11 +148,13 @@ export async function hasActiveSwarms(ctx: Pick<AppContext, "db">): Promise<bool
  *
  * Keyed by the queue rather than held as a module flag, because the
  * tests run many contexts in one process and each has its own.
+ * BullMQ registers at boot and never leaves this set; pg-boss still
+ * starts on the first tick and drops out when the last swarm settles.
  */
 const tickWorkers = new WeakSet<object>();
 
 /**
- * One thing at a time, per queue, for the worker's own lifecycle.
+ * One thing at a time, per queue, for the pg-boss worker's lifecycle.
  *
  * Starting a worker and stopping one are two steps each: mark the
  * queue, then talk to it. Interleaved, they lose ticks. A caller
@@ -162,9 +164,8 @@ const tickWorkers = new WeakSet<object>();
  * then removed. Everything that touches the mark goes through here, so
  * a send happens in the same turn as the registration it relies on.
  *
- * Lazy registration is untouched: this serializes the starts and
- * stops, it does not start anything, so a deployment that has never
- * run a swarm still polls for nothing.
+ * BullMQ never takes this lock: its workers are eager, offWork is a
+ * no-op, and closing a Worker from inside its own processor deadlocks.
  */
 const workerLifecycle = new WeakMap<object, Promise<unknown>>();
 
@@ -181,6 +182,11 @@ function inTurn<T>(jobs: object, step: () => Promise<T>): Promise<T> {
     ),
   );
   return next;
+}
+
+/** pg-boss polls; BullMQ is handed work, so it has no idle-worker cost. */
+function lazySwarmWorkers(jobs: { kind: string }): boolean {
+  return jobs.kind !== "bullmq";
 }
 
 /** The transaction handle drizzle hands the callback. */
@@ -2917,19 +2923,28 @@ async function recomputeSwarmStatus(
  * Queues a tick for one swarm.
  *
  * Every door uses this rather than a bare send, for the reason
- * enqueueRun exists: the singleton key is what makes a burst of
- * finishing workers one tick rather than one tick each, and a bare
- * send would be a tick per event that each read the same rows.
+ * enqueueRun exists: coalesceKey is what makes a burst of finishing
+ * workers one waiting tick rather than one tick each, and a send that
+ * lands while a tick is already running still produces exactly one
+ * more look (pg-boss short; BullMQ's Redis rerun flag).
+ *
+ * On pg-boss the worker is started in the same turn as the send, so a
+ * deployment with no swarms still polls for nothing. BullMQ already
+ * has the worker from boot, so this is only the send.
  */
 export async function enqueueSwarmTick(ctx: AppContext, swarmId: string): Promise<void> {
-  // The worker first, then the job, and both in one turn of the
-  // lifecycle lock: a deployment with no swarms runs no worker, so the
-  // order is what keeps a job from waiting for the next restart to be
-  // read, and the lock is what keeps a stop from landing in between.
-  await inTurn(ctx.jobs, async () => {
-    await registerTickWorker(ctx);
+  if (lazySwarmWorkers(ctx.jobs)) {
+    // The worker first, then the job, and both in one turn of the
+    // lifecycle lock: the order keeps a job from waiting for the next
+    // restart to be read, and the lock keeps a stop from landing in
+    // between.
+    await inTurn(ctx.jobs, async () => {
+      await registerTickWorker(ctx);
+      await ctx.jobs.send(SWARM_TICK_QUEUE, { swarmId }, { coalesceKey: swarmId });
+    });
+  } else {
     await ctx.jobs.send(SWARM_TICK_QUEUE, { swarmId }, { coalesceKey: swarmId });
-  });
+  }
   /**
    * And the clock, from the same door.
    *
@@ -2949,22 +2964,29 @@ export async function enqueueSwarmTick(ctx: AppContext, swarmId: string): Promis
 /**
  * Starts the swarm reconciler's worker, if this process has not.
  *
- * The worker polls at the interactive pace, for the same reason the
+ * pg-boss polls at the interactive pace, for the same reason the
  * gate's does: a person is watching a board that moves when it runs.
  * That pace is only cheap while it is earning its keep, and most
- * deployments have never started a swarm, so the worker is started by
- * the first tick rather than at boot and stopped again when the last
- * swarm settles. Single job at a time, because two ticks for one swarm
- * serializing on its row lock is work done twice.
+ * local installs have never started a swarm, so the worker is started
+ * by the first tick rather than at boot and stopped again when the
+ * last swarm settles.
  *
- * Idempotent, and safe to call concurrently: the queue is marked before
- * the await, so a second caller does not register a second worker.
+ * BullMQ is handed work: registerJobs starts this worker at boot and
+ * it stays up. Closing it from inside a tick would deadlock.
+ *
+ * Single job at a time, because two ticks for one swarm serializing
+ * on its row lock is work done twice. Idempotent: the queue is marked
+ * before the await, so a second caller does not register a second worker.
  */
 export async function ensureSwarmTickWorker(ctx: AppContext): Promise<void> {
-  await inTurn(ctx.jobs, () => registerTickWorker(ctx));
+  if (lazySwarmWorkers(ctx.jobs)) {
+    await inTurn(ctx.jobs, () => registerTickWorker(ctx));
+    return;
+  }
+  await registerTickWorker(ctx);
 }
 
-/** The registration itself. Only ever called inside a lifecycle turn. */
+/** The registration itself. On pg-boss, only ever called inside a lifecycle turn. */
 async function registerTickWorker(ctx: AppContext): Promise<void> {
   if (tickWorkers.has(ctx.jobs)) return;
   tickWorkers.add(ctx.jobs);
@@ -2975,9 +2997,9 @@ async function registerTickWorker(ctx: AppContext): Promise<void> {
       captureJobErrors(ctx.analytics, SWARM_TICK_QUEUE, async (data) => {
         await tickSwarm(ctx, data.swarmId);
         // After the tick, because the tick is what settles the last
-        // swarm. offWork only flags the worker, so a stop from inside
-        // its own handler does not wait on this job.
-        await stopSwarmTickWorkerIfIdle(ctx);
+        // swarm. Only on pg-boss: offWork from inside a BullMQ
+        // processor waits for this job and never returns.
+        if (lazySwarmWorkers(ctx.jobs)) await stopSwarmTickWorkerIfIdle(ctx);
       }),
     );
   } catch (err) {
@@ -2997,6 +3019,14 @@ async function registerTickWorker(ctx: AppContext): Promise<void> {
  * one that comes after finds no worker registered and registers again.
  */
 export async function stopSwarmTickWorkerIfIdle(ctx: AppContext): Promise<boolean> {
+  if (!lazySwarmWorkers(ctx.jobs)) {
+    if (!(await hasWatchedSwarms(ctx))) {
+      await stopSwarmWatchdog(ctx).catch((err: unknown) => {
+        console.warn("could not stop the swarm watchdog:", err);
+      });
+    }
+    return false;
+  }
   const stopped = await inTurn(ctx.jobs, async () => {
     if (!tickWorkers.has(ctx.jobs)) return false;
     if (await hasActiveSwarms(ctx)) return false;
@@ -3021,8 +3051,9 @@ export async function stopSwarmTickWorkerIfIdle(ctx: AppContext): Promise<boolea
   return stopped;
 }
 
-/** Stops the tick worker, so an idle deployment stops paying for the poll. */
+/** Stops the tick worker, so an idle pg-boss deployment stops paying for the poll. */
 export async function stopSwarmTickWorker(ctx: AppContext): Promise<void> {
+  if (!lazySwarmWorkers(ctx.jobs)) return;
   await inTurn(ctx.jobs, async () => {
     if (!tickWorkers.has(ctx.jobs)) return;
     tickWorkers.delete(ctx.jobs);

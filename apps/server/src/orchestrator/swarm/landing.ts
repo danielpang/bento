@@ -137,7 +137,8 @@ export const MAX_LANDING_ATTEMPTS = 5;
 /**
  * Which JobQueue instances already have a landing worker. Keyed by the
  * queue for the reason the tick worker's set is: the tests run many
- * contexts in one process, each with its own.
+ * contexts in one process, each with its own. BullMQ fills this at
+ * boot; pg-boss still starts on the first enqueue.
  */
 const landWorkers = new WeakSet<object>();
 
@@ -155,12 +156,16 @@ export interface LandingResult {
 /**
  * Starts the landing worker, if this process has not.
  *
- * Not at boot, for the reason the tick worker is not: most deployments
- * have never started a swarm, and a registered worker is a query per
- * poll forever. The ordinary poll interval rather than the interactive
- * one, because nobody is watching a landing the second it is queued:
- * the coordinator enqueues it as soon as it promotes the row, and the
- * poll is only the backstop for a job queued by a process that died.
+ * pg-boss: not at boot, for the reason the tick worker is not. Most
+ * local installs have never started a swarm, and a registered worker
+ * is a query per poll forever. The ordinary poll interval rather than
+ * the interactive one, because nobody is watching a landing the second
+ * it is queued: the coordinator enqueues it as soon as it promotes the
+ * row, and the poll is only the backstop for a job queued by a process
+ * that died.
+ *
+ * BullMQ: registerJobs starts this at boot. An idle Worker costs
+ * Redis nothing.
  */
 export async function ensureLandingWorker(ctx: AppContext): Promise<void> {
   if (landWorkers.has(ctx.jobs)) return;
@@ -185,10 +190,15 @@ export async function ensureLandingWorker(ctx: AppContext): Promise<void> {
  * Called after the tick's transaction commits, never inside it: the
  * row has to say "landing" before a worker reads it, and a job sent
  * inside the transaction can be picked up before the commit lands.
+ *
+ * Dedupe on the landing id, so a tick that promotes, a restart that
+ * resumes the same claim, and a stale-claim resend are one job until
+ * it finishes. The row lock and the landing uniqueness index are
+ * what still refuse a second landing in flight for the swarm.
  */
 export async function enqueueLanding(ctx: AppContext, landingId: string): Promise<void> {
-  await ensureLandingWorker(ctx);
-  await ctx.jobs.send(SWARM_LAND_QUEUE, { landingId }, { coalesceKey: landingId });
+  if (ctx.jobs.kind !== "bullmq") await ensureLandingWorker(ctx);
+  await ctx.jobs.send(SWARM_LAND_QUEUE, { landingId }, { dedupeKey: landingId });
 }
 
 /** Where a workspace's checkout of one repository is, on this host. */

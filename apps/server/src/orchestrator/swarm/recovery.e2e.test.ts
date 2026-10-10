@@ -488,12 +488,13 @@ test("every swarm still working gets one tick at boot", async () => {
 /**
  * What an idle deployment pays for swarms.
  *
- * The tick worker polls every two seconds, which is the pace a person
- * watching a board needs and a pure waste on a deployment that has
- * never started a swarm. Most have not, and pg-boss has no push, so an
- * always-registered worker is a query every two seconds forever on
- * every install, which is the shape of cost this codebase has been
- * billed for before.
+ * These cases are the pg-boss path. The tick worker polls every two
+ * seconds, which is the pace a person watching a board needs and a
+ * pure waste on a local install that has never started a swarm. Most
+ * have not, and pg-boss has no push, so an always-registered worker
+ * is a query every two seconds forever. BullMQ registers at boot and
+ * never stops: an idle Worker costs Redis nothing, and closing one
+ * from inside a tick deadlocks.
  */
 test("a deployment with nothing in flight registers no tick worker", async () => {
   for (const status of ["paused", "done", "failed", "cancelled", "draft"] as const) await makeSwarm(status);
@@ -505,7 +506,24 @@ test("a deployment with nothing in flight registers no tick worker", async () =>
   assert.deepEqual(workers, [], "so no worker polls for them");
 });
 
-test("the first tick starts the worker, and one start covers the rest", async () => {
+test("a BullMQ tick send does not start or stop a worker", async () => {
+  const bullJobs = new FakeJobQueue("bullmq");
+  const bull = { ...ctx, jobs: bullJobs } as unknown as AppContext;
+  const swarm = await makeSwarm("running");
+
+  await enqueueSwarmTick(bull, swarm.id);
+  assert.ok(!bullJobs.worked.includes("swarm.tick"), "the worker was registered at boot, not by this send");
+  assert.deepEqual(
+    bullJobs.sent.filter((job) => job.queue === "swarm.tick"),
+    [{ queue: "swarm.tick", data: { swarmId: swarm.id }, opts: { coalesceKey: swarm.id } }],
+  );
+
+  await db.update(swarms).set({ status: "done" }).where(eq(swarms.id, swarm.id));
+  assert.equal(await stopSwarmTickWorkerIfIdle(bull), false, "an idle Worker is left running");
+  assert.ok(!bullJobs.offWorked.includes("swarm.tick"));
+});
+
+test("the first tick starts the pg-boss worker, and one start covers the rest", async () => {
   const first = await makeSwarm("running");
   const second = await makeSwarm("planning");
 

@@ -125,8 +125,9 @@ import { REAP_SANDBOX_QUEUE, reapFinishedSandboxes, reapFinishedSwarmSandboxes, 
 import { latestConversationRun, resolveFollowUpRun } from "./stage-agent.js";
 import { asPipelineRun, isPipelineRun, type PipelineRun } from "./pipeline-run.js";
 import { describeRunSubject, type RunSubject } from "./run-subject.js";
-import { enqueueSwarmTick, tickAllLiveSwarms } from "./swarm/coordinator.js";
-import { resumeClaimedLandings } from "./swarm/landing.js";
+import { enqueueSwarmTick, ensureSwarmTickWorker, tickAllLiveSwarms } from "./swarm/coordinator.js";
+import { ensureLandingWorker, resumeClaimedLandings } from "./swarm/landing.js";
+import { ensureSwarmPublishWorker } from "./swarm/complete.js";
 import { SWARM_PUSH_QUEUE, ensureSwarmPushWorker, remoteBranchBundles } from "./swarm/remote-branches.js";
 import {
   claimQueuedMessages,
@@ -3371,6 +3372,18 @@ async function requeueWaitingRuns(ctx: AppContext): Promise<void> {
 export async function registerJobs(ctx: AppContext): Promise<void> {
   await recoverInterruptedRuns(ctx);
   /**
+   * Swarm tick, land and publish on BullMQ start here, before the
+   * boot recovery sends, so a resumed landing or a live-swarm tick is
+   * handed over as soon as it is queued. pg-boss still starts those
+   * workers on first send: an idle poll is a query, and most local
+   * installs have never opened a swarm.
+   */
+  if (ctx.jobs.kind === "bullmq") {
+    await ensureSwarmTickWorker(ctx);
+    await ensureLandingWorker(ctx);
+    await ensureSwarmPublishWorker(ctx);
+  }
+  /**
    * Landings the previous process was holding.
    *
    * A row that says "landing" with nothing behind it is the one state
@@ -3558,15 +3571,16 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
   }));
 
   /**
-   * The swarm reconciler's worker is not registered here.
+   * The swarm reconciler's pg-boss worker is not registered here.
    *
-   * It polls at the interactive pace, and most deployments have never
-   * started a swarm: a worker every two seconds for a board nobody has
-   * opened is the cost this file spent a release removing. It is
-   * started by the first tick instead (ensureSwarmTickWorker, which
-   * every door goes through) and stopped again when the last swarm
-   * settles. The boot path below starts it when there is already
-   * something to reconcile.
+   * It polls at the interactive pace, and most local installs have
+   * never started a swarm: a worker every two seconds for a board
+   * nobody has opened is the cost this file spent a release removing.
+   * It is started by the first tick instead (ensureSwarmTickWorker,
+   * which every door goes through) and stopped again when the last
+   * swarm settles. The boot path below starts it when there is already
+   * something to reconcile. BullMQ registered the same worker at the
+   * top of this function.
    */
 
   // pg-boss polls at the interactive pace (batch of 5). BullMQ maps

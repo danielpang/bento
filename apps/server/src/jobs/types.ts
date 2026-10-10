@@ -39,7 +39,6 @@ export type QueueName = (typeof QUEUE_NAMES)[number];
 export const COALESCE_QUEUES = new Set<QueueName>([
   "gate.evaluate",
   "swarm.tick",
-  "swarm.land",
   "swarm.push",
   "swarm.task-start-over",
 ]);
@@ -91,7 +90,8 @@ export interface JobCounts {
  * Payloads carry durable row ids. Callers receive no backend job id.
  * `wake` and `offWork` exist so local/Mac pg-boss can keep slow-poll
  * run workers and lazy swarm workers. BullMQ is push-based: enqueueRun
- * skips `wake`, and `offWork` is a no-op.
+ * skips `wake`, swarm tick/land/publish register at boot, and `offWork`
+ * is a no-op.
  */
 export interface JobQueue {
   readonly kind: JobQueueKind;
