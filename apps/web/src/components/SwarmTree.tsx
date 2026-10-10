@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type PointerEvent as Reac
 import { CompletionRing } from "./CompletionRing.js";
 import { NODE_HEIGHT, NODE_WIDTH, visibleNodes, type SwarmModel, type SwarmNode } from "../swarm/layout.js";
 import { diagramAttentionWords, diagramTaskTone, diagramTaskWords, isAttention } from "../swarm/status.js";
-import { cappedUsd, formatUsd } from "../swarm/money.js";
+import { cappedUsd, formatUsd, hasReportedSpend } from "../swarm/money.js";
 import { formatElapsed } from "../swarm/time.js";
 import type { SwarmPlannerRun } from "../swarm/types.js";
 import { SwarmPlannerStep } from "./SwarmPlannerStep.js";
@@ -254,7 +254,7 @@ function TreeNode({
   onToggle: (taskId: string) => void;
 }) {
   const attention = isAttention(node.attention);
-  const spend = formatUsd(cappedUsd(node.cost));
+  const spend = hasReportedSpend(node.cost) ? formatUsd(cappedUsd(node.cost)) : null;
   const words = diagramTaskWords(node.status, node.nodeType, node.agentActive, node.landing);
   const note = diagramAttentionWords(node.status, node.nodeType, node.attention, node.agentActive);
   const tone = diagramTaskTone(node.status, node.nodeType, node.agentActive, node.landing);
@@ -283,7 +283,7 @@ function TreeNode({
         className="swarm-node-face"
         aria-pressed={selected}
         onClick={() => onSelect(node.id)}
-        title={`${node.title}. ${node.parentRelation === "depends_on" && parentTitle ? `Depends on ${parentTitle}. ` : ""}${words}${note ? `, ${note}` : ""}. Spend estimate ${spend}`}
+        title={`${node.title}. ${node.parentRelation === "depends_on" && parentTitle ? `Depends on ${parentTitle}. ` : ""}${words}${note ? `, ${note}` : ""}${spend ? `. Spend estimate ${spend}` : "."}`}
       >
         <span className="swarm-node-head">
           <CompletionRing
@@ -309,9 +309,11 @@ function TreeNode({
             <span className="dot" data-state={tone} />
             {node.collapsed && !node.frontierPath ? `${node.doneLeaves} done` : words}
           </span>
-          <span className="swarm-node-cost" title={`Spend estimate ${spend}`}>
-            {spend}
-          </span>
+          {spend && (
+            <span className="swarm-node-cost" title={`Spend estimate ${spend}`}>
+              {spend}
+            </span>
+          )}
         </span>
         {/* The long run warning, and only then. A working leaf that is
             inside its window says nothing, because a timer on every

@@ -15,7 +15,7 @@ import {
   type TaskAction,
 } from "../swarm/status.js";
 import { formatCompletion, type SwarmNode } from "../swarm/layout.js";
-import { cappedUsd, formatUsd } from "../swarm/money.js";
+import { cappedUsd, formatUsd, hasReportedSpend } from "../swarm/money.js";
 import { formatElapsed } from "../swarm/time.js";
 import { MERGE_QUEUE_FAILURE, landingFailureWords } from "../swarm/failures.js";
 import { checksFailedAfterLanding } from "../swarm/waiting.js";
@@ -349,11 +349,13 @@ export function SwarmNodeDrawer({
               </div>
             </form>
           )}
-          <p className="swarm-node-cost-line">
-            <span>Spend estimate</span>
-            <strong>{formatUsd(cappedUsd(node.cost))}</strong>
-            {node.childIds.length > 0 && <span className="muted">Includes tasks below</span>}
-          </p>
+          {hasReportedSpend(node.cost) && (
+            <p className="swarm-node-cost-line">
+              <span>Spend estimate</span>
+              <strong>{formatUsd(cappedUsd(node.cost))}</strong>
+              {node.childIds.length > 0 && <span className="muted">Includes tasks below</span>}
+            </p>
+          )}
           {hasMoreActions && (
             <details className="feature-more-actions">
               <summary>More actions</summary>
