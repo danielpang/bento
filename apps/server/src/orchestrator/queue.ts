@@ -1,4 +1,5 @@
 import type { AppContext } from "../context.js";
+import { armServerRunQueuedRecovery } from "./work-timers.js";
 
 /**
  * How pg-boss workers pace themselves, and the one door for queuing a
@@ -58,6 +59,7 @@ export const RUN_WORKER_POLL_SECONDS = 30;
  */
 export async function enqueueRun(ctx: Pick<AppContext, "jobs">, runId: string): Promise<void> {
   await ctx.jobs.send("run.execute", { runId });
+  await armServerRunQueuedRecovery(ctx, runId);
   if (ctx.jobs.kind === "bullmq") return;
   ctx.jobs.wake("run.execute");
 }

@@ -111,16 +111,22 @@ import { captureRunQueueDepth } from "./queue-snapshot.js";
 import { ACTIVE_RUN_STATUSES, projectHasRepositories, startRunIfIdle } from "./start-run.js";
 import { enqueueRun, INTERACTIVE_POLL_SECONDS, QUEUE_POLL_SECONDS, RUN_WORKER_POLL_SECONDS } from "./queue.js";
 import {
+  armServerRunStallRecovery,
   PARKED_COMPUTE_SWEEP_ID,
   parkedComputeSweepShouldRun,
+  QUEUED_RUN_REQUEUE_MIN,
   reconcileGateSchedules,
   reconcileRunnerLeases,
+  reconcileServerRunRecoveries,
   signalParkedCompute,
+  STALLED_RUN_MIN,
   syncGateSchedule,
   syncParkedComputePresence,
   WORK_TIMER_DAILY_CRON,
   WORK_TIMER_DAILY_ID,
 } from "./work-timers.js";
+
+export { QUEUED_RUN_REQUEUE_MIN, STALLED_RUN_MIN };
 import { HIBERNATE_SANDBOX_QUEUE, MODAL_SWEEP_QUEUE, SandboxGone, scheduleModalHibernation, hibernateSandbox, rearmReadyModalSandboxes, sweepOrphanModalSandboxes, wakeSwarmSandbox } from "./hibernate-sandbox.js";
 import { modalNetworkForProject, organizationRestrictsNetwork } from "./sandbox-network.js";
 import { stopLeftoverAgent } from "./leftover-agent.js";
@@ -225,6 +231,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   if (!claimed) return; // a duplicate job claimed it first
   const claimedTick = performance.now();
   emitBoard("starting");
+  await armServerRunStallRecovery(ctx, runId);
 
   // A live sandbox keeps the driver that created it. A card or swarm
   // with none follows the project's provider: "auto" on every project,
@@ -2908,17 +2915,6 @@ async function failRunAsInterrupted(
   await subject.settle(ctx);
 }
 
-/**
- * Minutes a run may go without a single transcript line before its
- * agent has spoken, after which it is closed as stalled.
- *
- * Longer than anything the executor legitimately does in silence before
- * an agent starts: a repository's setup command is the longest such step
- * and is capped at twenty minutes (SETUP_TIMEOUT_MS in repo-setup.ts),
- * and it says it is starting before it goes quiet.
- */
-export const STALLED_RUN_MIN = 30;
-
 const STALLED_RUN_ERROR = `${SANDBOX_STALLED_AGENT_PREFIX}, so no agent ran.`;
 const STALLED_RUN_TRANSCRIPT =
   "The sandbox stopped responding before the agent started, so the run ended here. Nothing was changed. Try the run again.";
@@ -2963,7 +2959,11 @@ function isTextModeCli(cli: string): boolean {
  * the coordinator also restarts a stalled leaf or planner the way it
  * restarts any run whose sandbox failed before the agent started.
  */
-export async function reapStalledRuns(ctx: AppContext, stallMin: number = STALLED_RUN_MIN): Promise<string[]> {
+export async function reapStalledRuns(
+  ctx: AppContext,
+  stallMin: number = STALLED_RUN_MIN,
+  runId?: string,
+): Promise<string[]> {
   const candidates = await ctx.db
     .select({ run: agentRuns, cli: agentProfiles.cli })
     .from(agentRuns)
@@ -2972,6 +2972,7 @@ export async function reapStalledRuns(ctx: AppContext, stallMin: number = STALLE
       and(
         eq(agentRuns.executor, "server"),
         inArray(agentRuns.status, ["starting", "running"]),
+        runId ? eq(agentRuns.id, runId) : undefined,
         sql`not exists (
           select 1 from ${runEvents}
           where ${runEvents.runId} = ${agentRuns.id}
@@ -3008,16 +3009,6 @@ export async function reapStalledRuns(ctx: AppContext, stallMin: number = STALLE
 }
 
 /**
- * Minutes a server run may sit queued before its run.execute job is
- * presumed lost and sent again.
- *
- * Longer than any wait for a free run worker a deployment ordinarily
- * has, so the common case sends nothing, and short against a swarm
- * that would otherwise wait for a reboot.
- */
-export const QUEUED_RUN_REQUEUE_MIN = 10;
-
-/**
  * Sends run.execute again for server runs that have sat queued too long.
  *
  * A queued row is only a run once a job carries it, and a job can be
@@ -3036,6 +3027,7 @@ export const QUEUED_RUN_REQUEUE_MIN = 10;
 export async function requeueStrandedRuns(
   ctx: AppContext,
   afterMin: number = QUEUED_RUN_REQUEUE_MIN,
+  runId?: string,
 ): Promise<string[]> {
   const stranded = await ctx.db
     .select({ id: agentRuns.id })
@@ -3044,6 +3036,7 @@ export async function requeueStrandedRuns(
       and(
         eq(agentRuns.executor, "server"),
         eq(agentRuns.status, "queued"),
+        runId ? eq(agentRuns.id, runId) : undefined,
         sql`${agentRuns.queuedAt} < now() - make_interval(mins => ${afterMin})`,
       ),
     );
@@ -3405,6 +3398,32 @@ async function noteRequeuedRunnerClaim(ctx: AppContext, run: PipelineRun): Promi
 }
 
 /**
+ * One `runner.reap` fire. A named run is a lease, a stall, or a
+ * stranded queue; a job with neither kind nor runId is the leftover
+ * bulk path the daily job already covers.
+ */
+export async function handleRunnerReap(
+  ctx: AppContext,
+  data: { runId?: string; kind?: string } | undefined,
+): Promise<void> {
+  if (data?.kind === "stalled") {
+    await reapStalledRuns(ctx, STALLED_RUN_MIN, data.runId);
+    return;
+  }
+  if (data?.kind === "stranded") {
+    await requeueStrandedRuns(ctx, QUEUED_RUN_REQUEUE_MIN, data.runId);
+    return;
+  }
+  if (typeof data?.runId === "string") {
+    await reapExpiredRunnerLease(ctx, data.runId);
+    return;
+  }
+  await reapStaleRunnerClaims(ctx);
+  await reapStalledRuns(ctx);
+  await requeueStrandedRuns(ctx);
+}
+
+/**
  * One lease fire. The delay is the silence; claimedAt is the backstop
  * so a job that landed early (a debounce miss) does not bounce a
  * runner that just reported.
@@ -3473,6 +3492,7 @@ async function runParkedComputeSweep(ctx: AppContext): Promise<void> {
 export async function runDailyWorkTimerReconcile(ctx: AppContext): Promise<void> {
   await reconcileGateSchedules(ctx);
   await reconcileRunnerLeases(ctx);
+  await reconcileServerRunRecoveries(ctx);
   await sweepStrandedMessages(ctx).catch((err: unknown) => {
     console.warn("the stranded message sweep did not finish:", err);
     ctx.analytics?.captureException(err, null, null, { queue: "gate.sweep" });
@@ -3645,19 +3665,17 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
   );
 
   /**
-   * A runner claim arms a delayed lease; each heartbeat pushes it
-   * back. The job names the run, so an idle deployment holds no
-   * runner.reap cron and Postgres is not asked.
+   * A runner claim arms a delayed lease; a server run arms a stall
+   * or stranded recovery. Each job names the run, so an idle
+   * deployment holds no runner.reap cron and Postgres is not asked.
    */
-  await ctx.jobs.work<{ runId?: string }>("runner.reap", {}, captureJobErrors(ctx.analytics, "runner.reap", async (data) => {
-    if (typeof data?.runId === "string") {
-      await reapExpiredRunnerLease(ctx, data.runId);
-      return;
-    }
-    await reapStaleRunnerClaims(ctx);
-    await reapStalledRuns(ctx);
-    await requeueStrandedRuns(ctx);
-  }));
+  await ctx.jobs.work<{ runId?: string; kind?: string }>(
+    "runner.reap",
+    {},
+    captureJobErrors(ctx.analytics, "runner.reap", async (data) => {
+      await handleRunnerReap(ctx, data);
+    }),
+  );
 
   /**
    * The swarm reconciler's pg-boss worker is not registered here.
@@ -3707,11 +3725,16 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
   if (gated.length > 0) console.log(`armed gate clocks for ${gated.length} gated card(s)`);
   const leased = await reconcileRunnerLeases(ctx);
   if (leased.length > 0) console.log(`armed runner leases for ${leased.length} claimed run(s)`);
+  const recovered = await reconcileServerRunRecoveries(ctx);
+  if (recovered.stalled.length + recovered.stranded.length > 0) {
+    console.log(
+      `armed server-run recovery for ${recovered.stalled.length} in-flight and ${recovered.stranded.length} queued run(s)`,
+    );
+  }
   const parked = await syncParkedComputePresence(ctx);
   if (parked > 0) console.log(`parked-compute presence is ${parked}`);
-  // Stalled and stranded server runs used to ride the five-minute
-  // runner.reap cron. Boot plus the daily job is the catch now, so a
-  // restart does not wait until 09:00 UTC to notice one.
+  // Already-expired rows are closed or re-sent now; the delayed jobs
+  // cover anything that will become due while this process is up.
   await reapStalledRuns(ctx);
   await requeueStrandedRuns(ctx);
 

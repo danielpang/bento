@@ -5,24 +5,36 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { FakeJobQueue } from "../jobs/index.js";
 import { enqueueGateEvaluate, enqueueRun, INTERACTIVE_POLL_SECONDS, QUEUE_POLL_SECONDS, RUN_WORKER_POLL_SECONDS } from "./queue.js";
+import { QUEUED_RUN_REQUEUE_MIN, serverRunQueuedKey } from "./work-timers.js";
+
+function executeAndRecovery(runId: string) {
+  return [
+    { queue: "run.execute" as const, data: { runId } },
+    {
+      queue: "runner.reap" as const,
+      data: { runId, kind: "stranded" },
+      opts: { debounceKey: serverRunQueuedKey(runId), delayMs: QUEUED_RUN_REQUEUE_MIN * 60_000 },
+    },
+  ];
+}
 
 test("enqueueRun sends the job before it wakes pg-boss workers", async () => {
   const jobs = new FakeJobQueue();
   await enqueueRun({ jobs }, "run-1");
-  assert.deepEqual(jobs.sent, [{ queue: "run.execute", data: { runId: "run-1" } }]);
+  assert.deepEqual(jobs.sent, executeAndRecovery("run-1"));
   assert.deepEqual(jobs.woken, ["run.execute"]);
 });
 
 test("enqueueRun still queues when this process has no run workers", async () => {
   const jobs = new FakeJobQueue();
   await enqueueRun({ jobs }, "run-1");
-  assert.deepEqual(jobs.sent, [{ queue: "run.execute", data: { runId: "run-1" } }]);
+  assert.deepEqual(jobs.sent, executeAndRecovery("run-1"));
 });
 
 test("enqueueRun does not wake a BullMQ queue", async () => {
   const jobs = new FakeJobQueue("bullmq");
   await enqueueRun({ jobs }, "run-1");
-  assert.deepEqual(jobs.sent, [{ queue: "run.execute", data: { runId: "run-1" } }]);
+  assert.deepEqual(jobs.sent, executeAndRecovery("run-1"));
   assert.deepEqual(jobs.woken, []);
 });
 
@@ -57,6 +69,8 @@ test("registerJobs does not poll gated cards or runner claims on a five-minute c
   const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "run-executor.ts"), "utf8");
   assert.doesNotMatch(src, /schedule\("gate\.sweep",\s*"gate\.sweep",\s*"\*\/5/);
   assert.doesNotMatch(src, /schedule\("runner\.reap",\s*"runner\.reap",\s*"\*\/5/);
+  assert.match(src, /armServerRunStallRecovery\(ctx,\s*runId\)/);
+  assert.match(src, /reconcileServerRunRecoveries\(ctx\)/);
 });
 
 /**

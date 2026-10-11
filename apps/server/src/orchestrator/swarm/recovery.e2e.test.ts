@@ -20,6 +20,7 @@ import { FakeJobQueue } from "../../jobs/index.js";
 import { EventBus, type BoardEvent } from "../../events.js";
 import { loadEnv } from "../../env.js";
 import {
+  handleRunnerReap,
   markCancelled,
   QUEUED_RUN_REQUEUE_MIN,
   reapStalledRuns,
@@ -274,6 +275,46 @@ test("a run that stalled before its agent started is closed, and its swarm is to
     "and the reconciler is told, so a new planner can be woken",
   );
   ctx.running.delete(stalled.id);
+});
+
+test("a live process recovers a stalled server run when its delayed job fires", async () => {
+  const swarm = await makeSwarm();
+  const stalled = await stalledRun(swarm.id, 46, [
+    { minutesAgo: 44, payload: system("Starting a Modal sandbox") },
+  ]);
+  const controller = new AbortController();
+  ctx.running.set(stalled.id, controller);
+
+  await handleRunnerReap(ctx, { runId: stalled.id, kind: "stalled" });
+
+  const [row] = await db.select().from(agentRuns).where(eq(agentRuns.id, stalled.id));
+  assert.equal(row!.status, "failed", "the delayed job closes it without waiting for boot or the daily pass");
+  assert.ok(controller.signal.aborted);
+  ctx.running.delete(stalled.id);
+});
+
+test("a live process recovers a stranded queued run when its delayed job fires", async () => {
+  const swarm = await makeSwarm();
+  const [stranded] = await db
+    .insert(agentRuns)
+    .values({
+      type: "swarm",
+      swarmId: swarm.id,
+      role: "planner",
+      agentProfileId: PROFILE,
+      prompt: "",
+      status: "queued",
+      executor: "server",
+      queuedAt: new Date(Date.now() - (QUEUED_RUN_REQUEUE_MIN + 5) * 60_000),
+    })
+    .returning();
+
+  await handleRunnerReap(ctx, { runId: stranded!.id, kind: "stranded" });
+
+  assert.ok(
+    queued.some((job) => job.queue === "run.execute" && (job.data as { runId: string }).runId === stranded!.id),
+    "the delayed job sends run.execute again near the prior timeout",
+  );
 });
 
 test("a run whose agent has spoken, or that is not yet stalled, is left alone", async () => {

@@ -16,7 +16,8 @@ import type { SlackInboundJob } from "../orchestrator/slack-sync.js";
  * GitHub webhook receiver. Any event that touches a PR we track queues a
  * gate re-evaluation for the matching feature, which is what makes
  * "advance when review comments are resolved" feel immediate.
- * Self-hosters without a public URL rely on the gate.sweep cron instead.
+ * Self-hosters without a public URL rely on each gated card's
+ * `gate:<featureId>` schedule instead.
  */
 export function webhookRoutes(ctx: AppContext) {
   return new Hono()

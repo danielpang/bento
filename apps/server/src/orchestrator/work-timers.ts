@@ -22,6 +22,10 @@ import { ACTIVE_RUN_STATUSES } from "./start-run.js";
  * - A runner claim arms `runner-lease:<runId>` with debounce. Each
  *   heartbeat pushes the delay back. The job fires only when the
  *   machine goes silent.
+ * - A server run that is queued arms `run-queued:<runId>` for the
+ *   stranded-job timeout. One that enters starting/running arms
+ *   `run-stall:<runId>` for the pre-agent stall timeout. Each fire
+ *   is one row; an idle process holds none.
  *
  * Redis (or the in-process map on pg-boss) can drift if a process
  * dies between a row change and a counter update. Boot recomputes
@@ -38,6 +42,22 @@ export const PARKED_COMPUTE_PRESENCE_KEY = "parked-compute";
 export const PARKED_COMPUTE_SWEEP_ID = "gate.parked";
 export const WORK_TIMER_DAILY_ID = "gate.sweep";
 
+/**
+ * Minutes a server run may go without a transcript line before its
+ * agent has spoken, after which it is closed as stalled.
+ *
+ * Longer than anything the executor legitimately does in silence
+ * before an agent starts: a repository's setup command is the longest
+ * such step and is capped at twenty minutes.
+ */
+export const STALLED_RUN_MIN = 30;
+
+/**
+ * Minutes a server run may sit queued before its run.execute job is
+ * presumed lost and sent again.
+ */
+export const QUEUED_RUN_REQUEUE_MIN = 10;
+
 export function gateSchedulerId(featureId: string): string {
   return `gate:${featureId}`;
 }
@@ -46,7 +66,19 @@ export function runnerLeaseKey(runId: string): string {
   return `runner-lease:${runId}`;
 }
 
+export function serverRunStallKey(runId: string): string {
+  return `run-stall:${runId}`;
+}
+
+export function serverRunQueuedKey(runId: string): string {
+  return `run-queued:${runId}`;
+}
+
 export function runnerLeaseDelayMs(timeoutMin: number): number {
+  return timeoutMin * 60_000;
+}
+
+export function serverRunRecoveryDelayMs(timeoutMin: number): number {
   return timeoutMin * 60_000;
 }
 
@@ -114,6 +146,67 @@ export async function reconcileRunnerLeases(ctx: AppContext): Promise<string[]> 
     );
   for (const row of claimed) await refreshRunnerLease(ctx, row.id);
   return claimed.map((row) => row.id);
+}
+
+/**
+ * Arms the stranded-job clock for a server run that just went queued.
+ *
+ * debounceKey replaces a waiting delayed job, so a later enqueue of
+ * the same run (a retry, a boot requeue) pushes the fire back to the
+ * full timeout from now.
+ */
+export async function armServerRunQueuedRecovery(
+  ctx: Pick<AppContext, "jobs">,
+  runId: string,
+): Promise<void> {
+  await ctx.jobs.send("runner.reap", { runId, kind: "stranded" }, {
+    debounceKey: serverRunQueuedKey(runId),
+    delayMs: serverRunRecoveryDelayMs(QUEUED_RUN_REQUEUE_MIN),
+  });
+}
+
+/**
+ * Arms the pre-agent stall clock. Fires only if the agent never
+ * speaks; a fire against a run that has started is a no-op.
+ */
+export async function armServerRunStallRecovery(
+  ctx: Pick<AppContext, "jobs">,
+  runId: string,
+): Promise<void> {
+  await ctx.jobs.send("runner.reap", { runId, kind: "stalled" }, {
+    debounceKey: serverRunStallKey(runId),
+    delayMs: serverRunRecoveryDelayMs(STALLED_RUN_MIN),
+  });
+}
+
+/**
+ * Boot and the daily safety pass: every queued or in-flight server
+ * run gets its delayed recovery again. A flush or a restart loses
+ * only the time already elapsed on the previous one.
+ */
+export async function reconcileServerRunRecoveries(
+  ctx: AppContext,
+): Promise<{ stalled: string[]; stranded: string[] }> {
+  const stranded = await ctx.db
+    .select({ id: agentRuns.id })
+    .from(agentRuns)
+    .where(and(eq(agentRuns.executor, "server"), eq(agentRuns.status, "queued")));
+  for (const row of stranded) await armServerRunQueuedRecovery(ctx, row.id);
+
+  const stalled = await ctx.db
+    .select({ id: agentRuns.id })
+    .from(agentRuns)
+    .where(
+      and(
+        eq(agentRuns.executor, "server"),
+        inArray(agentRuns.status, ["starting", "running"]),
+      ),
+    );
+  for (const row of stalled) await armServerRunStallRecovery(ctx, row.id);
+  return {
+    stalled: stalled.map((row) => row.id),
+    stranded: stranded.map((row) => row.id),
+  };
 }
 
 /**
@@ -191,8 +284,9 @@ export async function armParkedComputeSweep(ctx: AppContext): Promise<void> {
 }
 
 /**
- * Idle means no per-card clocks, no parked sweep, no runner leases.
- * The daily cleanup is the one schedule an empty deployment keeps.
+ * Idle means no per-card clocks, no parked sweep, no runner leases,
+ * and no server-run recoveries. The daily cleanup is the one schedule
+ * an empty deployment keeps.
  */
 export function isIdleWorkTimerSchedule(id: string): boolean {
   return id !== WORK_TIMER_DAILY_ID;

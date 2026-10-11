@@ -310,7 +310,14 @@ test("a project with no repositories refuses a new run and cancels one already q
   assert.equal(started.status, 201, await started.clone().text());
   const body = (await started.json()) as { id: string; status: string };
   assert.equal(body.status, "queued");
-  assert.deepEqual(jobs.sent, [{ queue: "run.execute", data: { runId: body.id } }]);
+  assert.deepEqual(
+    jobs.sent.filter((job) => job.queue === "run.execute"),
+    [{ queue: "run.execute", data: { runId: body.id } }],
+  );
+  assert.ok(
+    jobs.sent.some((job) => job.queue === "runner.reap" && (job.data as { runId?: string }).runId === body.id),
+    "queuing a server run also arms its stranded recovery",
+  );
 });
 
 test("linking a PR still queues a gate evaluation for the card", async () => {

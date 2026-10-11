@@ -16,21 +16,26 @@ import { FakeJobQueue } from "../jobs/index.js";
 import { EventBus } from "../events.js";
 import { loadEnv } from "../env.js";
 import { queueFeatureEventFollowUps } from "./gate-evaluator.js";
-import { reapExpiredRunnerLease } from "./run-executor.js";
+import { handleRunnerReap, QUEUED_RUN_REQUEUE_MIN, reapExpiredRunnerLease, STALLED_RUN_MIN } from "./run-executor.js";
 import {
   GATE_CARD_CRON,
   PARKED_COMPUTE_CRON,
   PARKED_COMPUTE_PRESENCE_KEY,
   PARKED_COMPUTE_SWEEP_ID,
   WORK_TIMER_DAILY_ID,
+  armServerRunQueuedRecovery,
+  armServerRunStallRecovery,
   countParkedComputeWork,
   gateSchedulerId,
   isIdleWorkTimerSchedule,
   parkedComputeSweepShouldRun,
   reconcileGateSchedules,
   reconcileRunnerLeases,
+  reconcileServerRunRecoveries,
   refreshRunnerLease,
   runnerLeaseKey,
+  serverRunQueuedKey,
+  serverRunStallKey,
   signalParkedCompute,
   syncGateSchedule,
   syncParkedComputePresence,
@@ -291,9 +296,112 @@ test("a heartbeat replaces the waiting lease", async () => {
   assert.equal(leases[1]?.opts?.delayMs, 60_000);
 });
 
+test("queuing a server run arms stranded recovery at the prior timeout", async () => {
+  await armServerRunQueuedRecovery(ctx, "run-queued");
+  const job = jobs.sent.find((row) => row.queue === "runner.reap");
+  assert.ok(job, "a queued server run holds a delayed recovery");
+  assert.deepEqual(job.data, { runId: "run-queued", kind: "stranded" });
+  assert.equal(job.opts?.debounceKey, serverRunQueuedKey("run-queued"));
+  assert.equal(job.opts?.delayMs, QUEUED_RUN_REQUEUE_MIN * 60_000);
+});
+
+test("a server run entering starting arms stall recovery at the prior timeout", async () => {
+  await armServerRunStallRecovery(ctx, "run-stall");
+  const job = jobs.sent.find((row) => row.queue === "runner.reap");
+  assert.ok(job, "a starting server run holds a delayed recovery");
+  assert.deepEqual(job.data, { runId: "run-stall", kind: "stalled" });
+  assert.equal(job.opts?.debounceKey, serverRunStallKey("run-stall"));
+  assert.equal(job.opts?.delayMs, STALLED_RUN_MIN * 60_000);
+});
+
+test("boot reconstructs delayed recoveries for queued and starting server runs", async () => {
+  const feature = await makeFeature("active");
+  const queued = await makeRun(feature.id, { status: "queued", executor: "server" });
+  const starting = await makeRun(feature.id, {
+    status: "starting",
+    executor: "server",
+    startedAt: new Date(),
+  });
+  const claimed = await makeRun(feature.id, {
+    status: "starting",
+    executor: "runner",
+    claimedBy: "laptop",
+    claimedAt: new Date(),
+  });
+
+  const restored = await reconcileServerRunRecoveries(ctx);
+  assert.deepEqual(new Set(restored.stranded), new Set([queued.id]));
+  assert.deepEqual(new Set(restored.stalled), new Set([starting.id]));
+
+  const stranded = jobs.sent.find(
+    (job) => job.queue === "runner.reap" && (job.data as { runId?: string }).runId === queued.id,
+  );
+  assert.ok(stranded);
+  assert.deepEqual(stranded.data, { runId: queued.id, kind: "stranded" });
+  assert.equal(stranded.opts?.delayMs, QUEUED_RUN_REQUEUE_MIN * 60_000);
+
+  const stall = jobs.sent.find(
+    (job) => job.queue === "runner.reap" && (job.data as { runId?: string }).runId === starting.id,
+  );
+  assert.ok(stall);
+  assert.deepEqual(stall.data, { runId: starting.id, kind: "stalled" });
+  assert.equal(stall.opts?.delayMs, STALLED_RUN_MIN * 60_000);
+
+  assert.equal(
+    jobs.sent.filter((job) => (job.data as { runId?: string }).runId === claimed.id).length,
+    0,
+    "a runner claim is not a server-run recovery",
+  );
+});
+
+test("a live process recovers a stranded queued run when its delayed job fires", async () => {
+  const feature = await makeFeature("active");
+  const stranded = await makeRun(feature.id, {
+    status: "queued",
+    executor: "server",
+    queuedAt: new Date(Date.now() - (QUEUED_RUN_REQUEUE_MIN + 5) * 60_000),
+  });
+  await armServerRunQueuedRecovery(ctx, stranded.id);
+  jobs.sent.length = 0;
+
+  await handleRunnerReap(ctx, { runId: stranded.id, kind: "stranded" });
+  assert.ok(
+    jobs.sent.some((job) => job.queue === "run.execute" && (job.data as { runId: string }).runId === stranded.id),
+    "the lost run.execute is sent again near the prior timeout",
+  );
+});
+
+test("server-run recovery does not query postgres when no such rows exist", async () => {
+  const restored = await reconcileServerRunRecoveries(ctx);
+  assert.deepEqual(restored, { stalled: [], stranded: [] });
+  assert.equal(
+    jobs.sent.filter((job) => job.queue === "runner.reap").length,
+    0,
+    "no delayed recovery means the worker is never invoked",
+  );
+
+  jobs.sent.length = 0;
+  let queries = 0;
+  const originalExecute = pool.query.bind(pool);
+  pool.query = ((...args: unknown[]) => {
+    queries += 1;
+    return originalExecute(...(args as Parameters<typeof originalExecute>));
+  }) as typeof pool.query;
+  try {
+    // A live idle process has no runner.reap job to run. Reconcile
+    // already learned there is nothing; the worker is the only later
+    // path that would open Postgres, and it is not scheduled.
+    assert.equal(jobs.sent.length, 0);
+    assert.equal(queries, 0, "no job means the worker never opens Postgres");
+  } finally {
+    pool.query = originalExecute;
+  }
+});
+
 test("an empty deployment holds no idle work-timer schedules", async () => {
   await reconcileGateSchedules(ctx);
   await reconcileRunnerLeases(ctx);
+  await reconcileServerRunRecoveries(ctx);
   await syncParkedComputePresence(ctx);
   assert.equal(await jobs.getPresence(PARKED_COMPUTE_PRESENCE_KEY), 0);
   assert.equal(await parkedComputeSweepShouldRun(ctx), false);
@@ -305,7 +413,7 @@ test("an empty deployment holds no idle work-timer schedules", async () => {
   assert.equal(
     jobs.sent.filter((job) => job.queue === "runner.reap").length,
     0,
-    "no claimed run means no lease",
+    "no claimed run and no server-run recovery means no delayed reap",
   );
   assert.equal(WORK_TIMER_DAILY_ID, "gate.sweep");
 });
