@@ -3,8 +3,8 @@
  *
  * These three queues carry information no domain row holds. Repeat
  * imports must not duplicate them, and a crash mid-copy must still
- * leave every pending payload on the next boot. The pgboss schema
- * stays in place.
+ * leave every pending payload. Hosted boot no longer runs this; the
+ * owner one-shot does, then drops the hosted schema.
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -143,10 +143,10 @@ test("imported job ids are a deterministic function of the pg-boss id", () => {
   assert.deepEqual([...PAYLOAD_ONLY_QUEUES], ["slack.notify", "linear.outbound", "linear.create-issue"]);
 });
 
-test("startServer copies payload-only jobs on the first BullMQ boot", () => {
+test("startServer no longer queries pgboss on the BullMQ path", () => {
   const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "server.ts"), "utf8");
-  assert.match(src, /importPgbossPayloadJobs/);
-  assert.match(src, /jobs\.kind === "bullmq"/);
+  assert.doesNotMatch(src, /importPgbossPayloadJobs/);
+  assert.doesNotMatch(src, /pgboss\.job/);
 });
 
 test("a pg-boss queue is a no-op and a missing schema is not an error", async () => {

@@ -54,19 +54,40 @@ Development first. Production only after the development observation window in t
 
 1. Redis is reachable from the Fly region, AOF is on, and `REDIS_URL` is set on that app only.
 2. Deploy. Boot must log no `REDIS_URL is required` and no `must be a redis:// or rediss:// URL`.
-3. Payload-only pg-boss jobs (`slack.notify`, `linear.outbound`, `linear.create-issue` in `created` or `retry`) are imported into BullMQ with stable ids. A repeat boot must not duplicate them. The `pgboss` schema stays in place for one release.
+3. Payload-only pg-boss jobs (`slack.notify`, `linear.outbound`, `linear.create-issue` in `created` or `retry`) were imported into BullMQ with stable ids during the retention release. Hosted boot no longer queries `pgboss`. Leftovers are an owner one-shot (`apps/server/src/jobs/import-pgboss-cli.ts`), then Phase 5 drops the hosted schema.
 4. Boot reconciliation re-arms ready Modal hibernations, live-swarm watchdogs, gated-card clocks, runner leases, parked-compute presence, and Linear presence from rows.
 5. `/api/health` answers from process state. `/api/health?deep=1` is the operator database probe; do not point an uptime monitor at `deep=1`.
 6. Watch development for the plan's observation window: no lost runs, Slack or Linear updates, or swarm ticks.
 
 ## Rollback checks (owner)
 
-Hosted rollback is "boot the previous image that still understands pg-boss" only while the `pgboss` schema remains. Phase 5 drops that schema from hosted databases and removes hosted rollback.
+Hosted rollback to an image that still understands pg-boss ended when Phase 5 dropped the hosted `pgboss` schema. After that drop, the only hosted rollback is a restore of the backup taken immediately before it.
 
-- Do not drop `pgboss` in this release.
+- Do not place this drop in the shared migration chain. `packages/db/migrations` is what local and Mac apply.
 - Do not remove `PgBossQueue` or the shared migration chain. Local and Mac still start pg-boss.
-- Clearing `REDIS_URL` on a multi-mode app does not fall back to pg-boss; the process fails fast. Rollback is a deploy, not an unset secret.
-- A Redis flush delays work. The next boot rebuilds row-derived jobs. Payload-only jobs that were already imported and then flushed are gone unless they are still in `pgboss.job`.
+- Clearing `REDIS_URL` on a multi-mode app does not fall back to pg-boss; the process fails fast. Rollback is a deploy, not an unset secret, until the schema is gone. After the drop it is a restore.
+- A Redis flush delays work. The next boot rebuilds row-derived jobs. After the drop, payload-only jobs that were already imported and then flushed are gone.
+
+## Phase 5: drop hosted `pgboss` (owner)
+
+After one full BullMQ release, the `active_time` check above, and no fallback to pg-boss:
+
+1. Inventory the hosted database with `packages/db/ops/hosted-inventory-pgboss.sql`. Save the payload-only export (`slack.notify`, `linear.outbound`, `linear.create-issue` in `created` or `retry`).
+2. Confirm BullMQ coverage: those three queues are empty or already imported; every other named queue is rebuilt from rows, re-scheduled at boot, or is stale webhook/request work from before the cutover (`PGBOSS_DROP_COVERAGE` in `apps/server/src/jobs/import-pgboss.ts`).
+3. If payload-only leftovers remain, run the owner one-shot, then inventory again until those created/retry counts are zero:
+
+   ```bash
+   # Owner executes against the hosted database. Not a boot path.
+   DATABASE_URL=... REDIS_URL=... BENTO_ENVIRONMENT=production \
+     pnpm --filter @bento/server exec tsx src/jobs/import-pgboss-cli.ts
+   ```
+
+4. Take a hosted database backup (Neon PITR window, or an explicit backup) and record the restore point.
+5. Record the owner sign-off: hosted rollback is restore only, and this drop will not run against local, the TUI, or the Mac app.
+6. Apply `packages/db/ops/hosted-drop-pgboss.sql` to hosted/multi Neon only, development first, then production. `runMigrations` never applies this file.
+7. Confirm `pgboss` is gone on hosted, and that a laptop / Mac install still starts pg-boss and recreates its schema.
+
+The drop is irreversible without restore. Hosted no longer queries `pgboss`.
 
 ## `active_time` verification (owner)
 
@@ -84,4 +105,4 @@ The idle harness in `apps/server/src/idle.e2e.test.ts` is the pre-cutover proof:
 
 - Local mode, the TUI, and the Mac app stay on pg-boss. They must not import `bullmq` or `ioredis`.
 - Compose Redis is optional for `pnpm dev`. Start it only for multi-mode or BullMQ tests: `docker compose up -d postgres redis`.
-- External Redis, Fly secrets, and Neon settings are owner actions. A swarm leaf documents them here and does not execute them.
+- External Redis, Fly secrets, Neon backups, and the hosted `pgboss` drop are owner actions. A swarm leaf documents them here and does not execute them.

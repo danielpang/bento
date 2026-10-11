@@ -1,13 +1,59 @@
-import type { JobQueue, QueueName, SendOptions } from "./types.js";
+import { QUEUE_NAMES, type JobQueue, type QueueName, type SendOptions } from "./types.js";
 
 /**
  * Queues whose payloads cannot be rebuilt from domain rows. Boot
  * already re-queues runs, landings, ticks, and Modal hibernations
  * from tables; these three only lived in pg-boss.
+ *
+ * Hosted boot no longer copies them. The owner inventories leftovers
+ * and, if any remain, runs import-pgboss-cli before dropping the
+ * hosted pgboss schema.
  */
 export const PAYLOAD_ONLY_QUEUES = ["slack.notify", "linear.outbound", "linear.create-issue"] as const;
 
 export type PayloadOnlyQueue = (typeof PAYLOAD_ONLY_QUEUES)[number];
+
+/**
+ * What happens to a leftover pgboss.job row when the hosted schema
+ * is dropped. Every QueueName has a fate so a new queue cannot ship
+ * without an import or a rebuild.
+ *
+ * - import: payload-only; must be copied or confirmed empty
+ * - rebuild: registerJobs reconstructs from domain rows
+ * - reschedule: boot upserts the Redis (or pg-boss) scheduler
+ * - stale: webhook or request work already on BullMQ for a release
+ * - unused: reserved, never queued
+ */
+export type PgbossDropFate = "import" | "rebuild" | "reschedule" | "stale" | "unused";
+
+export const PGBOSS_DROP_COVERAGE: Record<QueueName, PgbossDropFate> = {
+  "run.execute": "rebuild",
+  "gate.evaluate": "rebuild",
+  "gate.sweep": "reschedule",
+  "runner.reap": "rebuild",
+  "run.queue-snapshot": "reschedule",
+  "sandbox.reap": "rebuild",
+  "sandbox.hibernate": "rebuild",
+  "sandbox.modal-sweep": "reschedule",
+  "swarm.tick": "rebuild",
+  "swarm.land": "rebuild",
+  "swarm.publish": "stale",
+  "swarm.push": "rebuild",
+  "swarm.task-start-over": "rebuild",
+  "swarm.watchdog": "rebuild",
+  "linear.backlog-sync": "stale",
+  "linear.inbound": "stale",
+  "linear.outbound": "import",
+  "linear.create-issue": "import",
+  "linear.sweep": "reschedule",
+  "slack.inbound": "stale",
+  "slack.notify": "import",
+  previews: "unused",
+};
+
+export function queuesWithDropFate(fate: PgbossDropFate): QueueName[] {
+  return QUEUE_NAMES.filter((name) => PGBOSS_DROP_COVERAGE[name] === fate);
+}
 
 const IMPORT_STATES = ["created", "retry"] as const;
 
@@ -74,7 +120,9 @@ function assertSafeIdent(name: string): string {
  * re-queued). The pgboss schema is not modified.
  *
  * A database that never ran pg-boss (no schema) is a no-op. Local and
- * Mac pg-boss processes skip this; they are not cutting over.
+ * Mac pg-boss processes skip this; they are not cutting over. Multi
+ * mode boot no longer calls this: after the hosted drop, a query
+ * against pgboss would be the poll this work removed.
  */
 export async function importPgbossPayloadJobs(opts: {
   pool: ImportQuery;

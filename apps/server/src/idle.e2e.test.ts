@@ -174,7 +174,8 @@ test("the production runbook covers Redis, isolation, AOF, cutover, and local pg
     "iad",
     "owner",
     "maxRetriesPerRequest",
-    "Do not drop `pgboss`",
+    "hosted-drop-pgboss.sql",
+    "irreversible without restore",
     "BENTO_IDLE_WINDOW_MS",
   ]) {
     assert.match(src, new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), `runbook is missing ${needle}`);
