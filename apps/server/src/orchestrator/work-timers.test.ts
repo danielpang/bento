@@ -1,5 +1,6 @@
 import { after, before, beforeEach, test } from "node:test";
 import assert from "node:assert/strict";
+import { Hono } from "hono";
 import pg from "pg";
 import { eq } from "drizzle-orm";
 import {
@@ -15,6 +16,9 @@ import type { AppContext } from "../context.js";
 import { FakeJobQueue } from "../jobs/index.js";
 import { EventBus } from "../events.js";
 import { loadEnv } from "../env.js";
+import { actorMiddleware } from "../middleware/actor.js";
+import { tenantMiddleware } from "../middleware/tenant.js";
+import { runnerRoutes } from "../routes/runner.js";
 import { queueFeatureEventFollowUps } from "./gate-evaluator.js";
 import { handleRunnerReap, QUEUED_RUN_REQUEUE_MIN, reapExpiredRunnerLease, STALLED_RUN_MIN } from "./run-executor.js";
 import {
@@ -58,6 +62,7 @@ let pool: ReturnType<typeof createPool>;
 let db: Db;
 let ctx: AppContext;
 let jobs: FakeJobQueue;
+let runnerApp: Hono;
 
 before(async () => {
   const admin = new pg.Client({ connectionString: adminUrl });
@@ -105,6 +110,10 @@ before(async () => {
     draining: false,
     drivers: { default: { provider: "local-process" }, get: () => undefined, selectable: () => [] },
   } as unknown as AppContext;
+  runnerApp = new Hono()
+    .use("*", actorMiddleware(ctx))
+    .use("*", tenantMiddleware(ctx))
+    .route("/api/runner", runnerRoutes(ctx));
 });
 
 after(async () => {
@@ -294,6 +303,59 @@ test("a heartbeat replaces the waiting lease", async () => {
   assert.equal(leases.length, 2);
   assert.equal(leases[1]?.opts?.debounceKey, runnerLeaseKey("run-1"));
   assert.equal(leases[1]?.opts?.delayMs, 60_000);
+});
+
+test("a healthy long-running runner claim is not reaped: events refresh its lease", async () => {
+  const feature = await makeFeature("active");
+  const run = await makeRun(feature.id, { status: "queued", executor: "runner" });
+
+  const claim = await runnerApp.request("/api/runner/claim", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ runnerId: "laptop" }),
+  });
+  assert.equal(claim.status, 200, await claim.clone().text());
+  const claimed = (await claim.json()) as { run: { id: string } | null };
+  assert.equal(claimed.run?.id, run.id);
+
+  const afterClaim = jobs.sent.filter((job) => job.queue === "runner.reap");
+  assert.equal(afterClaim.length, 1, "claim arms runner-lease:<runId>");
+  assert.deepEqual(afterClaim[0]?.data, { runId: run.id });
+  assert.equal(afterClaim[0]?.opts?.debounceKey, runnerLeaseKey(run.id));
+  assert.equal(afterClaim[0]?.opts?.delayMs, 60_000);
+
+  // The claim is already older than the timeout. Without a heartbeat
+  // the delayed job would reap it. The events report is that heartbeat.
+  await db
+    .update(agentRuns)
+    .set({ claimedAt: new Date(Date.now() - 2 * 60_000) })
+    .where(eq(agentRuns.id, run.id));
+
+  const events = await runnerApp.request(`/api/runner/runs/${run.id}/events`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      runnerId: "laptop",
+      events: [{ type: "message", role: "assistant", text: "still working" }],
+    }),
+  });
+  assert.equal(events.status, 200, await events.clone().text());
+
+  const leases = jobs.sent.filter((job) => job.queue === "runner.reap");
+  assert.equal(leases.length, 2, "the events report replaces the waiting lease");
+  assert.equal(leases[1]?.opts?.debounceKey, runnerLeaseKey(run.id));
+  assert.equal(leases[1]?.opts?.delayMs, 60_000);
+
+  // The original delayed job landing now is a debounce miss. claimedAt
+  // is the backstop: a reporting machine is not requeued.
+  await handleRunnerReap(ctx, { runId: run.id });
+  const [still] = await db.select().from(agentRuns).where(eq(agentRuns.id, run.id));
+  assert.equal(still?.status, "running");
+  assert.equal(still?.claimedBy, "laptop");
+  assert.ok(
+    still?.claimedAt && still.claimedAt.getTime() > Date.now() - 10_000,
+    "the events report stamped a fresh heartbeat",
+  );
 });
 
 test("queuing a server run arms stranded recovery at the prior timeout", async () => {

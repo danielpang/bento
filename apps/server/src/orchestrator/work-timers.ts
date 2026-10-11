@@ -19,13 +19,16 @@ import { ACTIVE_RUN_STATUSES } from "./start-run.js";
  *   directly via `armParkedComputeSweep`.
  * - Expired MCP grants and OAuth rows move to the daily job. They are
  *   row cleanup, not latency.
- * - A runner claim arms `runner-lease:<runId>` with debounce. Each
- *   heartbeat pushes the delay back. The job fires only when the
- *   machine goes silent.
- * - A server run that is queued arms `run-queued:<runId>` for the
- *   stranded-job timeout. One that enters starting/running arms
- *   `run-stall:<runId>` for the pre-agent stall timeout. Each fire
- *   is one row; an idle process holds none.
+ * - A runner claim arms `runner-lease:<runId>` with debounce. Claim
+ *   and each events report (the runner's heartbeat) push the delay
+ *   back. The job fires only when the machine goes silent. claimedAt
+ *   is the backstop if a debounce misses.
+ * - A server run has no runner heartbeat, so a refreshed lease does
+ *   not apply. Queued arms `run-queued:<runId>` for the stranded-job
+ *   timeout. Entering starting/running arms `run-stall:<runId>` for
+ *   the pre-agent stall timeout. A fire against a run whose agent
+ *   has spoken is a no-op. Each fire is one row; an idle process
+ *   holds none.
  *
  * Redis (or the in-process map on pg-boss) can drift if a process
  * dies between a row change and a counter update. Boot recomputes
@@ -119,6 +122,7 @@ export async function reconcileGateSchedules(ctx: AppContext): Promise<string[]>
 /**
  * Pushes this run's lease back by the claim timeout.
  *
+ * The runner claim route and each `/runs/:id/events` report call this.
  * debounceKey replaces a waiting delayed job, so a reporting runner
  * never lets the previous fire land. A silent one does.
  */

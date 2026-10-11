@@ -448,8 +448,8 @@ its own exit:
 - A planner, sub planner or resolver refused for plan limits or budget
   pauses or ends the swarm the way a worker refusal does.
 - A queued run whose job was lost is sent again after ten minutes
-  (`requeueStrandedRuns`, on runner.reap), and a landing stuck in
-  "landing" past the job's expiry is claimed again.
+  (`requeueStrandedRuns`, on a delayed `run-queued:<runId>` job), and a
+  landing stuck in "landing" past the job's expiry is claimed again.
 - Swarm messages delivered to a planner run that failed or was
   cancelled go back to queued.
 - A start over beside a failed sibling counts as in flight, and
@@ -536,9 +536,14 @@ with the planner's run id, and a handover lost this way as
 planner rather than a worker nobody is looking at.
 
 A server run whose handler hangs in its sandbox before the agent says
-anything is closed by `reapStalledRuns` in `run-executor.ts`, on the
-existing `runner.reap` schedule, after `STALLED_RUN_MIN` minutes with
-no transcript line. It closes them with `SANDBOX_STALLED_AGENT_PREFIX`,
+anything is closed by `reapStalledRuns` in `run-executor.ts`, on a
+delayed `run-stall:<runId>` job armed when the run enters starting,
+after `STALLED_RUN_MIN` minutes with no transcript line. There is no
+periodic `runner.reap` cron. A runner-executed claim is a different
+clock: claim and each events report arm `runner-lease:<runId>` and
+push that delay back, so a healthy long-running machine is not
+requeued. A stall fire against a server run whose agent has spoken is
+a no-op. Closed stalls use `SANDBOX_STALLED_AGENT_PREFIX`,
 which is on the unbilled list, so the run is not billed and the
 coordinator restarts it like any run whose sandbox failed first. A
 handler that comes back after its run was closed stops at the compare

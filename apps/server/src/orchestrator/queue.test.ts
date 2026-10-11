@@ -73,6 +73,12 @@ test("registerJobs does not poll gated cards or runner claims on a five-minute c
   assert.match(src, /reconcileServerRunRecoveries\(ctx\)/);
 });
 
+test("runner claim and events refresh the per-run lease", () => {
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "routes", "runner.ts"), "utf8");
+  assert.match(src, /refreshRunnerLease\(ctx,\s*candidate\.run\.id\)/);
+  assert.match(src, /refreshRunnerLease\(ctx,\s*runId\)/);
+});
+
 /**
  * A bare send still works, which is exactly why nothing else would
  * catch one: the run starts on the next poll, thirty seconds later,
