@@ -32,6 +32,15 @@ export function bullMqPresenceKey(prefix: string, key: string): string {
   return `${prefix}:presence:${key}`;
 }
 
+/**
+ * Two first sends can both observe a missing job and both call add
+ * with the same custom id. Only that collision is idempotent.
+ */
+export function isDuplicateJobIdError(err: unknown, jobId: string): boolean {
+  if (!(err instanceof Error)) return false;
+  return err.message.includes(jobId) && /already exists/i.test(err.message);
+}
+
 export interface BullMqQueueOptions {
   redisUrl: string;
   /** `BENTO_ENVIRONMENT`: development and production share one Redis safely. */
@@ -53,7 +62,15 @@ export class BullMqQueue implements JobQueue {
   private readonly queues = new Map<QueueName, Queue>();
   private readonly workers: Worker[] = [];
   private readonly workerConnections: Redis[] = [];
+  private readonly rerunInflight = new Set<Promise<void>>();
   private stopped = false;
+
+  /**
+   * Test-only wrap around a keyed add. Production never sets this.
+   * The wrapper receives the real add so a test can delay or fail it
+   * without patching BullMQ's prototype (tests run concurrently).
+   */
+  testAddKeyed?: (jobId: string, add: () => Promise<void>) => Promise<void>;
 
   constructor(opts: BullMqQueueOptions) {
     this.prefix = bullMqPrefix(opts.environment);
@@ -100,12 +117,12 @@ export class BullMqQueue implements JobQueue {
       },
     );
     worker.on("completed", (job) => {
-      void this.maybeRerun(queue, job.id, job.data);
+      this.trackRerunWork(this.maybeRerun(queue, job.id, job.data));
     });
     worker.on("failed", (job) => {
       if (!job) return;
       if (job.attemptsMade >= (job.opts.attempts ?? 1)) {
-        void this.maybeRerun(queue, job.id, job.data);
+        this.trackRerunWork(this.maybeRerun(queue, job.id, job.data));
       }
     });
     this.workers.push(worker);
@@ -157,6 +174,7 @@ export class BullMqQueue implements JobQueue {
     if (this.stopped) return;
     this.stopped = true;
     await Promise.all(this.workers.map((worker) => worker.close()));
+    await this.awaitRerunWork();
     await Promise.all([...this.queues.values()].map((queue) => queue.close()));
     await Promise.all(this.workerConnections.map((conn) => conn.quit()));
     await this.connection.quit();
@@ -223,7 +241,7 @@ export class BullMqQueue implements JobQueue {
       if (state === "waiting" || state === "delayed") return;
       await existing.remove().catch(() => {});
     }
-    await q.add("job", data, { ...jobOpts, jobId });
+    await this.addKeyed(q, data, jobId, jobOpts);
   }
 
   private async sendKeyed(q: Queue, data: object, jobId: string, jobOpts: JobsOptions): Promise<void> {
@@ -236,7 +254,7 @@ export class BullMqQueue implements JobQueue {
         return;
       }
     }
-    await q.add("job", data, { ...jobOpts, jobId });
+    await this.addKeyed(q, data, jobId, jobOpts);
   }
 
   private async sendDebounce(q: Queue, data: object, key: string, jobOpts: JobsOptions): Promise<void> {
@@ -247,7 +265,7 @@ export class BullMqQueue implements JobQueue {
       if (state === "active") return;
       await existing.remove().catch(() => {});
     }
-    await q.add("job", data, { ...jobOpts, jobId });
+    await this.addKeyed(q, data, jobId, jobOpts);
   }
 
   private async markRerun(queue: QueueName, key: string, data: object): Promise<void> {
@@ -269,11 +287,67 @@ export class BullMqQueue implements JobQueue {
     fallback: object,
     jobOpts: JobsOptions,
   ): Promise<void> {
-    const taken = await this.connection.getdel(bullMqRerunKey(this.prefix, queue, key));
+    const run = this.consumeRerunOnce(q, queue, key, fallback, jobOpts);
+    this.trackRerunWork(run);
+    await run;
+  }
+
+  private async consumeRerunOnce(
+    q: Queue,
+    queue: QueueName,
+    key: string,
+    fallback: object,
+    jobOpts: JobsOptions,
+  ): Promise<void> {
+    const flagKey = bullMqRerunKey(this.prefix, queue, key);
+    const payloadKey = bullMqRerunPayloadKey(this.prefix, queue, key);
+    const taken = await this.connection.getdel(flagKey);
     if (!taken) return;
-    const raw = await this.connection.getdel(bullMqRerunPayloadKey(this.prefix, queue, key));
-    const data = raw ? (JSON.parse(raw) as object) : fallback;
-    await q.add("job", data, { ...jobOpts, jobId: bullMqJobId("coalesce", key) });
+    const raw = await this.connection.getdel(payloadKey);
+    try {
+      const data = raw ? (JSON.parse(raw) as object) : fallback;
+      await this.addKeyed(q, data, bullMqJobId("coalesce", key), jobOpts);
+    } catch (err) {
+      try {
+        await this.restoreRerun(queue, key, raw);
+      } catch {
+        // Keep the add/parse error. Restore is best-effort so a
+        // closed Redis still reports the failure that lost the write.
+      }
+      throw err;
+    }
+  }
+
+  private async restoreRerun(queue: QueueName, key: string, raw: string | null): Promise<void> {
+    await this.connection.set(bullMqRerunKey(this.prefix, queue, key), "1", "NX");
+    if (raw !== null) {
+      await this.connection.set(bullMqRerunPayloadKey(this.prefix, queue, key), raw, "NX");
+    }
+  }
+
+  private async addKeyed(q: Queue, data: object, jobId: string, jobOpts: JobsOptions): Promise<void> {
+    const add = async () => {
+      await q.add("job", data, { ...jobOpts, jobId });
+    };
+    try {
+      if (this.testAddKeyed) await this.testAddKeyed(jobId, add);
+      else await add();
+    } catch (err) {
+      if (isDuplicateJobIdError(err, jobId)) return;
+      throw err;
+    }
+  }
+
+  private trackRerunWork(work: Promise<void>): void {
+    const tracked = work.catch(() => {});
+    this.rerunInflight.add(tracked);
+    void tracked.finally(() => this.rerunInflight.delete(tracked));
+  }
+
+  private async awaitRerunWork(): Promise<void> {
+    while (this.rerunInflight.size > 0) {
+      await Promise.all(this.rerunInflight);
+    }
   }
 
   private jobOpts(opts?: SendOptions): JobsOptions {

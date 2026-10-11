@@ -187,6 +187,32 @@ for (const backend of realQueueBackends()) {
       });
     });
 
+    test("Promise.all concurrent first keyed sends succeed and a late consumer drains once", { timeout: 20_000 }, async () => {
+      await withJobs(backend, async (jobs) => {
+        const cases = [
+          { queue: "swarm.publish" as const, opts: { dedupeKey: "race-1" }, payload: { n: 1 } },
+          { queue: "swarm.tick" as const, opts: { coalesceKey: "race-1" }, payload: { n: 1 } },
+          { queue: "sandbox.hibernate" as const, opts: { debounceKey: "race-1", delayMs: 250 }, payload: { n: 1 } },
+        ];
+        for (const { queue, opts, payload } of cases) {
+          // Create the queue first so the race is two keyed sends, not
+          // two createQueue calls (pg-boss deadlocks on that bootstrap).
+          await jobs.send(queue, { warmup: true });
+          await Promise.all([jobs.send(queue, payload, opts), jobs.send(queue, payload, opts)]);
+          const seen: unknown[] = [];
+          await jobs.work(queue, workOpts, async (data) => {
+            if (data && typeof data === "object" && "n" in data) seen.push(data);
+          });
+          await waitFor(() => seen.length === 1);
+          assert.deepEqual(seen, [payload]);
+          await waitFor(async () => {
+            const counts = await jobs.counts(queue);
+            return counts.waiting === 0 && counts.active === 0 && counts.delayed === 0;
+          });
+        }
+      });
+    });
+
     test("debounceKey replaces a waiting delayed job and pushes its delay back", { timeout: 15_000 }, async () => {
       await withJobs(backend, async (jobs) => {
         const seen: number[] = [];

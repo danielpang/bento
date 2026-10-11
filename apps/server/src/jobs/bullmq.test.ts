@@ -9,6 +9,8 @@ import {
   bullMqPrefix,
   bullMqPresenceKey,
   bullMqRerunKey,
+  bullMqRerunPayloadKey,
+  isDuplicateJobIdError,
 } from "./bullmq.js";
 
 const REDIS_URL = process.env.REDIS_URL ?? "redis://127.0.0.1:6379";
@@ -65,6 +67,16 @@ test("restart-safe identifiers are deterministic and environment-prefixed", () =
     "bento:development:rerun:swarm.tick:s1",
   );
   assert.notEqual(bullMqPrefix("development"), bullMqPrefix("production"));
+});
+
+test("isDuplicateJobIdError accepts only a stable-job-id collision", () => {
+  const id = bullMqJobId("dedupe", "s1");
+  assert.equal(isDuplicateJobIdError(new Error(`Job ${id} already exists`), id), true);
+  assert.equal(isDuplicateJobIdError(new Error(`Job ${id} already exists!`), id), true);
+  assert.equal(isDuplicateJobIdError(new Error("READONLY You can't write against a read only replica."), id), false);
+  assert.equal(isDuplicateJobIdError(new Error("Job other already exists"), id), false);
+  assert.equal(isDuplicateJobIdError(new Error("connection already exists"), id), false);
+  assert.equal(isDuplicateJobIdError({ message: `Job ${id} already exists` }, id), false);
 });
 
 test("a producer can send before any worker, and work then drains it", { timeout: 10_000 }, async () => {
@@ -379,6 +391,149 @@ test("a high-concurrency worker is still one Worker, not one per slot", { timeou
     assert.equal(max, 4);
     for (const release of held) release();
   });
+});
+
+test("Promise.all concurrent first keyed sends succeed and a late consumer drains once", { timeout: 15_000 }, async () => {
+  await withJobs(async (jobs) => {
+    const cases = [
+      { queue: "swarm.publish" as const, opts: { dedupeKey: "race-1" }, payload: { n: 1 } },
+      { queue: "swarm.tick" as const, opts: { coalesceKey: "race-1" }, payload: { n: 1 } },
+      { queue: "sandbox.hibernate" as const, opts: { debounceKey: "race-1", delayMs: 200 }, payload: { n: 1 } },
+    ];
+    for (const { queue, opts, payload } of cases) {
+      await Promise.all([jobs.send(queue, payload, opts), jobs.send(queue, payload, opts)]);
+      const seen: unknown[] = [];
+      await jobs.work(queue, { concurrency: 1 }, async (data) => {
+        seen.push(data);
+      });
+      await waitFor(() => seen.length === 1);
+      assert.deepEqual(seen, [payload]);
+      await waitFor(async () => {
+        const counts = await jobs.counts(queue);
+        return counts.waiting === 0 && counts.active === 0 && counts.delayed === 0;
+      });
+    }
+  });
+});
+
+test("a stable-job-id duplicate add is success; unrelated q.add errors propagate", { timeout: 10_000 }, async () => {
+  await withJobs(async (jobs) => {
+    const jobId = bullMqJobId("dedupe", "s1");
+    jobs.testAddKeyed = async () => {
+      throw new Error(`Job ${jobId} already exists`);
+    };
+    await jobs.send("swarm.publish", { n: 1 }, { dedupeKey: "s1" });
+    jobs.testAddKeyed = async () => {
+      throw new Error("READONLY You can't write against a read only replica.");
+    };
+    await assert.rejects(
+      () => jobs.send("swarm.publish", { n: 2 }, { dedupeKey: "s2" }),
+      /READONLY/,
+    );
+    jobs.testAddKeyed = async () => {
+      throw new Error("Connection is closed.");
+    };
+    await assert.rejects(
+      () => jobs.send("swarm.tick", { n: 3 }, { coalesceKey: "s3" }),
+      /Connection is closed/,
+    );
+    await assert.rejects(
+      () => jobs.send("sandbox.hibernate", { n: 4 }, { debounceKey: "s4", delayMs: 100 }),
+      /Connection is closed/,
+    );
+    jobs.testAddKeyed = undefined;
+  });
+});
+
+test("a forced rerun add failure restores the flag and payload", { timeout: 15_000 }, async () => {
+  await withJobs(async (jobs, redis, environment) => {
+    const seen: Array<{ n: number }> = [];
+    const started = deferred();
+    const release = deferred();
+    await jobs.work("swarm.tick", { concurrency: 1 }, async (data: { n: number }) => {
+      seen.push(data);
+      if (seen.length === 1) {
+        started.resolve();
+        await release.promise;
+      }
+    });
+    await jobs.send("swarm.tick", { n: 1 }, { coalesceKey: "s1" });
+    await started.promise;
+    await jobs.send("swarm.tick", { n: 3 }, { coalesceKey: "s1" });
+    const flag = bullMqRerunKey(bullMqPrefix(environment), "swarm.tick", "s1");
+    const payload = bullMqRerunPayloadKey(bullMqPrefix(environment), "swarm.tick", "s1");
+    assert.equal(await redis.get(flag), "1");
+    let addFailed = false;
+    jobs.testAddKeyed = async (jobId) => {
+      if (jobId === bullMqJobId("coalesce", "s1")) {
+        addFailed = true;
+        throw new Error("forced add failure");
+      }
+    };
+    release.resolve();
+    await waitFor(() => addFailed);
+    await waitFor(async () => (await redis.get(flag)) === "1" && (await redis.get(payload)) !== null);
+    assert.equal(await redis.get(flag), "1");
+    assert.deepEqual(JSON.parse((await redis.get(payload))!), { n: 3 });
+    assert.deepEqual(seen, [{ n: 1 }]);
+    jobs.testAddKeyed = undefined;
+    await jobs.send("swarm.tick", { n: 4 }, { coalesceKey: "s1" });
+    await waitFor(() => seen.some((row) => row.n === 3));
+    assert.ok(seen.some((row) => row.n === 4));
+    assert.equal(await redis.get(flag), null);
+  });
+});
+
+test("stop waits for in-flight rerun work so the replacement job is added", { timeout: 15_000 }, async () => {
+  const environment = envName();
+  const jobs = new BullMqQueue({ redisUrl: REDIS_URL, environment });
+  const started = deferred();
+  const release = deferred();
+  const addStarted = deferred();
+  const holdAdd = deferred();
+  let addFinished = false;
+  await jobs.work("swarm.tick", { concurrency: 1 }, async (data: { n: number }) => {
+    if (data.n === 1) {
+      started.resolve();
+      await release.promise;
+    }
+  });
+  await jobs.send("swarm.tick", { n: 1 }, { coalesceKey: "s1" });
+  await started.promise;
+  await jobs.send("swarm.tick", { n: 3 }, { coalesceKey: "s1" });
+  jobs.testAddKeyed = async (jobId, add) => {
+    if (jobId === bullMqJobId("coalesce", "s1")) {
+      addStarted.resolve();
+      await holdAdd.promise;
+      addFinished = true;
+    }
+    await add();
+  };
+  try {
+    release.resolve();
+    await addStarted.promise;
+    const stopping = jobs.stop();
+    await new Promise((r) => setTimeout(r, 80));
+    assert.equal(addFinished, false);
+    holdAdd.resolve();
+    await stopping;
+    assert.equal(addFinished, true);
+  } catch (err) {
+    holdAdd.resolve();
+    await jobs.stop().catch(() => {});
+    throw err;
+  }
+  const again = new BullMqQueue({ redisUrl: REDIS_URL, environment });
+  try {
+    const seen: number[] = [];
+    await again.work("swarm.tick", { concurrency: 1 }, async (data: { n: number }) => {
+      seen.push(data.n);
+    });
+    await waitFor(() => seen.length === 1);
+    assert.deepEqual(seen, [3]);
+  } finally {
+    await again.stop();
+  }
 });
 
 test("wake and offWork are no-ops and do not stop a worker", { timeout: 10_000 }, async () => {
