@@ -135,7 +135,7 @@ import { appendRunEvent } from "./transcript.js";
 import { isPersisted, loadPersistedIds, recoverMissedMessages } from "./recover-session.js";
 import { compactedConversation } from "./conversation-history.js";
 import { attachLiveConversation } from "./live-session.js";
-import { registerLinearJobs } from "./linear-sync.js";
+import { registerLinearJobs, syncLinearConnectedPresence } from "./linear-sync.js";
 import { queueRunFinishedSlack } from "./slack-notify.js";
 import { registerSlackJobs } from "./slack-sync.js";
 import { REAP_SANDBOX_QUEUE, reapFinishedSandboxes, reapFinishedSwarmSandboxes, runSandboxReapJob } from "./reap-sandbox.js";
@@ -3498,6 +3498,7 @@ export async function runDailyWorkTimerReconcile(ctx: AppContext): Promise<void>
     ctx.analytics?.captureException(err, null, null, { queue: "gate.sweep" });
   });
   await syncParkedComputePresence(ctx);
+  await syncLinearConnectedPresence(ctx);
   await sweepExpiredGrants(ctx).catch((err: unknown) => {
     console.warn("the expired MCP grant sweep did not finish:", err);
     ctx.analytics?.captureException(err, null, null, { queue: "gate.sweep" });

@@ -91,8 +91,8 @@ async function ensureLinearSweep(ctx: Pick<AppContext, "jobs">): Promise<void> {
  * Whether the hourly Linear sweep should touch Postgres.
  *
  * A zero here is the idle path: no query. A counter stuck at zero
- * while a connection exists is boot's problem, and connect/disconnect
- * recompute from the rows.
+ * while a connection exists is caught at boot and by the daily
+ * safety pass. Connect and disconnect recompute from the rows.
  */
 export async function linearSweepShouldRun(ctx: Pick<AppContext, "jobs">): Promise<boolean> {
   return (await ctx.jobs.getPresence(LINEAR_CONNECTED_PRESENCE_KEY)) > 0;
@@ -554,7 +554,8 @@ export async function registerLinearJobs(ctx: AppContext): Promise<void> {
 
   // Webhook fallback: deployments Linear cannot reach still converge.
   // Hourly, and only while Redis (or the in-process map) says an org
-  // has Linear. Boot recomputes that signal from the rows.
+  // has Linear. Boot and the daily safety pass recompute that signal
+  // from the rows.
   await ctx.jobs.work("linear.sweep", {}, captureJobErrors(ctx.analytics, "linear.sweep", async () => {
     await runLinearSweep(ctx);
   }));

@@ -9,6 +9,7 @@ import {
   createPool,
   featureMessages,
   features,
+  linearConnections,
   runMigrations,
   type Db,
 } from "@bento/db";
@@ -20,7 +21,13 @@ import { actorMiddleware } from "../middleware/actor.js";
 import { tenantMiddleware } from "../middleware/tenant.js";
 import { runnerRoutes } from "../routes/runner.js";
 import { queueFeatureEventFollowUps } from "./gate-evaluator.js";
-import { handleRunnerReap, QUEUED_RUN_REQUEUE_MIN, reapExpiredRunnerLease, STALLED_RUN_MIN } from "./run-executor.js";
+import { handleRunnerReap, QUEUED_RUN_REQUEUE_MIN, reapExpiredRunnerLease, runDailyWorkTimerReconcile, STALLED_RUN_MIN } from "./run-executor.js";
+import {
+  LINEAR_CONNECTED_PRESENCE_KEY,
+  LINEAR_SWEEP_CRON,
+  LINEAR_SWEEP_ID,
+  linearSweepShouldRun,
+} from "./linear-sync.js";
 import {
   GATE_CARD_CRON,
   PARKED_COMPUTE_CRON,
@@ -124,6 +131,7 @@ beforeEach(async () => {
   await pool.query("delete from feature_messages");
   await pool.query("delete from agent_runs");
   await pool.query("delete from features");
+  await pool.query("delete from linear_connections");
   jobs.sent.length = 0;
   jobs.scheduled.length = 0;
   jobs.unscheduled.length = 0;
@@ -458,6 +466,34 @@ test("server-run recovery does not query postgres when no such rows exist", asyn
   } finally {
     pool.query = originalExecute;
   }
+});
+
+test("the daily pass restores a stale-zero Linear presence flag", async () => {
+  await db.insert(linearConnections).values({
+    ownerId: "u1",
+    organizationId: null,
+    encryptedApiKey: "lin_api_stale",
+    hint: "stale",
+  });
+
+  await jobs.setPresence(LINEAR_CONNECTED_PRESENCE_KEY, 0);
+  assert.equal(await linearSweepShouldRun(ctx), false, "a stale zero keeps the hourly sweep off Postgres");
+  assert.equal(jobs.scheduled.find((row) => row.id === LINEAR_SWEEP_ID), undefined);
+
+  await runDailyWorkTimerReconcile(ctx);
+  assert.equal(await jobs.getPresence(LINEAR_CONNECTED_PRESENCE_KEY), 1);
+  assert.equal(await linearSweepShouldRun(ctx), true);
+  const restored = jobs.scheduled.find((row) => row.id === LINEAR_SWEEP_ID);
+  assert.ok(restored, "the daily pass re-arms the hourly Linear sweep");
+  assert.equal(restored.cron, LINEAR_SWEEP_CRON);
+
+  jobs.scheduled.length = 0;
+  jobs.presence.delete(LINEAR_CONNECTED_PRESENCE_KEY);
+  assert.equal(await linearSweepShouldRun(ctx), false, "a missing flag is the same idle path");
+
+  await runDailyWorkTimerReconcile(ctx);
+  assert.equal(await jobs.getPresence(LINEAR_CONNECTED_PRESENCE_KEY), 1);
+  assert.ok(jobs.scheduled.find((row) => row.id === LINEAR_SWEEP_ID));
 });
 
 test("an empty deployment holds no idle work-timer schedules", async () => {
