@@ -28,6 +28,8 @@ const DEFAULT_REDIS_URL = "redis://127.0.0.1:6379";
  *   so registerJobs has a live queue. Their subject is product/auth/MCP,
  *   not adapter parity; dual-running would only re-prove send/work that
  *   contract.test.ts already covers.
+ *   idle.e2e.test.ts boots multi mode only: the idle property is the
+ *   BullMQ path, and local/Mac pg-boss is allowed to poll.
  *   Swarm suites use FakeJobQueue so they can assert sent/worked/offWork.
  */
 export function realQueueBackends(): readonly RealQueueBackend[] {

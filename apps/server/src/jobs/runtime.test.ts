@@ -161,6 +161,7 @@ test("local startup does not import Redis", () => {
     "jobs/contract.test.ts",
     "jobs/import-pgboss.test.ts",
     "jobs/test-queue.ts",
+    "idle.e2e.test.ts",
   ]);
   const forbidden =
     /from\s+["']bullmq["']|from\s+["']ioredis["']|import\s*\(\s*["']bullmq["']\s*\)|import\s*\(\s*["']ioredis["']\s*\)|require\s*\(\s*["']bullmq["']\s*\)|require\s*\(\s*["']ioredis["']\s*\)/;
