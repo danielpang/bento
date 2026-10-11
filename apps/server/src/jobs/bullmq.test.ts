@@ -7,6 +7,7 @@ import {
   BullMqQueue,
   bullMqJobId,
   bullMqPrefix,
+  bullMqPresenceKey,
   bullMqRerunKey,
 } from "./bullmq.js";
 
@@ -198,6 +199,17 @@ test("attempts and backoff retry a failing handler", { timeout: 15_000 }, async 
     await jobs.send("slack.notify", { type: "created" }, { attempts: 3, backoffMs: 40 });
     await waitFor(() => attempts === 3);
     assert.equal(attempts, 3);
+  });
+});
+
+test("presence is a prefixed Redis key", { timeout: 10_000 }, async () => {
+  await withJobs(async (jobs, redis, environment) => {
+    await jobs.setPresence("parked-compute", 4);
+    assert.equal(await jobs.getPresence("parked-compute"), 4);
+    assert.equal(await redis.get(bullMqPresenceKey(bullMqPrefix(environment), "parked-compute")), "4");
+    await jobs.setPresence("parked-compute", 0);
+    assert.equal(await jobs.getPresence("parked-compute"), 0);
+    assert.equal(await redis.get(bullMqPresenceKey(bullMqPrefix(environment), "parked-compute")), null);
   });
 });
 

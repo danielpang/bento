@@ -16,6 +16,7 @@ import { captureRunFinished, deliverQueuedMessage, runnerReportedError } from ".
 import { runOutputPreview } from "../orchestrator/run-executor.js";
 import { queueRunFinishedSlack } from "../orchestrator/slack-notify.js";
 import { enqueueGateEvaluate } from "../orchestrator/queue.js";
+import { refreshRunnerLease } from "../orchestrator/work-timers.js";
 import { ACTIVE_RUN_STATUSES } from "../orchestrator/start-run.js";
 import { reportSandboxReady, sandboxOrigin } from "../orchestrator/sandbox-metrics.js";
 import { asPipelineRun, isPipelineRun } from "../orchestrator/pipeline-run.js";
@@ -150,6 +151,7 @@ export function runnerRoutes(ctx: AppContext) {
         .where(and(eq(agentRuns.id, candidate.run.id), isNull(agentRuns.claimedBy)))
         .returning();
       if (claimed.length === 0) return c.json({ run: null });
+      deferAfterCommit(c, () => refreshRunnerLease(ctx, candidate.run.id));
 
       const [profile] = await db(c, ctx)
         .select()
@@ -397,6 +399,11 @@ export function runnerRoutes(ctx: AppContext) {
           if (!isUniqueViolation(err) || attempt >= 5) throw err;
         }
       }
+      await db(c, ctx)
+        .update(agentRuns)
+        .set({ claimedAt: sql`now()` })
+        .where(eq(agentRuns.id, runId));
+      deferAfterCommit(c, () => refreshRunnerLease(ctx, runId));
 
       let emitted = seq - events.length;
       for (const event of events) {

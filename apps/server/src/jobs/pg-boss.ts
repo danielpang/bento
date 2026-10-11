@@ -14,6 +14,7 @@ export class PgBossQueue implements JobQueue {
   private readonly created = new Set<QueueName>();
   private readonly workersByQueue = new Map<QueueName, string[]>();
   private readonly namedSchedules = new Map<string, QueueName>();
+  private readonly presence = new Map<string, number>();
   private stopped = false;
 
   constructor(private readonly boss: PgBoss) {}
@@ -96,6 +97,15 @@ export class PgBossQueue implements JobQueue {
       return;
     }
     await this.boss.unschedule(id);
+  }
+
+  async setPresence(key: string, count: number): Promise<void> {
+    if (count <= 0) this.presence.delete(key);
+    else this.presence.set(key, count);
+  }
+
+  async getPresence(key: string): Promise<number> {
+    return this.presence.get(key) ?? 0;
   }
 
   async counts(queue: QueueName): Promise<JobCounts> {
@@ -210,6 +220,8 @@ function cronToDelayMs(cron: string): number {
 
 function queueForNamedSchedule(id: string): QueueName | undefined {
   if (id.startsWith("watchdog:")) return "swarm.watchdog";
+  if (id === "gate.parked") return "gate.sweep";
+  if (id.startsWith("gate:")) return "gate.evaluate";
   return undefined;
 }
 

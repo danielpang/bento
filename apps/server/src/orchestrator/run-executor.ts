@@ -109,7 +109,18 @@ import { sweepExpiredOAuth } from "../mcp/oauth-sweep.js";
 import { shouldIncludeStageNotes, shouldShareAgentAuth } from "../settings.js";
 import { captureRunQueueDepth } from "./queue-snapshot.js";
 import { ACTIVE_RUN_STATUSES, projectHasRepositories, startRunIfIdle } from "./start-run.js";
-import { enqueueGateEvaluate, enqueueRun, INTERACTIVE_POLL_SECONDS, QUEUE_POLL_SECONDS, RUN_WORKER_POLL_SECONDS } from "./queue.js";
+import { enqueueRun, INTERACTIVE_POLL_SECONDS, QUEUE_POLL_SECONDS, RUN_WORKER_POLL_SECONDS } from "./queue.js";
+import {
+  PARKED_COMPUTE_SWEEP_ID,
+  parkedComputeSweepShouldRun,
+  reconcileGateSchedules,
+  reconcileRunnerLeases,
+  signalParkedCompute,
+  syncGateSchedule,
+  syncParkedComputePresence,
+  WORK_TIMER_DAILY_CRON,
+  WORK_TIMER_DAILY_ID,
+} from "./work-timers.js";
 import { HIBERNATE_SANDBOX_QUEUE, MODAL_SWEEP_QUEUE, SandboxGone, scheduleModalHibernation, hibernateSandbox, rearmReadyModalSandboxes, sweepOrphanModalSandboxes, wakeSwarmSandbox } from "./hibernate-sandbox.js";
 import { modalNetworkForProject, organizationRestrictsNetwork } from "./sandbox-network.js";
 import { stopLeftoverAgent } from "./leftover-agent.js";
@@ -2391,9 +2402,11 @@ export async function deliverQueuedMessage(ctx: AppContext, runId: string): Prom
   if (next === "gone") return;
   if ("outOfCompute" in next) {
     // Out of compute: back to queued rather than lost to a limit the
-    // sender may not even have hit yet. The stranded sweep retries once
-    // the allowance returns.
+    // sender may not even have hit yet. Presence keeps a sweep only
+    // while something is parked; the allowance coming back is not an
+    // event this server always hears.
     await requeueMessages(ctx.db, ids);
+    await signalParkedCompute(ctx);
     return;
   }
   // Delivered, not merely sent: they are this run's prompt now, carried
@@ -2420,7 +2433,7 @@ export async function deliverQueuedMessage(ctx: AppContext, runId: string): Prom
  * is what guarantees a parked message always has a next chance, instead
  * of waiting on a terminal-path delivery that already happened.
  */
-async function sweepStrandedMessages(ctx: AppContext): Promise<void> {
+export async function sweepStrandedMessages(ctx: AppContext): Promise<void> {
   await requeueDanglingClaims(ctx.db);
   await ctx.db.execute(sql`
     update feature_messages set status = 'queued', run_id = null, sent_at = null
@@ -3370,6 +3383,120 @@ async function requeueWaitingRuns(ctx: AppContext): Promise<void> {
   }
 }
 
+const RUNNER_GONE_TEXT =
+  "The machine running this stopped reporting, so the run was returned to the queue.";
+
+async function noteRequeuedRunnerClaim(ctx: AppContext, run: PipelineRun): Promise<void> {
+  await appendRunEvent(ctx, run.id, {
+    type: "message",
+    role: "system",
+    text: RUNNER_GONE_TEXT,
+  });
+  const [feature] = await ctx.db.select().from(features).where(eq(features.id, run.featureId));
+  if (feature) {
+    ctx.bus.emitBoardEvent({
+      type: "run_updated",
+      projectId: feature.projectId,
+      featureId: feature.id,
+      runId: run.id,
+      status: "queued",
+    });
+  }
+}
+
+/**
+ * One lease fire. The delay is the silence; claimedAt is the backstop
+ * so a job that landed early (a debounce miss) does not bounce a
+ * runner that just reported.
+ */
+export async function reapExpiredRunnerLease(ctx: AppContext, runId: string): Promise<boolean> {
+  const cutoff = new Date(Date.now() - ctx.env.BENTO_RUNNER_CLAIM_TIMEOUT_MIN * 60_000);
+  const stale = await ctx.db
+    .update(agentRuns)
+    .set({ status: "queued", claimedBy: null, claimedAt: null, startedAt: null })
+    .where(
+      and(
+        eq(agentRuns.id, runId),
+        eq(agentRuns.executor, "runner"),
+        eq(agentRuns.type, "pipeline"),
+        inArray(agentRuns.status, ["starting", "running"]),
+        lt(agentRuns.claimedAt, cutoff),
+      ),
+    )
+    .returning()
+    .then((rows) => rows.map(asPipelineRun));
+  const run = stale[0];
+  if (!run) return false;
+  await noteRequeuedRunnerClaim(ctx, run);
+  console.warn(`requeued run ${run.id} whose runner went away`);
+  return true;
+}
+
+/** Daily safety: any claimed runner run whose last heartbeat is old. */
+export async function reapStaleRunnerClaims(ctx: AppContext): Promise<string[]> {
+  const cutoff = new Date(Date.now() - ctx.env.BENTO_RUNNER_CLAIM_TIMEOUT_MIN * 60_000);
+  const stale = await ctx.db
+    .update(agentRuns)
+    .set({ status: "queued", claimedBy: null, claimedAt: null, startedAt: null })
+    .where(
+      and(
+        eq(agentRuns.executor, "runner"),
+        eq(agentRuns.type, "pipeline"),
+        inArray(agentRuns.status, ["starting", "running"]),
+        lt(agentRuns.claimedAt, cutoff),
+      ),
+    )
+    .returning()
+    .then((rows) => rows.map(asPipelineRun));
+  for (const run of stale) await noteRequeuedRunnerClaim(ctx, run);
+  if (stale.length > 0) {
+    console.warn(`requeued ${stale.length} run(s) whose runner went away`);
+  }
+  return stale.map((run) => run.id);
+}
+
+async function runParkedComputeSweep(ctx: AppContext): Promise<void> {
+  if (!(await parkedComputeSweepShouldRun(ctx))) {
+    // Zero means stay off Postgres. A counter stuck at zero while
+    // work exists is the daily job's catch, not this one.
+    await ctx.jobs.unschedule(PARKED_COMPUTE_SWEEP_ID).catch(() => {});
+    return;
+  }
+  await sweepStrandedMessages(ctx);
+  await syncParkedComputePresence(ctx);
+}
+
+/**
+ * Daily: MCP/OAuth cleanup, stranded messages, and a rebuild of every
+ * row-derived clock. A presence counter stuck at zero is caught here.
+ */
+export async function runDailyWorkTimerReconcile(ctx: AppContext): Promise<void> {
+  await reconcileGateSchedules(ctx);
+  await reconcileRunnerLeases(ctx);
+  await sweepStrandedMessages(ctx).catch((err: unknown) => {
+    console.warn("the stranded message sweep did not finish:", err);
+    ctx.analytics?.captureException(err, null, null, { queue: "gate.sweep" });
+  });
+  await syncParkedComputePresence(ctx);
+  await sweepExpiredGrants(ctx).catch((err: unknown) => {
+    console.warn("the expired MCP grant sweep did not finish:", err);
+    ctx.analytics?.captureException(err, null, null, { queue: "gate.sweep" });
+  });
+  await sweepExpiredOAuth(ctx).catch((err: unknown) => {
+    console.warn("the expired MCP OAuth sweep did not finish:", err);
+    ctx.analytics?.captureException(err, null, null, { queue: "gate.sweep" });
+  });
+  await reapStaleRunnerClaims(ctx);
+  await reapStalledRuns(ctx);
+  await requeueStrandedRuns(ctx);
+}
+
+/** A plan change or period reset, so parked messages do not wait for the sweep. */
+export async function wakeParkedCompute(ctx: AppContext): Promise<void> {
+  await sweepStrandedMessages(ctx);
+  await syncParkedComputePresence(ctx);
+}
+
 export async function registerJobs(ctx: AppContext): Promise<void> {
   await recoverInterruptedRuns(ctx);
   /**
@@ -3518,57 +3645,17 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
   );
 
   /**
-   * Requeues runs a runner claimed but never reported on, which happens
-   * when the machine goes away mid-run. Without this the run sits in
-   * "starting" forever and the card's pipeline is stuck.
+   * A runner claim arms a delayed lease; each heartbeat pushes it
+   * back. The job names the run, so an idle deployment holds no
+   * runner.reap cron and Postgres is not asked.
    */
-  await ctx.jobs.schedule("runner.reap", "runner.reap", "*/5 * * * *");
-  await ctx.jobs.work("runner.reap", {}, captureJobErrors(ctx.analytics, "runner.reap", async () => {
-    const cutoff = new Date(Date.now() - ctx.env.BENTO_RUNNER_CLAIM_TIMEOUT_MIN * 60_000);
-    const stale = await ctx.db
-      .update(agentRuns)
-      .set({ status: "queued", claimedBy: null, claimedAt: null, startedAt: null })
-      .where(
-        and(
-          eq(agentRuns.executor, "runner"),
-          eq(agentRuns.type, "pipeline"),
-          eq(agentRuns.status, "starting"),
-          lt(agentRuns.claimedAt, cutoff),
-        ),
-      )
-      .returning()
-      // The update already filtered to the pipeline; this is where that
-      // becomes a type, so the loop below reads the card straight off.
-      .then((rows) => rows.map(asPipelineRun));
-    // Told where the user is looking: a card snapping from "starting"
-    // back to "queued" with no explanation reads as a glitch.
-    for (const run of stale) {
-      await appendRunEvent(ctx, run.id, {
-        type: "message",
-        role: "system",
-        text: "The machine running this stopped reporting, so the run was returned to the queue.",
-      });
-      const [feature] = await ctx.db.select().from(features).where(eq(features.id, run.featureId));
-      if (feature) {
-        ctx.bus.emitBoardEvent({
-          type: "run_updated",
-          projectId: feature.projectId,
-          featureId: feature.id,
-          runId: run.id,
-          status: "queued",
-        });
-      }
+  await ctx.jobs.work<{ runId?: string }>("runner.reap", {}, captureJobErrors(ctx.analytics, "runner.reap", async (data) => {
+    if (typeof data?.runId === "string") {
+      await reapExpiredRunnerLease(ctx, data.runId);
+      return;
     }
-    if (stale.length > 0) {
-      console.warn(`requeued ${stale.length} run(s) whose runner went away`);
-    }
-
-    // The same question for this server's own runs: one whose handler
-    // hung in its sandbox before the agent started. On this schedule
-    // rather than a new one, because every scheduled job is a query a
-    // poll on a database that should be allowed to sleep.
+    await reapStaleRunnerClaims(ctx);
     await reapStalledRuns(ctx);
-    // And runs that never got that far: queued, with their job lost.
     await requeueStrandedRuns(ctx);
   }));
 
@@ -3591,6 +3678,9 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
   await ctx.jobs.work<{ featureId: string }>("gate.evaluate", { batchSize: 5, pollingIntervalSeconds: INTERACTIVE_POLL_SECONDS }, async (data) => {
     try {
       await evaluateFeatureGate(ctx, data.featureId);
+      // pg-boss named schedules are one delayed job; this upserts the
+      // next fire while the card is still gated, and drops it if not.
+      await syncGateSchedule(ctx, data.featureId);
     } catch (err) {
       console.error(`gate.evaluate ${data.featureId} failed:`, err);
       ctx.analytics?.captureException(err, null, null, { queue: "gate.evaluate", feature_id: data.featureId });
@@ -3598,39 +3688,32 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
     }
   });
 
-  // Safety net for gates whose inputs change without a webhook (a long
-  // running check, a self-hosted instance with no public URL).
-  await ctx.jobs.schedule("gate.sweep", "gate.sweep", "*/5 * * * *");
-  await ctx.jobs.work("gate.sweep", {}, captureJobErrors(ctx.analytics, "gate.sweep", async () => {
-    const gated = await ctx.db.select({ id: features.id }).from(features).where(eq(features.status, "gated"));
-    for (const row of gated) {
-      await enqueueGateEvaluate(ctx, row.id);
+  /**
+   * Daily cleanup and the parked-compute sweep share this worker.
+   * The daily job is the one schedule an idle process keeps. The
+   * parked sweep exists only while Redis (or the in-process map)
+   * says a message is waiting on compute.
+   */
+  await ctx.jobs.work<{ kind?: string }>("gate.sweep", {}, captureJobErrors(ctx.analytics, "gate.sweep", async (data) => {
+    if (data?.kind === "parked") {
+      await runParkedComputeSweep(ctx);
+      return;
     }
-    /**
-     * Also here, not only at boot. A message parked because the team
-     * was out of compute has no active run whose finish would deliver
-     * it, and the allowance coming back is not an event anything
-     * fires on. Five minutes of lag against a period boundary is
-     * noise; a message that waits for the next deploy is a bug report.
-     */
-    await sweepStrandedMessages(ctx).catch((err: unknown) => {
-      console.warn("the stranded message sweep did not finish:", err);
-      ctx.analytics?.captureException(err, null, null, { queue: "gate.sweep" });
-    });
-    // Expired MCP grants are audit noise after a week. Revocation on the
-    // run's terminal paths already ended them; this only reclaims rows.
-    await sweepExpiredGrants(ctx).catch((err: unknown) => {
-      console.warn("the expired MCP grant sweep did not finish:", err);
-      ctx.analytics?.captureException(err, null, null, { queue: "gate.sweep" });
-    });
-    // Codes and authorization requests nobody finished, and client
-    // registrations that never became a connection. /register takes no
-    // session, so this is the only thing bounding that table.
-    await sweepExpiredOAuth(ctx).catch((err: unknown) => {
-      console.warn("the expired MCP OAuth sweep did not finish:", err);
-      ctx.analytics?.captureException(err, null, null, { queue: "gate.sweep" });
-    });
+    await runDailyWorkTimerReconcile(ctx);
   }));
+  await ctx.jobs.schedule(WORK_TIMER_DAILY_ID, "gate.sweep", WORK_TIMER_DAILY_CRON);
+
+  const gated = await reconcileGateSchedules(ctx);
+  if (gated.length > 0) console.log(`armed gate clocks for ${gated.length} gated card(s)`);
+  const leased = await reconcileRunnerLeases(ctx);
+  if (leased.length > 0) console.log(`armed runner leases for ${leased.length} claimed run(s)`);
+  const parked = await syncParkedComputePresence(ctx);
+  if (parked > 0) console.log(`parked-compute presence is ${parked}`);
+  // Stalled and stranded server runs used to ride the five-minute
+  // runner.reap cron. Boot plus the daily job is the catch now, so a
+  // restart does not wait until 09:00 UTC to notice one.
+  await reapStalledRuns(ctx);
+  await requeueStrandedRuns(ctx);
 
   /**
    * A PostHog gauge of runs waiting for a `run.execute` worker, every

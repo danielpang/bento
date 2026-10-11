@@ -20,6 +20,7 @@ export class FakeJobQueue implements JobQueue {
   readonly woken: QueueName[] = [];
   readonly scheduled: Array<{ id: string; queue: QueueName; cron: string; data?: unknown }> = [];
   readonly unscheduled: string[] = [];
+  readonly presence = new Map<string, number>();
   stopped = false;
 
   constructor(readonly kind: JobQueueKind = "fake") {}
@@ -43,6 +44,15 @@ export class FakeJobQueue implements JobQueue {
     this.unscheduled.push(id);
     const existing = this.scheduled.findIndex((row) => row.id === id);
     if (existing >= 0) this.scheduled.splice(existing, 1);
+  }
+
+  async setPresence(key: string, count: number): Promise<void> {
+    if (count <= 0) this.presence.delete(key);
+    else this.presence.set(key, count);
+  }
+
+  async getPresence(key: string): Promise<number> {
+    return this.presence.get(key) ?? 0;
   }
 
   async counts(_queue: QueueName): Promise<JobCounts> {

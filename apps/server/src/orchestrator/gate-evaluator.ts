@@ -15,6 +15,7 @@ import { queueSandboxReap } from "./reap-sandbox.js";
 import { captureStageSpend } from "./stage-spend.js";
 import { driverForSandbox, SandboxDriverUnavailable } from "./sandbox-driver.js";
 import { startAssignedStageAgent, stopRunsOutsideStage } from "./stage-agent.js";
+import { syncGateSchedule } from "./work-timers.js";
 
 type Feature = typeof features.$inferSelect;
 type Stage = typeof stages.$inferSelect;
@@ -86,8 +87,8 @@ export async function evaluateFeatureGate(ctx: AppContext, featureId: string): P
    * Only when the gate actually depends on one: a stage asking for a
    * command to pass, or for checks to be green, needs no agent and is
    * perfectly able to answer. Nothing would ask again either, since
-   * runs are what queue an evaluation and the sweep only revisits cards
-   * already marked gated, so this says why instead of stalling silently.
+   * runs are what queue an evaluation and a gated card's own schedule
+   * is what revisits it, so this says why instead of stalling silently.
    */
   const needsRun = criteria.some((criterion) => criterion.type === "run_succeeded");
   if (needsRun && !lastRun && !stage.defaultAgentProfileId) {
@@ -315,6 +316,8 @@ export async function insertFeatureEvent(db: FeatureEventWriter, event: FeatureE
  * about something that never happened.
  */
 export async function queueFeatureEventFollowUps(ctx: AppContext, event: FeatureEvent): Promise<void> {
+  // The card's gate clock follows the row this event just committed.
+  await syncGateSchedule(ctx, event.featureId);
   // Mirror the transition to Linear when this card came from there.
   // Queued, so a slow or failing Linear API never blocks the board.
   await queueLinearOutbound(ctx, {
@@ -968,7 +971,7 @@ async function markWaitingForApproval(ctx: AppContext, feature: Feature, stage: 
  * reaches every client through the gate endpoints they already read
  * rather than needing a new channel. Idempotent: a card already held
  * for this reason is left alone, so the five minute sweep does not
- * write an event every five minutes.
+ * write an event on every look.
  */
 interface HoldRow {
   criterion: { type: string };
@@ -1114,9 +1117,9 @@ async function readVerdict(
  * run is about work that has since changed, so a new one starts.
  *
  * A judge run that errored is reported as a failed criterion and not
- * retried on its own: the sweep re-evaluates gated cards every five
- * minutes, and an agent that respawned on each pass would spend money
- * in a loop. Running the stage again gets a fresh judgment.
+ * retried on its own: a gated card's schedule re-evaluates it every
+ * five minutes, and an agent that respawned on each pass would spend
+ * money in a loop. Running the stage again gets a fresh judgment.
  */
 async function judgeStageWork(
   ctx: AppContext,

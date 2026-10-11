@@ -159,6 +159,27 @@ test("a named schedule is a delayed job, not a queue-wide cron", async () => {
   assert.ok(calls.some((c) => c.op === "deleteJob"));
 });
 
+test("a gate card schedule is a delayed job on gate.evaluate", async () => {
+  const { boss, calls } = stubBoss();
+  const jobs = new PgBossQueue(boss);
+  await jobs.schedule("gate:feat-1", "gate.evaluate", "*/5 * * * *", { featureId: "feat-1" });
+  const send = calls.find((c) => c.op === "send");
+  assert.equal(send?.args[0], "gate.evaluate");
+  assert.deepEqual(send?.args[1], { featureId: "feat-1" });
+  await jobs.unschedule("gate:feat-1");
+  assert.ok(calls.some((c) => c.op === "deleteJob"));
+});
+
+test("presence is an in-process counter on pg-boss", async () => {
+  const { boss } = stubBoss();
+  const jobs = new PgBossQueue(boss);
+  assert.equal(await jobs.getPresence("parked-compute"), 0);
+  await jobs.setPresence("parked-compute", 2);
+  assert.equal(await jobs.getPresence("parked-compute"), 2);
+  await jobs.setPresence("parked-compute", 0);
+  assert.equal(await jobs.getPresence("parked-compute"), 0);
+});
+
 test("work concurrency registers that many workers, and wake notifies them", async () => {
   const { boss, calls } = stubBoss();
   const jobs = new PgBossQueue(boss);

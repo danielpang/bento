@@ -53,6 +53,12 @@ test("registerJobs uses one run.execute worker width and re-arms Modal sandboxes
   assert.match(src, /rearmReadyModalSandboxes\(ctx\)/);
 });
 
+test("registerJobs does not poll gated cards or runner claims on a five-minute cron", () => {
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "run-executor.ts"), "utf8");
+  assert.doesNotMatch(src, /schedule\("gate\.sweep",\s*"gate\.sweep",\s*"\*\/5/);
+  assert.doesNotMatch(src, /schedule\("runner\.reap",\s*"runner\.reap",\s*"\*\/5/);
+});
+
 /**
  * A bare send still works, which is exactly why nothing else would
  * catch one: the run starts on the next poll, thirty seconds later,

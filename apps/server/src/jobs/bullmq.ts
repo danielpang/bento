@@ -28,6 +28,10 @@ export function bullMqSchedulerMapKey(prefix: string, id: string): string {
   return `${prefix}:scheduler:${id}`;
 }
 
+export function bullMqPresenceKey(prefix: string, key: string): string {
+  return `${prefix}:presence:${key}`;
+}
+
 export interface BullMqQueueOptions {
   redisUrl: string;
   /** `BENTO_ENVIRONMENT`: development and production share one Redis safely. */
@@ -122,6 +126,20 @@ export class BullMqQueue implements JobQueue {
     const q = await this.queue(mapped as QueueName);
     await q.removeJobScheduler(id);
     await this.connection.del(bullMqSchedulerMapKey(this.prefix, id));
+  }
+
+  async setPresence(key: string, count: number): Promise<void> {
+    this.assertOpen();
+    const redisKey = bullMqPresenceKey(this.prefix, key);
+    if (count <= 0) await this.connection.del(redisKey);
+    else await this.connection.set(redisKey, String(count));
+  }
+
+  async getPresence(key: string): Promise<number> {
+    this.assertOpen();
+    const raw = await this.connection.get(bullMqPresenceKey(this.prefix, key));
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : 0;
   }
 
   async counts(queue: QueueName): Promise<JobCounts> {

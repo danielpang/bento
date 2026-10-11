@@ -216,6 +216,16 @@ for (const backend of realQueueBackends()) {
       });
     });
 
+    test("presence set and get round-trip, and zero clears the key", { timeout: 10_000 }, async () => {
+      await withJobs(backend, async (jobs) => {
+        assert.equal(await jobs.getPresence("parked-compute"), 0);
+        await jobs.setPresence("parked-compute", 3);
+        assert.equal(await jobs.getPresence("parked-compute"), 3);
+        await jobs.setPresence("parked-compute", 0);
+        assert.equal(await jobs.getPresence("parked-compute"), 0);
+      });
+    });
+
     test("schedule upserts and unschedule removes without throwing", { timeout: 15_000 }, async () => {
       await withJobs(backend, async (jobs) => {
         const queue: QueueName = "sandbox.modal-sweep";

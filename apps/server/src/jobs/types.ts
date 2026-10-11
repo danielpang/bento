@@ -99,6 +99,13 @@ export interface JobQueue {
   work<T>(queue: QueueName, opts: WorkOptions, handler: (data: T) => Promise<void>): Promise<void>;
   schedule(id: string, queue: QueueName, cron: string, data?: unknown): Promise<void>;
   unschedule(id: string): Promise<void>;
+  /**
+   * Work-presence counters. BullMQ stores them in Redis; pg-boss and
+   * the fake keep them in process. A timer that would query Postgres
+   * reads this first and stays quiet when the count is zero.
+   */
+  setPresence(key: string, count: number): Promise<void>;
+  getPresence(key: string): Promise<number>;
   counts(queue: QueueName): Promise<JobCounts>;
   stop(): Promise<void>;
   /**
