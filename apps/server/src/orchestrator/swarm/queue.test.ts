@@ -69,6 +69,7 @@ test("registerJobs starts swarm workers eagerly on BullMQ", () => {
   assert.match(src, /ensureSwarmTickWorker\(ctx\)/);
   assert.match(src, /ensureLandingWorker\(ctx\)/);
   assert.match(src, /ensureSwarmPublishWorker\(ctx\)/);
+  assert.match(src, /ensureSwarmWatchdog\(ctx\)/);
 });
 
 /**

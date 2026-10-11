@@ -43,7 +43,14 @@ import {
   withoutAcceptance,
 } from "./planner-news.js";
 import { observedAverageRunCost, budgetIsLow, enforcedSpend, money, spendOf } from "./ledger.js";
-import { ensureSwarmWatchdog, hasWatchedSwarms, stopSwarmWatchdog, WATCHED_SWARMS } from "./watchdog.js";
+import {
+  ensureSwarmWatchdog,
+  hasWatchedSwarms,
+  reconcileSwarmWatchdogs,
+  stopSwarmWatchdog,
+  syncSwarmWatchdog,
+  WATCHED_SWARMS,
+} from "./watchdog.js";
 import { captureSwarmSpend, type SwarmSpendOutcome } from "./spend.js";
 import { queueSwarmSlackNotify } from "../slack-notify.js";
 
@@ -465,6 +472,16 @@ export async function tickSwarm(
       await queueSwarmSandboxReap(ctx, swarmId);
     }
   }
+  /**
+   * The clock follows the row this tick left. A move into planning,
+   * running, blocked, or a plan-limit pause upserts `watchdog:<id>`;
+   * a terminal or other pause removes it. Failure here is never this
+   * tick's: the work happened, and boot will put the scheduler back.
+   */
+  await syncSwarmWatchdog(ctx, swarmId).catch((err: unknown) => {
+    console.warn("could not sync the swarm watchdog:", err);
+    ctx.analytics?.captureException(err, null, null, { queue: SWARM_TICK_QUEUE });
+  });
   return result;
 }
 
@@ -2946,14 +2963,15 @@ export async function enqueueSwarmTick(ctx: AppContext, swarmId: string): Promis
     await ctx.jobs.send(SWARM_TICK_QUEUE, { swarmId }, { coalesceKey: swarmId });
   }
   /**
-   * And the clock, from the same door.
+   * And the clock's worker, from the same door.
    *
    * Outside the lifecycle turn because it is a different worker with a
    * different lifetime: the tick worker stops when nothing is running,
    * and the watchdog has to outlive exactly that, for the swarm that is
-   * paused waiting on a ceiling somewhere else to lift. Its own failure
-   * is never this send's: a tick that could not also start a schedule
-   * is still a tick.
+   * paused waiting on a ceiling somewhere else to lift. The per-swarm
+   * scheduler is upserted by the tick that changes the row, and by
+   * boot. Its own failure is never this send's: a tick that could not
+   * also start a worker is still a tick.
    */
   await ensureSwarmWatchdog(ctx).catch((err: unknown) => {
     console.warn("could not start the swarm watchdog:", err);
@@ -3080,11 +3098,11 @@ export async function tickAllLiveSwarms(ctx: AppContext): Promise<number> {
    * state that cannot wake itself: its hours come back when a period
    * rolls over or somebody allows overage, and neither is an event
    * this server hears about. The watchdog is what asks on its behalf,
-   * and the watchdog is started from this door. Booting with only the
-   * active statuses registered nothing, so a deploy in the half hour
-   * after a team ran out of hours stranded the swarm for good.
+   * and boot is what puts its per-swarm scheduler back. Booting with
+   * only the active statuses registered nothing, so a deploy in the
+   * half hour after a team ran out of hours stranded the swarm for good.
    */
-  const live = await ctx.db.select({ id: swarms.id }).from(swarms).where(WATCHED_SWARMS);
+  const live = await reconcileSwarmWatchdogs(ctx);
   for (const row of live) await enqueueSwarmTick(ctx, row.id);
   return live.length;
 }

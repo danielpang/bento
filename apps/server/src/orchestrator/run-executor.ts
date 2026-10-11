@@ -126,6 +126,7 @@ import { latestConversationRun, resolveFollowUpRun } from "./stage-agent.js";
 import { asPipelineRun, isPipelineRun, type PipelineRun } from "./pipeline-run.js";
 import { describeRunSubject, type RunSubject } from "./run-subject.js";
 import { enqueueSwarmTick, ensureSwarmTickWorker, tickAllLiveSwarms } from "./swarm/coordinator.js";
+import { ensureSwarmWatchdog } from "./swarm/watchdog.js";
 import { ensureLandingWorker, resumeClaimedLandings } from "./swarm/landing.js";
 import { ensureSwarmPublishWorker } from "./swarm/complete.js";
 import { SWARM_PUSH_QUEUE, ensureSwarmPushWorker, remoteBranchBundles } from "./swarm/remote-branches.js";
@@ -3382,6 +3383,7 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
     await ensureSwarmTickWorker(ctx);
     await ensureLandingWorker(ctx);
     await ensureSwarmPublishWorker(ctx);
+    await ensureSwarmWatchdog(ctx);
   }
   /**
    * Landings the previous process was holding.

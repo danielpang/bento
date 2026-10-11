@@ -33,11 +33,16 @@ export class FakeJobQueue implements JobQueue {
   }
 
   async schedule(id: string, queue: QueueName, cron: string, data?: unknown): Promise<void> {
-    this.scheduled.push(data === undefined ? { id, queue, cron } : { id, queue, cron, data });
+    const entry = data === undefined ? { id, queue, cron } : { id, queue, cron, data };
+    const existing = this.scheduled.findIndex((row) => row.id === id);
+    if (existing >= 0) this.scheduled[existing] = entry;
+    else this.scheduled.push(entry);
   }
 
   async unschedule(id: string): Promise<void> {
     this.unscheduled.push(id);
+    const existing = this.scheduled.findIndex((row) => row.id === id);
+    if (existing >= 0) this.scheduled.splice(existing, 1);
   }
 
   async counts(_queue: QueueName): Promise<JobCounts> {

@@ -13,6 +13,7 @@ export class PgBossQueue implements JobQueue {
   readonly kind = "pg-boss" as const;
   private readonly created = new Set<QueueName>();
   private readonly workersByQueue = new Map<QueueName, string[]>();
+  private readonly namedSchedules = new Map<string, QueueName>();
   private stopped = false;
 
   constructor(private readonly boss: PgBoss) {}
@@ -60,18 +61,40 @@ export class PgBossQueue implements JobQueue {
   async schedule(id: string, queue: QueueName, cron: string, data?: unknown): Promise<void> {
     this.assertOpen();
     await this.ensureQueue(queue);
-    // pg-boss names a schedule by its queue. Phase 0 schedules are one
-    // per queue, so the id is the queue name; a later phase that needs
-    // many schedules on one queue will use a different backend.
-    void id;
-    if (data === undefined) {
-      await this.boss.schedule(queue, cron);
-    } else {
-      await this.boss.schedule(queue, cron, asJobData(data));
+    // pg-boss names a schedule by its queue. One-per-queue crons keep
+    // using that. Many schedules on one queue (watchdog:<swarmId>) are
+    // delayed jobs keyed by id; the handler upserts the next fire.
+    if (id === queue) {
+      if (data === undefined) {
+        await this.boss.schedule(queue, cron);
+      } else {
+        await this.boss.schedule(queue, cron, asJobData(data));
+      }
+      return;
     }
+    this.namedSchedules.set(id, queue);
+    const jobId = keyedJobId("schedule", id);
+    const existing = await this.boss.getJobById(queue, jobId);
+    if (existing) {
+      if (existing.state === "active") return;
+      await this.boss.cancel(queue, jobId).catch(() => {});
+      await this.boss.deleteJob(queue, jobId).catch(() => {});
+    }
+    await this.boss.send(queue, asJobData(data ?? {}), {
+      id: jobId,
+      startAfter: new Date(Date.now() + cronToDelayMs(cron)),
+    });
   }
 
   async unschedule(id: string): Promise<void> {
+    const queue = this.namedSchedules.get(id) ?? queueForNamedSchedule(id);
+    if (queue) {
+      this.namedSchedules.delete(id);
+      const jobId = keyedJobId("schedule", id);
+      await this.boss.cancel(queue, jobId).catch(() => {});
+      await this.boss.deleteJob(queue, jobId).catch(() => {});
+      return;
+    }
     await this.boss.unschedule(id);
   }
 
@@ -172,9 +195,22 @@ export class PgBossQueue implements JobQueue {
 }
 
 /** pg-boss job ids are UUIDs. Hash keeps the id a function of the caller key. */
-function keyedJobId(kind: "dedupe" | "debounce", key: string): string {
+function keyedJobId(kind: "dedupe" | "debounce" | "schedule", key: string): string {
   const hex = createHash("sha1").update(`${kind}:${key}`).digest("hex");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+}
+
+function cronToDelayMs(cron: string): number {
+  const hourly = cron.trim() === "0 * * * *";
+  const everyN = cron.trim().match(/^\*\/(\d+) \* \* \* \*$/);
+  if (hourly) return 60 * 60 * 1000;
+  if (everyN) return Math.max(1, Number(everyN[1])) * 60 * 1000;
+  return 60 * 1000;
+}
+
+function queueForNamedSchedule(id: string): QueueName | undefined {
+  if (id.startsWith("watchdog:")) return "swarm.watchdog";
+  return undefined;
 }
 
 function asJobData<T>(data: T): object {

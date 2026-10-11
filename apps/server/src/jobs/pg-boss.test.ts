@@ -144,6 +144,21 @@ test("kind is pg-boss", () => {
   assert.equal(new PgBossQueue(boss).kind, "pg-boss");
 });
 
+test("a named schedule is a delayed job, not a queue-wide cron", async () => {
+  const { boss, calls } = stubBoss();
+  const jobs = new PgBossQueue(boss);
+  const before = Date.now();
+  await jobs.schedule("watchdog:s1", "swarm.watchdog", "0 * * * *", { swarmId: "s1" });
+  assert.equal(calls.some((c) => c.op === "schedule"), false);
+  const send = calls.find((c) => c.op === "send");
+  assert.equal(send?.args[0], "swarm.watchdog");
+  assert.deepEqual(send?.args[1], { swarmId: "s1" });
+  const startAfter = (send?.args[2] as { startAfter: Date }).startAfter;
+  assert.ok(startAfter.getTime() >= before + 59 * 60 * 1000);
+  await jobs.unschedule("watchdog:s1");
+  assert.ok(calls.some((c) => c.op === "deleteJob"));
+});
+
 test("work concurrency registers that many workers, and wake notifies them", async () => {
   const { boss, calls } = stubBoss();
   const jobs = new PgBossQueue(boss);

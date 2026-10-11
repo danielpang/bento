@@ -44,15 +44,32 @@ import { captureSwarmSpend } from "./spend.js";
  * event this server hears about: the period rolls over somewhere else,
  * or somebody allows overage. Without something asking again, a swarm
  * paused at 4pm on the last day of a period would sit there until a
- * person noticed and pressed a button.
+ * person noticed and pressed a button. That pause is checked once an
+ * hour rather than every minute; a plan change or period reset ticks
+ * it directly when the cloud module can announce one.
  *
- * A schedule rather than a fast poller, and registered only once a
- * deployment has a swarm: a minute of lag is nothing against thresholds
- * measured in tens of minutes, and most deployments have never started
- * a swarm at all.
+ * One scheduler per live swarm, not one cron for the deployment. A
+ * process with nothing to watch holds no schedule and pays for no
+ * tick. The id is `watchdog:<swarmId>`, created when a tick moves a
+ * swarm into a watched state, removed when it leaves, and rebuilt
+ * from the rows at boot so a flush or a restart loses only time.
  */
 
 export const SWARM_WATCHDOG_QUEUE = "swarm.watchdog";
+
+/** Every minute. The thresholds are in tens of minutes; this is precise enough. */
+export const WATCHDOG_MINUTE_CRON = "* * * * *";
+
+/**
+ * A swarm paused on a plan limit. Hours coming back is not an event
+ * this server hears, so this is the fallback until the cloud module
+ * can tick those swarms directly.
+ */
+export const WATCHDOG_HOURLY_CRON = "0 * * * *";
+
+export function swarmWatchdogSchedulerId(swarmId: string): string {
+  return `watchdog:${swarmId}`;
+}
 
 /**
  * A run whose agent process is in the sandbox.
@@ -62,9 +79,6 @@ export const SWARM_WATCHDOG_QUEUE = "swarm.watchdog";
  * neither warns on them nor treats them as a reason to keep a warning.
  */
 const AGENT_IN_SANDBOX = ["running"] as const;
-
-/** Every minute. The thresholds are in tens of minutes; this is precise enough. */
-const WATCHDOG_CRON = "* * * * *";
 
 /** How much of a stuck agent's transcript the planner is shown. */
 const TAIL_LINES = 12;
@@ -81,23 +95,23 @@ interface Thresholds {
 const DEFAULT_THRESHOLDS: Thresholds = { warnMin: 20, escalateMin: 45 };
 
 /**
- * Starts the watchdog, if this process has not.
+ * Starts the watchdog worker, if this process has not.
  *
- * Lazily, from the same door the tick worker is started by, so a
- * deployment with no swarms runs no schedule and pays for no poll. The
- * ordinary poll interval: the job is produced by cron once a minute,
- * and nobody is waiting on the moment it is picked up.
+ * The worker only. Each live swarm has its own scheduler; those are
+ * added and removed as the swarm moves, and rebuilt at boot. pg-boss
+ * still starts this worker on first use so a local install with no
+ * swarms polls for nothing. BullMQ registers it at boot.
  */
 export async function ensureSwarmWatchdog(ctx: AppContext): Promise<void> {
   if (watchdogs.has(ctx.jobs)) return;
   watchdogs.add(ctx.jobs);
   try {
-    await ctx.jobs.schedule(SWARM_WATCHDOG_QUEUE, SWARM_WATCHDOG_QUEUE, WATCHDOG_CRON);
-    await ctx.jobs.work(
+    await ctx.jobs.work<{ swarmId?: string }>(
       SWARM_WATCHDOG_QUEUE,
       { batchSize: 1, pollingIntervalSeconds: QUEUE_POLL_SECONDS },
-      captureJobErrors(ctx.analytics, SWARM_WATCHDOG_QUEUE, async () => {
-        await runWatchdog(ctx);
+      captureJobErrors(ctx.analytics, SWARM_WATCHDOG_QUEUE, async (data) => {
+        const swarmId = typeof data?.swarmId === "string" ? data.swarmId : undefined;
+        await runWatchdog(ctx, new Date(), swarmId);
       }),
     );
   } catch (err) {
@@ -107,20 +121,89 @@ export async function ensureSwarmWatchdog(ctx: AppContext): Promise<void> {
 }
 
 /**
- * Stops the watchdog and takes its schedule down with it.
+ * Stops the watchdog worker and drops a leftover cluster-wide schedule.
  *
- * Both, because the schedule is a row in the database rather than
- * something this process holds: left behind, it would keep producing a
- * job a minute for a deployment whose last swarm finished weeks ago,
- * and every one of those jobs is a query.
+ * Per-swarm schedulers are removed as each swarm leaves a watched
+ * state. This is the idle-process cleanup: no live swarm, so no worker
+ * on pg-boss and no global cron a crash may have left behind. BullMQ
+ * keeps the worker; closing it from inside a processor deadlocks, and
+ * an idle Worker costs Redis nothing.
  */
 export async function stopSwarmWatchdog(ctx: AppContext): Promise<void> {
   if (!watchdogs.has(ctx.jobs)) return;
-  watchdogs.delete(ctx.jobs);
-  await ctx.jobs.offWork(SWARM_WATCHDOG_QUEUE);
   await ctx.jobs.unschedule(SWARM_WATCHDOG_QUEUE).catch(() => {
     // A schedule that is already gone is the state this wanted.
   });
+  if (ctx.jobs.kind === "bullmq") return;
+  watchdogs.delete(ctx.jobs);
+  await ctx.jobs.offWork(SWARM_WATCHDOG_QUEUE);
+}
+
+type WatchdogCadenceSwarm = {
+  id: string;
+  status: (typeof swarms.$inferSelect)["status"];
+  pausedReason: (typeof swarms.$inferSelect)["pausedReason"];
+};
+
+export function watchdogCron(swarm: WatchdogCadenceSwarm): string {
+  return swarm.status === "paused" && swarm.pausedReason === "plan_limit"
+    ? WATCHDOG_HOURLY_CRON
+    : WATCHDOG_MINUTE_CRON;
+}
+
+async function scheduleSwarmWatchdog(ctx: AppContext, swarm: WatchdogCadenceSwarm): Promise<void> {
+  await ctx.jobs.schedule(swarmWatchdogSchedulerId(swarm.id), SWARM_WATCHDOG_QUEUE, watchdogCron(swarm), {
+    swarmId: swarm.id,
+  });
+}
+
+export async function unscheduleSwarmWatchdog(ctx: AppContext, swarmId: string): Promise<void> {
+  await ctx.jobs.unschedule(swarmWatchdogSchedulerId(swarmId)).catch(() => {
+    // Already gone is the state this wanted.
+  });
+}
+
+/**
+ * Puts this swarm's scheduler in the state its row implies.
+ *
+ * Idempotent. A tick that moved the swarm into planning, running or
+ * blocked (or a plan-limit pause) upserts; a tick that moved it to a
+ * terminal or other pause removes.
+ */
+export async function syncSwarmWatchdog(ctx: AppContext, swarmId: string): Promise<void> {
+  await ensureSwarmWatchdog(ctx);
+  const [row] = await ctx.db
+    .select({ id: swarms.id, status: swarms.status, pausedReason: swarms.pausedReason })
+    .from(swarms)
+    .where(and(eq(swarms.id, swarmId), WATCHED_SWARMS))
+    .limit(1);
+  if (!row) {
+    await unscheduleSwarmWatchdog(ctx, swarmId);
+    return;
+  }
+  await scheduleSwarmWatchdog(ctx, row);
+}
+
+/**
+ * Boot: every live swarm gets its scheduler, and any scheduler whose
+ * swarm is not live is removed. Also drops the old cluster-wide cron.
+ */
+export async function reconcileSwarmWatchdogs(ctx: AppContext): Promise<Array<{ id: string }>> {
+  await ensureSwarmWatchdog(ctx);
+  await ctx.jobs.unschedule(SWARM_WATCHDOG_QUEUE).catch(() => {
+    // The cluster-wide cron this replaces. Gone is fine.
+  });
+  const live = await ctx.db
+    .select({ id: swarms.id, status: swarms.status, pausedReason: swarms.pausedReason })
+    .from(swarms)
+    .where(WATCHED_SWARMS);
+  const liveIds = new Set(live.map((swarm) => swarm.id));
+  for (const swarm of live) await scheduleSwarmWatchdog(ctx, swarm);
+  const known = await ctx.db.select({ id: swarms.id }).from(swarms);
+  for (const row of known) {
+    if (!liveIds.has(row.id)) await unscheduleSwarmWatchdog(ctx, row.id);
+  }
+  return live;
 }
 
 /**
@@ -185,13 +268,20 @@ export interface WatchdogResult {
 }
 
 /**
- * One pass of the clock over every swarm that has one running.
+ * One pass of the clock over a swarm, or over every swarm that has one
+ * running when no id is given.
  *
- * Reads rather than remembers: which nodes are already yellow is a
- * column, so a pass that runs twice in a minute writes nothing the
- * second time and a process that restarts loses nothing.
+ * Per-swarm schedulers fire with the swarm's id. A pass with no id is
+ * the tests and a leftover cluster-wide job. Reads rather than
+ * remembers: which nodes are already yellow is a column, so a pass
+ * that runs twice in a minute writes nothing the second time and a
+ * process that restarts loses nothing.
  */
-export async function runWatchdog(ctx: AppContext, now: Date = new Date()): Promise<WatchdogResult> {
+export async function runWatchdog(
+  ctx: AppContext,
+  now: Date = new Date(),
+  swarmId?: string,
+): Promise<WatchdogResult> {
   const result: WatchdogResult = { warned: [], escalated: [], timedOut: [], retried: [], cleared: [], reconciled: [] };
   const live = await ctx.db
     .select({
@@ -203,7 +293,12 @@ export async function runWatchdog(ctx: AppContext, now: Date = new Date()): Prom
       timeLimitMin: swarms.timeLimitMin,
     })
     .from(swarms)
-    .where(WATCHED_SWARMS);
+    .where(swarmId ? and(eq(swarms.id, swarmId), WATCHED_SWARMS) : WATCHED_SWARMS);
+
+  if (swarmId && live.length === 0) {
+    await unscheduleSwarmWatchdog(ctx, swarmId);
+    return result;
+  }
 
   for (const swarm of live) {
     const thresholds: Thresholds = DEFAULT_THRESHOLDS;
@@ -218,25 +313,27 @@ export async function runWatchdog(ctx: AppContext, now: Date = new Date()): Prom
       await enqueueSwarmTick(ctx, swarm.id);
       result.retried.push(swarm.id);
       result.reconciled.push(swarm.id);
-      continue;
+    } else {
+      await watchRuns(ctx, swarm, thresholds, now, result);
+      await clearStoppedRuns(ctx, swarm, now, result);
+      // A swarm already at a ceiling has its ending; the clock does not
+      // give it another one.
+      if (swarm.status !== "budget_exhausted" && swarm.status !== "timed_out") {
+        await enforceTimeLimit(ctx, swarm, now, result);
+      }
+      /*
+       * And the reconcile. One tick per swarm per pass, on the swarm's own
+       * singleton key, so a pass that already asked for one above (an
+       * escalation, a cleared clock) or an event that did adds no second
+       * job: a tick waiting to be picked up swallows the send. A swarm the
+       * clock just timed out is ticked too, which is what records it.
+       */
+      await enqueueSwarmTick(ctx, swarm.id);
+      result.reconciled.push(swarm.id);
     }
-
-    await watchRuns(ctx, swarm, thresholds, now, result);
-    await clearStoppedRuns(ctx, swarm, now, result);
-    // A swarm already at a ceiling has its ending; the clock does not
-    // give it another one.
-    if (swarm.status !== "budget_exhausted" && swarm.status !== "timed_out") {
-      await enforceTimeLimit(ctx, swarm, now, result);
-    }
-    /*
-     * And the reconcile. One tick per swarm per pass, on the swarm's own
-     * singleton key, so a pass that already asked for one above (an
-     * escalation, a cleared clock) or an event that did adds no second
-     * job: a tick waiting to be picked up swallows the send. A swarm the
-     * clock just timed out is ticked too, which is what records it.
-     */
-    await enqueueSwarmTick(ctx, swarm.id);
-    result.reconciled.push(swarm.id);
+    // Cadence and presence follow the row this pass left, including a
+    // time-limit ending that just took the swarm off the clock.
+    await syncSwarmWatchdog(ctx, swarm.id);
   }
   return result;
 }

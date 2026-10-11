@@ -18,8 +18,15 @@ import type { AppContext } from "./context.js";
 import { FakeJobQueue } from "./jobs/index.js";
 import { EventBus, type BoardEvent } from "./events.js";
 import { loadEnv } from "./env.js";
-import { runWatchdog } from "./orchestrator/swarm/watchdog.js";
-import { tickSwarm } from "./orchestrator/swarm/coordinator.js";
+import {
+  reconcileSwarmWatchdogs,
+  runWatchdog,
+  swarmWatchdogSchedulerId,
+  syncSwarmWatchdog,
+  WATCHDOG_HOURLY_CRON,
+  WATCHDOG_MINUTE_CRON,
+} from "./orchestrator/swarm/watchdog.js";
+import { tickAllLiveSwarms, tickSwarm } from "./orchestrator/swarm/coordinator.js";
 import { DOCUMENT_ASSEMBLY_FLAG } from "./orchestrator/swarm/deliverable.js";
 
 /**
@@ -51,6 +58,7 @@ const ESCALATE_MIN = 45;
 let pool: ReturnType<typeof createPool>;
 let db: Db;
 let ctx: AppContext;
+let jobs: FakeJobQueue;
 let emitted: BoardEvent[];
 let queued: FakeJobQueue["sent"];
 
@@ -76,7 +84,7 @@ before(async () => {
 
   const bus = new EventBus();
   emitted = [];
-  const jobs = new FakeJobQueue();
+  jobs = new FakeJobQueue();
   queued = jobs.sent;
   ctx = {
     env: loadEnv({ BENTO_MODE: "local", DATABASE_URL: testUrl } as NodeJS.ProcessEnv),
@@ -97,6 +105,9 @@ beforeEach(async () => {
   await pool.query("delete from swarms");
   emitted.length = 0;
   queued.length = 0;
+  jobs.scheduled.length = 0;
+  jobs.unscheduled.length = 0;
+  jobs.worked.length = 0;
 });
 
 async function makeSwarm(overrides: Partial<typeof swarms.$inferInsert> = {}) {
@@ -519,4 +530,114 @@ test("a document assembly whose lease ran out is taken back by the tick the pass
   const after = await readTask(assembly!.id);
   assert.notEqual(after.status, "working", "the stale lease is taken back and the assembly run again");
   assert.match(after.report ?? "", /Document assembly failed/, "here it fails visibly, having no branch to assemble on");
+});
+
+function watchdogSchedule(swarmId: string) {
+  return jobs.scheduled.find((row) => row.id === swarmWatchdogSchedulerId(swarmId));
+}
+
+/**
+ * One Job Scheduler per live swarm. The tick that moves a swarm into a
+ * watched state creates it; the tick that leaves that set removes it.
+ */
+test("a live swarm gets a per-swarm watchdog scheduler", async () => {
+  const swarm = await makeSwarm({ status: "running" });
+  await syncSwarmWatchdog(ctx, swarm.id);
+  const scheduled = watchdogSchedule(swarm.id);
+  assert.ok(scheduled, "planning, running and blocked each hold a clock");
+  assert.equal(scheduled.queue, "swarm.watchdog");
+  assert.equal(scheduled.cron, WATCHDOG_MINUTE_CRON);
+  assert.deepEqual(scheduled.data, { swarmId: swarm.id });
+});
+
+test("a terminal or non-plan pause drops the watchdog scheduler", async () => {
+  const done = await makeSwarm({ status: "running" });
+  const paused = await makeSwarm({ status: "running" });
+  await syncSwarmWatchdog(ctx, done.id);
+  await syncSwarmWatchdog(ctx, paused.id);
+  assert.ok(watchdogSchedule(done.id));
+  assert.ok(watchdogSchedule(paused.id));
+
+  await db.update(swarms).set({ status: "done" }).where(eq(swarms.id, done.id));
+  await db.update(swarms).set({ status: "paused", pausedReason: "manual" }).where(eq(swarms.id, paused.id));
+  await syncSwarmWatchdog(ctx, done.id);
+  await syncSwarmWatchdog(ctx, paused.id);
+
+  assert.equal(watchdogSchedule(done.id), undefined, "an ended swarm is not worth a clock");
+  assert.equal(watchdogSchedule(paused.id), undefined, "a person's pause is theirs to resume");
+  assert.ok(jobs.unscheduled.includes(swarmWatchdogSchedulerId(done.id)));
+  assert.ok(jobs.unscheduled.includes(swarmWatchdogSchedulerId(paused.id)));
+});
+
+test("a swarm paused on a plan limit is checked hourly", async () => {
+  const swarm = await makeSwarm({ status: "paused", pausedReason: "plan_limit" });
+  await syncSwarmWatchdog(ctx, swarm.id);
+  const scheduled = watchdogSchedule(swarm.id);
+  assert.ok(scheduled, "hours coming back is not an event this server hears");
+  assert.equal(scheduled.cron, WATCHDOG_HOURLY_CRON);
+
+  await db.update(swarms).set({ status: "running", pausedReason: null }).where(eq(swarms.id, swarm.id));
+  await syncSwarmWatchdog(ctx, swarm.id);
+  assert.equal(watchdogSchedule(swarm.id)?.cron, WATCHDOG_MINUTE_CRON, "back at work, back to a minute");
+});
+
+/**
+ * Boot rebuilds what Redis or a crash would have dropped, and takes
+ * down a clock whose swarm is no longer live — including the old
+ * cluster-wide cron this replaced.
+ */
+test("boot installs live schedulers and drops stale ones", async () => {
+  const running = await makeSwarm({ status: "running" });
+  const onHours = await makeSwarm({ status: "paused", pausedReason: "plan_limit" });
+  const finished = await makeSwarm({ status: "done" });
+  const byHand = await makeSwarm({ status: "paused", pausedReason: "manual" });
+
+  await jobs.schedule(swarmWatchdogSchedulerId(finished.id), "swarm.watchdog", WATCHDOG_MINUTE_CRON, {
+    swarmId: finished.id,
+  });
+  await jobs.schedule("swarm.watchdog", "swarm.watchdog", WATCHDOG_MINUTE_CRON);
+
+  const live = await reconcileSwarmWatchdogs(ctx);
+  assert.deepEqual(
+    new Set(live.map((row) => row.id)),
+    new Set([running.id, onHours.id]),
+  );
+  assert.equal(watchdogSchedule(running.id)?.cron, WATCHDOG_MINUTE_CRON);
+  assert.equal(watchdogSchedule(onHours.id)?.cron, WATCHDOG_HOURLY_CRON);
+  assert.equal(watchdogSchedule(finished.id), undefined);
+  assert.equal(watchdogSchedule(byHand.id), undefined);
+  assert.equal(
+    jobs.scheduled.find((row) => row.id === "swarm.watchdog"),
+    undefined,
+    "the cluster-wide cron is gone",
+  );
+});
+
+test("a tick that settles a swarm takes its watchdog down with it", async () => {
+  const swarm = await makeSwarm({ status: "running" });
+  await db.insert(swarmTasks).values({ swarmId: swarm.id, title: "landed", status: "done" });
+  await tickSwarm(ctx, swarm.id);
+  assert.equal((await db.select().from(swarms).where(eq(swarms.id, swarm.id)))[0]!.status, "done");
+  assert.equal(watchdogSchedule(swarm.id), undefined);
+});
+
+test("boot reconciliation is what a restart uses to put the clocks back", async () => {
+  const running = await makeSwarm({ status: "running" });
+  const onHours = await makeSwarm({ status: "paused", pausedReason: "plan_limit" });
+  await makeSwarm({ status: "done" });
+
+  await tickAllLiveSwarms(ctx);
+  assert.equal(watchdogSchedule(running.id)?.cron, WATCHDOG_MINUTE_CRON);
+  assert.equal(watchdogSchedule(onHours.id)?.cron, WATCHDOG_HOURLY_CRON);
+});
+
+test("a per-swarm pass leaves every other swarm alone", async () => {
+  const watched = await makeSwarm({ status: "running" });
+  const other = await makeSwarm({ status: "running" });
+  const { task } = await workingLeaf(watched.id, WARN_MIN + 1);
+
+  const result = await runWatchdog(ctx, new Date(), watched.id);
+  assert.deepEqual(result.warned, [task.id]);
+  assert.ok(result.reconciled.includes(watched.id));
+  assert.ok(!result.reconciled.includes(other.id));
 });
