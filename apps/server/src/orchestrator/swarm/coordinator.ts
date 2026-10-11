@@ -2969,9 +2969,9 @@ export async function enqueueSwarmTick(ctx: AppContext, swarmId: string): Promis
    * different lifetime: the tick worker stops when nothing is running,
    * and the watchdog has to outlive exactly that, for the swarm that is
    * paused waiting on a ceiling somewhere else to lift. The per-swarm
-   * scheduler is upserted by the tick that changes the row, and by
-   * boot. Its own failure is never this send's: a tick that could not
-   * also start a worker is still a tick.
+   * scheduler is upserted by the tick or route that changes the row,
+   * and by boot. Its own failure is never this send's: a tick that
+   * could not also start a worker is still a tick.
    */
   await ensureSwarmWatchdog(ctx).catch((err: unknown) => {
     console.warn("could not start the swarm watchdog:", err);

@@ -40,6 +40,7 @@ import { enqueueSwarmPublish } from "../orchestrator/swarm/complete.js";
 import { driverForProject, driverForSandbox } from "../orchestrator/sandbox-driver.js";
 import { markCancelled } from "../orchestrator/run-executor.js";
 import { enqueueSwarmTick } from "../orchestrator/swarm/coordinator.js";
+import { syncSwarmWatchdog } from "../orchestrator/swarm/watchdog.js";
 import { MAX_PLAN_DEPTH, MAX_SWARM_GOAL_CHARS, MAX_SWARM_WORKERS } from "@bento/core";
 import { requireSwarms } from "../orchestrator/swarm/gate.js";
 import { swarmBranchName } from "../orchestrator/swarm/sandbox.js";
@@ -301,7 +302,9 @@ const updateSwarm = z
  *
  * After the commit, never inside it, for the reason the coordinator
  * emits after its transaction: a viewer that refetches on the event
- * has to find the state the event describes.
+ * has to find the state the event describes. The watchdog follows the
+ * same hook: a pause or a cancel that left its clock running would
+ * keep asking about a swarm nobody is working.
  */
 function saySwarmChanged(
   ctx: AppContext,
@@ -315,6 +318,10 @@ function saySwarmChanged(
       projectId: swarm.projectId,
       swarmId: swarm.id,
       ...(status ? { status } : {}),
+    });
+    await syncSwarmWatchdog(ctx, swarm.id).catch((err: unknown) => {
+      console.warn("could not sync the swarm watchdog:", err);
+      ctx.analytics?.captureException(err, null, null, { source: "swarm_route" });
     });
   });
 }

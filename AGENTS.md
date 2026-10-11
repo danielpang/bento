@@ -425,13 +425,19 @@ under a reader. A Modal row "busy" with nothing active goes back to
 ready rather than re-arming forever. Every destroy passes the row's
 `imageRef`, or the hibernation image outlives the machine and bills.
 
-## Every live swarm is reconciled every minute, and nothing waits on an event that will not come
+## Every live swarm holds its own watchdog, and nothing waits on an event that will not come
 
 Ticks used to come only from events (a run ending, a landing, a route)
 and boot, so any state with nothing in flight stayed frozen until a
-person acted. The watchdog now ticks every swarm in `WATCHED_SWARMS`
-once a minute under the swarm's singleton key. On top of that, each
-stall found in production or by audit has its own exit:
+person acted. Each live swarm now holds a `watchdog:<swarmId>`
+scheduler. Planning, running, blocked, and a plan-limit pause get a
+clock: once a minute, or hourly for the plan-limit pause, because
+hours coming back is not an event this server hears. A terminal swarm
+or a person's pause drops that scheduler on the same transition that
+wrote the row (the tick, or the pause/cancel route). Boot rebuilds
+live clocks and removes stale ones, including the old cluster-wide
+cron. On top of that, each stall found in production or by audit has
+its own exit:
 
 - A planner whose turn succeeded without deciding a reported leaf is
   told again (`PLANNER_NOT_TOLD`), up to `MAX_PLANNER_RETELLS`, then the

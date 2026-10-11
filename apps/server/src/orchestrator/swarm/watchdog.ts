@@ -50,9 +50,11 @@ import { captureSwarmSpend } from "./spend.js";
  *
  * One scheduler per live swarm, not one cron for the deployment. A
  * process with nothing to watch holds no schedule and pays for no
- * tick. The id is `watchdog:<swarmId>`, created when a tick moves a
- * swarm into a watched state, removed when it leaves, and rebuilt
- * from the rows at boot so a flush or a restart loses only time.
+ * tick. The id is `watchdog:<swarmId>`, created when a tick or a
+ * route moves a swarm into a watched state, removed when it leaves
+ * (including a person's pause or cancel, on that request), and
+ * rebuilt from the rows at boot so a flush or a restart loses only
+ * time.
  */
 
 export const SWARM_WATCHDOG_QUEUE = "swarm.watchdog";
@@ -166,9 +168,9 @@ export async function unscheduleSwarmWatchdog(ctx: AppContext, swarmId: string):
 /**
  * Puts this swarm's scheduler in the state its row implies.
  *
- * Idempotent. A tick that moved the swarm into planning, running or
- * blocked (or a plan-limit pause) upserts; a tick that moved it to a
- * terminal or other pause removes.
+ * Idempotent. A tick or a route that moved the swarm into planning,
+ * running or blocked (or a plan-limit pause) upserts; one that moved
+ * it to a terminal or other pause removes.
  */
 export async function syncSwarmWatchdog(ctx: AppContext, swarmId: string): Promise<void> {
   await ensureSwarmWatchdog(ctx);

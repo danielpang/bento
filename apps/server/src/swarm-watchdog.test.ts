@@ -14,10 +14,12 @@ import {
   swarms,
   type Db,
 } from "@bento/db";
+import { createApp } from "./app.js";
 import type { AppContext } from "./context.js";
 import { FakeJobQueue } from "./jobs/index.js";
 import { EventBus, type BoardEvent } from "./events.js";
 import { loadEnv } from "./env.js";
+import { createFeatureFlags } from "./feature-flags.js";
 import {
   reconcileSwarmWatchdogs,
   runWatchdog,
@@ -58,6 +60,7 @@ const ESCALATE_MIN = 45;
 let pool: ReturnType<typeof createPool>;
 let db: Db;
 let ctx: AppContext;
+let app: ReturnType<typeof createApp>;
 let jobs: FakeJobQueue;
 let emitted: BoardEvent[];
 let queued: FakeJobQueue["sent"];
@@ -86,14 +89,19 @@ before(async () => {
   emitted = [];
   jobs = new FakeJobQueue();
   queued = jobs.sent;
+  const env = loadEnv({ BENTO_MODE: "local", DATABASE_URL: testUrl } as NodeJS.ProcessEnv);
   ctx = {
-    env: loadEnv({ BENTO_MODE: "local", DATABASE_URL: testUrl } as NodeJS.ProcessEnv),
+    env,
     db,
     pool,
     bus,
     userId: "u1",
     jobs,
+    running: new Map(),
+    featureFlags: createFeatureFlags(env),
+    drivers: { default: { provider: "local-process" }, get: () => undefined, selectable: () => [] },
   } as unknown as AppContext;
+  app = createApp(ctx);
   bus.onBoardEvent(PROJECT, (event) => emitted.push(event));
 });
 
@@ -567,6 +575,36 @@ test("a terminal or non-plan pause drops the watchdog scheduler", async () => {
   assert.equal(watchdogSchedule(paused.id), undefined, "a person's pause is theirs to resume");
   assert.ok(jobs.unscheduled.includes(swarmWatchdogSchedulerId(done.id)));
   assert.ok(jobs.unscheduled.includes(swarmWatchdogSchedulerId(paused.id)));
+});
+
+/**
+ * The pause and cancel routes write the row themselves, not through
+ * a tick. The clock has to come off on that same request: waiting
+ * for the next fire, or for boot, leaves a scheduler asking about a
+ * swarm nobody is working.
+ */
+test("pausing a swarm drops its watchdog immediately", async () => {
+  const swarm = await makeSwarm({ status: "running" });
+  await syncSwarmWatchdog(ctx, swarm.id);
+  assert.ok(watchdogSchedule(swarm.id));
+
+  const res = await app.request(`/api/swarms/${swarm.id}/pause`, { method: "POST" });
+  assert.equal(res.status, 200, await res.text());
+  assert.equal((await db.select().from(swarms).where(eq(swarms.id, swarm.id)))[0]!.status, "paused");
+  assert.equal(watchdogSchedule(swarm.id), undefined, "a person's pause does not wait for the next tick");
+  assert.ok(jobs.unscheduled.includes(swarmWatchdogSchedulerId(swarm.id)));
+});
+
+test("cancelling a swarm drops its watchdog immediately", async () => {
+  const swarm = await makeSwarm({ status: "running" });
+  await syncSwarmWatchdog(ctx, swarm.id);
+  assert.ok(watchdogSchedule(swarm.id));
+
+  const res = await app.request(`/api/swarms/${swarm.id}/cancel`, { method: "POST" });
+  assert.equal(res.status, 200, await res.text());
+  assert.equal((await db.select().from(swarms).where(eq(swarms.id, swarm.id)))[0]!.status, "cancelled");
+  assert.equal(watchdogSchedule(swarm.id), undefined, "a stopped swarm is not worth a clock");
+  assert.ok(jobs.unscheduled.includes(swarmWatchdogSchedulerId(swarm.id)));
 });
 
 test("a swarm paused on a plan limit is checked hourly", async () => {
