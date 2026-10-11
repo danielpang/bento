@@ -220,7 +220,9 @@ export function runRoutes(ctx: AppContext) {
         // 24 hour cap. Ready plus a later job puts it back on the
         // same path as a run that just finished.
         if (driver.provider === "modal" && sandbox) {
-          deferAfterCommit(c, () => markSandboxAwake(ctx.db, ctx, sandbox.id));
+          deferAfterCommit(c, async (): Promise<void> => {
+            void (await markSandboxAwake(ctx.db, ctx, sandbox.id));
+          });
         }
       } catch (err) {
         ctx.analytics?.captureException(err, actor(c), run.organizationId, {
