@@ -3,46 +3,58 @@ import test from "node:test";
 import {
   RUN_QUEUE_SNAPSHOT_EVENT,
   captureRunQueueDepth,
-  tallyServerRunCounts,
+  snapshotFromQueueCounts,
 } from "./queue-snapshot.js";
 import type { AppContext } from "../context.js";
 import type { Analytics } from "../analytics.js";
+import { FakeJobQueue } from "../jobs/index.js";
+import type { JobCounts } from "../jobs/types.js";
 
-test("queued stays queued, starting and running are busy", () => {
-  assert.deepEqual(
-    tallyServerRunCounts([
-      { status: "queued", n: 7 },
-      { status: "starting", n: 2 },
-      { status: "running", n: 5 },
-    ]),
-    { queued: 7, busy: 7 },
-  );
-});
+function jobsWithCounts(counts: JobCounts): FakeJobQueue {
+  const jobs = new FakeJobQueue();
+  jobs.counts = async () => counts;
+  return jobs;
+}
 
-test("an empty tally is a quiet queue", () => {
-  assert.deepEqual(tallyServerRunCounts([]), { queued: 0, busy: 0 });
-});
-
-test("postgres count strings still tally", () => {
-  assert.deepEqual(tallyServerRunCounts([{ status: "queued", n: "3" as unknown as number }]), {
-    queued: 3,
-    busy: 0,
+test("waiting and delayed are queued, active is busy", () => {
+  assert.deepEqual(snapshotFromQueueCounts({ waiting: 7, active: 5, delayed: 2 }), {
+    queued: 9,
+    busy: 5,
   });
 });
 
-test("no analytics means no query", async () => {
-  let queried = false;
+test("an empty tally emits nothing", () => {
+  assert.equal(snapshotFromQueueCounts({ waiting: 0, active: 0, delayed: 0 }), null);
+});
+
+test("no analytics means no queue read", async () => {
+  let counted = false;
+  const jobs = new FakeJobQueue();
+  jobs.counts = async () => {
+    counted = true;
+    return { waiting: 1, active: 0, delayed: 0 };
+  };
   await captureRunQueueDepth({
     analytics: undefined,
-    db: {
-      select() {
-        queried = true;
-        return this;
-      },
-    },
+    jobs,
     env: { BENTO_MAX_CONCURRENT_RUNS: 32 },
   } as unknown as AppContext);
-  assert.equal(queried, false);
+  assert.equal(counted, false);
+});
+
+test("an empty queue emits nothing", async () => {
+  const captured: Array<{ event: string; properties?: Record<string, unknown> }> = [];
+  const analytics: Analytics = {
+    capture: (event) => captured.push(event),
+    captureException: () => {},
+    shutdown: async () => {},
+  };
+  await captureRunQueueDepth({
+    analytics,
+    jobs: jobsWithCounts({ waiting: 0, active: 0, delayed: 0 }),
+    env: { BENTO_MAX_CONCURRENT_RUNS: 32 },
+  } as unknown as AppContext);
+  assert.deepEqual(captured, []);
 });
 
 test("a snapshot names the queued depth and this process's workers", async () => {
@@ -54,21 +66,7 @@ test("a snapshot names the queued depth and this process's workers", async () =>
   };
   await captureRunQueueDepth({
     analytics,
-    db: {
-      select() {
-        return this;
-      },
-      from() {
-        return this;
-      },
-      where() {
-        return this;
-      },
-      groupBy: async () => [
-        { status: "queued", n: 4 },
-        { status: "running", n: 32 },
-      ],
-    },
+    jobs: jobsWithCounts({ waiting: 4, active: 32, delayed: 0 }),
     env: { BENTO_MAX_CONCURRENT_RUNS: 32 },
   } as unknown as AppContext);
   assert.equal(captured.length, 1);
@@ -85,18 +83,7 @@ test("a snapshot names the machine and app when the platform says", async () => 
   };
   await captureRunQueueDepth({
     analytics,
-    db: {
-      select() {
-        return this;
-      },
-      from() {
-        return this;
-      },
-      where() {
-        return this;
-      },
-      groupBy: async () => [{ status: "queued", n: 1 }],
-    },
+    jobs: jobsWithCounts({ waiting: 1, active: 0, delayed: 0 }),
     env: {
       BENTO_MAX_CONCURRENT_RUNS: 32,
       FLY_APP_NAME: "bento-production",

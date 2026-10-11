@@ -127,7 +127,7 @@ import {
 } from "./work-timers.js";
 
 export { QUEUED_RUN_REQUEUE_MIN, STALLED_RUN_MIN };
-import { HIBERNATE_SANDBOX_QUEUE, MODAL_SWEEP_QUEUE, SandboxGone, scheduleModalHibernation, hibernateSandbox, rearmReadyModalSandboxes, sweepOrphanModalSandboxes, wakeSwarmSandbox } from "./hibernate-sandbox.js";
+import { HIBERNATE_SANDBOX_QUEUE, MODAL_SWEEP_CRON, MODAL_SWEEP_QUEUE, SandboxGone, scheduleModalHibernation, hibernateSandbox, rearmReadyModalSandboxes, sweepOrphanModalSandboxes, wakeSwarmSandbox } from "./hibernate-sandbox.js";
 import { modalNetworkForProject, organizationRestrictsNetwork } from "./sandbox-network.js";
 import { stopLeftoverAgent } from "./leftover-agent.js";
 import { pipelineAgentBinaries } from "./pipeline-agents.js";
@@ -3587,7 +3587,7 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
       await hibernateSandbox(ctx, data.sandboxId);
     }),
   );
-  await ctx.jobs.schedule(MODAL_SWEEP_QUEUE, MODAL_SWEEP_QUEUE, "0 9 * * *");
+  await ctx.jobs.schedule(MODAL_SWEEP_QUEUE, MODAL_SWEEP_QUEUE, MODAL_SWEEP_CRON);
   await ctx.jobs.work(
     MODAL_SWEEP_QUEUE,
     { pollingIntervalSeconds: QUEUE_POLL_SECONDS },
@@ -3740,10 +3740,9 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
 
   /**
    * A PostHog gauge of runs waiting for a `run.execute` worker, every
-   * five minutes. Skipped when analytics is off: the only consumer is
-   * the dashboard that decides whether to add workers, and a queue
-   * that backs up does so over hours, so minute resolution bought
-   * nothing but a job, an archive row, and a query per minute.
+   * five minutes. Reads `counts("run.execute")` and emits nothing
+   * while the queue is empty. Skipped when analytics is off: the only
+   * consumer is the dashboard that decides whether to add workers.
    */
   if (ctx.analytics) {
     await ctx.jobs.schedule("run.queue-snapshot", "run.queue-snapshot", "*/5 * * * *");

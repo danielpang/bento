@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { MODAL_REPO_PREPARE_TIMEOUT_MS } from "@bento/sandbox";
-import { hibernateShouldSkip, MODAL_SWEEP_GRACE_MS } from "./hibernate-sandbox.js";
+import { hibernateShouldSkip, MODAL_SWEEP_CRON, MODAL_SWEEP_GRACE_MS, MODAL_SWEEP_QUEUE } from "./hibernate-sandbox.js";
 import { modalRunHosts } from "./modal-hosts.js";
 
 test("hibernation skips anything that is not a finished modal sandbox", () => {
@@ -60,4 +60,9 @@ test("a credential whose model host cannot be named refuses before a sandbox exi
 test("orphan sweep grace outlasts a two repository clone", () => {
   assert.ok(MODAL_SWEEP_GRACE_MS > 2 * MODAL_REPO_PREPARE_TIMEOUT_MS);
   assert.ok(MODAL_SWEEP_GRACE_MS > 16 * 60 * 1000);
+});
+
+test("Modal cleanup stays a daily scheduler", () => {
+  assert.equal(MODAL_SWEEP_QUEUE, "sandbox.modal-sweep");
+  assert.equal(MODAL_SWEEP_CRON, "0 9 * * *");
 });

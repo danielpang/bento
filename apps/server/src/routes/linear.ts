@@ -7,10 +7,11 @@ import { linearConnections, linearIssueLinks, linearTeamMappings, member, projec
 import { LinearClient } from "@bento/linear";
 import type { AppContext } from "../context.js";
 import { actor, activeOrg } from "../middleware/actor.js";
-import { tenantDb as db } from "../middleware/tenant.js";
+import { deferAfterCommit, tenantDb as db } from "../middleware/tenant.js";
 import { canAccessProject } from "../access.js";
 import { maskSecret } from "../secrets.js";
 import { importLinearIssue, linearConnectionFor, linearConnectionRow } from "../linear.js";
+import { syncLinearConnectedPresence } from "../orchestrator/linear-sync.js";
 
 export function linearRoutes(ctx: AppContext) {
   const routes = new Hono();
@@ -87,6 +88,9 @@ export function linearRoutes(ctx: AppContext) {
         webhook = false;
       }
     }
+    deferAfterCommit(c, async () => {
+      await syncLinearConnectedPresence(ctx);
+    });
     return c.json({ connected: true, webhook });
   });
 
@@ -111,6 +115,9 @@ export function linearRoutes(ctx: AppContext) {
     await db(c, ctx)
       .delete(linearConnections)
       .where(orgFilter(linearConnections.organizationId, access.organizationId));
+    deferAfterCommit(c, async () => {
+      await syncLinearConnectedPresence(ctx);
+    });
     return c.json({ ok: true });
   });
 

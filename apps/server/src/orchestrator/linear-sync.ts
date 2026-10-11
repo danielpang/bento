@@ -19,6 +19,12 @@ import { INTERACTIVE_POLL_SECONDS } from "./queue.js";
 
 const BENTO_LABEL = "bento";
 
+/** Redis (or the in-process map) flag: how many tenants have Linear. */
+export const LINEAR_CONNECTED_PRESENCE_KEY = "linear-connected";
+export const LINEAR_SWEEP_ID = "linear.sweep";
+/** Hourly. Webhooks are the primary path; this is the unreachable fallback. */
+export const LINEAR_SWEEP_CRON = "0 * * * *";
+
 function linkOrgFilter(organizationId: string | null) {
   return organizationId
     ? eq(linearIssueLinks.organizationId, organizationId)
@@ -75,6 +81,48 @@ export async function linearConnectedOrgs(ctx: AppContext): Promise<(string | nu
     .select({ organizationId: linearConnections.organizationId })
     .from(linearConnections);
   return rows.map((row) => row.organizationId);
+}
+
+async function ensureLinearSweep(ctx: Pick<AppContext, "jobs">): Promise<void> {
+  await ctx.jobs.schedule(LINEAR_SWEEP_ID, "linear.sweep", LINEAR_SWEEP_CRON);
+}
+
+/**
+ * Whether the hourly Linear sweep should touch Postgres.
+ *
+ * A zero here is the idle path: no query. A counter stuck at zero
+ * while a connection exists is boot's problem, and connect/disconnect
+ * recompute from the rows.
+ */
+export async function linearSweepShouldRun(ctx: Pick<AppContext, "jobs">): Promise<boolean> {
+  return (await ctx.jobs.getPresence(LINEAR_CONNECTED_PRESENCE_KEY)) > 0;
+}
+
+/**
+ * Rebuild the Linear-connected signal from the rows, and drop the
+ * hourly sweep when nobody has Linear.
+ */
+export async function syncLinearConnectedPresence(ctx: AppContext): Promise<number> {
+  const count = (await linearConnectedOrgs(ctx)).length;
+  await ctx.jobs.setPresence(LINEAR_CONNECTED_PRESENCE_KEY, count);
+  if (count > 0) await ensureLinearSweep(ctx);
+  else {
+    await ctx.jobs.unschedule(LINEAR_SWEEP_ID).catch(() => {
+      // Already gone is the state this wanted.
+    });
+  }
+  return count;
+}
+
+/**
+ * Webhook fallback: one backlog sync per connected org. Redis says
+ * whether anyone is connected; an empty flag emits nothing.
+ */
+export async function runLinearSweep(ctx: AppContext): Promise<void> {
+  if (!(await linearSweepShouldRun(ctx))) return;
+  for (const organizationId of await linearConnectedOrgs(ctx)) {
+    await ctx.jobs.send("linear.backlog-sync", { organizationId });
+  }
 }
 
 /**
@@ -505,12 +553,12 @@ export async function registerLinearJobs(ctx: AppContext): Promise<void> {
   });
 
   // Webhook fallback: deployments Linear cannot reach still converge.
-  await ctx.jobs.schedule("linear.sweep", "linear.sweep", "*/15 * * * *");
+  // Hourly, and only while Redis (or the in-process map) says an org
+  // has Linear. Boot recomputes that signal from the rows.
   await ctx.jobs.work("linear.sweep", {}, captureJobErrors(ctx.analytics, "linear.sweep", async () => {
-    for (const organizationId of await linearConnectedOrgs(ctx)) {
-      await ctx.jobs.send("linear.backlog-sync", { organizationId });
-    }
+    await runLinearSweep(ctx);
   }));
+  await syncLinearConnectedPresence(ctx);
 
   // A person just changed an issue in Linear, or a card on the board.
   // Same two second pg-boss pace as gate.evaluate; BullMQ ignores the

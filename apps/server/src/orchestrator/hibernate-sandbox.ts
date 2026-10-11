@@ -24,6 +24,7 @@ export const HIBERNATE_SANDBOX_QUEUE = "sandbox.hibernate";
 
 /** Nightly, and once at boot beside the finished-card sweep. */
 export const MODAL_SWEEP_QUEUE = "sandbox.modal-sweep";
+export const MODAL_SWEEP_CRON = "0 9 * * *";
 
 export { MODAL_WARM_WINDOW_MS };
 

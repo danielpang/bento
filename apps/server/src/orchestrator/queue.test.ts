@@ -73,6 +73,24 @@ test("registerJobs does not poll gated cards or runner claims on a five-minute c
   assert.match(src, /reconcileServerRunRecoveries\(ctx\)/);
 });
 
+test("registerJobs keeps Modal cleanup daily and snapshots from the queue", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const src = readFileSync(join(here, "run-executor.ts"), "utf8");
+  const snapshot = readFileSync(join(here, "queue-snapshot.ts"), "utf8");
+  assert.match(src, /schedule\(MODAL_SWEEP_QUEUE,\s*MODAL_SWEEP_QUEUE,\s*MODAL_SWEEP_CRON\)/);
+  assert.match(snapshot, /jobs\.counts\("run\.execute"\)/);
+});
+
+test("Linear sweep is hourly and connect/disconnect recompute the signal", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const sync = readFileSync(join(here, "linear-sync.ts"), "utf8");
+  const routes = readFileSync(join(here, "..", "routes", "linear.ts"), "utf8");
+  assert.match(sync, /LINEAR_SWEEP_CRON = "0 \* \* \* \*"/);
+  assert.doesNotMatch(sync, /\*\/15 \* \* \* \*/);
+  assert.match(sync, /syncLinearConnectedPresence\(ctx\)/);
+  assert.match(routes, /syncLinearConnectedPresence\(ctx\)/);
+});
+
 test("runner claim and events refresh the per-run lease", () => {
   const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "routes", "runner.ts"), "utf8");
   assert.match(src, /refreshRunnerLease\(ctx,\s*candidate\.run\.id\)/);

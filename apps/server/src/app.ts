@@ -111,7 +111,9 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
 
   app.get("/api/health", async (c) => {
     try {
-      await ping(ctx.db);
+      // Process-only by default, so an uptime monitor cannot keep
+      // Neon awake. ?deep=1 is the operator probe that pings Postgres.
+      if (c.req.query("deep") === "1") await ping(ctx.db);
       // Null in local mode and whenever the key is unset, so a laptop
       // never phones home, leftover env vars included.
       const posthogKey = posthogApiKey(ctx.env);
