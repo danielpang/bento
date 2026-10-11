@@ -74,7 +74,7 @@ export function runRoutes(ctx: AppContext) {
       if ("outOfCompute" in run) return c.json({ error: run.outOfCompute, code: "PLAN_LIMIT" }, 402);
 
       // Runner-executed runs stay queued until a machine claims them.
-      if (executor === "server") await enqueueRun(ctx, run.id);
+      if (executor === "server") deferAfterCommit(c, () => enqueueRun(ctx, run.id));
       return c.json(run, 201);
     })
     .get("/:id", async (c) => {
@@ -119,7 +119,7 @@ export function runRoutes(ctx: AppContext) {
       if (run === "busy") return c.json({ error: CARD_BUSY }, 409);
       if (run === "gone") return c.json({ error: "not found" }, 404);
       if ("outOfCompute" in run) return c.json({ error: run.outOfCompute, code: "PLAN_LIMIT" }, 402);
-      if (previous.executor === "server") await enqueueRun(ctx, run.id);
+      if (previous.executor === "server") deferAfterCommit(c, () => enqueueRun(ctx, run.id));
       return c.json(run, 201);
     })
     /**
@@ -220,7 +220,7 @@ export function runRoutes(ctx: AppContext) {
         // 24 hour cap. Ready plus a later job puts it back on the
         // same path as a run that just finished.
         if (driver.provider === "modal" && sandbox) {
-          await markSandboxAwake(db(c, ctx), ctx, sandbox.id);
+          deferAfterCommit(c, () => markSandboxAwake(ctx.db, ctx, sandbox.id));
         }
       } catch (err) {
         ctx.analytics?.captureException(err, actor(c), run.organizationId, {

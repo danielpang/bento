@@ -181,3 +181,106 @@ test("ctx.boss stays inside the pg-boss adapter", () => {
   visit(srcRoot);
   assert.deepEqual(offenders, [], `ctx.boss outside the adapter in ${offenders.join(", ")}`);
 });
+
+/**
+ * Named route producers that write a row the worker will re-read.
+ * A send from inside the tenant transaction can be claimed before that
+ * row is visible; the worker then finds nothing and acks.
+ */
+const ROUTE_QUEUE_PRODUCERS = [
+  "enqueueRun",
+  "queueRunFinishedSlack",
+  "markSandboxAwake",
+  "armModalHibernation",
+] as const;
+
+function stripComments(src: string): string {
+  return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+}
+
+function matchingParen(src: string, open: number): number {
+  let depth = 0;
+  let quote: string | null = null;
+  for (let i = open; i < src.length; i++) {
+    const ch = src[i]!;
+    if (quote) {
+      if (ch === "\\" && quote !== "`") {
+        i += 1;
+        continue;
+      }
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === "`") {
+      quote = ch;
+      continue;
+    }
+    if (ch === "(") depth += 1;
+    else if (ch === ")") {
+      depth -= 1;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+function isInsideDeferAfterCommit(src: string, index: number): boolean {
+  let from = 0;
+  while (from < index) {
+    const start = src.indexOf("deferAfterCommit", from);
+    if (start === -1 || start >= index) return false;
+    const paren = src.indexOf("(", start + "deferAfterCommit".length);
+    if (paren === -1) return false;
+    const end = matchingParen(src, paren);
+    if (end === -1) return false;
+    if (index > paren && index < end) return true;
+    from = start + 1;
+  }
+  return false;
+}
+
+/** Route enqueue sites that are not wrapped in deferAfterCommit. */
+function undeferredRouteEnqueues(src: string): string[] {
+  const body = stripComments(src);
+  const re = new RegExp(`\\b(${ROUTE_QUEUE_PRODUCERS.join("|")})\\s*\\(`, "g");
+  const offenders: string[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(body))) {
+    if (!isInsideDeferAfterCommit(body, match.index)) offenders.push(match[1]!);
+  }
+  return offenders;
+}
+
+test("the queue source guard rejects an undeferred route enqueue", () => {
+  assert.deepEqual(
+    undeferredRouteEnqueues(`
+      if (executor === "server") await enqueueRun(ctx, run.id);
+      deferAfterCommit(c, () => enqueueGateEvaluate(ctx, feature.id));
+    `),
+    ["enqueueRun"],
+  );
+});
+
+test("the queue source guard accepts a deferred route enqueue", () => {
+  assert.deepEqual(
+    undeferredRouteEnqueues(`
+      if (executor === "server") deferAfterCommit(c, () => enqueueRun(ctx, run.id));
+      deferAfterCommit(c, async () => { await enqueueRun(ctx, started.id); });
+      deferAfterCommit(c, () => queueRunFinishedSlack(ctx, runId));
+      deferAfterCommit(c, () => markSandboxAwake(ctx.db, ctx, sandbox.id));
+    `),
+    [],
+  );
+});
+
+test("named route producers enqueue only after commit", () => {
+  const routesDir = join(dirname(fileURLToPath(import.meta.url)), "..", "routes");
+  const offenders: string[] = [];
+  for (const ent of readdirSync(routesDir, { withFileTypes: true })) {
+    if (!ent.isFile() || !ent.name.endsWith(".ts") || ent.name.endsWith(".test.ts")) continue;
+    const rel = `routes/${ent.name}`;
+    const found = undeferredRouteEnqueues(readFileSync(join(routesDir, ent.name), "utf8"));
+    for (const name of found) offenders.push(`${rel}:${name}`);
+  }
+  assert.deepEqual(offenders, [], `undeferred route enqueue in ${offenders.join(", ")}`);
+});

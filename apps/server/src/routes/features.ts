@@ -812,7 +812,7 @@ export function featureRoutes(ctx: AppContext) {
       // The run's prompt now carries them, so they are delivered rather
       // than in flight: a run that fails is resumed, not redelivered.
       await markMessagesDelivered(db(c, ctx), claimed.map((m) => m.id), run.id);
-      if (resumeFrom.executor === "server") await enqueueRun(ctx, run.id);
+      if (resumeFrom.executor === "server") deferAfterCommit(c, () => enqueueRun(ctx, run.id));
       return c.json({ queued: false as const, run }, 201);
     })
     /**
@@ -1567,7 +1567,7 @@ export function featureRoutes(ctx: AppContext) {
       if (run === "busy") return c.json({ error: CARD_BUSY }, 409);
       if (run === "gone") return c.json({ error: "not found" }, 404);
       if ("outOfCompute" in run) return c.json({ error: run.outOfCompute, code: "PLAN_LIMIT" }, 402);
-      if (executor === "server") await enqueueRun(ctx, run.id);
+      if (executor === "server") deferAfterCommit(c, () => enqueueRun(ctx, run.id));
       return c.json(run, 201);
     })
     /** Full history: stage moves and status changes, oldest first. */

@@ -462,7 +462,7 @@ export function runnerRoutes(ctx: AppContext) {
         .returning({ id: agentRuns.id });
       if (!closed) return c.json({ ok: true });
       await deliverQueuedMessage(ctx, runId);
-      await queueRunFinishedSlack(ctx, runId);
+      deferAfterCommit(c, () => queueRunFinishedSlack(ctx, runId));
 
       // Runner runs end here rather than in finishRun, so the same
       // event every other ending emits is emitted here, through the
