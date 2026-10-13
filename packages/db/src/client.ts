@@ -1,7 +1,7 @@
 import { sql } from "drizzle-orm";
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import pg from "pg";
-import { archivePgBossJobs, parsePgBossArchive } from "./pg-boss-archive.js";
+import { archivePgBossJobs, matchPgBossArchive } from "./pg-boss-archive.js";
 import * as schema from "./schema/index.js";
 
 export type Db = NodePgDatabase<typeof schema>;
@@ -195,6 +195,8 @@ export function createPool(databaseUrl: string, options?: { max?: number }): pg.
  * moved at once) whose client-side timer is the pool query_timeout.
  * pg-boss sets lock_timeout to the same 30s inside the script, so the
  * lock wait and the move share one budget. Batches commit as they go.
+ * A script that looks like archive and cannot be batched is refused,
+ * rather than run as the unbounded statement.
  */
 export function pgBossDatabase(
   pool: pg.Pool,
@@ -204,7 +206,14 @@ export function pgBossDatabase(
 } {
   return {
     executeSql(text, values) {
-      const archive = values === undefined || values.length === 0 ? parsePgBossArchive(text) : null;
+      // A refusal is a rejected promise. pg-boss awaits executeSql, and a
+      // synchronous throw would escape callers that only handle rejection.
+      let archive;
+      try {
+        archive = matchPgBossArchive(text, values);
+      } catch (err) {
+        return Promise.reject(err);
+      }
       if (archive) {
         const batch: { batchSize?: number; maxBatches?: number } = {};
         if (options?.archiveBatchSize !== undefined) batch.batchSize = options.archiveBatchSize;

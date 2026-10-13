@@ -349,6 +349,9 @@ importers:
       drizzle-kit:
         specifier: ^0.31.0
         version: 0.31.10
+      pg-boss:
+        specifier: ^10.4.2
+        version: 10.4.2
       tsx:
         specifier: ^4.19.3
         version: 4.23.1
