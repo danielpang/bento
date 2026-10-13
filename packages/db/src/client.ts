@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import pg from "pg";
+import { archivePgBossJobs, parsePgBossArchive } from "./pg-boss-archive.js";
 import * as schema from "./schema/index.js";
 
 export type Db = NodePgDatabase<typeof schema>;
@@ -62,8 +63,10 @@ export const POOL_KEEPALIVE_INITIAL_DELAY_MS = 10_000;
  * workers' fetches hang the same way, so a dead socket used to mean a
  * quarter hour of no cron and no jobs. node-pg's `query_timeout` fails
  * the query instead and, because the query is still active, tears the
- * socket down at once; the next checkout opens a fresh one. Every
- * query in this codebase is indexed and small next to this bound.
+ * socket down at once; the next checkout opens a fresh one. Ordinary
+ * queries are indexed and small next to this bound. pg-boss archive
+ * is not: it is rewritten into committed batches in pgBossDatabase,
+ * because a timeout on the unbounded script rolls the move back.
  */
 export const POOL_QUERY_TIMEOUT_MS = 30_000;
 
@@ -186,12 +189,28 @@ export function createPool(databaseUrl: string, options?: { max?: number }): pg.
  * Passing this (instead of a connection string) is how Timekeeper
  * cron gets the same keepalive and idle recycle as the app pool.
  * pg-boss will not close a pool it did not create; call `pool.end()`.
+ *
+ * The archive script is not forwarded as pg-boss wrote it. That script
+ * is a single transaction (advisory lock, then every eligible job
+ * moved at once) whose client-side timer is the pool query_timeout.
+ * pg-boss sets lock_timeout to the same 30s inside the script, so the
+ * lock wait and the move share one budget. Batches commit as they go.
  */
-export function pgBossDatabase(pool: pg.Pool): {
+export function pgBossDatabase(
+  pool: pg.Pool,
+  options?: { archiveBatchSize?: number; archiveMaxBatches?: number },
+): {
   executeSql(text: string, values?: unknown[]): Promise<pg.QueryResult>;
 } {
   return {
     executeSql(text, values) {
+      const archive = values === undefined || values.length === 0 ? parsePgBossArchive(text) : null;
+      if (archive) {
+        const batch: { batchSize?: number; maxBatches?: number } = {};
+        if (options?.archiveBatchSize !== undefined) batch.batchSize = options.archiveBatchSize;
+        if (options?.archiveMaxBatches !== undefined) batch.maxBatches = options.archiveMaxBatches;
+        return archivePgBossJobs(pool, archive, batch);
+      }
       return pool.query(text, values);
     },
   };
