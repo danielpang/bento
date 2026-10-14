@@ -42,6 +42,8 @@ const ArtifactViewer = lazy(() =>
   import("./ArtifactViewer.js").then((m) => ({ default: m.ArtifactViewer })),
 );
 
+const WORKING_NODE_REFRESH_MS = 60_000;
+
 /**
  * The Swarms board: the switcher, the page under it, and the drawer over
  * both.
@@ -58,6 +60,7 @@ const ArtifactViewer = lazy(() =>
  * ring, the header's ring, the tree and the outline alike. Four
  * surfaces, one set of numbers.
  */
+
 export function SwarmBoard({
   projectId,
   client,
@@ -280,6 +283,15 @@ export function SwarmBoard({
     setNode(null);
     loadNode(selectedId, taskId);
   }, [selectedId, taskId, loadNode]);
+
+  // A sandbox that died under its agent sends no board event, so the
+  // drawer's quiet figure is refreshed by polling.
+  const openTaskWorking = !!taskId && detail?.tasks.find((row) => row.id === taskId)?.status === "working";
+  useEffect(() => {
+    if (!selectedId || !taskId || !openTaskWorking) return;
+    const timer = setInterval(() => loadNode(selectedId, taskId), WORKING_NODE_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [selectedId, taskId, openTaskWorking, loadNode]);
 
   const [creating, setCreating] = useState(false);
   /** Whether the settings dialog is up for the swarm on screen. */

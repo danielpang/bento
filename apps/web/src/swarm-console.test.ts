@@ -28,7 +28,7 @@ import { canReopen } from "./swarm/status.js";
 import { seedSwarms } from "./swarm/fixtures.js";
 import { buildSwarmModel } from "./swarm/layout.js";
 import type { SwarmDetail, SwarmLanding, SwarmPlannerRun, SwarmStatus, SwarmSummary, SwarmTask } from "./swarm/types.js";
-import { markDoneConfirmText } from "./components/SwarmNodeDrawer.js";
+import { markDoneConfirmText, WORKER_QUIET_HINT_MS, workerQuietMs } from "./components/SwarmNodeDrawer.js";
 import { backoffMinutes } from "./components/MergeQueue.js";
 import { checksFailedAfterLanding, idleWords, leafStartBlocker } from "./swarm/waiting.js";
 import { taskActionRefusal } from "./swarm/status.js";
@@ -1798,4 +1798,36 @@ test("a leaf's drawer offers a message to its worker, and says where it goes", (
     task: done, node: model.byId.get("slow")!, onClose: () => {}, onMessage: async () => ({ live: false }),
   }));
   assert.doesNotMatch(finished, /Message the worker/);
+});
+
+test("a working leaf whose worker has gone quiet offers both retries up front", () => {
+  const model = buildSwarmModel(tasks(), { now: 60 * 60 * 1000, runningTaskIds: new Set(["slow"]) });
+  const task = { ...tasks().find((row) => row.id === "slow")!, status: "working" as const, assignedRunId: "run-1" };
+  const run = (quietMs: number | null) => ({
+    id: "run-1", status: "running", queuedAt: "2026-10-14T00:00:00Z", startedAt: "2026-10-14T00:00:01Z",
+    endedAt: null, error: null, quietMs,
+  });
+  const drawer = (quietMs: number | null) => renderToStaticMarkup(createElement(SwarmNodeDrawer, {
+    task, node: model.byId.get("slow")!, onClose: () => {}, onRetry: () => {}, onStartOver: () => {},
+    detail: { taskId: task.id, commits: [], events: [], runs: [run(quietMs)] },
+  }));
+
+  const quiet = drawer(WORKER_QUIET_HINT_MS + 4 * 60_000);
+  assert.match(quiet, /No output from the worker for 14 minutes/);
+  assert.match(quiet, /Docker or OrbStack restarted/);
+  assert.match(quiet, /class="swarm-worker-quiet"[\s\S]*>Retry in the same sandbox<[\s\S]*>Retry task</);
+  assertNoDashes(quiet, "the quiet worker hint");
+
+  for (const html of [drawer(WORKER_QUIET_HINT_MS - 1), drawer(null)]) {
+    assert.doesNotMatch(html, /swarm-worker-quiet|No output from the worker/);
+    assert.match(html, /The worker is running/);
+  }
+});
+
+test("a worker's silence ages with the page between reads", () => {
+  const run = { id: "r", status: "running", queuedAt: "", startedAt: null, endedAt: null, error: null, quietMs: 60_000 };
+  assert.equal(workerQuietMs(run, 1_000, 31_000), 90_000);
+  assert.equal(workerQuietMs(run, 31_000, 1_000), 60_000, "a clock behind the read never shortens it");
+  assert.equal(workerQuietMs({ ...run, quietMs: null }, 0, 0), null);
+  assert.equal(workerQuietMs(undefined, 0, 0), null);
 });
