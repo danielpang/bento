@@ -1713,6 +1713,35 @@ async function workerOn(swarmId: string, taskId: string, status: "queued" | "run
   return run!;
 }
 
+test("a task's detail says how long its working agent has been silent", async () => {
+  const swarm = await createSwarm();
+  const tree = await treeOf(swarm.id);
+  const worker = await workerOn(swarm.id, tree.first.id);
+  const twentyMinutesAgo = new Date(Date.now() - 20 * 60_000);
+  await db.update(agentRuns).set({ startedAt: twentyMinutesAgo }).where(eq(agentRuns.id, worker.id));
+  const quietOf = async () => {
+    const response = await app.request(`/api/swarms/${swarm.id}/tasks/${tree.first.id}`);
+    assert.equal(response.status, 200, await response.clone().text());
+    const detail = (await response.json()) as {
+      runs: { id: string; quietMs: number | null }[];
+    };
+    return detail.runs.find((run) => run.id === worker.id)!.quietMs;
+  };
+
+  const silentSinceStart = await quietOf();
+  assert.ok(silentSinceStart !== null && silentSinceStart >= 20 * 60_000 - 5_000, `quiet ${silentSinceStart}`);
+
+  await db.insert(runEvents).values({
+    runId: worker.id, seq: 1, type: "message", ts: new Date(Date.now() - 2 * 60_000),
+    payload: { type: "message", role: "assistant", text: "Running the tests." },
+  });
+  const sinceLastLine = await quietOf();
+  assert.ok(sinceLastLine !== null && sinceLastLine >= 2 * 60_000 - 5_000 && sinceLastLine < 3 * 60_000, `quiet ${sinceLastLine}`);
+
+  await db.update(agentRuns).set({ status: "failed", endedAt: new Date() }).where(eq(agentRuns.id, worker.id));
+  assert.equal(await quietOf(), null, "a finished run is not silent, it is over");
+});
+
 const landingOf = async (id: string) => (await db.select().from(swarmLandings).where(eq(swarmLandings.id, id)))[0]!;
 
 test("a plain retry takes the old attempt's branch out of the merge queue too", async () => {

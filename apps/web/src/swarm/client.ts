@@ -766,6 +766,7 @@ export interface WireNode {
     endedAt: string | null;
     error: string | null;
     sandboxProvider?: string | null;
+    quietMs?: number | null;
   }[];
 }
 
