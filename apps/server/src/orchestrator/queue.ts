@@ -63,5 +63,7 @@ export async function enqueueRun(
    * has no run workers of its own, and without this every run waited
    * for the worker app's thirty second poll.
    */
-  ctx.bus?.emitRunControl({ runId, action: "queued" });
+  // Optional call as well as optional bus: tests stub the bus with the
+  // few methods they watch, and a queue must not fail a route for that.
+  ctx.bus?.emitRunControl?.({ runId, action: "queued" });
 }
