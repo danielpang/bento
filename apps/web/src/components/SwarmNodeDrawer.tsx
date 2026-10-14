@@ -391,9 +391,7 @@ export function SwarmNodeDrawer({
           {workerQuiet && (
             <div className="swarm-worker-quiet" role="status">
               <p className="swarm-attention-note">
-                It may be running something long. If its sandbox stopped (for example, Docker or OrbStack restarted), the
-                agent is gone even though this task still says it is working. Retry in the same sandbox keeps the work on
-                this task&apos;s branch. Retry task starts over in a new sandbox from the swarm&apos;s branch.
+                Haven&apos;t heard from agent in awhile, please retry the agent task if the agent is stuck
               </p>
               <div className="action-grid">
                 {canRetry && (

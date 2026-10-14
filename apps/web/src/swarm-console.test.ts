@@ -1814,7 +1814,7 @@ test("a working leaf whose worker has gone quiet offers both retries up front", 
 
   const quiet = drawer(WORKER_QUIET_HINT_MS + 4 * 60_000);
   assert.match(quiet, /No output from the worker for 14 minutes/);
-  assert.match(quiet, /Docker or OrbStack restarted/);
+  assert.match(quiet, /heard from agent in awhile, please retry the agent task if the agent is stuck/);
   assert.match(quiet, /class="swarm-worker-quiet"[\s\S]*>Retry in the same sandbox<[\s\S]*>Retry task</);
   assertNoDashes(quiet, "the quiet worker hint");
 
