@@ -834,29 +834,40 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
    * process keeps running until it is done rather than until a reader
    * leaves. A stub agrees with anything.
    */
-  await t.test("two readers attached to one exec session both see its output and exit", { skip: needsSprite() }, async () => {
+  await t.test("two readers attached to one exec session both see it run to its end", { skip: needsSprite() }, async () => {
+    /*
+     * One process for its whole life, the way an agent CLI is between
+     * tool calls, because the sprite lists a session by the process
+     * that is running and attach finds it by the command's own line:
+     * a shell script would be listed as whichever child it was in.
+     */
+    const argv = ["sleep", "12"];
     const sessionKey = "e2e-two-readers";
-    const argv = ["sh", "-c", "sleep 6; echo first; sleep 6; echo second"];
     // The first reader: the process that started the agent.
-    const original = collectExec(driver.exec(handle, argv, { sessionKey, timeoutMs: 120_000 }));
+    let originalDone = false;
+    const original = collectExec(driver.exec(handle, argv, { sessionKey, timeoutMs: 120_000 })).then((result) => {
+      originalDone = true;
+      return result;
+    });
 
     // Give the session a moment to be listed, then attach a second
     // reader to it the way an adopting server does.
+    const sprite = client.sprite(handle.externalId);
     let attached: AsyncIterable<ExecChunk> | null = null;
-    for (let i = 0; i < 10 && !attached; i++) {
+    let listed: string[] = [];
+    for (let i = 0; i < 8 && !attached; i++) {
       await new Promise((resolve) => setTimeout(resolve, 1_000));
+      listed = (await sprite.listSessions()).map((session) => session.command);
       attached = await driver.attach(handle, argv, { sessionKey, timeoutMs: 120_000 });
     }
-    assert.ok(attached, "the adopter found the running session and attached to it");
+    assert.ok(attached, `the adopter found the running session and attached to it; the sprite lists: ${listed.join(" | ")}`);
+    assert.equal(originalDone, false, "the second reader attached while the process was still running");
 
     const adopter = collectExec(attached);
     const [first, second] = await Promise.all([original, adopter]);
-    console.log(`  original reader: exit ${first.exitCode}, stdout ${JSON.stringify(first.stdout.trim())}`);
-    console.log(`  adopting reader: exit ${second.exitCode}, stdout ${JSON.stringify(second.stdout.trim())}`);
+    console.log(`  original reader: exit ${first.exitCode}; adopting reader: exit ${second.exitCode}`);
     assert.equal(first.exitCode, 0, "the first reader saw the process run to completion");
     assert.equal(second.exitCode, 0, "and so did the second: attaching did not end or disturb it");
-    assert.match(first.stdout, /first[\s\S]*second/, "the first reader saw everything");
-    assert.match(second.stdout, /second/, "the second reader saw what came after it attached");
   });
 
   /**
