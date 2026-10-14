@@ -2562,6 +2562,23 @@ a.pr-row:hover .pr-external {
   flex: 1;
   border-top: 1px solid var(--line);
 }
+.chat-earlier {
+  align-self: center;
+  margin: 0 0 8px;
+  padding: 4px 10px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--muted, inherit);
+  background: transparent;
+  border: 1px solid var(--border, currentColor);
+  border-radius: 999px;
+  cursor: pointer;
+}
+.chat-earlier:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
 .chat-section:first-child .chat-run {
   margin-top: 2px;
 }

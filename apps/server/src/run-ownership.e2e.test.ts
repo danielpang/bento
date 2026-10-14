@@ -327,38 +327,41 @@ test("a message that lands on one server reaches the live session on the other",
   await waitFor("the live session to exist on A", async () => ctxA.liveInputs.has(runId) || null);
   assert.equal(ctxB.liveInputs.has(runId), false, "B holds no session for it");
 
-  const sent = await json<{ queued: boolean; live?: boolean; delivery?: string }>(
-    await appB.request(`/api/features/${feature.id}/message`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text: "change of plan" }),
-    }),
-  );
-  // B cannot see A's stdin, so it watches the row for A's answer and
-  // reports what the row said once A had pumped the message in.
-  assert.equal(sent.queued, false, "the row read sent within the wait, so B answers live");
-  assert.equal(sent.live, true);
-  assert.equal(sent.delivery, "queue", "the delivery mode comes from the run's adapter, not a local handle");
+  try {
+    const sent = await json<{ queued: boolean; live?: boolean; delivery?: string }>(
+      await appB.request(`/api/features/${feature.id}/message`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "change of plan" }),
+      }),
+    );
+    // B cannot see A's stdin, so it watches the row for A's answer and
+    // reports what the row said once A had pumped the message in.
+    assert.equal(sent.queued, false, "the row read sent within the wait, so B answers live");
+    assert.equal(sent.live, true);
+    assert.equal(sent.delivery, "queue", "the delivery mode comes from the run's adapter, not a local handle");
 
-  // A heard the nudge, claimed the row and wrote it into the agent.
-  const message = await waitFor("the message to be sent", async () => {
-    const [row] = await ctxB.db.select().from(featureMessages).where(eq(featureMessages.featureId, feature.id));
-    return row?.status === "sent" ? row : null;
-  });
-  assert.equal(message.runId, runId, "sent into the run A was driving");
-
-  await waitFor("the agent's second turn", async () => {
-    const lines = await ctxB.db.select({ payload: runEvents.payload }).from(runEvents).where(eq(runEvents.runId, runId));
-    const results = lines.filter((l) => (l.payload as { type: string }).type === "result").length;
-    const said = lines.some((l) => {
-      const p = l.payload as { type: string; role?: string; text?: string };
-      return p.type === "message" && p.role === "user" && p.text === "change of plan";
+    // A heard the nudge, claimed the row and wrote it into the agent.
+    const message = await waitFor("the message to be sent", async () => {
+      const [row] = await ctxB.db.select().from(featureMessages).where(eq(featureMessages.featureId, feature.id));
+      return row?.status === "sent" ? row : null;
     });
-    return results >= 2 && said ? true : null;
-  }, 60_000);
+    assert.equal(message.runId, runId, "sent into the run A was driving");
 
-  // Let the held session close so the worker slot is free for the next test.
-  ctxA.liveInputs.get(runId)?.close?.();
+    await waitFor("the agent's second turn", async () => {
+      const lines = await ctxB.db.select({ payload: runEvents.payload }).from(runEvents).where(eq(runEvents.runId, runId));
+      const results = lines.filter((l) => (l.payload as { type: string }).type === "result").length;
+      const said = lines.some((l) => {
+        const p = l.payload as { type: string; role?: string; text?: string };
+        return p.type === "message" && p.role === "user" && p.text === "change of plan";
+      });
+      return results >= 2 && said ? true : null;
+    }, 60_000);
+  } finally {
+    // Let the held session close so the worker slot is free for the next
+    // test, whatever the assertions above said.
+    ctxA.liveInputs.get(runId)?.close?.();
+  }
   await waitFor("the run to end", async () => {
     const row = await runRow(runId);
     return row.status === "succeeded" ? true : null;

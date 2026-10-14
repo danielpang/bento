@@ -437,5 +437,8 @@ export function handleRunControl(ctx: AppContext, control: RunControl, deps: Run
     case "released":
       deps.adopt().catch(report("run_adopt"));
       return;
+    case "queued":
+      for (const id of ctx.runWorkers ?? []) ctx.boss.notifyWorker(id);
+      return;
   }
 }

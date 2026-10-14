@@ -593,6 +593,18 @@ publish. The wire carries ids, never message text: the row is the
 message, and the holder claims it through its live session's `pump`.
 The two-server test is `run-ownership.e2e.test.ts`.
 
+Production is two Fly apps on one image (`docs/deploying-hosted.md`):
+the web app with `BENTO_MAX_CONCURRENT_RUNS = 0`, which registers no
+run workers and never adopts a run, and the worker app, which has no
+HTTP service and so is never suspended. `enqueueRun` publishes a
+`queued` control so the worker's pollers wake for a run the web app
+queued. `BENTO_DIRECT_DATABASE_URL` carries the LISTEN connection and
+the migration lock when `DATABASE_URL` is a transaction mode pooler.
+The card conversation route returns each run's last
+`CONVERSATION_EVENTS_PER_RUN` events and the runs route pages the rest
+(`/events/before`); the gate sweep evaluates only cards whose criteria
+can change without an event.
+
 The swarm coordinator follows the same rule. A tick that finds news
 for a planner held open between turns on another live process (the
 planner run's owner has a fresh lease and is not in this process's

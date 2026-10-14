@@ -81,7 +81,9 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   const env = loadEnv(rawEnv);
   await applyInitialAgentAuthSharing({ env }, options.initialShareAgentAuth);
 
-  if (options.migrate) await runMigrations(env.DATABASE_URL);
+  // Migrations hold a session advisory lock, which a transaction mode
+  // pooler cannot carry; the direct URL when there is one.
+  if (options.migrate) await runMigrations(env.BENTO_DIRECT_DATABASE_URL ?? env.DATABASE_URL);
 
   // Before anything logs: the export wraps console, so the earlier it
   // starts the more of the boot story PostHog gets to keep.
@@ -248,7 +250,9 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     const pgBus = await attachPgBus({
       bus: ctx.bus,
       pool,
-      connectionString: env.DATABASE_URL,
+      // LISTEN is session state, so the dedicated connection takes the
+      // direct URL when DATABASE_URL is a pooler's.
+      connectionString: env.BENTO_DIRECT_DATABASE_URL ?? env.DATABASE_URL,
       loadRunEvent: async (runId, seq) => {
         const [row] = await db
           .select({ payload: runEvents.payload })

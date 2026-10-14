@@ -104,6 +104,7 @@ Turn on "Create a pull request" for a stage and a successful run there pushes th
 | [Coding agents](./docs/agents.md)          | What each tool can do, how each authenticates, talking to a working agent |
 | [Pull requests](./docs/pull-requests.md)   | Publishing, what stays out of the diff, connecting GitHub                 |
 | [Web app setup](./docs/web-app.md)         | Running it for a team, multi mode, troubleshooting, contributing          |
+| [Deploying hosted](./docs/deploying-hosted.md) | The Fly web and worker apps, their environment variables, the Postgres bus, rollout |
 | [macOS app](./apps/desktop/README.md)      | Electron desktop setup, packaging, and verification                       |
 
 

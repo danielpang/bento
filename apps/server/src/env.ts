@@ -7,6 +7,18 @@ const envSchema = z.object({
   /** 0 asks the OS for any free port, which embedded mode uses. */
   PORT: z.coerce.number().int().min(0).max(65535).default(4400),
   DATABASE_URL: z.string().default("postgres://postgres:postgres@localhost:5439/app"),
+  /**
+   * A direct (non pooled) connection to the same database, for the two
+   * things a transaction mode pooler cannot carry: the LISTEN connection
+   * the event bus replicates on, and the session advisory lock the
+   * migrations take. Set this when DATABASE_URL points at Neon's pooled
+   * endpoint so the per machine connection count stops being the thing
+   * that caps how many machines may run; leave it unset and both use
+   * DATABASE_URL, which is right for a single machine or a local
+   * install. The queue pool stays on DATABASE_URL: pg-boss locks at
+   * transaction level, which pooling carries.
+   */
+  BENTO_DIRECT_DATABASE_URL: z.string().optional(),
   /** Where worktrees and other server state live. */
   BENTO_DATA_DIR: z.string().default(path.join(os.homedir(), ".bento")),
   /**
@@ -42,9 +54,13 @@ const envSchema = z.object({
    * sprites (or containers) do the work, and this is how many exec
    * sockets and keep-awake pings one Node process will hold. Local
    * installs default to 4 so a laptop is not asked to run a fleet.
-   * Hosted Fly sets this higher in fly.toml.
+   * Hosted Fly sets this on each app: the worker app drives the runs,
+   * and the web app sets 0, which means "this process drives no runs":
+   * it registers no run workers, adopts no orphans, and may be
+   * suspended by Fly without stranding an agent. Every other job
+   * (gates, sweeps, Slack, Linear) still runs where it always did.
    */
-  BENTO_MAX_CONCURRENT_RUNS: z.coerce.number().int().positive().default(4),
+  BENTO_MAX_CONCURRENT_RUNS: z.coerce.number().int().min(0).default(4),
   /** A runner-claimed run with no report for this long is requeued. */
   BENTO_RUNNER_CLAIM_TIMEOUT_MIN: z.coerce.number().int().positive().default(45),
   /**

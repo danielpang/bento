@@ -37,6 +37,21 @@ import type {
   FlagSnapshot,
 } from "./types.js";
 
+/**
+ * One finished run in a card's conversation: the tail of its events,
+ * where that tail begins, and how many earlier lines the server kept
+ * back for getEventsBefore.
+ */
+export interface ConversationBlock {
+  runId: string;
+  agentName: string;
+  queuedAt: string;
+  status: string;
+  events: AgentEvent[];
+  firstSeq: number | null;
+  earlier: number;
+}
+
 export interface TokenStore {
   get(): string | null | Promise<string | null>;
   set(token: string | null): void | Promise<void>;
@@ -1139,9 +1154,19 @@ export class BentoClient {
    */
   getConversation(featureId: string) {
     return this.request<{
-      blocks: { runId: string; agentName: string; queuedAt: string; status: string; events: AgentEvent[] }[];
+      blocks: ConversationBlock[];
       pending: { id: string; text: string; status: "queued" | "sent"; createdAt: string }[];
     }>(`/api/features/${featureId}/conversation`);
+  }
+
+  /**
+   * A page of a finished run's events before a sequence number: what
+   * the conversation left out of a long run's block, oldest first.
+   */
+  getEventsBefore(runId: string, seq: number, limit = 200) {
+    return this.request<{ events: AgentEvent[]; firstSeq: number | null; earlier: number }>(
+      `/api/runs/${runId}/events/before?seq=${seq}&limit=${limit}`,
+    );
   }
 
   /** Committed work: per-repo diffs and the stage write-ups, from the feature branch. */

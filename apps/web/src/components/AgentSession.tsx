@@ -1,7 +1,7 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as Menu from "@radix-ui/react-dropdown-menu";
 import { ThinkingOrb } from "thinking-orbs";
-import type { AgentProfile, AgentRun, BentoClient, Stage } from "@bento/api-client";
+import type { AgentProfile, AgentRun, BentoClient, ConversationBlock, Stage } from "@bento/api-client";
 import {
   forgetsBetweenRuns,
   hasNoLiveTranscript,
@@ -107,9 +107,34 @@ export function AgentSession({
    * Without it, each follow-up run reset the pane and the exchange
    * looked lost, even though the agent kept its session context.
    */
-  const [blocks, setBlocks] = useState<
-    { runId: string; agentName: string; queuedAt: string; status: string; events: AgentEvent[] }[]
-  >([]);
+  const [blocks, setBlocks] = useState<ConversationBlock[]>([]);
+  /**
+   * A long run's block arrives as its tail; the lines before it are
+   * fetched a page at a time when the reader asks, and prepended.
+   */
+  const [loadingEarlier, setLoadingEarlier] = useState<string | null>(null);
+  const loadEarlier = useCallback(
+    async (runId: string) => {
+      const block = blocks.find((b) => b.runId === runId);
+      if (!block || block.firstSeq === null || block.earlier <= 0) return;
+      setLoadingEarlier(runId);
+      try {
+        const page = await client.getEventsBefore(runId, block.firstSeq);
+        setBlocks((prev) =>
+          prev.map((b) =>
+            b.runId === runId
+              ? { ...b, events: [...page.events, ...b.events], firstSeq: page.firstSeq ?? b.firstSeq, earlier: page.earlier }
+              : b,
+          ),
+        );
+      } catch {
+        // The block keeps what it has; the button stays for another try.
+      } finally {
+        setLoadingEarlier(null);
+      }
+    },
+    [blocks, client],
+  );
   // Remembered across cards and sessions: detail is a reading
   // preference, not a per-card state. Only an absent preference falls
   // back to defaultShowDetail; a saved "0" still means hidden.
@@ -348,7 +373,7 @@ export function AgentSession({
    * left to read). A run picked from the list shows alone.
    */
   const sections = useMemo(() => {
-    const out: { key: string; runId: string; agentName: string; when: string; status: string; items: ChatItem[] }[] = [];
+    const out: { key: string; runId: string; agentName: string; when: string; status: string; items: ChatItem[]; earlier?: number }[] = [];
     const itemsFor = (runId: string, runEvents: AgentEvent[], agentName: string, prefix: string): ChatItem[] => {
       const sourceRun = runs.find((run) => run.id === runId);
       const sourceAgent = profiles.find((profile) => profile.id === sourceRun?.agentProfileId);
@@ -393,6 +418,7 @@ export function AgentSession({
         when: runTime(block.queuedAt),
         status: runWords(block.status),
         items: itemsFor(block.runId, block.events, block.agentName, block.runId),
+        earlier: block.earlier,
       });
     }
     if (latestRun && !inBlocks.has(latestRun.id)) {
@@ -575,6 +601,18 @@ export function AgentSession({
                     {showsSandbox && sandboxLabel(runs, section.runId)}
                   </span>
                 </div>
+                {(section.earlier ?? 0) > 0 && (
+                  <button
+                    type="button"
+                    className="chat-earlier"
+                    disabled={loadingEarlier === section.runId}
+                    onClick={() => void loadEarlier(section.runId)}
+                  >
+                    {loadingEarlier === section.runId
+                      ? "Loading earlier output..."
+                      : `Show ${section.earlier} earlier ${section.earlier === 1 ? "line" : "lines"}`}
+                  </button>
+                )}
                 {section.items.map((item) => (
                   <ChatRow key={item.key} item={item} showDetail={showDetail} />
                 ))}

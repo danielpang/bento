@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 import { SpritesClient } from "@fly/sprites";
 import { writeFileCommand } from "@bento/agents";
 import { AGENT_BINARIES, TOOLCHAIN_LEGACY_MARKER, TOOLCHAIN_STAMPS } from "./agent-toolchain.js";
-import { collectExec, type SandboxHandle } from "./driver.js";
+import { collectExec, type ExecChunk, type SandboxHandle } from "./driver.js";
 import { taskRequest } from "./keep-awake.js";
 import { SpriteDriver, spriteExistsWithRetry, spriteName, stagedCommandLine } from "./sprite.js";
 
@@ -818,6 +818,45 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
     );
     const result = await pending;
     assert.equal(result.exitCode, 0, result.stderr.trim());
+  });
+
+  /**
+   * Two server processes reading one agent's exec session at once.
+   *
+   * This is what a lease hand-off looks like on a real machine
+   * (apps/server run-ownership.ts): the process that lost a run keeps
+   * consuming its stream so the socket does not drop the agent, while
+   * the adopter attaches to the same session and drives it from there.
+   * The drain path has had two readers for its grace period since
+   * reattach existed; a disowned reader stays for the rest of the run.
+   * Only a real sprite can say whether a second attach disturbs the
+   * first, whether both see the output and the exit, and whether the
+   * process keeps running until it is done rather than until a reader
+   * leaves. A stub agrees with anything.
+   */
+  await t.test("two readers attached to one exec session both see its output and exit", { skip: needsSprite() }, async () => {
+    const sessionKey = "e2e-two-readers";
+    const argv = ["sh", "-c", "sleep 6; echo first; sleep 6; echo second"];
+    // The first reader: the process that started the agent.
+    const original = collectExec(driver.exec(handle, argv, { sessionKey, timeoutMs: 120_000 }));
+
+    // Give the session a moment to be listed, then attach a second
+    // reader to it the way an adopting server does.
+    let attached: AsyncIterable<ExecChunk> | null = null;
+    for (let i = 0; i < 10 && !attached; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      attached = await driver.attach(handle, argv, { sessionKey, timeoutMs: 120_000 });
+    }
+    assert.ok(attached, "the adopter found the running session and attached to it");
+
+    const adopter = collectExec(attached);
+    const [first, second] = await Promise.all([original, adopter]);
+    console.log(`  original reader: exit ${first.exitCode}, stdout ${JSON.stringify(first.stdout.trim())}`);
+    console.log(`  adopting reader: exit ${second.exitCode}, stdout ${JSON.stringify(second.stdout.trim())}`);
+    assert.equal(first.exitCode, 0, "the first reader saw the process run to completion");
+    assert.equal(second.exitCode, 0, "and so did the second: attaching did not end or disturb it");
+    assert.match(first.stdout, /first[\s\S]*second/, "the first reader saw everything");
+    assert.match(second.stdout, /second/, "the second reader saw what came after it attached");
   });
 
   /**

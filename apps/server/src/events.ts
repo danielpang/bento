@@ -100,12 +100,15 @@ export type BusWirePayload =
  * - tick: the holder of this run (a swarm planner held open between
  *   turns) should run its swarm's tick itself, because a tick elsewhere
  *   had news for the planner and only the holder can write it in.
+ * - queued: a run was just queued; every process with run workers
+ *   wakes them, so a run queued on a machine without workers (the web
+ *   app of a split deployment) starts now rather than on the next poll.
  *
  * Coordinates only, never payloads: a message's text is a row the
  * holder reads, so the wire carries ids and the database stays the
  * one source of what was said.
  */
-export type RunControlAction = "cancel" | "nudge" | "released" | "close" | "tick";
+export type RunControlAction = "cancel" | "nudge" | "released" | "close" | "tick" | "queued";
 
 export interface RunControl {
   runId: string;

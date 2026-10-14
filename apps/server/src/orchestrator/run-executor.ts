@@ -804,6 +804,9 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
         deliver: liveHold.deliver,
         waiting: liveHold.waiting,
         close: liveHold.dispose,
+        // How a nudge from another server's message route reaches
+        // this session: the row is committed there, claimed here.
+        pump: liveHold.pump,
       });
     }
     liveSession = liveHold;
@@ -2805,6 +2808,9 @@ export async function recoverInterruptedRuns(ctx: AppContext): Promise<void> {
  */
 export async function adoptOrphanedRuns(ctx: AppContext): Promise<{ resumed: number; closed: number }> {
   if (ctx.draining) return { resumed: 0, closed: 0 };
+  // A process with no run slots drives no runs, orphans included: on
+  // the split deployment that is the web app, which Fly may suspend.
+  if (ctx.env.BENTO_MAX_CONCURRENT_RUNS === 0) return { resumed: 0, closed: 0 };
   const orphans = await orphanedRuns(ctx);
 
   let closed = 0;
@@ -3312,6 +3318,7 @@ async function resumeInterruptedRun(
         deliver: liveSession.deliver,
         waiting: liveSession.waiting,
         close: liveSession.dispose,
+        pump: liveSession.pump,
       });
     }
   }
@@ -3760,7 +3767,30 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
   await ctx.boss.createQueue("gate.sweep");
   await ctx.boss.schedule("gate.sweep", "*/5 * * * *");
   await ctx.boss.work("gate.sweep", captureJobErrors(ctx.analytics, "gate.sweep", async () => {
-    const gated = await ctx.db.select({ id: features.id }).from(features).where(eq(features.status, "gated"));
+    /**
+     * Only cards whose gate can change with no event to say so: a
+     * command to re-run, GitHub checks or review threads to re-read, a
+     * judge to ask. A card gated on a person (manual) or on its own
+     * run (run_succeeded, or no criteria at all) moves only when
+     * something on this server moves it, and that path queues its own
+     * evaluation; sweeping it was an evaluation per parked card every
+     * five minutes, with GitHub calls behind the ones that had a pull
+     * request, for nothing. The stage is read through the card's
+     * current stage; a card with none is not gated on anything.
+     */
+    const gated = await ctx.db
+      .select({ id: features.id })
+      .from(features)
+      .innerJoin(stages, eq(stages.id, features.currentStageId))
+      .where(
+        and(
+          eq(features.status, "gated"),
+          sql`exists (
+            select 1 from jsonb_array_elements(${stages.gateCriteria}) as c
+            where c ->> 'type' in ('command', 'checks_pass', 'pr_comments_resolved', 'agent_judge')
+          )`,
+        ),
+      );
     for (const row of gated) {
       await ctx.boss.send("gate.evaluate", { featureId: row.id });
     }
