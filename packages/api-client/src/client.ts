@@ -617,6 +617,11 @@ export class BentoClient {
        * same value rides on every API response as `x-bento-build`.
        */
       build?: string;
+      /**
+       * Whether the server can mail the contact form. False sends the
+       * console's contact dialog to GitHub issues instead.
+       */
+      contact?: boolean;
       /** Which social logins the server is configured for (multi mode). */
       social?: { github: boolean; google: boolean };
       /**

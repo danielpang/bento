@@ -121,6 +121,11 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
         driver: ctx.drivers.default.provider,
         selectableSandboxProviders: ctx.drivers.selectable(),
         build: shell?.build ?? undefined,
+        // Whether the contact form has an inbox to mail. Without one
+        // (the desktop app, most self-hosted installs) the console
+        // opens a GitHub issue instead, rather than letting someone
+        // write a report the server can only refuse.
+        contact: Boolean(ctx.env.BENTO_CONTACT_EMAIL),
         // Which social logins are actually configured, so the sign-in
         // page offers real buttons rather than ones that can only 404.
         social: {
