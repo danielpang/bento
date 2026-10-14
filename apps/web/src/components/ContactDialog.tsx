@@ -1,12 +1,16 @@
-import { useState, type FormEvent } from "react";
-import type { BentoClient } from "@bento/api-client";
+import { useEffect, useState, type FormEvent } from "react";
+import { ApiError, type BentoClient } from "@bento/api-client";
+import { githubIssueUrl, ISSUES_URL } from "../github-issue.js";
 import { Modal } from "./Modal.js";
-
-const ISSUES_URL = "https://github.com/danielpang/bento/issues";
 
 /**
  * The contact form: an issue report or a feature request, mailed to
  * the operator through the server.
+ *
+ * A server with no contact address (the desktop app, most self-hosted
+ * installs) has nowhere to mail it, so there the form opens a GitHub
+ * issue with the message filled in. Nothing is sent from the machine;
+ * the person reviews it on GitHub and submits it themselves.
  *
  * When reporting an issue, a GitHub link sits under the kind picker
  * rather than after the form, because the useful moment to check for
@@ -34,11 +38,39 @@ export function ContactDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [sent, setSent] = useState(false);
+  const [issueUrl, setIssueUrl] = useState("");
+  // Unknown until health answers, and treated as mailable meanwhile: a
+  // server older than the field cannot say, and the refusal below
+  // still lands on GitHub.
+  const [mailable, setMailable] = useState(true);
   const ready = message.trim().length > 0;
+
+  useEffect(() => {
+    let live = true;
+    void client
+      .health()
+      .then((health) => {
+        if (live && health.contact === false) setMailable(false);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [client]);
+
+  function openIssue() {
+    const url = githubIssueUrl(kind, message);
+    window.open(url, "_blank", "noopener,noreferrer");
+    setIssueUrl(url);
+  }
 
   async function submit(e: FormEvent) {
     e.preventDefault();
     if (!ready || busy) return;
+    if (!mailable) {
+      openIssue();
+      return;
+    }
     setBusy(true);
     setError("");
     try {
@@ -47,10 +79,39 @@ export function ContactDialog({
       // on submit leaves someone wondering whether anything was sent.
       setSent(true);
     } catch (err) {
+      if (err instanceof ApiError && err.status === 503) {
+        // No contact address after all. The message is kept, so the
+        // next press takes it to GitHub instead of losing it.
+        setMailable(false);
+        setError("This server cannot send mail. Open it on GitHub instead, and your message will be filled in.");
+        return;
+      }
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
     }
+  }
+
+  if (issueUrl) {
+    return (
+      <Modal
+        title="Contact"
+        description="Your message is filled in on a new GitHub issue. Review it there and submit it to send it to us."
+        onClose={onClose}
+        actions={
+          <button type="button" className="btn btn-primary" onClick={onClose}>
+            Close
+          </button>
+        }
+      >
+        <p className="muted">
+          Nothing opened?{" "}
+          <a href={issueUrl} target="_blank" rel="noreferrer">
+            Open the issue on GitHub
+          </a>
+        </p>
+      </Modal>
+    );
   }
 
   if (sent) {
@@ -71,7 +132,11 @@ export function ContactDialog({
   return (
     <Modal
       title="Contact"
-      description="Report an issue or request a feature, and it lands in our inbox."
+      description={
+        mailable
+          ? "Report an issue or request a feature, and it lands in our inbox."
+          : "Report an issue or request a feature. It opens as a GitHub issue with your message filled in, for you to submit."
+      }
       onClose={onClose}
       actions={
         <>
@@ -79,7 +144,7 @@ export function ContactDialog({
             Cancel
           </button>
           <button type="submit" form="contact-form" className="btn btn-primary" disabled={busy || !ready}>
-            Send
+            {mailable ? "Send" : "Open on GitHub"}
           </button>
         </>
       }
