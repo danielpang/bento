@@ -117,6 +117,7 @@ import { pipelineAgentBinaries } from "./pipeline-agents.js";
 import { appendRunEvent } from "./transcript.js";
 import {
   adoptRun,
+  coalesced,
   confirmRunOwnership,
   endStdinUnlessDisowned,
   handleRunControl,
@@ -3477,11 +3478,13 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
    * server) arrive here from the bus, this process's own routes
    * included. See run-ownership.ts.
    */
+  // One sweep at a time, however many releases arrive together.
+  const adopt = coalesced(async () => {
+    await adoptOrphanedRuns(ctx);
+  });
   ctx.bus.onRunControl((control) =>
     handleRunControl(ctx, control, {
-      adopt: async () => {
-        await adoptOrphanedRuns(ctx);
-      },
+      adopt,
       // The tick runs here, in the process that holds the planner's
       // session, so deliverPlannerWake finds it waiting and writes the
       // wake in. The swarm row lock inside the tick serializes it with

@@ -342,6 +342,35 @@ export async function adoptRun(ctx: AppContext, runId: string, leaseMs: number =
 }
 
 /**
+ * Runs an async task at most once at a time, with at most one more run
+ * queued behind it. A server shutting down with thirty runs publishes
+ * thirty releases, and every other process heard each one as a reason
+ * to sweep for orphans: thirty sweeps where the first did all the work.
+ * Through this, a burst becomes the sweep in flight and one more after
+ * it, which is what confirms nothing arrived between the two.
+ */
+export function coalesced(task: () => Promise<void>): () => Promise<void> {
+  let running: Promise<void> | null = null;
+  let again = false;
+  const run = async (): Promise<void> => {
+    do {
+      again = false;
+      await task();
+    } while (again);
+  };
+  return () => {
+    if (running) {
+      again = true;
+      return running;
+    }
+    running = run().finally(() => {
+      running = null;
+    });
+    return running;
+  };
+}
+
+/**
  * Stops the agent of a run, wherever it is being driven. The local
  * abort covers a holder on this process without a round trip (and a
  * context that never attached a bus); the control covers every other

@@ -33,13 +33,14 @@ import type { AppContext } from "../context.js";
 import type { BoardEvent } from "../events.js";
 import { runsForCaller } from "../feature-flags.js";
 import { actor } from "../middleware/actor.js";
-import { deferAfterCommit, deferOnRollback, tenantDb as db } from "../middleware/tenant.js";
+import { deferAfterCommit, deferOnRollback, respondAfterCommit, tenantDb as db } from "../middleware/tenant.js";
 import { queueSwarmSandboxReap, reapSwarmSandbox } from "../orchestrator/reap-sandbox.js";
 import { enqueueTaskStartOver } from "../orchestrator/swarm/start-over.js";
 import { enqueueSwarmPublish } from "../orchestrator/swarm/complete.js";
 import { driverForProject, driverForSandbox } from "../orchestrator/sandbox-driver.js";
 import { markCancelled } from "../orchestrator/run-executor.js";
-import { nudgeRun, requestRunAbort } from "../orchestrator/run-ownership.js";
+import { requestRunAbort } from "../orchestrator/run-ownership.js";
+import { liveDeliveryOf, nudgeAndAwaitSent } from "../orchestrator/remote-live.js";
 import { enqueueSwarmTick } from "../orchestrator/swarm/coordinator.js";
 import { MAX_PLAN_DEPTH, MAX_SWARM_GOAL_CHARS, MAX_SWARM_WORKERS } from "@bento/core";
 import { requireSwarms } from "../orchestrator/swarm/gate.js";
@@ -1677,14 +1678,27 @@ export function swarmRoutes(ctx: AppContext) {
         /*
          * The worker may be live on another server, whose stdin this
          * process cannot see. The row is committed first, then that
-         * server is told to claim it (run-ownership.ts); a worker with
-         * no live session anywhere leaves it parked for the next agent,
-         * as before. Reported as not live, because this process cannot
-         * know what the other did.
+         * server is told to claim it (run-ownership.ts), and the row is
+         * watched for about a second for its answer: sent means the
+         * holder wrote it into the agent, and the response says live.
+         * A worker with no live session anywhere leaves it parked for
+         * the next agent, as before, and the response says not live.
          */
         if (workerRunId) {
           const runId = workerRunId;
-          deferAfterCommit(c, async () => nudgeRun(ctx, runId));
+          respondAfterCommit(c, async () => {
+            const sent = await nudgeAndAwaitSent(ctx, runId, async () => {
+              const [row] = await ctx.db
+                .select({ status: swarmMessages.status, sentAt: swarmMessages.sentAt })
+                .from(swarmMessages)
+                .where(eq(swarmMessages.id, message.id))
+                .limit(1);
+              return row?.status === "sent";
+            });
+            if (!sent) return null;
+            const delivery = (await liveDeliveryOf(ctx, runId)) ?? "queue";
+            return c.json({ ...message, status: "sent", runId, sentAt: new Date(), live: true, delivery }, 201);
+          });
         }
         return c.json({ ...message, live: false }, 201);
       },

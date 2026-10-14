@@ -734,6 +734,12 @@ export const agentRuns = pgTable(
     // The same question asked of a swarm, which reads its runs by
     // swarm rather than by card.
     index("agent_runs_swarm_queued_idx").on(t.swarmId, t.queuedAt),
+    // The runs in flight, which the orphan sweep, the stalled reaper
+    // and boot recovery ask for every few minutes. Partial: a handful
+    // of rows at any moment, out of every run ever made.
+    index("agent_runs_active_idx")
+      .on(t.executor, t.status)
+      .where(sql`${t.status} in ('queued', 'starting', 'running')`),
     /**
      * The discriminator and the columns have to agree, or the type is
      * decoration. A pipeline run is a card at a stage and nothing else;

@@ -2,6 +2,11 @@
 # the app itself stays small; it schedules work and holds the board.
 app = "bento-production"
 primary_region = "iad"
+# Time between SIGTERM and SIGKILL on a deploy. The server's shutdown
+# releases the runs it holds (so the new machine adopts them at once),
+# severs streams, stops the queue and flushes analytics; Fly's default
+# of five seconds was tight for that on a slow database.
+kill_timeout = "30s"
 
 [build]
   dockerfile = "../../infra/docker/Dockerfile"

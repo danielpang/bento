@@ -376,6 +376,16 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
          * writer.
          */
         ctx.draining = true;
+        /**
+         * Let go of every run this process was driving and say so on
+         * the bus, first: a live server adopts them now rather than
+         * when their lease would have run out, and this write has to
+         * land inside Fly's kill timeout, ahead of the HTTP close and
+         * the queue stop that follow.
+         */
+        await releaseOwnedRuns(ctx).catch((err: unknown) => {
+          console.warn("could not release this server's runs on shutdown:", err);
+        });
         await new Promise<void>((resolve) => {
           /**
            * Stop accepting, then sever what is still open. An SSE stream
@@ -389,15 +399,6 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
           (server.handle as { closeAllConnections?: () => void }).closeAllConnections?.();
         });
         await boss.stop({ close: true, timeout: 2000 }).catch(() => {});
-        /**
-         * Let go of every run this process was driving and say so on
-         * the bus, while the bus and the pool are still up: a live
-         * server adopts them now, rather than when their lease would
-         * have run out.
-         */
-        await releaseOwnedRuns(ctx).catch((err: unknown) => {
-          console.warn("could not release this server's runs on shutdown:", err);
-        });
         await pgBus.stop().catch(() => {});
         // Flush before the pool closes: capture is fire and forget, so
         // whatever queued in the last seconds is only on this machine.

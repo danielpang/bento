@@ -111,6 +111,25 @@ export function deferOnRollback(
  * is already committed by then, so there is nothing left to undo, and
  * the response has been decided.
  */
+/**
+ * Replaces the response after the request's transaction has committed,
+ * for a route whose honest answer depends on what another server does
+ * with the rows it just wrote. The handler returns its provisional
+ * response as usual; once the commit has landed, `produce` runs with
+ * the rows visible to everyone, and a response it returns is the one
+ * the client gets. Null keeps the provisional one. The deferred tasks
+ * run before the response is sent, which is what makes this possible.
+ */
+export function respondAfterCommit(
+  c: { get: (key: string) => unknown; set res(value: Response) },
+  produce: () => Promise<Response | null>,
+): void {
+  deferAfterCommit(c, async () => {
+    const response = await produce();
+    if (response) c.res = response;
+  });
+}
+
 export function deferAfterCommit(
   c: { get: (key: string) => unknown },
   task: () => Promise<void>,

@@ -327,14 +327,18 @@ test("a message that lands on one server reaches the live session on the other",
   await waitFor("the live session to exist on A", async () => ctxA.liveInputs.has(runId) || null);
   assert.equal(ctxB.liveInputs.has(runId), false, "B holds no session for it");
 
-  const sent = await json<{ queued: boolean; live?: boolean }>(
+  const sent = await json<{ queued: boolean; live?: boolean; delivery?: string }>(
     await appB.request(`/api/features/${feature.id}/message`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ text: "change of plan" }),
     }),
   );
-  assert.equal(sent.queued, true, "B cannot see A's stdin, so it reports the row as parked");
+  // B cannot see A's stdin, so it watches the row for A's answer and
+  // reports what the row said once A had pumped the message in.
+  assert.equal(sent.queued, false, "the row read sent within the wait, so B answers live");
+  assert.equal(sent.live, true);
+  assert.equal(sent.delivery, "queue", "the delivery mode comes from the run's adapter, not a local handle");
 
   // A heard the nudge, claimed the row and wrote it into the agent.
   const message = await waitFor("the message to be sent", async () => {

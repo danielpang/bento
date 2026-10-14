@@ -32,7 +32,7 @@ import {
 } from "@bento/db";
 import type { SandboxDriver, SandboxHandle } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
-import { deferAfterCommit, tenantDb as db } from "../middleware/tenant.js";
+import { deferAfterCommit, respondAfterCommit, tenantDb as db } from "../middleware/tenant.js";
 import { actor } from "../middleware/actor.js";
 import { canAccessProject, getAccessibleFeature } from "../access.js";
 import { driverForSandbox, SandboxDriverUnavailable } from "../orchestrator/sandbox-driver.js";
@@ -51,7 +51,7 @@ import {
 } from "../orchestrator/gate-evaluator.js";
 import { ACTIVE_RUN_STATUSES, CARD_BUSY, CARD_BUSY_DELETE, NO_REPOSITORIES, projectHasRepositories, startRunIfIdle } from "../orchestrator/start-run.js";
 import { enqueueRun } from "../orchestrator/queue.js";
-import { nudgeRun } from "../orchestrator/run-ownership.js";
+import { liveDeliveryOf, nudgeAndAwaitSent } from "../orchestrator/remote-live.js";
 import { queueLinearIssueCreate } from "../orchestrator/linear-sync.js";
 import {
   claimQueuedMessages,
@@ -762,12 +762,25 @@ export function featureRoutes(ctx: AppContext) {
         /*
          * The run may be live on another server, whose stdin this
          * process cannot see. The row is committed first, then that
-         * server is told to claim it (run-ownership.ts); a run with no
-         * live session anywhere leaves it parked until the run ends,
-         * as before. Reported as queued, because this process cannot
-         * know what the other did.
+         * server is told to claim it (run-ownership.ts), and the row
+         * is watched for about a second for its answer: sent means the
+         * holder wrote it into the agent, and the response says live.
+         * A run with no live session anywhere leaves it parked until
+         * the run ends, as before, and the response says queued.
          */
-        deferAfterCommit(c, async () => nudgeRun(ctx, latest.id));
+        respondAfterCommit(c, async () => {
+          const sent = await nudgeAndAwaitSent(ctx, latest.id, async () => {
+            const [row] = await ctx.db
+              .select({ status: featureMessages.status })
+              .from(featureMessages)
+              .where(eq(featureMessages.id, messageId))
+              .limit(1);
+            return row?.status === "sent";
+          });
+          if (!sent) return null;
+          const delivery = (await liveDeliveryOf(ctx, latest.id)) ?? "queue";
+          return c.json({ queued: false as const, live: true as const, delivery });
+        });
         return c.json({ queued: true as const });
       }
       /**
