@@ -590,10 +590,15 @@ publish. The wire carries ids, never message text: the row is the
 message, and the holder claims it through its live session's `pump`.
 The two-server test is `run-ownership.e2e.test.ts`.
 
-One gap remains: the swarm coordinator hands a held planner its wake
-through the local `liveInputs` only, so a tick on a machine that does
-not hold the planner lets the wake wait for the planner's run to end,
-as before. The planner hold is behind the beta flag.
+The swarm coordinator follows the same rule. A tick that finds news
+for a planner held open between turns on another live process (the
+planner run's owner has a fresh lease and is not in this process's
+`liveInputs`) returns `plannerHeldElsewhereId`, and `tickSwarm`
+publishes a `tick` control; the holder runs the tick itself, where the
+session is, and the row lock at the top of `runTick` keeps the two
+ticks in order. A held planner refused another turn is closed the same
+way (`close`). A planner whose owner's lease has lapsed is nobody's, and
+its news waits for the run to end or be adopted, as before.
 
 ## Starting a run goes through startRunIfIdle, never a bare insert
 

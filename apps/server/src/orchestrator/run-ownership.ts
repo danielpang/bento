@@ -338,11 +338,22 @@ export function nudgeRun(ctx: AppContext, runId: string): void {
  * somebody else's and is ignored, except a release, which is an
  * invitation to every process.
  */
-export function handleRunControl(
-  ctx: AppContext,
-  control: RunControl,
-  adopt: () => Promise<void>,
-): void {
+export interface RunControlDeps {
+  /** Adopt whatever runs are nobody's; for a release. */
+  adopt(): Promise<void>;
+  /**
+   * Run the swarm tick for a planner this process holds between turns;
+   * for a tick that found news for it on another process. Only called
+   * when the planner's live session says it is waiting.
+   */
+  tickHeldPlanner(runId: string): Promise<void>;
+}
+
+export function handleRunControl(ctx: AppContext, control: RunControl, deps: RunControlDeps): void {
+  const report = (source: string) => (err: unknown) => {
+    console.warn(`could not act on ${control.action} for run ${control.runId}:`, err);
+    ctx.analytics?.captureException(err, null, null, { run_id: control.runId, source });
+  };
   switch (control.action) {
     case "cancel":
       ctx.running.get(control.runId)?.abort();
@@ -350,17 +361,20 @@ export function handleRunControl(
     case "nudge": {
       const live = ctx.liveInputs.get(control.runId);
       if (!live?.pump) return;
-      live.pump().catch((err: unknown) => {
-        console.warn(`could not feed parked messages into run ${control.runId}:`, err);
-        ctx.analytics?.captureException(err, null, null, { run_id: control.runId, source: "run_nudge" });
-      });
+      live.pump().catch(report("run_nudge"));
+      return;
+    }
+    case "close":
+      ctx.liveInputs.get(control.runId)?.close?.();
+      return;
+    case "tick": {
+      const live = ctx.liveInputs.get(control.runId);
+      if (!live?.waiting?.()) return;
+      deps.tickHeldPlanner(control.runId).catch(report("planner_tick"));
       return;
     }
     case "released":
-      adopt().catch((err: unknown) => {
-        console.warn(`could not adopt released run ${control.runId}:`, err);
-        ctx.analytics?.captureException(err, null, null, { run_id: control.runId, source: "run_adopt" });
-      });
+      deps.adopt().catch(report("run_adopt"));
       return;
   }
 }

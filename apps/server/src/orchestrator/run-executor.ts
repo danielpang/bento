@@ -141,7 +141,7 @@ import { REAP_SANDBOX_QUEUE, reapFinishedSandboxes, reapFinishedSwarmSandboxes, 
 import { latestConversationRun, resolveFollowUpRun } from "./stage-agent.js";
 import { asPipelineRun, isPipelineRun, type PipelineRun } from "./pipeline-run.js";
 import { describeRunSubject, type RunSubject } from "./run-subject.js";
-import { enqueueSwarmTick, SWARM_TICK_QUEUE, tickAllLiveSwarms } from "./swarm/coordinator.js";
+import { enqueueSwarmTick, SWARM_TICK_QUEUE, tickAllLiveSwarms, tickSwarm } from "./swarm/coordinator.js";
 import { SWARM_LAND_QUEUE, resumeClaimedLandings } from "./swarm/landing.js";
 import { SWARM_PUSH_QUEUE, ensureSwarmPushWorker, remoteBranchBundles } from "./swarm/remote-branches.js";
 import { SWARM_START_OVER_QUEUE } from "./swarm/start-over.js";
@@ -3474,9 +3474,21 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
    * server) arrive here from the bus, this process's own routes
    * included. See run-ownership.ts.
    */
-  ctx.bus.onRunControl((control) => handleRunControl(ctx, control, async () => {
-    await adoptOrphanedRuns(ctx);
-  }));
+  ctx.bus.onRunControl((control) =>
+    handleRunControl(ctx, control, {
+      adopt: async () => {
+        await adoptOrphanedRuns(ctx);
+      },
+      // The tick runs here, in the process that holds the planner's
+      // session, so deliverPlannerWake finds it waiting and writes the
+      // wake in. The swarm row lock inside the tick serializes it with
+      // any tick the queue is running elsewhere.
+      tickHeldPlanner: async (runId) => {
+        const [run] = await ctx.db.select({ swarmId: agentRuns.swarmId }).from(agentRuns).where(eq(agentRuns.id, runId)).limit(1);
+        if (run?.swarmId) await tickSwarm(ctx, run.swarmId);
+      },
+    }),
+  );
 
   await ctx.boss.createQueue("run.execute");
   await ctx.boss.createQueue("gate.evaluate");

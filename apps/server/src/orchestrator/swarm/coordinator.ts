@@ -46,6 +46,7 @@ import { observedAverageRunCost, budgetIsLow, enforcedSpend, money, spendOf } fr
 import { ensureSwarmWatchdog, hasWatchedSwarms, stopSwarmWatchdog, WATCHED_SWARMS } from "./watchdog.js";
 import { captureSwarmSpend, type SwarmSpendOutcome } from "./spend.js";
 import { queueSwarmSlackNotify } from "../slack-notify.js";
+import { ownershipOf, RUN_LEASE_MS } from "../run-ownership.js";
 
 /**
  * The swarm's reconciler: one function, run behind one queue, that
@@ -226,6 +227,13 @@ export interface SwarmTickDeps {
    */
   liveInputs?: Map<string, LiveInput>;
   /**
+   * This process's id in run-ownership.ts, so a planner run owned by
+   * another live process is told apart from one this process drives
+   * on an adapter with no live mode. Absent, every owned planner reads
+   * as another's, which is what a test with no ownership wants.
+   */
+  instanceId?: string;
+  /**
    * The plan's hours and the swarm's budget, asked before a wake is
    * written into a planner held open between turns: that turn is paid
    * for like a new run's, and startRun is where a new run is refused.
@@ -272,6 +280,12 @@ export interface SwarmTickResult {
   liveWake?: LiveWake | null;
   /** A held planner refused another turn for plan or budget, closed after the commit. */
   closePlannerId?: string | null;
+  /**
+   * A planner run with news waiting that another live process holds
+   * open between turns. tickSwarm asks that process to tick after the
+   * commit; nothing here is written for it.
+   */
+  plannerHeldElsewhereId?: string | null;
   /** Worker runs started. */
   workerRunIds: string[];
   /** Resolver runs started on conflicted landings. */
@@ -389,6 +403,7 @@ export async function tickSwarm(
      */
     startLanding: async () => {},
     liveInputs: ctx.liveInputs,
+    instanceId: ownershipOf(ctx).instanceId,
     checkCompute: (tx, id) => swarmComputeRefusal(tx as unknown as Db, id, ctx.entitlements),
   },
 ): Promise<SwarmTickResult | null> {
@@ -422,7 +437,21 @@ export async function tickSwarm(
     }
     // Refused another turn for plan or budget: end its stdin, so the run
     // finishes and the swarm's ceiling is what decides what comes next.
-    if (result.closePlannerId) deps.liveInputs?.get(result.closePlannerId)?.close?.();
+    // A planner another process holds is told over the bus.
+    if (result.closePlannerId) {
+      const local = deps.liveInputs?.get(result.closePlannerId);
+      if (local) local.close?.();
+      else ctx.bus.emitRunControl({ runId: result.closePlannerId, action: "close" });
+    }
+    /*
+     * News for a planner held open on another process. This tick could
+     * see that it is held (its owner's lease is live) but not whether it
+     * is between turns, and could not write into its stdin either way,
+     * so the holder is asked to run the tick itself: there, the session
+     * is in liveInputs, and the same code writes the wake in. The row
+     * lock at the top of runTick keeps the two ticks in order.
+     */
+    if (result.plannerHeldElsewhereId) ctx.bus.emitRunControl({ runId: result.plannerHeldElsewhereId, action: "tick" });
     for (const runId of [
       ...(result.plannerRunId ? [result.plannerRunId] : []),
       ...result.workerRunIds,
@@ -614,6 +643,7 @@ async function runTick(
   let plannerRunId: string | null = null;
   let liveWake: LiveWake | null = null;
   let closePlannerId: string | null = null;
+  let plannerHeldElsewhereId: string | null = null;
   if (canStartAgents) {
     plannerRunId = await restartPlannerAfterSandboxFailure(tx, swarm, deps, refusals, events, now);
     if (!plannerRunId) {
@@ -622,6 +652,7 @@ async function runTick(
       if (woken?.kind === "started") plannerRunId = woken.runId;
       else if (woken?.kind === "live") liveWake = woken.wake;
       else if (woken?.kind === "close") closePlannerId = woken.runId;
+      else if (woken?.kind === "elsewhere") plannerHeldElsewhereId = woken.runId;
     }
   }
   const spawned = canStartAgents
@@ -637,6 +668,7 @@ async function runTick(
     plannerToldLiveId: null,
     liveWake,
     closePlannerId,
+    plannerHeldElsewhereId,
     workerRunIds: spawned.runIds,
     resolverRunIds: landing.resolverRunIds,
     spawnRefusal: spawned.refusal,
@@ -1554,7 +1586,8 @@ function retellCount(flags: Record<string, unknown>): number {
 type PlannerWoken =
   | { kind: "started"; runId: string }
   | { kind: "live"; runId: string; wake: LiveWake }
-  | { kind: "close"; runId: string };
+  | { kind: "close"; runId: string }
+  | { kind: "elsewhere"; runId: string };
 
 /**
  * Everything waiting for the planner becomes one message and one turn.
@@ -1587,7 +1620,7 @@ async function deliverPlannerWake(
   }
 
   const [activePlanner] = await tx
-    .select({ id: agentRuns.id })
+    .select({ id: agentRuns.id, ownerId: agentRuns.ownerId, ownerHeartbeatAt: agentRuns.ownerHeartbeatAt })
     .from(agentRuns)
     .where(
       and(
@@ -1603,13 +1636,23 @@ async function deliverPlannerWake(
    * so a worker's report reaches it without a machine wake, a spawn,
    * and a session resume. Only while it is between turns: mid turn the
    * wake waits, as above, and the turn's end asks for this tick again.
-   * A planner this process does not hold (another server's, or one on
-   * an adapter with no live mode) is simply active, and the wake waits
-   * for its run to end.
+   * A planner on an adapter with no live mode is simply active, and
+   * the wake waits for its run to end. A planner another live server
+   * holds (its owner's lease is fresh, run-ownership.ts) may well be
+   * waiting between turns, which only that server can see: the tick
+   * reports it, and tickSwarm asks that server to tick for itself.
    */
   const held = activePlanner ? deps.liveInputs?.get(activePlanner.id) : undefined;
   const hearsLive = activePlanner !== undefined && held !== undefined && held.waiting?.() === true;
-  if (activePlanner && !hearsLive) return null;
+  if (activePlanner && !hearsLive) {
+    const heldElsewhere =
+      held === undefined
+      && activePlanner.ownerId !== null
+      && activePlanner.ownerId !== deps.instanceId
+      && activePlanner.ownerHeartbeatAt !== null
+      && activePlanner.ownerHeartbeatAt.getTime() > Date.now() - RUN_LEASE_MS;
+    return heldElsewhere ? { kind: "elsewhere", runId: activePlanner.id } : null;
+  }
 
   /*
    * Messages handed to a planner that then failed or was stopped go
