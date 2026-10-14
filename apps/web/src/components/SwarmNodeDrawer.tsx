@@ -24,6 +24,13 @@ import { MERGE_QUEUE_FAILURE, landingFailureWords } from "../swarm/failures.js";
 import { checksFailedAfterLanding } from "../swarm/waiting.js";
 import type { SwarmNodeDetail, SwarmStatus, SwarmTask, SwarmTaskEvent, SwarmTaskRun } from "../swarm/types.js";
 
+/**
+ * The quiet check: how long since the worker's last transcript line.
+ * A sandbox that died under its agent (Docker or OrbStack restarting)
+ * leaves the run "running" but silent, so past this the drawer offers
+ * both retries. Separate from the watchdog's long-running check, which
+ * counts total run time and cannot tell busy from dead.
+ */
 export const WORKER_QUIET_HINT_MS = 10 * 60_000;
 
 export function workerQuietMs(run: SwarmTaskRun | undefined, readAt: number, now: number): number | null {
