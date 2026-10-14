@@ -29,6 +29,7 @@ import {
 import { EventBus } from "./events.js";
 import { loadEnv, posthogApiKey, type Env } from "./env.js";
 import { registerJobs } from "./orchestrator/run-executor.js";
+import { releaseOwnedRuns } from "./orchestrator/run-ownership.js";
 import { refreshModelCatalog } from "./orchestrator/model-catalog.js";
 import { QUEUE_POLL_SECONDS } from "./orchestrator/queue.js";
 import { applyInitialAgentAuthSharing } from "./settings.js";
@@ -388,6 +389,15 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
           (server.handle as { closeAllConnections?: () => void }).closeAllConnections?.();
         });
         await boss.stop({ close: true, timeout: 2000 }).catch(() => {});
+        /**
+         * Let go of every run this process was driving and say so on
+         * the bus, while the bus and the pool are still up: a live
+         * server adopts them now, rather than when their lease would
+         * have run out.
+         */
+        await releaseOwnedRuns(ctx).catch((err: unknown) => {
+          console.warn("could not release this server's runs on shutdown:", err);
+        });
         await pgBus.stop().catch(() => {});
         // Flush before the pool closes: capture is fire and forget, so
         // whatever queued in the last seconds is only on this machine.

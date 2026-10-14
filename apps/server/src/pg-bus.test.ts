@@ -135,6 +135,12 @@ test("run_done crosses processes", async () => {
   assert.equal(await done, "succeeded");
 });
 
+test("run controls cross processes", async () => {
+  const heard = waitFor<{ runId: string; action: string }>((resolve) => busB.onRunControl(resolve));
+  busA.emitRunControl({ runId: "run-ctl", action: "cancel" });
+  assert.deepEqual(await heard, { runId: "run-ctl", action: "cancel" });
+});
+
 test("board events cross processes", async () => {
   const projectId = crypto.randomUUID();
   const received = waitFor<unknown>((resolve) => busB.onBoardEvent(projectId, resolve));

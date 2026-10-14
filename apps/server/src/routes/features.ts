@@ -51,6 +51,7 @@ import {
 } from "../orchestrator/gate-evaluator.js";
 import { ACTIVE_RUN_STATUSES, CARD_BUSY, CARD_BUSY_DELETE, NO_REPOSITORIES, projectHasRepositories, startRunIfIdle } from "../orchestrator/start-run.js";
 import { enqueueRun } from "../orchestrator/queue.js";
+import { nudgeRun } from "../orchestrator/run-ownership.js";
 import { queueLinearIssueCreate } from "../orchestrator/linear-sync.js";
 import {
   claimQueuedMessages,
@@ -758,6 +759,15 @@ export function featureRoutes(ctx: AppContext) {
             .where(eq(featureMessages.id, messageId));
           return c.json({ queued: false as const, live: true as const, delivery: liveSession.delivery });
         }
+        /*
+         * The run may be live on another server, whose stdin this
+         * process cannot see. The row is committed first, then that
+         * server is told to claim it (run-ownership.ts); a run with no
+         * live session anywhere leaves it parked until the run ends,
+         * as before. Reported as queued, because this process cannot
+         * know what the other did.
+         */
+        deferAfterCommit(c, async () => nudgeRun(ctx, latest.id));
         return c.json({ queued: true as const });
       }
       /**

@@ -2,6 +2,7 @@ import { and, desc, eq, gte, inArray, isNull, ne, sql } from "drizzle-orm";
 import { agentRuns, projects, stages, type Db } from "@bento/db";
 import type { AppContext } from "../context.js";
 import { ACTIVE_RUN_STATUSES, projectHasRepositories, startRunIfIdle } from "./start-run.js";
+import { requestRunAbort } from "./run-ownership.js";
 import { enqueueRun } from "./queue.js";
 import { requeueUndelivered } from "./messages.js";
 import { followUpSource, type FollowUpWorkRun } from "./follow-up-source.js";
@@ -129,7 +130,7 @@ export async function stopRunsOutsideStage(
   const { captureRunFinished } = active.length > 0 ? await import("./run-executor.js") : { captureRunFinished: null };
   for (const run of active) {
     if (keepStageId && run.stageId === keepStageId) continue;
-    ctx.running.get(run.id)?.abort();
+    requestRunAbort(ctx, run.id);
     const [closed] = await ctx.db
       .update(agentRuns)
       .set({ status: "cancelled", endedAt: new Date(), error: null })

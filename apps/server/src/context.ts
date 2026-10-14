@@ -40,6 +40,38 @@ export interface LiveInput {
    * planner refused another turn for plan hours or budget.
    */
   close?(): void;
+  /**
+   * Claims whatever is parked for this run in the database and writes
+   * it into the session now. How a message sent on another server
+   * reaches the agent: that server enqueued the row and published a
+   * nudge, and the process holding the session answers it here.
+   * Resolves true when something was written.
+   */
+  pump?(): Promise<boolean>;
+}
+
+/**
+ * This process's claim on the runs it drives; see
+ * orchestrator/run-ownership.ts. Made on first use rather than at
+ * construction, so the many places that build a context by hand (every
+ * test, the embedded TUI) need not know about it.
+ */
+export interface RunOwnership {
+  /** Minted at boot. Not a machine id: those come back; this never does. */
+  instanceId: string;
+  /** Runs this process claimed and has not yet seen end. What the heartbeat stamps. */
+  owned: Set<string>;
+  /**
+   * Runs this process drove and lost to another server (its lease ran
+   * out while it was suspended or cut off, and somebody adopted them).
+   * Its loops keep consuming their streams silently and write nothing,
+   * exactly as a draining process does for all of its runs.
+   */
+  disowned: Set<string>;
+  /** Per run, what to do the moment it is disowned: clear hold timers, drop the live handle. */
+  onDisown: Map<string, () => void>;
+  /** The heartbeat timer, while one is running. */
+  heartbeat?: ReturnType<typeof setInterval>;
 }
 
 /**
@@ -182,6 +214,8 @@ export interface AppContext {
    * how an agent's answer was once lost to a seq collision.
    */
   draining: boolean;
+  /** See RunOwnership. Absent until the first run is claimed or adopted. */
+  ownership?: RunOwnership;
 }
 
 /**

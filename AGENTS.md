@@ -545,6 +545,56 @@ whether they wake another planner.
 Both are behind the beta testers flag (`isBetaRun` in
 `swarmLiveConversation`), because a held planner is a held machine.
 
+## A run belongs to one process, by lease, and requests to it travel over the bus
+
+A run's agent stream, abort handle and stdin live in exactly one
+server process. Fly starts a second machine on web traffic, and that
+machine used to reattach on boot to every server run that said
+"running", including the ones the first machine was still driving:
+two loops on one agent, two writers on one transcript. And every door
+that reaches into a run (the cancel routes, a message into a live
+session, the stalled reaper) looked only in its own memory, so a Stop
+that landed on the other machine changed the row and reached no agent.
+
+`orchestrator/run-ownership.ts` is the rule. Each process mints an id
+at boot (`instanceId`): deliberately not the Fly machine id, which
+comes back after a suspend with a dead claim attached. The queue claim
+in `executeRun` writes `agent_runs.owner_id` in the same compare and
+set, and the process renews `owner_heartbeat_at` for every run it
+holds every `RUN_HEARTBEAT_MS`, in one statement, only while it holds
+any. A run whose heartbeat is older than `RUN_LEASE_MS` is nobody's:
+`adoptOrphanedRuns` (boot, the `runner.reap` schedule, a second pass
+one lease after boot, and a `released` control) takes it with a compare
+and set on the stale lease, so two servers sweeping at once split the
+orphans, and then follows the agent into its sandbox exactly as a boot
+always has. A process that finds its lease taken disowns the run: it
+keeps consuming the stream (closing it could end the agent's exec
+session under the new owner) but writes nothing and ends nothing, the
+way a draining process treats all of its runs. `yielded(ctx, runId)`
+is that check, and every terminal path and transcript write asks it.
+`appendRunEvent` also carries the guard inside the insert, so a write
+racing the heartbeat is refused by the database rather than landing
+beside the new owner's. Shutdown calls `releaseOwnedRuns` before the
+pool closes, which clears the columns and announces each run, so the
+successor adopts at once instead of waiting out a lease.
+
+Anything that needs the process holding a run publishes a
+`run_control` on the event bus (`events.ts`, replicated by `pg-bus.ts`
+like every other bus event): `requestRunAbort` for a cancel, `nudgeRun`
+after a message row commits, `released` from a shutdown. Every process
+hears it; the one with the run in memory acts (`handleRunControl`, in
+`registerJobs`); the rest ignore it. So: never call
+`ctx.running.get(id)?.abort()` or `ctx.liveInputs.get(id)?.deliver()`
+as the only way to reach a run. Try the local handle if you like, then
+publish. The wire carries ids, never message text: the row is the
+message, and the holder claims it through its live session's `pump`.
+The two-server test is `run-ownership.e2e.test.ts`.
+
+One gap remains: the swarm coordinator hands a held planner its wake
+through the local `liveInputs` only, so a tick on a machine that does
+not hold the planner lets the wake wait for the planner's run to end,
+as before. The planner hold is behind the beta flag.
+
 ## Starting a run goes through startRunIfIdle, never a bare insert
 
 One card, one agent. Every door that starts a run (the runs route,

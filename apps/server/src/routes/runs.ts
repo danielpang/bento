@@ -9,6 +9,7 @@ import type { AppContext } from "../context.js";
 import { deferAfterCommit, tenantDb as db } from "../middleware/tenant.js";
 import { actor } from "../middleware/actor.js";
 import { markCancelled } from "../orchestrator/run-executor.js";
+import { requestRunAbort } from "../orchestrator/run-ownership.js";
 import { modalNetworkForProject } from "../orchestrator/sandbox-network.js";
 import { markSandboxAwake } from "../orchestrator/hibernate-sandbox.js";
 import { CARD_BUSY, NO_REPOSITORIES, projectHasRepositories, startRunIfIdle } from "../orchestrator/start-run.js";
@@ -136,7 +137,7 @@ export function runRoutes(ctx: AppContext) {
       const run = found.run;
       if (TERMINAL.has(run.status)) return c.json({ error: `run already ${run.status}` }, 409);
 
-      ctx.running.get(run.id)?.abort();
+      requestRunAbort(ctx, run.id);
       await markCancelled(ctx, run.id);
       ctx.bus.emitBoardEvent({
         type: "run_updated",

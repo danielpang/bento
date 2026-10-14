@@ -51,6 +51,20 @@ export interface LiveConversationHandle {
   dispose: () => void;
   /** True between turns while the process is held open for a message. */
   waiting: () => boolean;
+  /**
+   * Claims what is parked for this conversation and writes it in now,
+   * without waiting for the turn to end. The answer to a nudge from
+   * another server, which enqueued the row and could not reach this
+   * process's stdin itself. True when something was written.
+   */
+  pump: () => Promise<boolean>;
+  /**
+   * Lets go of the conversation without ending it: the hold timer is
+   * cleared and nothing further is written, but stdin stays open,
+   * because another process now owns this session and will close it
+   * when it is done. For a run this process was disowned of.
+   */
+  detach: () => void;
 }
 
 /**
@@ -96,26 +110,42 @@ export function attachLiveConversation(input: {
     if (liveChannel.pending === 0) liveChannel.end();
   };
 
+  let detached = false;
+
   const deliver = async (text: string): Promise<boolean> => {
+    if (detached) return false;
     clearIdle();
     const accepted = liveChannel.write(live.encodeMessage(text, "followUp"));
     if (accepted) await input.sayAsUser(text);
     return accepted;
   };
 
-  const onTurnFinished = async (ok: boolean): Promise<void> => {
+  /**
+   * Feeds in whatever parked while the agent worked, oldest first, as
+   * one message. Shared by the turn's end and by a nudge, so the two
+   * doors agree on what a delivered message is: written to stdin, then
+   * marked sent, then shown in the transcript. A write the channel
+   * refused puts the rows back for the next door.
+   */
+  const pumpParked = async (): Promise<boolean> => {
+    if (detached) return false;
     const claimed = await conversation.claim();
-    if (claimed.length > 0) {
-      clearIdle();
-      const joined = claimed.map((m) => m.text).join("\n");
-      const accepted = liveChannel.write(live.encodeMessage(joined, "followUp"));
-      if (accepted) {
-        await conversation.markSent(claimed.map((m) => m.id));
-        await input.sayAsUser(joined);
-        return;
-      }
-      await conversation.requeue(claimed.map((m) => m.id));
+    if (claimed.length === 0) return false;
+    clearIdle();
+    const joined = claimed.map((m) => m.text).join("\n");
+    const accepted = liveChannel.write(live.encodeMessage(joined, "followUp"));
+    if (accepted) {
+      await conversation.markSent(claimed.map((m) => m.id));
+      await input.sayAsUser(joined);
+      return true;
     }
+    await conversation.requeue(claimed.map((m) => m.id));
+    return false;
+  };
+
+  const onTurnFinished = async (ok: boolean): Promise<void> => {
+    if (detached) return;
+    if (await pumpParked()) return;
 
     if (liveChannel.pending === 0) {
       const idleSec = await conversation.holdFor(ok);
@@ -145,9 +175,17 @@ export function attachLiveConversation(input: {
     deliver,
     onTurnFinished,
     dispose() {
+      if (detached) return;
       closeWhenQuiet();
     },
     waiting: () => waiting,
+    pump: pumpParked,
+    detach() {
+      detached = true;
+      // The timer only, never the channel: ending stdin here would end
+      // the agent under the process that now owns it.
+      clearIdle();
+    },
   };
 }
 

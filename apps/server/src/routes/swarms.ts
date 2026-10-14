@@ -39,6 +39,7 @@ import { enqueueTaskStartOver } from "../orchestrator/swarm/start-over.js";
 import { enqueueSwarmPublish } from "../orchestrator/swarm/complete.js";
 import { driverForProject, driverForSandbox } from "../orchestrator/sandbox-driver.js";
 import { markCancelled } from "../orchestrator/run-executor.js";
+import { nudgeRun, requestRunAbort } from "../orchestrator/run-ownership.js";
 import { enqueueSwarmTick } from "../orchestrator/swarm/coordinator.js";
 import { MAX_PLAN_DEPTH, MAX_SWARM_GOAL_CHARS, MAX_SWARM_WORKERS } from "@bento/core";
 import { requireSwarms } from "../orchestrator/swarm/gate.js";
@@ -1122,7 +1123,7 @@ export function swarmRoutes(ctx: AppContext) {
         .from(agentRuns)
         .where(and(eq(agentRuns.swarmId, swarm.id), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)));
       for (const run of active) {
-        ctx.running.get(run.id)?.abort();
+        requestRunAbort(ctx, run.id);
         await markCancelled(ctx, run.id);
       }
 
@@ -1248,7 +1249,7 @@ export function swarmRoutes(ctx: AppContext) {
         .limit(1);
       if (!run) return c.json({ error: "The planner is not running." }, 409);
 
-      ctx.running.get(run.id)?.abort();
+      requestRunAbort(ctx, run.id);
       await markCancelled(ctx, run.id);
       deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
       saySwarmChanged(ctx, c, swarm);
@@ -1291,7 +1292,7 @@ export function swarmRoutes(ctx: AppContext) {
         .limit(1);
       if (!run) return c.json({ error: "No worker is running on this task." }, 409);
 
-      ctx.running.get(run.id)?.abort();
+      requestRunAbort(ctx, run.id);
       await markCancelled(ctx, run.id);
       deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
       saySwarmChanged(ctx, c, swarm);
@@ -1673,6 +1674,18 @@ export function swarmRoutes(ctx: AppContext) {
             .where(eq(swarmMessages.id, message.id));
           return c.json({ ...message, status: "sent", runId: workerRunId, sentAt, live: true, delivery: liveWorker.delivery }, 201);
         }
+        /*
+         * The worker may be live on another server, whose stdin this
+         * process cannot see. The row is committed first, then that
+         * server is told to claim it (run-ownership.ts); a worker with
+         * no live session anywhere leaves it parked for the next agent,
+         * as before. Reported as not live, because this process cannot
+         * know what the other did.
+         */
+        if (workerRunId) {
+          const runId = workerRunId;
+          deferAfterCommit(c, async () => nudgeRun(ctx, runId));
+        }
         return c.json({ ...message, live: false }, 201);
       },
     )
@@ -1938,7 +1951,7 @@ export function swarmRoutes(ctx: AppContext) {
         .from(agentRuns)
         .where(and(eq(agentRuns.swarmTaskId, task.id), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)));
       for (const run of active) {
-        ctx.running.get(run.id)?.abort();
+        requestRunAbort(ctx, run.id);
         await markCancelled(ctx, run.id);
       }
 
@@ -2514,7 +2527,7 @@ async function stopRunsOnTask(ctx: AppContext, c: Context, taskId: string): Prom
     .from(agentRuns)
     .where(and(eq(agentRuns.swarmTaskId, taskId), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)));
   for (const run of active) {
-    ctx.running.get(run.id)?.abort();
+    requestRunAbort(ctx, run.id);
     await markCancelled(ctx, run.id);
   }
 }

@@ -103,6 +103,10 @@ export async function attachPgBus(options: PgBusOptions): Promise<PgBus> {
       case "run_done":
         bus.deliverRunDone(message.runId, message.status);
         return;
+      case "run_control":
+        // Every process hears it; only the one holding the run acts.
+        bus.deliverRunControl({ runId: message.runId, action: message.action });
+        return;
       case "board":
         bus.deliverBoardEvent(message.event);
         return;

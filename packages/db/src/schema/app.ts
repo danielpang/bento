@@ -630,6 +630,18 @@ export const agentRuns = pgTable(
   /** Which runner claimed this run, for runner-executed work. */
   claimedBy: text("claimed_by"),
   claimedAt: timestamp("claimed_at", { withTimezone: true }),
+  /**
+   * Which server process is driving this run, and when it last said
+   * so. The id is minted by the process at boot, never a machine id:
+   * machines are destroyed and made again, and a process that lost a
+   * run must not find it again by name. The heartbeat is the lease
+   * (see orchestrator/run-ownership.ts): a run whose stamp is older
+   * than the lease has no process behind it and may be adopted by any
+   * live server. Null on runner-executed runs, on runs from before the
+   * column, and on a run its process released as it shut down.
+   */
+  ownerId: text("owner_id"),
+  ownerHeartbeatAt: timestamp("owner_heartbeat_at", { withTimezone: true }),
   cliSessionId: text("cli_session_id"),
   exitCode: integer("exit_code"),
   costUsd: numeric("cost_usd"),
