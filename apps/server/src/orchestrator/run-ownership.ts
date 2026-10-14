@@ -157,6 +157,38 @@ export function disownRun(ctx: AppContext, runId: string): void {
 }
 
 /**
+ * Whether this process may still end a run's stdin, asked of the row at
+ * the moment it matters rather than of memory.
+ *
+ * A live session's hold timer closes stdin when it fires. A machine
+ * suspended past its lease resumes with that timer overdue, and it
+ * fires before the heartbeat has had a chance to notice the run was
+ * adopted meanwhile; the EOF would end the agent under its new owner.
+ * The same gap exists for a draining process whose successor already
+ * has the run. So the timer asks here first. A row that names another
+ * process disowns the run on the spot. A read that fails answers no:
+ * the cost of not closing is a session held until the run limit, the
+ * cost of closing wrongly is another server's agent ended.
+ */
+export async function confirmRunOwnership(ctx: AppContext, runId: string): Promise<boolean> {
+  if (yielded(ctx, runId)) return false;
+  try {
+    const [row] = await ctx.db
+      .select({ ownerId: agentRuns.ownerId })
+      .from(agentRuns)
+      .where(eq(agentRuns.id, runId))
+      .limit(1);
+    if (!row) return false;
+    if (row.ownerId === null || row.ownerId === ownershipOf(ctx).instanceId) return true;
+    disownRun(ctx, runId);
+    return false;
+  } catch (err) {
+    console.warn(`could not confirm who owns run ${runId}; leaving its stdin open:`, err);
+    return false;
+  }
+}
+
+/**
  * Closes the agent's stdin at the end of a loop, unless this process
  * was disowned of the run: the process that owns it now is attached to
  * the same session, and an EOF from here would end the agent under it.

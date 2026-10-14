@@ -117,6 +117,7 @@ import { pipelineAgentBinaries } from "./pipeline-agents.js";
 import { appendRunEvent } from "./transcript.js";
 import {
   adoptRun,
+  confirmRunOwnership,
   endStdinUnlessDisowned,
   handleRunControl,
   holdRun,
@@ -789,6 +790,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       liveChannel,
       conversation: conversation ?? headlessConversation(),
       holdUntil: Date.now() + ctx.env.BENTO_RUN_TIMEOUT_MIN * 60_000 - HOLD_MARGIN_MS,
+      mayEnd: () => confirmRunOwnership(ctx, runId),
       sayAsUser,
       saySystem,
     });
@@ -3299,6 +3301,7 @@ async function resumeInterruptedRun(
       liveChannel,
       conversation: conversation ?? headlessConversation(),
       holdUntil: Date.now() + timeoutMs - HOLD_MARGIN_MS,
+      mayEnd: () => confirmRunOwnership(ctx, run.id),
       sayAsUser,
       saySystem,
     });

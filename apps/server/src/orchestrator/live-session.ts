@@ -90,6 +90,13 @@ export function attachLiveConversation(input: {
    * starts a fresh run on the same session.
    */
   holdUntil?: number;
+  /**
+   * Asked before stdin is closed at the end of a hold or a turn. False
+   * leaves it open: the run belongs to another process now (adopted
+   * while this one was suspended, or handed to a successor on drain),
+   * and the EOF would end the agent under it. Absent means always.
+   */
+  mayEnd?: () => Promise<boolean>;
   sayAsUser: (text: string) => Promise<void>;
   saySystem: (text: string) => Promise<void>;
 }): LiveConversationHandle {
@@ -108,6 +115,18 @@ export function attachLiveConversation(input: {
   const closeWhenQuiet = () => {
     clearIdle();
     if (liveChannel.pending === 0) liveChannel.end();
+  };
+
+  /**
+   * Ends stdin once nothing is waiting to be read, if this process may
+   * still do so. The hold timer and the no-hold close both come through
+   * here, because both can fire on a process that no longer owns the
+   * run; dispose does not, because by then the stream has ended.
+   */
+  const endStdinIfOurs = async (): Promise<void> => {
+    if (liveChannel.pending !== 0) return;
+    if (input.mayEnd && !(await input.mayEnd())) return;
+    liveChannel.end();
   };
 
   let detached = false;
@@ -159,7 +178,9 @@ export function attachLiveConversation(input: {
         idleTimer = setTimeout(() => {
           idleTimer = null;
           waiting = false;
-          if (liveChannel.pending === 0) liveChannel.end();
+          endStdinIfOurs().catch((err: unknown) => {
+            console.warn(`could not end the held session of run ${input.runId}:`, err);
+          });
         }, idleSec * 1000);
         idleTimer.unref?.();
         waiting = true;
@@ -168,7 +189,8 @@ export function attachLiveConversation(input: {
       }
     }
 
-    closeWhenQuiet();
+    clearIdle();
+    await endStdinIfOurs();
   };
 
   return {

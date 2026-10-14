@@ -574,7 +574,10 @@ way a draining process treats all of its runs. `yielded(ctx, runId)`
 is that check, and every terminal path and transcript write asks it.
 `appendRunEvent` also carries the guard inside the insert, so a write
 racing the heartbeat is refused by the database rather than landing
-beside the new owner's. Shutdown calls `releaseOwnedRuns` before the
+beside the new owner's, and a live session's hold timer asks
+`confirmRunOwnership` before it closes stdin, because a machine that
+resumes from a suspend fires that timer before its heartbeat has
+noticed the run was adopted. Shutdown calls `releaseOwnedRuns` before the
 pool closes, which clears the columns and announces each run, so the
 successor adopts at once instead of waiting out a lease.
 
