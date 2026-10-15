@@ -1,11 +1,15 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import type { BentoClient } from "@bento/api-client";
 import { ONBOARDING_REENABLE_NOTE } from "../onboarding.js";
+import { hasProviderKey } from "../provider-tabs.js";
+import { ProviderKeysCard } from "./Credentials.js";
 import { Modal } from "./Modal.js";
 import { useToast } from "./Toasts.js";
 
 
-export type OnboardingStep = "repository" | "github" | "agents" | "pipeline";
+export type OnboardingStep = "repository" | "github" | "providers" | "agents" | "pipeline";
+
+export const ONBOARDING_STEPS: readonly OnboardingStep[] = ["repository", "github", "providers", "agents", "pipeline"];
 
 /**
  * What the board already knows about this workspace, so each step can
@@ -38,14 +42,20 @@ function reviewedOr(ready: boolean, reviewed: boolean): StepDone {
 }
 
 /**
- * The first run walkthrough: a repository, GitHub, agents, and the
- * pipeline, in the order a card needs them.
+ * The first run walkthrough: a repository, GitHub, a model provider
+ * key, agents, and the pipeline, in the order a card needs them.
  *
  * A guide rather than a form. Every step opens the panel or page that
  * already does the job, so there is one place to add a repository and
  * one place to edit an agent, and the walkthrough cannot drift from
  * them. The board hides the dialog while one of those is open and
  * brings it back on the same step when it closes.
+ *
+ * The provider key step is the exception, and embeds the keys card
+ * itself (the same component the Agents panel shows, so it still cannot
+ * drift). Under Agents the card sits below every agent, and people set
+ * up agents without ever scrolling to it, then watched every run fail
+ * for want of a key.
  *
  * Shown while the person's `onboarding_walkthrough` flag is on. Skip
  * and Finish both turn it off on the server, so it stays away on every
@@ -84,6 +94,25 @@ export function OnboardingWalkthrough({
   const [busy, setBusy] = useState(false);
   /** Null while unknown, so a slow status read does not claim GitHub is missing. */
   const [canPublish, setCanPublish] = useState<boolean | null>(null);
+  /** Null until the keys card has read what is saved. */
+  const [hasKey, setHasKey] = useState<boolean | null>(null);
+  const onSecrets = useCallback((names: string[]) => setHasKey(hasProviderKey(names)), []);
+
+  // Read here too, so the step's check is right before it is opened.
+  useEffect(() => {
+    let cancelled = false;
+    void client
+      .listSecrets()
+      .then((result) => {
+        if (!cancelled) setHasKey(hasProviderKey(result.secrets.map((secret) => secret.name)));
+      })
+      .catch(() => {
+        if (!cancelled) setHasKey(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [client]);
 
   // Read each time the dialog mounts, which includes coming back from
   // the settings page or a panel where the connection was just made.
@@ -122,6 +151,8 @@ export function OnboardingWalkthrough({
     body: string;
     action: { label: string; run: () => void } | null;
     hint?: string;
+    /** Shown in place of an action, for a step done inside the walkthrough. */
+    content?: ReactNode;
   }[] = [
     {
       id: "repository",
@@ -147,6 +178,15 @@ export function OnboardingWalkthrough({
         run: () => window.location.assign("/settings?tab=github"),
       },
       hint: "You will come back to this step when you return to the board.",
+    },
+    {
+      id: "providers",
+      title: "Add a model provider",
+      done: hasKey,
+      body: "Agents run on a model provider's API, billed to your own key. Save a key for at least one provider before you set up agents: Anthropic for Claude Code, OpenAI for Codex, or any other provider your agents' models run on.",
+      action: null,
+      content: <ProviderKeysCard client={client} onSecrets={onSecrets} />,
+      hint: "Keys are stored encrypted and never shown again. You can change them later under Agents.",
     },
     {
       id: "agents",
@@ -175,7 +215,7 @@ export function OnboardingWalkthrough({
   return (
     <Modal
       title="Welcome to Bento"
-      description="Four steps take a card from an idea to a pull request. Do them now, or skip and come back later."
+      description="Five steps take a card from an idea to a pull request. Do them now, or skip and come back later."
       onClose={onDismiss}
       large
       actions={
@@ -250,6 +290,7 @@ export function OnboardingWalkthrough({
             </button>
           </div>
         )}
+        {current.content}
         {current.hint && <p className="muted onboarding-hint">{current.hint}</p>}
       </section>
     </Modal>
