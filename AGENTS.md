@@ -770,6 +770,17 @@ which is the shape it took in PostHog. A pool with a warm connection
 at the moment of suspend is the precondition, so the queue pool, which
 polls until the instant the machine sleeps, is the one that hits it.
 
+The freeze check reads the wall clock, and Fly can leave that clock at
+the moment of the suspend for seconds after resume, so a poll in that
+window still draws a dead socket. That was the "Query read timeout"
+from `Boss.onSupervise` on the development app; worker fetches hit it
+too, silently, because pg-boss swallows fetch errors. So a query that
+times out retires the pool's other idle clients, and
+`pgBossDatabase` gives the statements pg-boss runs on a timer (fetch,
+the version row leases, the clock read) a ten second timeout and one
+retry (`pg-boss-poll.ts`). Retry only a statement that is harmless to
+run twice.
+
 A dedicated `pg.Client` (the LISTEN connection in `pg-bus.ts`) is
 outside this and has to handle its own reconnect.
 

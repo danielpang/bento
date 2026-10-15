@@ -1,7 +1,8 @@
 import { sql } from "drizzle-orm";
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import pg from "pg";
-import { archivePgBossJobs, matchPgBossArchive } from "./pg-boss-archive.js";
+import { archivePgBossJobs, isQueryReadTimeout, matchPgBossArchive } from "./pg-boss-archive.js";
+import { isPgBossPoll, runPgBossPoll } from "./pg-boss-poll.js";
 import * as schema from "./schema/index.js";
 
 export type Db = NodePgDatabase<typeof schema>;
@@ -137,19 +138,22 @@ type ConnectCallback = (
  * "do not reuse". The retire requests are queued ahead of the real
  * checkout, so the real one finds no idle client and connects fresh.
  *
- * Fly corrects the guest wall clock a few hundred milliseconds after
- * resume, so a poll that lands before the correction cannot be told
+ * Fly can leave the guest wall clock at the moment of the suspend for
+ * seconds after resume, so a checkout in that window cannot be told
  * apart from a normal one and may still draw a dead socket. That is
  * what `query_timeout` is for: the query fails after a bounded wait
- * and the client goes with it.
+ * and the client goes with it. A query that timed out is itself the
+ * sign the clock missed: the other idle clients slept on the same
+ * sockets, so they are retired then too, and a retry connects fresh.
  */
 class RecyclingPool extends pg.Pool {
   private lastActivityAt = Date.now();
 
   constructor(config: pg.PoolConfig) {
     super(config);
-    this.on("release", () => {
+    this.on("release", (err: unknown) => {
       this.lastActivityAt = Date.now();
+      if (isQueryReadTimeout(err)) this.retireIdleClients("idle beside a connection whose query timed out");
     });
   }
 
@@ -164,12 +168,15 @@ class RecyclingPool extends pg.Pool {
     const now = Date.now();
     const frozen = now - this.lastActivityAt >= POOL_FROZEN_GAP_MS;
     this.lastActivityAt = now;
-    if (!frozen) return;
+    if (frozen) this.retireIdleClients("connection predates a process suspend and is presumed dead");
+  }
+
+  private retireIdleClients(reason: string): void {
     const stale = this.idleCount;
     for (let i = 0; i < stale; i++) {
       super.connect((err, client, release) => {
         if (err || !client) return;
-        release(new Error("connection predates a process suspend and is presumed dead"));
+        release(new Error(reason));
       });
     }
   }
@@ -197,10 +204,15 @@ export function createPool(databaseUrl: string, options?: { max?: number }): pg.
  * lock wait and the move share one budget. Batches commit as they go.
  * A script that looks like archive and cannot be batched is refused,
  * rather than run as the unbounded statement.
+ *
+ * The statements pg-boss runs on a timer (fetch, the version row
+ * leases, the clock read) get a short timeout and one retry on a fresh
+ * connection (`runPgBossPoll`), because a poll after a suspend can draw
+ * a socket the freeze check missed.
  */
 export function pgBossDatabase(
   pool: pg.Pool,
-  options?: { archiveBatchSize?: number; archiveMaxBatches?: number },
+  options?: { archiveBatchSize?: number; archiveMaxBatches?: number; pollTimeoutMs?: number },
 ): {
   executeSql(text: string, values?: unknown[]): Promise<pg.QueryResult>;
 } {
@@ -220,6 +232,7 @@ export function pgBossDatabase(
         if (options?.archiveMaxBatches !== undefined) batch.maxBatches = options.archiveMaxBatches;
         return archivePgBossJobs(pool, archive, batch);
       }
+      if (isPgBossPoll(text)) return runPgBossPoll(pool, text, values, options?.pollTimeoutMs);
       return pool.query(text, values);
     },
   };
