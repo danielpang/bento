@@ -4,8 +4,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import net from "node:net";
+import Docker from "dockerode";
 import { DockerDriver, SANDBOX_STOPPED_MESSAGE } from "./docker.js";
-import { createDockerClient } from "./docker-client.js";
+import { createDockerClient, resolveDockerSocket } from "./docker-client.js";
 import { collectExec, LineChannel, type ExecChunk } from "./driver.js";
 
 // Uses only the installed sandbox image, no agent credentials or network.
@@ -18,6 +20,8 @@ test(
   async (t) => {
     const directory = await mkdtemp(path.join(tmpdir(), "bento-exec-test-"));
     const docker = createDockerClient();
+    const socketPath = resolveDockerSocket();
+    assert.ok(socketPath, "these tests put a proxy in front of the local Docker socket");
     const driver = new DockerDriver(docker, "none");
     const handle = await driver.provision({
       projectId: "exec-test",
@@ -168,58 +172,51 @@ wait
         const line = status.stdout.split("\n").find((entry) => entry.trim().split(/\s+/)[0] === pid);
         assert.ok(!line || line.trim().split(/\s+/)[1]!.startsWith("Z"), `process still running: ${line}`);
       });
-      await t.test("a durable run whose container stopped answering still ends at its timeout", async () => {
-        const container = docker.getContainer(handle.externalId);
-        const chunks: ExecChunk[] = [];
-        let paused = false;
-        const started = Date.now();
+      await t.test("a durable run ends at its timeout when Docker stops answering", async () => {
+        // Every connection open now goes silent and every new request goes
+        // unanswered: what a frozen VM looks like from the server.
+        const proxy = await dockerProxy(socketPath);
         try {
-          for await (const chunk of driver.exec(handle, ["sh", "-c", "echo started; sleep 300"], {
-            sessionKey: randomUUID(),
-            timeoutMs: 2000,
-          })) {
-            chunks.push(chunk);
-            if (chunk.kind === "stdout" && !paused) {
-              paused = true;
-              await container.pause();
-            }
-          }
+          const silent = new DockerDriver(new Docker({ socketPath: proxy.path }), "none");
+          const started = Date.now();
+          const result = await runWithin(
+            silent.exec(handle, ["sh", "-c", "echo started; sleep 300"], { sessionKey: randomUUID(), timeoutMs: 2000 }),
+            40_000,
+            (chunk) => {
+              if (chunk.kind === "stdout") proxy.freeze("all");
+            },
+          );
+          assert.ok(result.ended, "the run must end without Docker's help");
+          assert.deepEqual(result.chunks.at(-1), { kind: "exit", exitCode: -1 });
+          assert.ok(result.chunks.some((chunk) => chunk.kind === "stderr" && /exec timeout/.test(chunk.data)));
+          assert.ok(Date.now() - started < 30_000, `took ${Date.now() - started}ms`);
         } finally {
-          if (paused) await container.unpause();
+          proxy.close();
         }
-        assert.ok(paused);
-        assert.deepEqual(chunks.at(-1), { kind: "exit", exitCode: -1 });
-        assert.ok(chunks.some((chunk) => chunk.kind === "stderr" && /exec timeout/.test(chunk.data)));
-        assert.ok(Date.now() - started < 30_000, "the stop must not wait on a container that cannot answer");
       });
-      await t.test("a durable run ends when its container is no longer running", async () => {
-        let stopped = false;
-        const lying = new Proxy(docker, {
-          get(target, prop) {
-            if (prop === "getContainer") {
-              return (id: string) =>
-                new Proxy(target.getContainer(id), {
-                  get(container, key) {
-                    if (key === "inspect" && stopped) return async () => ({ State: { Running: false } });
-                    const value = Reflect.get(container, key, container) as unknown;
-                    return typeof value === "function" ? value.bind(container) : value;
-                  },
-                });
-            }
-            const value = Reflect.get(target, prop, target) as unknown;
-            return typeof value === "function" ? value.bind(target) : value;
-          },
-        });
-        const watched = new DockerDriver(lying, "none", { livenessMs: 300 });
-        const chunks: ExecChunk[] = [];
-        for await (const chunk of watched.exec(handle, ["sh", "-c", "echo started; sleep 300"], { sessionKey: randomUUID() })) {
-          chunks.push(chunk);
-          if (chunk.kind === "stdout") stopped = true;
+      await t.test("a durable run ends when its container stops under a connection that never closes", async () => {
+        // The VM restart: the old exec connection stays open and silent,
+        // while Docker itself answers again and says the container exited.
+        const proxy = await dockerProxy(socketPath);
+        try {
+          const watched = new DockerDriver(new Docker({ socketPath: proxy.path }), "none", { livenessMs: 300 });
+          const result = await runWithin(
+            watched.exec(handle, ["sh", "-c", "echo started; sleep 300"], { sessionKey: randomUUID() }),
+            20_000,
+            (chunk) => {
+              if (chunk.kind !== "stdout") return;
+              proxy.freeze("open");
+              void docker.getContainer(handle.externalId).kill();
+            },
+          );
+          assert.ok(result.ended, "the run must end once its container is down");
+          assert.deepEqual(result.chunks.at(-2), { kind: "stderr", data: SANDBOX_STOPPED_MESSAGE });
+          assert.deepEqual(result.chunks.at(-1), { kind: "exit", exitCode: -1 });
+          assert.equal(await watched.running(handle), false);
+          assert.equal(await watched.running({ ...handle, externalId: `missing-${randomUUID()}` }), false);
+        } finally {
+          proxy.close();
         }
-        assert.deepEqual(chunks.at(-2), { kind: "stderr", data: SANDBOX_STOPPED_MESSAGE });
-        assert.deepEqual(chunks.at(-1), { kind: "exit", exitCode: -1 });
-        assert.equal(await watched.running({ ...handle, externalId: `missing-${randomUUID()}` }), false);
-        assert.equal(await driver.running(handle), true);
       });
     } finally {
       await driver.destroy(handle);
@@ -227,3 +224,73 @@ wait
     }
   },
 );
+
+/**
+ * A Unix socket in front of Docker. `freeze("all")` holds every
+ * connection silent and leaves new ones unanswered; `freeze("open")`
+ * does that only to the connections already open.
+ */
+async function dockerProxy(target: string) {
+  const at = path.join(tmpdir(), `bento-dp-${randomUUID().slice(0, 8)}.sock`);
+  let frozen: "none" | "all" | "open" = "none";
+  const sockets = new Set<net.Socket>();
+  const server = net.createServer((client) => {
+    sockets.add(client);
+    client.on("error", () => {});
+    if (frozen === "all") return;
+    const upstream = net.connect(target);
+    sockets.add(upstream);
+    upstream.on("error", () => {});
+    let held = false;
+    const live = () => !held && frozen !== "all";
+    pairs.push(() => {
+      held = true;
+    });
+    client.on("data", (data) => {
+      if (live()) upstream.write(data);
+    });
+    upstream.on("data", (data) => {
+      if (live()) client.write(data);
+    });
+    client.on("close", () => {
+      if (live()) upstream.destroy();
+    });
+    upstream.on("close", () => {
+      if (live()) client.destroy();
+    });
+  });
+  const pairs: (() => void)[] = [];
+  await new Promise<void>((resolve) => server.listen(at, resolve));
+  return {
+    path: at,
+    freeze(mode: "all" | "open") {
+      for (const hold of pairs) hold();
+      frozen = mode;
+    },
+    close() {
+      server.close();
+      for (const socket of sockets) socket.destroy();
+    },
+  };
+}
+
+/** Reads an exec until it ends or `ms` passes, whichever is first. */
+async function runWithin(chunks: AsyncIterable<ExecChunk>, ms: number, onChunk: (chunk: ExecChunk) => void) {
+  const seen: ExecChunk[] = [];
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<false>((resolve) => {
+    timer = setTimeout(() => resolve(false), ms);
+  });
+  const finished = (async () => {
+    for await (const chunk of chunks) {
+      seen.push(chunk);
+      onChunk(chunk);
+    }
+    return true as const;
+  })();
+  try {
+    return { ended: await Promise.race([finished, deadline]), chunks: seen };
+  } finally {
+    clearTimeout(timer);
+  }
+}

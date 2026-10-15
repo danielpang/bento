@@ -14,7 +14,7 @@ const DEFAULT_IMAGE = "bento-sandbox:dev";
  */
 const DOCKER_CALL_TIMEOUT_MS = 30_000;
 /** How long a durable run's stop may take before its reader is ended without the exit record. */
-const DURABLE_STOP_DEADLINE_MS = 45_000;
+const DURABLE_STOP_DEADLINE_MS = 15_000;
 /** How long the reader is given to deliver the exit record a stop wrote. */
 const DURABLE_EXIT_GRACE_MS = 2_000;
 /** Silence after which a durable run asks whether its container is still up. */
@@ -443,7 +443,8 @@ export class DockerDriver implements SandboxDriver {
       clearInterval(liveness);
       for (const timer of timers) clearTimeout(timer);
       opts?.signal?.removeEventListener("abort", onAbort);
-      await stopping;
+      // A forced end is one whose cleanup is not answering.
+      if (forced === undefined) await stopping;
     }
   }
 
