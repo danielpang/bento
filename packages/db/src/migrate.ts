@@ -84,7 +84,11 @@ export async function runMigrations(databaseUrl: string): Promise<void> {
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
-  const url = process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5439/app";
+  // The lock below is a session advisory lock: through a transaction
+  // pooler the unlock can land on another backend and leave the lock held
+  // forever, so this takes the direct URL when one is set, as the server does.
+  const url =
+    process.env.BENTO_DIRECT_DATABASE_URL ?? process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5439/app";
   runMigrations(url).catch((err) => {
     console.error(err);
     process.exit(1);
