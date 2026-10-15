@@ -394,6 +394,12 @@ export interface SandboxDriver {
    * different from "not installed" and must not be shown as it.
    */
   checkTools?(binaries: readonly string[], image?: string): Promise<Record<string, boolean> | null>;
+  /**
+   * Free bytes on the disk the sandboxes write to, as seen from inside
+   * one, when the driver runs them in a local VM whose disk can fill
+   * apart from the host's. Null when no sandbox is running to ask.
+   */
+  freeDiskBytes?(): Promise<number | null>;
   destroy(handle: SandboxHandle): Promise<void>;
   /**
    * Whether the machine is still there.

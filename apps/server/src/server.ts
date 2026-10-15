@@ -33,6 +33,7 @@ import { releaseOwnedRuns } from "./orchestrator/run-ownership.js";
 import { refreshModelCatalog } from "./orchestrator/model-catalog.js";
 import { QUEUE_POLL_SECONDS } from "./orchestrator/queue.js";
 import { applyInitialAgentAuthSharing } from "./settings.js";
+import { createDiskSpaceMonitor } from "./disk-space.js";
 
 export interface StartOptions {
   /** Overrides applied on top of the process environment. */
@@ -225,6 +226,13 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
       userId,
       draining: false,
     };
+    if (env.BENTO_MODE === "local" && ctx.drivers.default.provider !== "sprite") {
+      ctx.diskSpace = createDiskSpaceMonitor({
+        hostPath: env.BENTO_DATA_DIR,
+        thresholdBytes: env.BENTO_LOW_DISK_WARNING_GB * 1024 ** 3,
+        driver: ctx.drivers.default,
+      });
+    }
     const githubApp = createGitHubApp(env);
     if (githubApp) ctx.githubApp = githubApp;
     if (auth) ctx.auth = auth;

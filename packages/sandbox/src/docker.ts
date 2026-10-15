@@ -368,6 +368,14 @@ export class DockerDriver implements SandboxDriver {
     }
   }
 
+  async freeDiskBytes(): Promise<number | null> {
+    const [running] = await this.docker.listContainers({ filters: { name: ["bento-sbx-"], status: ["running"] } });
+    if (!running) return null;
+    const handle: SandboxHandle = { externalId: running.Id, provider: "docker", workdir: "/" };
+    const result = await collectExec(this.exec(handle, ["df", "-Pk", "/"], { timeoutMs: 5000 }));
+    return result.exitCode === 0 ? parseDfAvailableBytes(result.stdout) : null;
+  }
+
   /**
    * Runs `command -v` for each tool in a throwaway container built from
    * the sandbox image, which is where agents actually run: what the
@@ -442,6 +450,13 @@ done
     clearTimeout(timer);
     stream.destroy();
   }
+}
+
+/** The "Available" column of `df -Pk`, in bytes. */
+export function parseDfAvailableBytes(output: string): number | null {
+  const row = output.trim().split("\n").at(-1)?.trim().split(/\s+/);
+  const kb = row && row.length >= 4 ? Number(row[3]) : NaN;
+  return Number.isFinite(kb) && kb >= 0 ? kb * 1024 : null;
 }
 
 /**
