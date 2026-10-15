@@ -249,7 +249,12 @@ environment and execs the command, so the URL carries only `sh
 running, not by the argv it was given (the real-sprite test saw a
 staged command listed as what the launcher had exec'd into), so a
 staged session is looked for by the launcher's line and by the
-command's first word, the rule an unstaged run already lives by. Do not trim
+command's first word, the rule an unstaged run already lives by. And
+it names a command spawned straight from the exec URL by its
+executable's resolved path (`sleep 12` is listed as `/usr/bin/sleep
+12`), so `sessionCommandMatches` compares the first word by basename;
+before that, a reattach to an unstaged live run could never find its
+session. Do not trim
 prompts in the executor to stay under it: Modal and Docker take argv
 out of band, and the sprite driver is the one place that knows what
 fits. The launcher carries the organization's keys, so it removes
