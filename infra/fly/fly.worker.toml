@@ -1,6 +1,6 @@
 # Hosted Bento, the worker half of production. Same image as fly.toml;
 # this app drives the agent runs and the web app (fly.toml) serves the
-# console and the API with BENTO_MAX_CONCURRENT_RUNS = 0. Splitting them
+# console and the API as BENTO_ROLE = "web". Splitting them
 # is what lets the web app scale on traffic and suspend when quiet
 # without ever holding an agent's stream, and what lets run capacity be
 # raised without touching the web app. The two talk through Postgres:
@@ -26,6 +26,9 @@ kill_timeout = "30s"
   BENTO_ENVIRONMENT = "production"
   BENTO_SANDBOX_DRIVER = "sprite"
   PORT = "8080"
+  # The worker half: this process drives the agent runs and adopts the
+  # ones a stopped worker left behind.
+  BENTO_ROLE = "worker"
   # How many agent runs this process drives at once. Sprites do the
   # heavy work; this is sockets and keep-awake on the orchestrator.
   BENTO_MAX_CONCURRENT_RUNS = "32"

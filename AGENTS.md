@@ -600,9 +600,16 @@ The two-server test is `run-ownership.e2e.test.ts`.
 
 Production is two Fly apps on one image (`infra/fly/fly.toml` and
 `infra/fly/fly.worker.toml`):
-the web app with `BENTO_MAX_CONCURRENT_RUNS = 0`, which registers no
-run workers and never adopts a run, and the worker app, which has no
-HTTP service and so is never suspended. `enqueueRun` publishes a
+the web app with `BENTO_ROLE = "web"`, which registers no run workers
+and never adopts a run, and the worker app with `BENTO_ROLE =
+"worker"`, which has no HTTP service and so is never suspended. The
+role is explicit on purpose: a slot count of zero once meant "web",
+and a process whose role was inferred from a number could be
+misconfigured into either half without anyone noticing. Read the role
+through `drivesRuns` and the slot count through `runSlots` in
+`env.ts`, never `BENTO_MAX_CONCURRENT_RUNS` directly, because a web
+process has no slots whatever that variable says, and setting it on
+one is refused at boot. `enqueueRun` publishes a
 `queued` control so the worker's pollers wake for a run the web app
 queued. `BENTO_DIRECT_DATABASE_URL` carries the LISTEN connection and
 the migration lock when `DATABASE_URL` is a transaction mode pooler.

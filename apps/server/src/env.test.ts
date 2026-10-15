@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { loadEnv, logExportTarget, parseOtlpHeaders, posthogApiKey } from "./env.js";
+import { drivesRuns, loadEnv, logExportTarget, parseOtlpHeaders, posthogApiKey, runSlots } from "./env.js";
 
 test("posthogApiKey is null when the key is unset", () => {
   assert.equal(posthogApiKey(loadEnv({ BENTO_MODE: "multi" })), null);
@@ -83,4 +83,31 @@ test("parseOtlpHeaders tolerates blanks, stray commas, and a bare percent", () =
   assert.deepEqual(parseOtlpHeaders(undefined), {});
   assert.deepEqual(parseOtlpHeaders(" , novalue , =nokey , k = v , "), { k: "v" });
   assert.deepEqual(parseOtlpHeaders("token=100%"), { token: "100%" });
+});
+
+test("the role, not the slot count, says whether a process drives runs", () => {
+  const base = { DATABASE_URL: "postgres://x" } as NodeJS.ProcessEnv;
+  const all = loadEnv(base);
+  assert.equal(all.BENTO_ROLE, "all");
+  assert.equal(drivesRuns(all), true);
+  assert.equal(runSlots(all), 4);
+
+  const web = loadEnv({ ...base, BENTO_ROLE: "web" });
+  assert.equal(drivesRuns(web), false);
+  assert.equal(runSlots(web), 0);
+
+  const worker = loadEnv({ ...base, BENTO_ROLE: "worker", BENTO_MAX_CONCURRENT_RUNS: "32" });
+  assert.equal(drivesRuns(worker), true);
+  assert.equal(runSlots(worker), 32);
+});
+
+test("a web process that sets a slot count is refused at boot", () => {
+  assert.throws(
+    () => loadEnv({ DATABASE_URL: "postgres://x", BENTO_ROLE: "web", BENTO_MAX_CONCURRENT_RUNS: "8" } as NodeJS.ProcessEnv),
+    /BENTO_ROLE=web drives no agent runs/,
+  );
+  assert.throws(
+    () => loadEnv({ DATABASE_URL: "postgres://x", BENTO_MAX_CONCURRENT_RUNS: "0" } as NodeJS.ProcessEnv),
+    /BENTO_MAX_CONCURRENT_RUNS/,
+  );
 });

@@ -27,7 +27,7 @@ import {
   type AppContext,
 } from "./context.js";
 import { EventBus } from "./events.js";
-import { loadEnv, posthogApiKey, type Env } from "./env.js";
+import { loadEnv, posthogApiKey, runSlots, type Env } from "./env.js";
 import { registerJobs } from "./orchestrator/run-executor.js";
 import { releaseOwnedRuns } from "./orchestrator/run-ownership.js";
 import { refreshModelCatalog } from "./orchestrator/model-catalog.js";
@@ -99,7 +99,8 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
    * throw must take those installs back out on its way up.
    */
   try {
-    const poolMax = poolMaxForRuns(env.BENTO_MAX_CONCURRENT_RUNS);
+    const slots = runSlots(env);
+    const poolMax = poolMaxForRuns(slots);
     const pool = createPool(env.DATABASE_URL, { max: poolMax });
     const db = createDb(pool);
 
@@ -110,7 +111,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     const bossPool = createPool(env.DATABASE_URL, {
       // Polling does not need one connection per worker. Enough that a
       // burst of completions is not queued behind the default 10.
-      max: Math.min(poolMax, Math.max(10, Math.ceil(env.BENTO_MAX_CONCURRENT_RUNS / 2))),
+      max: Math.min(poolMax, Math.max(10, Math.ceil(slots / 2))),
     });
     const boss = new PgBoss({
       db: pgBossDatabase(bossPool),
@@ -357,7 +358,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
 
     if (!options.quiet) {
       console.log(
-        `bento server listening on http://${hostname}:${server.port} (${env.BENTO_MODE} mode, ${env.BENTO_SANDBOX_DRIVER} sandboxes, ${env.BENTO_MAX_CONCURRENT_RUNS} run workers)`,
+        `bento server listening on http://${hostname}:${server.port} (${env.BENTO_MODE} mode, ${env.BENTO_ROLE} role, ${env.BENTO_SANDBOX_DRIVER} sandboxes, ${slots} run workers)`,
       );
       if (env.BENTO_MODE === "multi") console.log(`invitation mail: ${mailer.description}`);
       if (logExport) {

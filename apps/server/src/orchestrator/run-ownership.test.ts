@@ -44,3 +44,22 @@ test("coalesced surfaces a failing pass to its callers and recovers after", asyn
   await task();
   assert.equal(attempt, 2, "the next request runs a fresh pass");
 });
+
+/**
+ * The web half of a split deployment drives no runs, orphans included.
+ * It answers before touching the database, so a web process that wins
+ * the shared reap job costs nothing and strands nothing.
+ */
+test("a web role process adopts no orphans", async () => {
+  const { adoptOrphanedRuns } = await import("./run-executor.js");
+  const ctx = {
+    draining: false,
+    env: { BENTO_ROLE: "web", BENTO_MAX_CONCURRENT_RUNS: 4 },
+    db: {
+      select() {
+        throw new Error("a web process must not look for orphans");
+      },
+    },
+  } as unknown as import("../context.js").AppContext;
+  assert.deepEqual(await adoptOrphanedRuns(ctx), { resumed: 0, closed: 0 });
+});

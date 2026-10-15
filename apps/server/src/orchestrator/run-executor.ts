@@ -97,6 +97,7 @@ import { confirmSwarmMessagesDelivered, requeueUndeliveredNodeMessages, takeNode
 import { exportSwarmBranch, swarmBranchName } from "./swarm/sandbox.js";
 import { applyRunCharge, chargeForRun } from "./swarm/ledger.js";
 import { resolveAgentEnv } from "./agent-env.js";
+import { drivesRuns, runSlots } from "../env.js";
 import { customProviderRunEnv } from "./custom-provider.js";
 import { agentAuthEnv, agentAuthMounts, gitIdentityEnv } from "./agent-auth.js";
 import { prepareRunMcp } from "./mcp-run.js";
@@ -2808,9 +2809,9 @@ export async function recoverInterruptedRuns(ctx: AppContext): Promise<void> {
  */
 export async function adoptOrphanedRuns(ctx: AppContext): Promise<{ resumed: number; closed: number }> {
   if (ctx.draining) return { resumed: 0, closed: 0 };
-  // A process with no run slots drives no runs, orphans included: on
-  // the split deployment that is the web app, which Fly may suspend.
-  if (ctx.env.BENTO_MAX_CONCURRENT_RUNS === 0) return { resumed: 0, closed: 0 };
+  // The web half of a split deployment drives no runs, orphans
+  // included: Fly may suspend it, and a run it held would be stranded.
+  if (!drivesRuns(ctx.env)) return { resumed: 0, closed: 0 };
   const orphans = await orphanedRuns(ctx);
 
   let closed = 0;
@@ -3651,7 +3652,7 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
    * bare boss.send still runs, on the next poll.
    */
   ctx.runWorkers = [];
-  for (let slot = 0; slot < ctx.env.BENTO_MAX_CONCURRENT_RUNS; slot++) {
+  for (let slot = 0; slot < runSlots(ctx.env); slot++) {
     const workerId = await ctx.boss.work<{ runId: string }>("run.execute", { batchSize: 1, pollingIntervalSeconds: RUN_WORKER_POLL_SECONDS }, async (jobs) => {
       for (const job of jobs) {
         try {

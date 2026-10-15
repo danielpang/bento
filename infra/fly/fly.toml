@@ -19,11 +19,12 @@ kill_timeout = "30s"
   BENTO_ENVIRONMENT = "production"
   BENTO_SANDBOX_DRIVER = "sprite"
   PORT = "8080"
-  # This process drives no agent runs: the worker app does. It still
-  # queues them, evaluates gates, and runs the Slack, Linear and sweep
-  # jobs, and it never adopts an orphaned run, so Fly suspending it
-  # strands nothing.
-  BENTO_MAX_CONCURRENT_RUNS = "0"
+  # The web half: this process drives no agent runs, the worker app
+  # does. It still queues them, evaluates gates, and runs the Slack,
+  # Linear and sweep jobs, and it never adopts an orphaned run, so Fly
+  # suspending it strands nothing. BENTO_MAX_CONCURRENT_RUNS is not set
+  # here on purpose: a web process refuses it at boot.
+  BENTO_ROLE = "web"
   # The console is served from this same app, so the browser sees one
   # origin: session cookies, OAuth callbacks, the /device page and the
   # /accept-invitation link all work without CORS.
