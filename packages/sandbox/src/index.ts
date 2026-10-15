@@ -1,5 +1,5 @@
 export * from "./driver.js";
-export { DockerDriver } from "./docker.js";
+export { DockerDriver, SANDBOX_STOPPED_MESSAGE } from "./docker.js";
 export { LocalProcessDriver } from "./local-process.js";
 export {
   SpriteDriver,

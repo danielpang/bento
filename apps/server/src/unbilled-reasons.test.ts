@@ -48,6 +48,10 @@ test("provider failures before a Sprite starts are not billed", () => {
     )?.id,
     "previous-agent-running",
   );
+  assert.equal(
+    unbilledReason("The sandbox stopped while the agent was running, so the run ended. Run again to continue.")?.id,
+    "sandbox-stopped",
+  );
   assert.equal(unbilledReason("Bento restarted before the agent started, so no agent ran.")?.id, "restart-before-agent");
   assert.equal(unbilledReason("interrupted by a server restart"), null, "a restart that cut off a working agent stays billed");
   assert.equal(unbilledReason(SWARM_BRANCH_LOST_MESSAGE)?.id, "swarm-branch-lost");

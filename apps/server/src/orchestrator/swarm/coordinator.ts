@@ -356,12 +356,12 @@ function sandboxRestarts(flags: unknown): number {
 }
 
 /**
- * A run that failed before its agent started.
+ * A run that failed on its sandbox rather than its work: the machine
+ * never ran the agent, or stopped under it.
  *
  * The unbilled-reason rules are the one list of those failures: they
- * exist so a person is not charged for a machine that never ran their
- * agent, and that is the same question as whether the work was ever
- * attempted. Read here rather than copied, so a provider failure that
+ * exist so a person is not charged for a machine that failed them, and
+ * that is the same question as whether the work deserves another try. Read here rather than copied, so a provider failure that
  * joins that list is restarted without this file learning its words.
  */
 function failedBeforeAgentStarted(run: { status: string; error: string | null }): boolean {

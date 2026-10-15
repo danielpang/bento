@@ -752,6 +752,7 @@ test("a quiet run whose machine stopped is closed, and its swarm is told", async
   const [row] = await db.select().from(agentRuns).where(eq(agentRuns.id, dead.id));
   assert.equal(row!.status, "failed");
   assert.equal(row!.error, SANDBOX_STOPPED_RUN_ERROR);
+  assert.equal(row!.billable, false, "a machine that died under the agent is the provider's failure");
   const lines = await db.select().from(runEvents).where(eq(runEvents.runId, dead.id));
   assert.match((lines.at(-1)!.payload as { text: string }).text, /sandbox stopped while this run was working/);
   assert.ok(

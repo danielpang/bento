@@ -3,8 +3,8 @@
  *
  * Matches inspect only the first error line. Later lines are command
  * output and must not decide billing. These reasons are restricted to
- * provider failures before an agent starts. Once an agent or its
- * sandbox has done work, failures remain billable.
+ * provider failures: a machine that never ran the agent, or one that
+ * stopped under it. A failure of the agent or its work stays billable.
  */
 export type UnbilledMatch =
   | { kind: "prefix"; text: string }
@@ -48,6 +48,13 @@ export const SANDBOX_STALLED_AGENT_PREFIX = "The sandbox stopped responding befo
  * sandbox failed first.
  */
 export const RESTART_BEFORE_AGENT_PREFIX = "Bento restarted before the agent started";
+/**
+ * How a run record opens when the machine stopped while the agent was
+ * working (a Docker VM that restarted, a sprite or box that went away).
+ * The provider failed, not the agent, so it is not billed, and a swarm
+ * starts the run again the way it does after any sandbox failure.
+ */
+export const SANDBOX_STOPPED_AGENT_PREFIX = "The sandbox stopped while the agent was running";
 export const PREVIOUS_AGENT_RUNNING_PREFIX =
   "An agent from an earlier run of this task is still running in its sandbox and could not be stopped";
 
@@ -102,6 +109,11 @@ export const UNBILLED_REASONS: readonly UnbilledReason[] = [
     id: "sandbox-stalled",
     summary: "The sandbox stopped answering before the agent was launched, so no agent ran.",
     match: { kind: "prefix", text: SANDBOX_STALLED_AGENT_PREFIX },
+  },
+  {
+    id: "sandbox-stopped",
+    summary: "The sandbox stopped while the agent was running, so the run ended with the machine.",
+    match: { kind: "prefix", text: SANDBOX_STOPPED_AGENT_PREFIX },
   },
   {
     id: "restart-before-agent",

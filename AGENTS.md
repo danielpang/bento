@@ -718,7 +718,11 @@ the same of every running server run that has been quiet for
 `QUIET_RUN_CHECK_MIN`, closes one whose machine is down the way a
 restart closes a run whose agent had started, and aborts whatever loop
 still holds it. A lookup that errors closes nothing. A new driver
-should implement `running` for the same reason.
+should implement `running` for the same reason. Either way the run
+record opens with `SANDBOX_STOPPED_AGENT_PREFIX`, which is on the
+unbilled list: the machine failed, not the agent, so the person is not
+charged and a swarm's coordinator starts the run again the way it does
+after any sandbox failure.
 
 ## Modal stdin closes through the stream, never closeStdin()
 

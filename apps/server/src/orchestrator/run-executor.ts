@@ -52,11 +52,13 @@ import {
   type PreparedRepository,
   type SandboxDriver,
   type SandboxHandle,
+  SANDBOX_STOPPED_MESSAGE,
 } from "@bento/sandbox";
 import { captureJobErrors } from "../analytics.js";
 import type { AppContext } from "../context.js";
 import {
   SANDBOX_GONE_AGENT_PREFIX,
+  SANDBOX_STOPPED_AGENT_PREFIX,
   SANDBOX_REFUSED_AGENT_PREFIX,
   SANDBOX_STALLED_AGENT_PREFIX,
   RESTART_BEFORE_AGENT_PREFIX,
@@ -1286,6 +1288,13 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
         },
         exitCode,
       );
+      emitBoard("failed");
+      await subject.settle(ctx);
+      return;
+    }
+    if ((outcome.error ?? "").includes(SANDBOX_STOPPED_MESSAGE)) {
+      console.error(`the sandbox of run ${runId} stopped under its agent:`, outcome.error);
+      await finishRun(ctx, runId, { ...outcome, error: SANDBOX_STOPPED_RUN_ERROR }, exitCode);
       emitBoard("failed");
       await subject.settle(ctx);
       return;
@@ -3123,7 +3132,7 @@ export async function reapStalledRuns(ctx: AppContext, stallMin: number = STALLE
 /** Minutes a running agent may go without a transcript line before its machine is asked whether it is still up. */
 export const QUIET_RUN_CHECK_MIN = 10;
 
-export const SANDBOX_STOPPED_RUN_ERROR = "the sandbox stopped while the agent was running";
+export const SANDBOX_STOPPED_RUN_ERROR = `${SANDBOX_STOPPED_AGENT_PREFIX}, so the run ended. Run again to continue.`;
 const SANDBOX_STOPPED_RUN_TRANSCRIPT =
   "The sandbox stopped while this run was working, so the run ended here. Send a message to pick up where it left off.";
 
