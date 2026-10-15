@@ -406,6 +406,13 @@ export interface SandboxDriver {
    */
   exists?(handle: SandboxHandle): Promise<boolean>;
   /**
+   * Whether the machine is up, so an agent inside it can still be alive.
+   * False only when the provider answered that it is stopped or gone; a
+   * lookup that fails throws, because a reaper reads false as "the agent
+   * is dead" and closes its run.
+   */
+  running?(handle: SandboxHandle): Promise<boolean>;
+  /**
    * Point-in-time snapshot of the sandbox, taken before an agent runs so
    * its changes can be undone wholesale. Only drivers that can restore
    * implement this; the Docker driver relies on git instead.

@@ -52,11 +52,13 @@ import {
   type PreparedRepository,
   type SandboxDriver,
   type SandboxHandle,
+  SANDBOX_STOPPED_MESSAGE,
 } from "@bento/sandbox";
 import { captureJobErrors } from "../analytics.js";
 import type { AppContext } from "../context.js";
 import {
   SANDBOX_GONE_AGENT_PREFIX,
+  SANDBOX_STOPPED_AGENT_PREFIX,
   SANDBOX_REFUSED_AGENT_PREFIX,
   SANDBOX_STALLED_AGENT_PREFIX,
   RESTART_BEFORE_AGENT_PREFIX,
@@ -1176,7 +1178,7 @@ export function mergeAgentExecEnv(
  * exactly the way a normal run does.
  */
 async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Promise<void> {
-  const { runId, subject, repoRows, prepared, handle, branch, publisher, argv, result, emitBoard } = settlement;
+  const { driver, runId, subject, repoRows, prepared, handle, branch, publisher, argv, result, emitBoard } = settlement;
   const { profile } = subject;
   const runRole = subject.run.role;
   const saySystem = (text: string) =>
@@ -1286,6 +1288,16 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
         },
         exitCode,
       );
+      emitBoard("failed");
+      await subject.settle(ctx);
+      return;
+    }
+    // The error's tail is the agent's own output, so the words alone
+    // could be printed to get a run for free: the provider must also
+    // say the machine is down. A lookup that fails confirms nothing.
+    if ((outcome.error ?? "").includes(SANDBOX_STOPPED_MESSAGE) && (await sandboxConfirmedDown(driver, handle))) {
+      console.error(`the sandbox of run ${runId} stopped under its agent:`, outcome.error);
+      await finishRun(ctx, runId, { ...outcome, error: SANDBOX_STOPPED_RUN_ERROR }, exitCode);
       emitBoard("failed");
       await subject.settle(ctx);
       return;
@@ -3120,6 +3132,89 @@ export async function reapStalledRuns(ctx: AppContext, stallMin: number = STALLE
   return closed;
 }
 
+async function sandboxConfirmedDown(driver: SandboxDriver, handle: SandboxHandle): Promise<boolean> {
+  if (!driver.running) return false;
+  try {
+    return !(await driver.running(handle));
+  } catch {
+    return false;
+  }
+}
+
+/** Minutes a running agent may go without a transcript line before its machine is asked whether it is still up. */
+export const QUIET_RUN_CHECK_MIN = 10;
+
+export const SANDBOX_STOPPED_RUN_ERROR = `${SANDBOX_STOPPED_AGENT_PREFIX}, so the run ended. Run again to continue.`;
+const SANDBOX_STOPPED_RUN_TRANSCRIPT =
+  "The sandbox stopped while this run was working, so the run ended here. Send a message to pick up where it left off.";
+
+/**
+ * Closes running server runs whose machine is no longer up.
+ *
+ * The run's own loop ends when its sandbox does, unless the provider
+ * stops answering without closing the connection: a Docker VM that
+ * froze and restarted left a swarm planner "running" for fifteen hours,
+ * holding the swarm's planner slot while three finished reports waited.
+ * Only quiet runs are asked about, and only a provider that answered
+ * "stopped" or "gone" closes one; a lookup that fails is no answer.
+ *
+ * Closed the way a restart closes a run whose agent had started, so a
+ * swarm's coordinator wakes a fresh planner, or tells the planner about
+ * a worker, as it does after a reboot.
+ */
+export async function reapRunsWithStoppedSandbox(
+  ctx: AppContext,
+  quietMin: number = QUIET_RUN_CHECK_MIN,
+): Promise<string[]> {
+  const candidates = await ctx.db
+    .select({ run: agentRuns, sandbox: sandboxes })
+    .from(agentRuns)
+    .innerJoin(sandboxes, eq(sandboxes.id, agentRuns.sandboxId))
+    .where(
+      and(
+        eq(agentRuns.executor, "server"),
+        eq(agentRuns.status, "running"),
+        sql`coalesce(
+          (select max(${runEvents.ts}) from ${runEvents} where ${runEvents.runId} = ${agentRuns.id}),
+          ${agentRuns.agentStartedAt},
+          ${agentRuns.startedAt}
+        ) < now() - make_interval(mins => ${quietMin})`,
+      ),
+    );
+
+  const closed: string[] = [];
+  for (const { run, sandbox } of candidates) {
+    let up: boolean;
+    try {
+      const driver = driverForSandbox(ctx.drivers, sandbox);
+      if (!driver.running) continue;
+      up = await driver.running({
+        externalId: sandbox.externalId,
+        provider: driver.provider,
+        workdir: sandbox.workdir,
+        ...(sandbox.imageRef ? { imageRef: sandbox.imageRef } : {}),
+      });
+    } catch (err) {
+      console.warn(`could not ask whether the sandbox of run ${run.id} is up:`, err);
+      continue;
+    }
+    if (up) continue;
+    // Closed first, so the holder's loop, once the abort ends it, loses
+    // the compare and set rather than recording a cancel.
+    await failRunAsInterrupted(ctx, run, { error: SANDBOX_STOPPED_RUN_ERROR, transcript: SANDBOX_STOPPED_RUN_TRANSCRIPT });
+    requestRunAbort(ctx, run.id);
+    closed.push(run.id);
+    ctx.analytics?.captureException(new Error(`run ${run.id} outlived its sandbox`), run.startedBy, run.organizationId, {
+      run_id: run.id,
+      source: "run_sandbox_stopped",
+      role: run.role,
+      provider: sandbox.provider,
+    });
+  }
+  if (closed.length > 0) console.warn(`closed ${closed.length} run(s) whose sandbox had stopped`);
+  return closed;
+}
+
 /**
  * Minutes a server run may sit queued before its run.execute job is
  * presumed lost and sent again.
@@ -3761,6 +3856,8 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
     // rather than a new one, because every scheduled job is a query a
     // poll on a database that should be allowed to sleep.
     await reapStalledRuns(ctx);
+    // And runs whose agent started in a machine that has since stopped.
+    await reapRunsWithStoppedSandbox(ctx);
     // And runs that never got that far: queued, with their job lost.
     await requeueStrandedRuns(ctx);
     // And runs whose server went away without saying so (a machine Fly

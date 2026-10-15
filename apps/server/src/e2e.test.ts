@@ -28,7 +28,13 @@ import {
   stages,
 } from "@bento/db";
 import { SseParser } from "@bento/core";
-import { LocalProcessDriver, WorktreeManager, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
+import {
+  LocalProcessDriver,
+  SANDBOX_STOPPED_MESSAGE,
+  WorktreeManager,
+  type SandboxDriver,
+  type SandboxHandle,
+} from "@bento/sandbox";
 import PgBoss from "pg-boss";
 import pg from "pg";
 import { createApp } from "./app.js";
@@ -688,6 +694,47 @@ test("a run whose sandbox never came up records no provider, and says so once in
   } finally {
     ctx.drivers = previousDrivers;
   }
+});
+
+test("a run is free for a stopped sandbox only when the provider confirms it stopped", { timeout: 90_000 }, async () => {
+  const { project } = await setupProject("Stopped sandbox");
+  const profile = await fakeProfile("stopped-fake");
+  const runEndingWithStopWords = async (machineUp: boolean) => {
+    const feature = await createFeature(project.id, `stop words, machine ${machineUp ? "up" : "down"}`);
+    await app.request(`/api/features/${feature.id}/advance`, { method: "POST" });
+    const driver = new LocalProcessDriver();
+    const exec = driver.exec.bind(driver);
+    driver.exec = (handle, argv, opts) => {
+      if (!argv.join(" ").includes("fake-session-1")) return exec(handle, argv, opts);
+      return (async function* () {
+        yield { kind: "stderr" as const, data: SANDBOX_STOPPED_MESSAGE };
+        yield { kind: "exit" as const, exitCode: -1 };
+      })();
+    };
+    driver.running = async () => machineUp;
+    const previousDrivers = ctx.drivers;
+    ctx.drivers = singleDriver(driver);
+    try {
+      const started = await json<{ id: string }>(
+        await app.request("/api/runs", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ featureId: feature.id, agentProfileId: profile.id, prompt: "hello" }),
+        }),
+      );
+      assert.equal(await waitForRun(started.id), "failed");
+      const [row] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, started.id));
+      return row!;
+    } finally {
+      ctx.drivers = previousDrivers;
+    }
+  };
+
+  const spoofed = await runEndingWithStopWords(true);
+  assert.equal(spoofed.billable, true, "an agent that prints the words while its machine is up is billed");
+  const stopped = await runEndingWithStopWords(false);
+  assert.equal(stopped.billable, false, "a machine the provider says is down is not billed");
+  assert.match(stopped.error ?? "", /^The sandbox stopped while the agent was running/);
 });
 
 test("changes exclude work inherited from the branch point", async () => {

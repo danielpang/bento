@@ -697,6 +697,33 @@ count); an agent that started and went quiet is usually running a long
 command. A text-mode agent (dsh) says nothing until it exits, so once
 `agentStartedAt` is stamped (as it is exec'd) it is never reaped.
 
+## A stop ends the stream itself, and a run outlives its machine by minutes at most
+
+A local swarm planner sat "running" for fifteen hours, past its 120
+minute limit, while three finished workers waited for it: OrbStack's
+VM froze on a full disk and later restarted, and nothing ended the
+run. The Docker driver's durable stream stopped a run by writing an
+exit record into the container for its reader to deliver, so a
+daemon that did not answer, or a container that was gone, meant the
+reader waited forever, and the timeout, Stop, and the watchdog all
+waited with it.
+
+So in `packages/sandbox/src/docker.ts` every Docker API call has a
+deadline (`withDeadline`), a stop that cannot deliver its record
+aborts the reader and reports the reason as the run's exit, and a
+reader that goes quiet asks the driver whether the container is still
+up (`running`, false only when Docker answered "stopped" or "gone").
+On the server, `reapRunsWithStoppedSandbox` (on `runner.reap`) asks
+the same of every running server run that has been quiet for
+`QUIET_RUN_CHECK_MIN`, closes one whose machine is down the way a
+restart closes a run whose agent had started, and aborts whatever loop
+still holds it. A lookup that errors closes nothing. A new driver
+should implement `running` for the same reason. Either way the run
+record opens with `SANDBOX_STOPPED_AGENT_PREFIX`, which is on the
+unbilled list: the machine failed, not the agent, so the person is not
+charged and a swarm's coordinator starts the run again the way it does
+after any sandbox failure.
+
 ## Modal stdin closes through the stream, never closeStdin()
 
 Every Modal run in production hung at its first sandbox file write
