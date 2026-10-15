@@ -1,5 +1,6 @@
 import { after, before, mock, test } from "node:test";
 import assert from "node:assert/strict";
+import { createRequire } from "node:module";
 import net from "node:net";
 import { setTimeout as sleep } from "node:timers/promises";
 import pg from "pg";
@@ -18,6 +19,8 @@ import { createPool, pgBossDatabase, POOL_FROZEN_GAP_MS, postgresPoolConfig } fr
  * closing the client side, exactly as silent as a forgotten peer, and
  * keeps accepting new connections so a reconnect works.
  */
+const plans = createRequire(import.meta.url)("pg-boss/src/plans.js") as { getTime: () => string };
+
 const adminUrl = process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5439/app";
 const testDbName = "pool_recycle_test";
 const upstream = new URL(adminUrl);
@@ -179,6 +182,42 @@ test("pg-boss cron and workers come back after a suspend without an error", asyn
     assert.ok(pool.totalCount <= warm, "the frozen clients were retired, not kept alongside");
   } finally {
     await boss.stop({ close: true, timeout: 2_000 }).catch(() => {});
+    await pool.end();
+  }
+});
+
+test("a pg-boss poll on a wake the clock missed retries on a fresh connection", async () => {
+  // Fly can leave the wall clock at the suspend for seconds after
+  // resume, so the freeze check sees no gap and hands out an idle
+  // socket that died while the machine slept. Two warm clients, both
+  // dead: the retry must not draw the second one.
+  const pool = createPool(proxyUrl, { max: 4 });
+  const retired: string[] = [];
+  let connects = 0;
+  pool.on("connect", () => connects++);
+  pool.on("release", (err) => {
+    if (err instanceof Error) retired.push(err.message);
+  });
+  try {
+    await Promise.all([pool.query("select pg_sleep(0.05)"), pool.query("select pg_sleep(0.05)")]);
+    assert.equal(pool.idleCount, 2);
+    assert.equal(connects, 2);
+
+    blackhole();
+
+    const db = pgBossDatabase(pool, { pollTimeoutMs: 500 });
+    const started = performance.now();
+    const { rows } = await db.executeSql(plans.getTime());
+    const elapsed = performance.now() - started;
+    assert.ok(Number(rows[0].time) > 0, "the poll answered");
+    assert.ok(elapsed >= 450 && elapsed < 5_000, `one short timeout, then a fresh connection: ${elapsed}ms`);
+    assert.equal(connects, 3, "the retry opened a new connection");
+    assert.ok(
+      retired.includes("idle beside a connection whose query timed out"),
+      "the other frozen client was retired with the one that timed out",
+    );
+    assert.equal(pool.totalCount, 1);
+  } finally {
     await pool.end();
   }
 });
