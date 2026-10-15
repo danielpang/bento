@@ -1591,7 +1591,7 @@ test("a reported leaf says in its badge, next step, and worker logs where the pl
   assert.match(reviewing, /class="swarm-review-status" role="status" data-review="reviewing"/);
   const restarting = drawerHtml(node("r", { status: "working", report: "Implemented it.", review: "restarting" }));
   assert.match(restarting, /planner restarting/);
-  assert.match(restarting, /starting the planner again with this report/);
+  assert.match(restarting, /planner agent died before it could review the work\. Bento will restart planner to verify work/);
   // An accepted leaf's landing speaks for it, whatever review the server last sent.
   const accepted = drawerHtml(node("r", { status: "working", report: "Implemented it.", flags: { accepted: true }, review: "reviewing" }));
   assert.doesNotMatch(accepted, /planner reviewing|swarm-review-status/);

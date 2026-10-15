@@ -17,10 +17,10 @@ export function reviewWords(review: LeafReview | null): string {
 export function reviewNextStep(review: LeafReview | null): string {
   if (review === "reviewing") return "The worker finished. The planner is reviewing its report and will accept it or send it back.";
   if (review === "restarting") {
-    return "The worker finished. The planner reviewing its report stopped before it decided, so Bento is starting the planner again with this report.";
+    return "Swarm worker completed but the planner agent died before it could review the work. Bento will restart planner to verify work.";
   }
   if (review === "stopped") {
-    return "The worker finished. The planner reviewing its report was stopped, so the report goes to the planner the next time it starts.";
+    return "The worker finished. The planner was stopped before deciding on this report, so the report goes to the planner the next time it starts.";
   }
   if (review === "undecided") {
     return "The worker finished. The planner was handed its report several times and never decided. Mark it done, retry it, or cancel it.";

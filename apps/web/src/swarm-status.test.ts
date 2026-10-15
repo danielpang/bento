@@ -300,9 +300,9 @@ test("a reported leaf says where its review stands, and only while it waits for 
   assert.equal(nodeReview({ ...reported, report: null, review: "reviewing" }), null, "no report, nothing to review");
   for (const review of ["waiting", "reviewing", "restarting", "stopped", "undecided"] as const) {
     const sentence = reviewNextStep(review);
-    assert.ok(sentence.startsWith("The worker finished."), review);
+    assert.match(sentence, /^(The worker finished\.|Swarm worker completed)/, review);
     assert.doesNotMatch(sentence, /[–—]| - /, `${review} has no dash`);
   }
   assert.match(reviewNextStep("reviewing"), /planner is reviewing/);
-  assert.match(reviewNextStep("restarting"), /starting the planner again/);
+  assert.match(reviewNextStep("restarting"), /Bento will restart planner to verify work/);
 });
