@@ -47,19 +47,34 @@ test("coalesced surfaces a failing pass to its callers and recovers after", asyn
 
 /**
  * The web half of a split deployment drives no runs, orphans included.
- * It answers before touching the database, so a web process that wins
- * the shared reap job costs nothing and strands nothing.
+ * But the reap schedule it shares with the workers can land on it, so
+ * a pass there announces every orphan it finds as a release, which the
+ * workers adopt on, and takes none itself.
  */
-test("a web role process adopts no orphans", async () => {
+test("a web role process announces orphans and adopts none", async () => {
   const { adoptOrphanedRuns } = await import("./run-executor.js");
+  const announced: Array<{ runId: string; action: string }> = [];
+  const rows = [{ id: "run-1", status: "running" }, { id: "run-2", status: "starting" }];
   const ctx = {
     draining: false,
     env: { BENTO_ROLE: "web", BENTO_MAX_CONCURRENT_RUNS: 4 },
+    bus: { emitRunControl: (c: { runId: string; action: string }) => announced.push(c) },
     db: {
       select() {
-        throw new Error("a web process must not look for orphans");
+        return this;
       },
+      from() {
+        return this;
+      },
+      update() {
+        throw new Error("a web process must not adopt");
+      },
+      where: async () => rows,
     },
   } as unknown as import("../context.js").AppContext;
   assert.deepEqual(await adoptOrphanedRuns(ctx), { resumed: 0, closed: 0 });
+  assert.deepEqual(announced, [
+    { runId: "run-1", action: "released" },
+    { runId: "run-2", action: "released" },
+  ]);
 });

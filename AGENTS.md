@@ -572,7 +572,12 @@ any. A run whose heartbeat is older than `RUN_LEASE_MS` is nobody's:
 one lease after boot, and a `released` control) takes it with a compare
 and set on the stale lease, so two servers sweeping at once split the
 orphans, and then follows the agent into its sandbox exactly as a boot
-always has. A process that finds its lease taken disowns the run: it
+always has. It never takes a run this process already holds, however
+stale the row looks: a heartbeat that fell behind is refreshed by the
+next one, and adopting it would put a second loop on a live agent. And
+the run worker releases a run only when its own invocation claimed it,
+because pg-boss retries an expired job while the agent is still
+working, and that retry returns from `executeRun` at once. A process that finds its lease taken disowns the run: it
 keeps consuming the stream (closing it could end the agent's exec
 session under the new owner) but writes nothing and ends nothing, the
 way a draining process treats all of its runs. `yielded(ctx, runId)`
@@ -601,8 +606,10 @@ The two-server test is `run-ownership.e2e.test.ts`.
 Production is two Fly apps on one image (`infra/fly/fly.toml` and
 `infra/fly/fly.worker.toml`):
 the web app with `BENTO_ROLE = "web"`, which registers no run workers
-and never adopts a run, and the worker app with `BENTO_ROLE =
-"worker"`, which has no HTTP service and so is never suspended. The
+and never adopts a run (the shared `runner.reap` job can still land on
+it, so its pass announces each orphan it finds as `released` and a
+worker adopts), and the worker app with `BENTO_ROLE = "worker"`, which
+has no HTTP service and so is never suspended. The
 role is explicit on purpose: a slot count of zero once meant "web",
 and a process whose role was inferred from a number could be
 misconfigured into either half without anyone noticing. Read the role

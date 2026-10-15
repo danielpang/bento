@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, eq, inArray, isNull, lt, or, sql, type SQL } from "drizzle-orm";
+import { and, eq, inArray, isNull, lt, ne, notInArray, or, sql, type SQL } from "drizzle-orm";
 import { agentRuns } from "@bento/db";
 import type { AppContext, RunOwnership } from "../context.js";
 import type { RunControl } from "../events.js";
@@ -292,25 +292,34 @@ export async function releaseOwnedRuns(ctx: AppContext): Promise<string[]> {
 }
 
 /**
+ * The row condition for a run nobody is driving: no owner, or an owner
+ * whose heartbeat is older than the lease. Never one this process holds
+ * in memory, whatever the row says: a heartbeat that fell behind (a
+ * database blip, a stalled event loop) makes this process's own live
+ * run look abandoned, and adopting it would start a second reader on
+ * an agent the first loop is still driving, the very thing the lease
+ * exists to prevent. The next heartbeat refreshes the row; if another
+ * process adopted it meanwhile, the heartbeat is what disowns it here.
+ */
+function orphanCondition(ctx: AppContext, leaseMs: number): SQL {
+  const ownership = ownershipOf(ctx);
+  const stale = or(
+    isNull(agentRuns.ownerId),
+    isNull(agentRuns.ownerHeartbeatAt),
+    lt(agentRuns.ownerHeartbeatAt, sql`now() - make_interval(secs => ${leaseMs / 1000})`),
+  )!;
+  const notMine = or(isNull(agentRuns.ownerId), ne(agentRuns.ownerId, ownership.instanceId))!;
+  const notHeld = ownership.owned.size > 0 ? notInArray(agentRuns.id, [...ownership.owned]) : undefined;
+  return and(eq(agentRuns.executor, "server"), inArray(agentRuns.status, [...HELD_STATUSES]), stale, notMine, notHeld)!;
+}
+
+/**
  * Server runs nobody is driving: no owner on the row, or an owner whose
- * heartbeat is older than the lease. What boot recovery and the reap
- * sweep consider for adoption.
+ * heartbeat is older than the lease, and not one this process holds.
+ * What boot recovery and the reap sweep consider for adoption.
  */
 export async function orphanedRuns(ctx: AppContext, leaseMs: number = RUN_LEASE_MS) {
-  return ctx.db
-    .select()
-    .from(agentRuns)
-    .where(
-      and(
-        eq(agentRuns.executor, "server"),
-        inArray(agentRuns.status, [...HELD_STATUSES]),
-        or(
-          isNull(agentRuns.ownerId),
-          isNull(agentRuns.ownerHeartbeatAt),
-          lt(agentRuns.ownerHeartbeatAt, sql`now() - make_interval(secs => ${leaseMs / 1000})`),
-        ),
-      ),
-    );
+  return ctx.db.select().from(agentRuns).where(orphanCondition(ctx, leaseMs));
 }
 
 /**
@@ -320,21 +329,11 @@ export async function orphanedRuns(ctx: AppContext, leaseMs: number = RUN_LEASE_
  * and does nothing further.
  */
 export async function adoptRun(ctx: AppContext, runId: string, leaseMs: number = RUN_LEASE_MS): Promise<boolean> {
+  if (ownershipOf(ctx).owned.has(runId)) return false; // already this process's, whatever the row says
   const [adopted] = await ctx.db
     .update(agentRuns)
     .set(ownershipClaim(ctx))
-    .where(
-      and(
-        eq(agentRuns.id, runId),
-        eq(agentRuns.executor, "server"),
-        inArray(agentRuns.status, [...HELD_STATUSES]),
-        or(
-          isNull(agentRuns.ownerId),
-          isNull(agentRuns.ownerHeartbeatAt),
-          lt(agentRuns.ownerHeartbeatAt, sql`now() - make_interval(secs => ${leaseMs / 1000})`),
-        ),
-      ),
-    )
+    .where(and(eq(agentRuns.id, runId), orphanCondition(ctx, leaseMs)))
     .returning({ id: agentRuns.id });
   if (!adopted) return false;
   holdRun(ctx, runId);

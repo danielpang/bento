@@ -1043,6 +1043,9 @@ test("every entity route refuses a foreign tenant", async () => {
     // RLS policy can cover, so the matrix is the only thing pinning it.
     ["GET", `/api/runs/${run.id}/events`],
     ["GET", `/api/runs/${swarm.plannerRunId}/events`],
+    // The transcript's earlier pages, behind the same check as the tail.
+    ["GET", `/api/runs/${run.id}/events/before?seq=5`],
+    ["GET", `/api/runs/${swarm.plannerRunId}/events/before?seq=5`],
     ["GET", `/api/board/${project.id}/events`],
     ["GET", `/api/board/${project.id}/events`],
     ["POST", "/api/linear/mappings", { body: JSON.stringify({ linearTeamId: "team-x", projectId: project.id }) }],

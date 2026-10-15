@@ -2809,31 +2809,58 @@ export async function recoverInterruptedRuns(ctx: AppContext): Promise<void> {
  */
 export async function adoptOrphanedRuns(ctx: AppContext): Promise<{ resumed: number; closed: number }> {
   if (ctx.draining) return { resumed: 0, closed: 0 };
+  const orphans = await orphanedRuns(ctx);
   // The web half of a split deployment drives no runs, orphans
   // included: Fly may suspend it, and a run it held would be stranded.
-  if (!drivesRuns(ctx.env)) return { resumed: 0, closed: 0 };
-  const orphans = await orphanedRuns(ctx);
+  // But the reap schedule is one pg-boss job shared by every process,
+  // and the web app wins it as often as a worker does; a pass that
+  // found orphans and kept quiet would leave them waiting for a pass a
+  // worker wins. So it announces each one the way a shutting down
+  // server does, and the workers adopt on hearing it.
+  if (!drivesRuns(ctx.env)) {
+    for (const orphan of orphans) ctx.bus.emitRunControl({ runId: orphan.id, action: "released" });
+    if (orphans.length > 0) console.warn(`announced ${orphans.length} orphaned run(s) for a worker to adopt`);
+    return { resumed: 0, closed: 0 };
+  }
 
   let closed = 0;
   let resuming = 0;
   for (const orphan of orphans) {
     if (ctx.draining) break;
     if (!(await adoptRun(ctx, orphan.id))) continue; // another server got there first
-    // The sandbox is found through the run's own link, never by
-    // external id: sandboxes has no unique index on external_id, so a
-    // name lookup could hand back another row for the same sprite.
-    const sandbox =
-      orphan.status === "running" && orphan.sandboxId
-        ? (await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, orphan.sandboxId)).limit(1))[0]
-        : undefined;
+    // From here the run is held and heartbeated by this process, so
+    // nothing below may leave without either resuming it or letting it
+    // go: a throw that kept the hold would keep every other server off
+    // a run nobody is driving, for as long as this process lives.
+    let sandbox: typeof sandboxes.$inferSelect | undefined;
     let resumeDriver: SandboxDriver | undefined;
-    if (sandbox) {
-      try {
-        resumeDriver = driverForSandbox(ctx.drivers, sandbox);
-      } catch (err) {
-        console.warn(`run ${orphan.id} cannot resume:`, err);
-        resumeDriver = undefined;
+    try {
+      // The sandbox is found through the run's own link, never by
+      // external id: sandboxes has no unique index on external_id, so a
+      // name lookup could hand back another row for the same sprite.
+      sandbox =
+        orphan.status === "running" && orphan.sandboxId
+          ? (await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, orphan.sandboxId)).limit(1))[0]
+          : undefined;
+      if (sandbox) {
+        try {
+          resumeDriver = driverForSandbox(ctx.drivers, sandbox);
+        } catch (err) {
+          console.warn(`run ${orphan.id} cannot resume:`, err);
+          resumeDriver = undefined;
+        }
       }
+    } catch (err) {
+      console.error(`could not look up the sandbox of orphaned run ${orphan.id}:`, err);
+      ctx.analytics?.captureException(err, orphan.startedBy, orphan.organizationId, {
+        run_id: orphan.id,
+        source: "resume_interrupted_lookup",
+      });
+      // Let go rather than close: the lookup failing usually means the
+      // database is unwell, and the close would fail the same way. The
+      // lease lapses and the next sweep, here or elsewhere, tries again.
+      releaseRun(ctx, orphan.id);
+      continue;
     }
     if (!sandbox || !resumeDriver?.attach) {
       try {
@@ -3655,6 +3682,14 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
   for (let slot = 0; slot < runSlots(ctx.env); slot++) {
     const workerId = await ctx.boss.work<{ runId: string }>("run.execute", { batchSize: 1, pollingIntervalSeconds: RUN_WORKER_POLL_SECONDS }, async (jobs) => {
       for (const job of jobs) {
+        // A job for a run this process already drives (pg-boss expired
+        // the first job and retried it while the agent was still
+        // working) returns from executeRun at once, and must not let
+        // go of the run on its way out: that would stop the heartbeat,
+        // let the lease lapse under a live agent, and have a sweep
+        // start a second loop on it. Only the invocation that took the
+        // run releases it.
+        const heldBefore = ownershipOf(ctx).owned.has(job.data.runId);
         try {
           await executeRun(ctx, job.data.runId);
         } catch (err) {
@@ -3668,7 +3703,7 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
         } finally {
           // However the run ended, this process no longer holds it, so
           // the heartbeat stops renewing its lease.
-          releaseRun(ctx, job.data.runId);
+          if (!heldBefore) releaseRun(ctx, job.data.runId);
         }
       }
     });
