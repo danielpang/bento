@@ -19,6 +19,7 @@ import type { Auth } from "./auth.js";
 import type { SecretBox } from "./secrets.js";
 import { EventBus } from "./events.js";
 import type { Env } from "./env.js";
+import type { DiskSpaceMonitor } from "./disk-space.js";
 
 export const LOCAL_USER_ID = "local-user";
 
@@ -156,6 +157,8 @@ export interface AppContext {
    * until a project can name its own.
    */
   drivers: SandboxDrivers;
+  /** Free space on the disk local sandboxes write to. Local mode only. */
+  diskSpace?: DiskSpaceMonitor;
   worktrees: WorktreeManager;
   /** Server-owned GitHub App; an installation is selected per organization. */
   githubApp?: GitHubApp;

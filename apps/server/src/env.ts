@@ -30,6 +30,12 @@ const envSchema = z.object({
    * docker or local-process deployment is that default.
    */
   BENTO_SANDBOX_DRIVER: z.enum(["docker", "local-process", "sprite"]).default("docker"),
+  /**
+   * Local mode warns when the disk sandboxes write to has less free
+   * space than this, in GB. A full disk stops Docker and every agent
+   * running in it. 0 turns the warning off.
+   */
+  BENTO_LOW_DISK_WARNING_GB: z.coerce.number().min(0).default(10),
   /** Required when BENTO_SANDBOX_DRIVER=sprite. */
   SPRITES_TOKEN: z.string().optional(),
   SPRITES_REGION: z.string().optional(),

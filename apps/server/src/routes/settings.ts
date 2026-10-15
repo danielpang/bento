@@ -136,6 +136,11 @@ export function settingsRoutes(
      * Whether Browse can open a folder dialog here. Only local mode,
      * where the server and the person share a machine and a screen.
      */
+    .get("/disk-space", async (c) => {
+      if (!localOnly || !ctx.diskSpace) return c.json({ error: "not found" }, 404);
+      const status = await ctx.diskSpace.check();
+      return c.json({ warning: status?.warning ?? null });
+    })
     .get("/folder-picker", async (c) => {
       if (!localOnly || !isLoopbackHost(c.req.url) || (await inContainer())) return c.json({ available: false });
       return c.json({ available: (await pickerCommand()) !== null });

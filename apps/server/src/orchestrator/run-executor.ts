@@ -350,6 +350,9 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     return;
   }
 
+  const disk = await ctx.diskSpace?.check().catch(() => null);
+  if (disk?.warning) await saySystem(disk.warning);
+
   let handle: SandboxHandle;
   let prepared: PreparedRepository[] = [];
   /**

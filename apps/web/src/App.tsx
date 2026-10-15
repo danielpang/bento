@@ -47,6 +47,7 @@ import {
 import { NavMenu, ConfigureMenu, type NavAction } from "./components/NavMenu.js";
 import { CommandMenu } from "./components/CommandMenu.js";
 import { OutOfCompute } from "./components/OutOfCompute.js";
+import { LowDiskSpace } from "./components/LowDiskSpace.js";
 import { SignIn } from "./components/SignIn.js";
 import { NewFeatureDialog, NewProjectDialog, PromptDialog } from "./components/PromptDialog.js";
 import { ProjectPicker } from "./components/ProjectPicker.js";
@@ -1383,6 +1384,7 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
       {/* The swarm page carries its own, above its own header, so a
           swarm does not stack two identical banners. */}
       {!swarming && <OutOfCompute />}
+      <LowDiskSpace />
 
       {!boardPending && setupNeeded && (
         <div className="setup-prompt">
