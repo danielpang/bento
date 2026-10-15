@@ -61,9 +61,19 @@ function useSecrets(client: BentoClient) {
   return { secrets, canManage, loadFailed, reload };
 }
 
-export function ProviderKeysCard({ client }: { client: BentoClient }) {
+export function ProviderKeysCard({
+  client,
+  onSecrets,
+}: {
+  client: BentoClient;
+  /** Told what is saved after every read, so a host can say whether a key is set. */
+  onSecrets?: (names: string[]) => void;
+}) {
   const toast = useToast();
   const { secrets, canManage, loadFailed, reload } = useSecrets(client);
+  useEffect(() => {
+    if (secrets) onSecrets?.(secrets.map((secret) => secret.name));
+  }, [secrets, onSecrets]);
   const [tab, setTab] = useState<(typeof PROVIDER_TABS)[number]["id"]>("anthropic");
   /** Draft values per credential name, so switching tabs loses nothing. */
   const [inputs, setInputs] = useState<Record<string, string>>({});

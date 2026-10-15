@@ -18,3 +18,10 @@ export const PROVIDER_TABS = [
   { id: "ollama", label: "Ollama", keys: ["OLLAMA_API_KEY", "OLLAMA_BASE_URL"] },
   { id: "vercel", label: "Vercel AI Gateway", keys: ["AI_GATEWAY_API_KEY"] },
 ] as const;
+
+/** The API key each provider tab is lit by: saving any one lets an agent run. */
+export const PROVIDER_API_KEYS: readonly string[] = PROVIDER_TABS.map((entry) => entry.keys[0]);
+
+export function hasProviderKey(names: readonly string[]): boolean {
+  return names.some((name) => PROVIDER_API_KEYS.includes(name));
+}

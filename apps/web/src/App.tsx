@@ -55,7 +55,7 @@ import { identifyUser, resetUser, sessionIdentityChange } from "./posthog.js";
 import { desktop } from "./desktop.js";
 import { readProjectSelection, rememberProjectSelection } from "./project-selection.js";
 import { loadBoardPipeline } from "./board-shape.js";
-import type { OnboardingStep } from "./components/OnboardingWalkthrough.js";
+import { ONBOARDING_STEPS, type OnboardingStep } from "./components/OnboardingWalkthrough.js";
 import { REPOSITORY_SETUP_ACTION, REPOSITORY_SETUP_MESSAGE } from "./repository-setup.js";
 
 /*
@@ -592,7 +592,7 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
   const [onboardingStep, setOnboardingStep] = useState<OnboardingStep>(() => {
     try {
       const saved = sessionStorage.getItem("bento.onboarding-step");
-      return saved === "github" || saved === "agents" || saved === "pipeline" ? saved : "repository";
+      return ONBOARDING_STEPS.find((id) => id === saved) ?? "repository";
     } catch {
       return "repository";
     }

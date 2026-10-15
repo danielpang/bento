@@ -10511,15 +10511,18 @@ a.swarm-plan-source-name:hover {
   margin: 4px 0 0;
 }
 
-/* Onboarding walkthrough: the steps as a row of four tiles above the
-   step that is open, folding to two by two on a phone. */
+/* Onboarding walkthrough: the steps as a row of five tiles above the
+   step that is open, folding to three, then two, on narrower screens. */
 .onboarding-steps {
   list-style: none;
   margin: 4px 0 0;
   padding: 0;
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 6px;
+}
+@media (max-width: 900px) {
+  .onboarding-steps { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 .onboarding-step {
   display: flex;
