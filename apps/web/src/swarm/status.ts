@@ -1,4 +1,32 @@
-import type { NodeType, SwarmStatus, TaskAttention, TaskStatus } from "./types.js";
+import type { LeafReview, NodeType, SwarmStatus, TaskAttention, TaskStatus } from "./types.js";
+
+/** A reported leaf's badge, by where its review stands. The terminal uses the same words. */
+export function reviewWords(review: LeafReview | null): string {
+  if (review === "reviewing") return "planner reviewing";
+  if (review === "restarting") return "planner restarting";
+  if (review === "stopped") return "planner stopped";
+  if (review === "undecided") return "not reviewed";
+  return "waiting for review";
+}
+
+/**
+ * What happens next to a reported leaf, in a sentence for the drawer
+ * and the end of its worker logs, so a finished worker never reads as
+ * one nobody is looking at.
+ */
+export function reviewNextStep(review: LeafReview | null): string {
+  if (review === "reviewing") return "The worker finished. The planner is reviewing its report and will accept it or send it back.";
+  if (review === "restarting") {
+    return "The worker finished. The planner reviewing its report stopped before it decided, so Bento is starting the planner again with this report.";
+  }
+  if (review === "stopped") {
+    return "The worker finished. The planner reviewing its report was stopped, so the report goes to the planner the next time it starts.";
+  }
+  if (review === "undecided") {
+    return "The worker finished. The planner was handed its report several times and never decided. Mark it done, retry it, or cancel it.";
+  }
+  return "The worker finished. Its report is waiting for the planner, which reviews it as soon as it is free.";
+}
 
 /**
  * What a status looks like, and what it is called.
@@ -130,6 +158,7 @@ export function diagramTaskWords(
   nodeType: NodeType,
   agentActive = false,
   landing: "waiting" | "failed" | "review" | null = null,
+  review: LeafReview | null = null,
 ): string {
   // An agent in the sandbox is working, whatever the row's own status
   // says. A resolver keeps the leaf landed, and a subplanner keeps a
@@ -141,7 +170,7 @@ export function diagramTaskWords(
   if (landing === "waiting") return "waiting to land";
   // Reported and not yet accepted: the worker finished, and the
   // planner has the report. Not pending, which reads as nobody started.
-  if (landing === "review") return "waiting for review";
+  if (landing === "review") return reviewWords(review);
   if (nodeType === "plan" && status === "failed") return "stalled";
   if (status === "done") return "completed";
   if (status === "open" || status === "assigned" || status === "working") return "pending";
@@ -160,11 +189,12 @@ export function diagramTaskTone(
   nodeType: NodeType,
   agentActive = false,
   landing: "waiting" | "failed" | "review" | null = null,
+  review: LeafReview | null = null,
 ): Tone {
   if (agentActive) return "running";
   if (landing === "failed") return "failed";
   if (landing === "waiting") return taskTone("landed");
-  if (landing === "review") return "idle";
+  if (landing === "review") return review === "reviewing" ? "running" : "idle";
   if (nodeType === "plan" && status === "failed") return "gated";
   if (status === "open" || status === "assigned" || status === "working") return "idle";
   return taskTone(status);

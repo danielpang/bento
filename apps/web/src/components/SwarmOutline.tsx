@@ -110,8 +110,8 @@ export function SwarmOutline({
                 <span className="status swarm-row-status">
                   {row.agentActive
                     ? <AgentOrb label="Agent working" />
-                    : <span className="dot" data-state={diagramTaskTone(row.status, row.nodeType, row.agentActive, row.landing)} />}
-                  {diagramTaskWords(row.status, row.nodeType, row.agentActive, row.landing)}
+                    : <span className="dot" data-state={diagramTaskTone(row.status, row.nodeType, row.agentActive, row.landing, row.review)} />}
+                  {diagramTaskWords(row.status, row.nodeType, row.agentActive, row.landing, row.review)}
                 </span>
                 {/* Attention is its own column, never folded into the
                     status: a worker running long is still working. */}

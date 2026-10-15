@@ -69,6 +69,14 @@ export type TaskAttention =
   | "plan_limit";
 
 /**
+ * Where a reported leaf stands with the planner, as the server reads it
+ * from the run the report was handed to: not handed over yet, being
+ * reviewed, handed to a planner that failed (a new one gets it), handed
+ * to a planner a person stopped, or handed over as often as it will be.
+ */
+export type LeafReview = "waiting" | "reviewing" | "restarting" | "stopped" | "undecided";
+
+/**
  * Measured is what a tool reported. Estimated is priced from reported
  * tokens. The assumed field is retained for older wire data, and the
  * console never treats it as spend.
@@ -206,6 +214,8 @@ export interface SwarmTask {
    * Absent (a fixture, an older server) reads as false.
    */
   canRetryLanding?: boolean;
+  /** Where its report stands with the planner. Absent (a fixture, an older server) reads as not handed over. */
+  review?: LeafReview | null;
 }
 
 /** A question the planner stopped to ask. One at a time. */

@@ -1574,13 +1574,27 @@ test("a reported leaf waits for the planner's review rather than reading as pend
   const reported = node("r", { status: "working", report: "Implemented it." });
   const html = drawerHtml(reported);
   assert.match(html, /waiting for review/);
-  assert.match(html, /Waiting for the planner to review the report\./);
+  assert.match(html, /Its report is waiting for the planner/);
   assert.doesNotMatch(html, /pending/);
   assert.doesNotMatch(html, /Waiting for an agent to start/);
   // With its agent still in the sandbox it is working, whatever it reported.
   const model = buildSwarmModel([reported], { now: NOW, runningTaskIds: new Set(["r"]) });
   const live = renderToStaticMarkup(createElement(SwarmNodeDrawer, { task: reported, node: model.byId.get("r")!, onClose: () => {} }));
   assert.doesNotMatch(live, /waiting for review/);
+  assert.doesNotMatch(live, /swarm-review-status/);
+});
+
+test("a reported leaf says in its badge, next step, and worker logs where the planner is with it", () => {
+  const reviewing = drawerHtml(node("r", { status: "working", report: "Implemented it.", review: "reviewing" }));
+  assert.match(reviewing, /planner reviewing/);
+  assert.match(reviewing, /The planner is reviewing its report/);
+  assert.match(reviewing, /class="swarm-review-status" role="status" data-review="reviewing"/);
+  const restarting = drawerHtml(node("r", { status: "working", report: "Implemented it.", review: "restarting" }));
+  assert.match(restarting, /planner restarting/);
+  assert.match(restarting, /starting the planner again with this report/);
+  // An accepted leaf's landing speaks for it, whatever review the server last sent.
+  const accepted = drawerHtml(node("r", { status: "working", report: "Implemented it.", flags: { accepted: true }, review: "reviewing" }));
+  assert.doesNotMatch(accepted, /planner reviewing|swarm-review-status/);
 });
 
 test("a failed leaf is never waiting to land, and a conflict the resolver gave up on says it already tried", () => {

@@ -14,6 +14,7 @@ import {
   diagramTaskTone,
   diagramTaskWords,
   isAttention,
+  reviewNextStep,
   taskActionRefusal,
   type TaskAction,
 } from "../swarm/status.js";
@@ -270,6 +271,7 @@ export function SwarmNodeDrawer({
   // A branch that has not landed, which marking the task done gives up.
   const unlandedBranch = task.nodeType === "leaf" && (node.landing !== null || task.status === "landed");
   const assignedWaiting = task.nodeType === "leaf" && task.status === "assigned" && !task.assignedRunId && !startingOver;
+  const reviewNote = task.nodeType === "leaf" && node.landing === "review" && !node.agentActive ? reviewNextStep(node.review) : null;
   const primaryAction = canStartOver && task.status === "failed" ? "startOver"
     : canRetryLanding ? "landing"
     : canFixForward ? "fix"
@@ -284,8 +286,7 @@ export function SwarmNodeDrawer({
     : mergeQueueFailure ? landingFailure
     : task.nodeType === "leaf" && node.landing === "waiting"
       ? "Waiting to land. If the sandbox holding this branch is asleep, Bento starts it first, which can take a minute."
-    : task.nodeType === "leaf" && node.landing === "review" && !node.agentActive
-      ? "Waiting for the planner to review the report."
+    : reviewNote ? reviewNote
     : checksFailed ? "A new attempt starts when a worker is free."
     : assignedWaiting && startBlocker ? startBlocker
     : primaryAction === "startOver" ? "Start this task over in a new sandbox, or open More actions for other options."
@@ -343,8 +344,8 @@ export function SwarmNodeDrawer({
           <span className="status swarm-node-header-status">
             {node.agentActive
               ? <AgentOrb label="Agent working" />
-              : <span className="dot" data-state={diagramTaskTone(task.status, task.nodeType, node.agentActive, node.landing)} />}
-            {diagramTaskWords(task.status, task.nodeType, node.agentActive, node.landing)}
+              : <span className="dot" data-state={diagramTaskTone(task.status, task.nodeType, node.agentActive, node.landing, node.review)} />}
+            {diagramTaskWords(task.status, task.nodeType, node.agentActive, node.landing, node.review)}
           </span>
           <button className="btn btn-ghost feature-close" onClick={onClose} aria-label="Close" title="Close (Esc)">
             <span aria-hidden="true">×</span>
@@ -680,6 +681,12 @@ export function SwarmNodeDrawer({
               )}
               {(typeof transcript === "function" ? transcript(setWorkerActivity) : transcript) ??
                 <p className="muted">Worker logs will appear here when this task starts.</p>}
+              {reviewNote && (
+                <div className="swarm-review-status" role="status" data-review={node.review ?? "waiting"}>
+                  {node.review === "reviewing" ? <AgentOrb label="Planner reviewing" /> : <span className="dot" data-state="idle" />}
+                  <span>{reviewNote}</span>
+                </div>
+              )}
             </section>
             {canMessage && (
               <div className="swarm-node-compose composer-dock">

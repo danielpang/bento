@@ -680,6 +680,7 @@ export interface WireTask {
   endedAt: string | null;
   /** The landing retry route's own answer for this task. Absent from an older server. */
   canRetryLanding?: boolean;
+  review?: SwarmTask["review"];
 }
 
 /** One row of the merge queue, as the detail sends it. */
@@ -912,6 +913,7 @@ export function toTask(row: WireTask): SwarmTask {
     endedAt: row.endedAt,
     commits: [],
     canRetryLanding: row.canRetryLanding === true,
+    review: row.review ?? null,
   };
 }
 

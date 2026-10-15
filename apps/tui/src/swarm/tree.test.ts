@@ -93,6 +93,21 @@ test("a node waiting on a person says what it is waiting for", () => {
   assert.deepEqual(lines, ["└─ ▸ Refund path  working  running long"]);
 });
 
+test("a reported leaf says where its review stands", () => {
+  const lines = swarmTreeLines(
+    detail([
+      task({ id: "a", title: "One", status: "working", review: "waiting", position: 0 }),
+      task({ id: "b", title: "Two", status: "working", review: "reviewing", position: 1 }),
+      task({ id: "c", title: "Three", status: "working", review: "restarting", position: 2 }),
+    ]),
+  );
+  assert.deepEqual(lines, [
+    "├─ ▸ One  waiting for review",
+    "├─ ▸ Two  planner reviewing",
+    "└─ ▸ Three  planner restarting",
+  ]);
+});
+
 test("a follow up subtree is labelled with what it was reopened for", () => {
   const lines = swarmTreeLines(
     detail([

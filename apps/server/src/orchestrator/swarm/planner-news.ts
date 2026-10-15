@@ -220,3 +220,43 @@ export async function handLeafToPlanner(tx: TaskWriter, hand: LeafHandover): Pro
     detail: hand.detail,
   });
 }
+
+/**
+ * Where a reported leaf's review stands, so the console can say what
+ * happens after its worker finished rather than show a quiet node.
+ *
+ * Mirrors PLANNER_NOT_TOLD and PLANNER_RETELLS_EXHAUSTED, so the words
+ * follow what the coordinator will do: "waiting" is not handed over yet
+ * (or handed back after a turn that did not decide it), "reviewing" is a
+ * planner that is queued or running with it, "restarting" is a planner
+ * that failed with it, whose news the next wake carries, "stopped" is a
+ * planner a person stopped, whose news rides along with the next wake,
+ * and "undecided" is a report whose re-tells are spent.
+ */
+export type LeafReview = "waiting" | "reviewing" | "restarting" | "stopped" | "undecided";
+
+export function leafReview(
+  task: Pick<typeof swarmTasks.$inferSelect, "nodeType" | "status" | "report" | "flags">,
+  reviewerStatus: string | null,
+): LeafReview | null {
+  if (task.nodeType !== "leaf" || task.status !== "working") return null;
+  if (typeof task.report !== "string" || task.report.trim() === "") return null;
+  const flags = task.flags ?? {};
+  if (flags.accepted === true || typeof flags.landingError === "string") return null;
+  const told = typeof flags.plannerToldAt === "string" && flags.plannerToldAt !== "";
+  if (!told || reviewerStatus === null) return "waiting";
+  if (reviewerStatus === "queued" || reviewerStatus === "starting" || reviewerStatus === "running") return "reviewing";
+  const retells = typeof flags.plannerRetells === "number" ? flags.plannerRetells : 0;
+  if (retells >= MAX_PLANNER_RETELLS) return "undecided";
+  if (reviewerStatus === "failed") return "restarting";
+  if (reviewerStatus === "cancelled") return "stopped";
+  return "waiting";
+}
+
+const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** The planner run a leaf's report was handed to, when its flag names one. */
+export function leafReviewerId(flags: Record<string, unknown> | null): string | null {
+  const id = flags?.plannerToldBy;
+  return typeof id === "string" && RUN_ID.test(id) ? id : null;
+}

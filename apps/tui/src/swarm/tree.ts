@@ -50,6 +50,15 @@ const WORDS: Record<SwarmTaskRow["status"], string> = {
   cancelled: "cancelled",
 };
 
+/** A reported leaf, by where its review stands, in the console's words. */
+const REVIEW: Record<NonNullable<SwarmTaskRow["review"]>, string> = {
+  waiting: "waiting for review",
+  reviewing: "planner reviewing",
+  restarting: "planner restarting",
+  stopped: "planner stopped",
+  undecided: "not reviewed",
+};
+
 /** What a node is waiting for a person about, when it is. */
 const ATTENTION: Record<string, string> = {
   long_running: "running long",
@@ -171,7 +180,7 @@ function nodeLine(
   if (task.nodeType === "plan") {
     parts.push(`${rolled.done}/${rolled.total}`);
   } else {
-    parts.push(working.has(task.id) ? "working" : WORDS[task.status]);
+    parts.push(working.has(task.id) ? "working" : task.review ? REVIEW[task.review] : WORDS[task.status]);
   }
   const attention = task.attention ? (ATTENTION[task.attention] ?? "needs you") : null;
   if (attention) parts.push(attention);
