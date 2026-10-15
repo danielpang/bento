@@ -84,7 +84,7 @@ export async function runMigrations(databaseUrl: string): Promise<void> {
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
-  // Session advisory lock: a transaction pooler can leak it.
+  // Run migration through direct connection.
   const url =
     process.env.BENTO_DIRECT_DATABASE_URL ?? process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5439/app";
   runMigrations(url).catch((err) => {
