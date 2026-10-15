@@ -598,7 +598,8 @@ publish. The wire carries ids, never message text: the row is the
 message, and the holder claims it through its live session's `pump`.
 The two-server test is `run-ownership.e2e.test.ts`.
 
-Production is two Fly apps on one image (`docs/deploying-hosted.md`):
+Production is two Fly apps on one image (`infra/fly/fly.toml` and
+`infra/fly/fly.worker.toml`):
 the web app with `BENTO_MAX_CONCURRENT_RUNS = 0`, which registers no
 run workers and never adopts a run, and the worker app, which has no
 HTTP service and so is never suspended. `enqueueRun` publishes a
