@@ -1178,7 +1178,7 @@ export function mergeAgentExecEnv(
  * exactly the way a normal run does.
  */
 async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Promise<void> {
-  const { runId, subject, repoRows, prepared, handle, branch, publisher, argv, result, emitBoard } = settlement;
+  const { driver, runId, subject, repoRows, prepared, handle, branch, publisher, argv, result, emitBoard } = settlement;
   const { profile } = subject;
   const runRole = subject.run.role;
   const saySystem = (text: string) =>
@@ -1292,7 +1292,10 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
       await subject.settle(ctx);
       return;
     }
-    if ((outcome.error ?? "").includes(SANDBOX_STOPPED_MESSAGE)) {
+    // The error's tail is the agent's own output, so the words alone
+    // could be printed to get a run for free: the provider must also
+    // say the machine is down. A lookup that fails confirms nothing.
+    if ((outcome.error ?? "").includes(SANDBOX_STOPPED_MESSAGE) && (await sandboxConfirmedDown(driver, handle))) {
       console.error(`the sandbox of run ${runId} stopped under its agent:`, outcome.error);
       await finishRun(ctx, runId, { ...outcome, error: SANDBOX_STOPPED_RUN_ERROR }, exitCode);
       emitBoard("failed");
@@ -3127,6 +3130,15 @@ export async function reapStalledRuns(ctx: AppContext, stallMin: number = STALLE
   }
   if (closed.length > 0) console.warn(`closed ${closed.length} run(s) that stalled before their agent started`);
   return closed;
+}
+
+async function sandboxConfirmedDown(driver: SandboxDriver, handle: SandboxHandle): Promise<boolean> {
+  if (!driver.running) return false;
+  try {
+    return !(await driver.running(handle));
+  } catch {
+    return false;
+  }
 }
 
 /** Minutes a running agent may go without a transcript line before its machine is asked whether it is still up. */
