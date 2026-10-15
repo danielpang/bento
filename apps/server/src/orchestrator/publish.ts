@@ -86,6 +86,63 @@ export interface PublishedPullRequest {
 }
 
 /**
+ * The organization's GitHub connection cannot read this repository.
+ *
+ * The run stops before a machine is made. It is the project's
+ * configuration, so callers do not send it to error tracking: an
+ * exception there opens an issue for something a token or a GitHub
+ * App install fixes.
+ */
+export class RepositoryAccessError extends Error {
+  readonly label: string;
+
+  constructor(label: string, message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "RepositoryAccessError";
+    this.label = label;
+  }
+}
+
+export function isRepositoryAccessError(err: unknown): err is RepositoryAccessError {
+  return err instanceof RepositoryAccessError || (err instanceof Error && err.name === "RepositoryAccessError");
+}
+
+/** What to tell a person when GitHub will not show the repository at all. */
+export function inaccessibleRepositoryMessage(label: string): string {
+  return (
+    `${label} could not be cloned. GitHub says the repository was not found. ` +
+    "That is also what GitHub says when this organization's GitHub connection cannot see a private repository, " +
+    "and when the repository was renamed or deleted. Check it under Settings, Repositories. " +
+    "Then save a GitHub token under Settings, GitHub, or install the GitHub App on the repository, and run again."
+  );
+}
+
+/** What to tell a person when the connection can see the repository but cannot read its git data. */
+export function repositoryContentsMessage(label: string): string {
+  return (
+    `${label} could not be cloned because this organization's GitHub connection cannot read the repository. ` +
+    "Grant the GitHub App Contents access, or save a token that can read the repository under Settings, GitHub, and run again."
+  );
+}
+
+/**
+ * The URL a seed clone is willing to fetch.
+ *
+ * GitHub's own clone URL is rewritten to https so a ssh form cannot
+ * pick up a key on this host. A loopback URL or an absolute path is a
+ * test standing in for that host. Anything else is refused: the seed
+ * must not follow a clone URL that is not the repository GitHub named.
+ */
+export function cloneUrlForSeed(cloneUrl: string, fullName: string): string {
+  const parsed = parseRepoUrl(cloneUrl);
+  if (parsed && /github\.com/i.test(cloneUrl)) {
+    return `https://github.com/${parsed.owner}/${parsed.repo}.git`;
+  }
+  if (cloneUrl.startsWith("/") || /^https?:\/\/(127\.0\.0\.1|localhost)(:|\/)/.test(cloneUrl)) return cloneUrl;
+  throw new Error(`GitHub returned an unexpected clone URL for ${fullName}`);
+}
+
+/**
  * Downloads a private repository on the trusted host and strips
  * credentials before transfer.
  *
@@ -94,36 +151,99 @@ export interface PublishedPullRequest {
  * longer exists on the remote the clone falls back to the remote's real
  * default, so the caller must record which branch it got and hand that
  * name to the sandbox.
+ *
+ * The clone URL and the token's repository id come from GitHub when
+ * the publisher can ask. The id stored on the project row is what the
+ * repository was when it was connected. After a rename, or when that
+ * id no longer matches the URL, a token limited to the stored id
+ * cannot see the URL and git says the repository was not found. Asking
+ * first clones the repository GitHub returns now. When GitHub will not
+ * show it, this stops before git runs.
  */
 export async function createRepositorySeed(
-  publisher: GitHubPublisher,
+  publisher: Pick<GitHubPublisher, "pushToken" | "resolveRepository">,
   repoUrl: string,
   githubRepoId: number | undefined,
   baseBranch: string,
 ): Promise<{ bundle: Buffer; baseBranch: string }> {
   const parsed = parseRepoUrl(repoUrl);
   if (!parsed) throw new Error(`not a GitHub remote: ${repoUrl}`);
-  const remote = `https://github.com/${parsed.owner}/${parsed.repo}.git`;
-  const token = await publisher.pushToken(githubRepoId);
+  const storedLabel = `${parsed.owner}/${parsed.repo}`;
+  const visible = publisher.resolveRepository
+    ? await publisher.resolveRepository({ owner: parsed.owner, repo: parsed.repo })
+    : undefined;
+  if (visible === null) throw new RepositoryAccessError(storedLabel, inaccessibleRepositoryMessage(storedLabel));
+  if (visible && !visible.canClone) {
+    throw new RepositoryAccessError(visible.fullName, repositoryContentsMessage(visible.fullName));
+  }
+
+  const remote = visible
+    ? cloneUrlForSeed(visible.cloneUrl, visible.fullName)
+    : `https://github.com/${parsed.owner}/${parsed.repo}.git`;
+  const label = visible?.fullName ?? storedLabel;
+  const tokenRepoId = visible?.id ?? githubRepoId;
   const root = await mkdtemp(path.join(tmpdir(), "bento-seed-"));
   const checkout = path.join(root, "checkout");
   const home = path.join(root, "home");
   const bundlePath = path.join(root, "repository.bundle");
   await mkdir(home);
-  const env = trustedGitEnv(home, token);
   try {
-    const resolvedBranch = await cloneBaseBranch({
+    const { branch: resolvedBranch, env } = await cloneSeedCheckout(publisher, {
       remote,
-      label: `${parsed.owner}/${parsed.repo}`,
+      label,
       baseBranch,
       checkout,
-      env,
-      fallbackToDefaultBranch: true,
+      home,
+      tokenRepoId,
     });
     await run("git", ["-C", checkout, "bundle", "create", bundlePath, `refs/heads/${resolvedBranch}`], { env });
     return { bundle: await readFile(bundlePath), baseBranch: resolvedBranch };
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Clones the seed, and retries once with the installation-wide token
+ * when a token limited to one repository id cannot see the remote.
+ *
+ * A personal access token ignores the id, so the second call is the
+ * same credential and is not asked to clone again. When GitHub has
+ * already said it will not show the repository, the clone is not
+ * attempted.
+ */
+async function cloneSeedCheckout(
+  publisher: Pick<GitHubPublisher, "pushToken">,
+  args: {
+    remote: string;
+    label: string;
+    baseBranch: string;
+    checkout: string;
+    home: string;
+    tokenRepoId: number | undefined;
+  },
+): Promise<{ branch: string; env: NodeJS.ProcessEnv }> {
+  const token =
+    args.tokenRepoId === undefined ? await publisher.pushToken() : await publisher.pushToken(args.tokenRepoId);
+  const clone = (credential: string) => {
+    const env = trustedGitEnv(args.home, credential);
+    return cloneBaseBranch({
+      remote: args.remote,
+      label: args.label,
+      baseBranch: args.baseBranch,
+      checkout: args.checkout,
+      env,
+      fallbackToDefaultBranch: true,
+    }).then((branch) => ({ branch, env }));
+  };
+  try {
+    return await clone(token);
+  } catch (err) {
+    if (args.tokenRepoId === undefined || !isRepositoryAccessError(err)) throw err;
+    const broader = await publisher.pushToken();
+    if (broader === token) throw err;
+    await rm(args.checkout, { recursive: true, force: true });
+    return clone(broader);
   }
 }
 
@@ -887,7 +1007,7 @@ export async function cloneBaseBranch(args: {
     return args.baseBranch;
   } catch (err) {
     const access = inaccessibleCloneExplanation(args.label, args.remote, err);
-    if (access) throw new Error(access, { cause: cloneFailureCause(err) });
+    if (access) throw new RepositoryAccessError(args.label, access, { cause: cloneFailureCause(err) });
     if (!missingBranchFailure(err)) throw err;
     if (args.fallbackToDefaultBranch) {
       const fallback = await remoteDefaultBranch(args.remote, args.env);
@@ -957,12 +1077,7 @@ export function inaccessibleCloneExplanation(label: string, remote: string, err:
         "Check the URL and its access under Settings, Repositories, then run again."
       );
     }
-    return (
-      `${label} could not be cloned. GitHub says the repository was not found. ` +
-      "That is also what GitHub says when this organization's GitHub connection cannot see a private repository, " +
-      "and when the repository was renamed or deleted. Check it under Settings, Repositories. " +
-      "Then save a GitHub token under Settings, GitHub, or install the GitHub App on the repository, and run again."
-    );
+    return inaccessibleRepositoryMessage(label);
   }
   if (credentialRejected(text)) {
     if (!github) {
