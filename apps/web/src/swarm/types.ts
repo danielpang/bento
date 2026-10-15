@@ -153,6 +153,8 @@ export interface SwarmTaskRun {
   error: string | null;
   /** The sandbox provider the run ran on; absent or null when unknown. */
   sandboxProvider?: string | null;
+  /** Milliseconds since an active run's last transcript line; null once it ends. */
+  quietMs?: number | null;
 }
 
 export interface SwarmTask {

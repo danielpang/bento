@@ -78,6 +78,13 @@ interface Thresholds {
   escalateMin: number;
 }
 
+/**
+ * The long-running check: how long a run has been going, busy or not.
+ * Turns the node yellow at warnMin and wakes the planner at escalateMin.
+ * It cannot tell a busy agent from a dead one; the quiet check in
+ * SwarmNodeDrawer (WORKER_QUIET_HINT_MS) catches a sandbox that died
+ * under its agent.
+ */
 const DEFAULT_THRESHOLDS: Thresholds = { warnMin: 20, escalateMin: 45 };
 
 /**

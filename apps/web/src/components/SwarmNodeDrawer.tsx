@@ -1,4 +1,4 @@
-import { Fragment, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useMemo, useState, type ReactNode } from "react";
 import * as Tabs from "@radix-ui/react-tabs";
 import { Markdown } from "./Markdown.js";
 import { BetaOnly } from "../beta.js";
@@ -22,7 +22,21 @@ import { cappedUsd, formatUsd } from "../swarm/money.js";
 import { formatElapsed } from "../swarm/time.js";
 import { MERGE_QUEUE_FAILURE, landingFailureWords } from "../swarm/failures.js";
 import { checksFailedAfterLanding } from "../swarm/waiting.js";
-import type { SwarmNodeDetail, SwarmStatus, SwarmTask, SwarmTaskEvent } from "../swarm/types.js";
+import type { SwarmNodeDetail, SwarmStatus, SwarmTask, SwarmTaskEvent, SwarmTaskRun } from "../swarm/types.js";
+
+/**
+ * The quiet check: how long since the worker's last transcript line.
+ * A sandbox that died under its agent (Docker or OrbStack restarting)
+ * leaves the run "running" but silent, so past this the drawer offers
+ * both retries. Separate from the watchdog's long-running check, which
+ * counts total run time and cannot tell busy from dead.
+ */
+export const WORKER_QUIET_HINT_MS = 10 * 60_000;
+
+export function workerQuietMs(run: SwarmTaskRun | undefined, readAt: number, now: number): number | null {
+  if (!run || typeof run.quietMs !== "number") return null;
+  return run.quietMs + Math.max(0, now - readAt);
+}
 
 /**
  * One node, opened.
@@ -201,6 +215,8 @@ export function SwarmNodeDrawer({
   const commits = detail ? detail.commits : task.commits;
   const events = detail?.events ?? [];
   const runs = detail?.runs ?? [];
+  const readAt = useMemo(() => Date.now(), [detail]);
+  const [now, setNow] = useState(() => Date.now());
   /*
    * What the swarm's own state allows, as the routes decide it. Hidden
    * rather than offered and refused, with the reason said once below.
@@ -241,6 +257,16 @@ export function SwarmNodeDrawer({
   // the row while no worker is: its agent finished. One whose agent is
   // still in the sandbox is working whatever else is on it.
   const workerActive = task.nodeType === "leaf" && task.status === "working" && (node.agentActive || node.landing === null);
+  useEffect(() => {
+    if (!workerActive) return;
+    const timer = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(timer);
+  }, [workerActive]);
+  const quietMs = workerActive && node.agentActive && task.assignedRunId
+    ? workerQuietMs(runs.find((run) => run.id === task.assignedRunId), readAt, now)
+    : null;
+  const workerQuiet = quietMs !== null && quietMs >= WORKER_QUIET_HINT_MS && (canRetry || canStartOver);
+  const quietMinutes = quietMs === null ? 0 : Math.floor(quietMs / 60_000);
   // A branch that has not landed, which marking the task done gives up.
   const unlandedBranch = task.nodeType === "leaf" && (node.landing !== null || task.status === "landed");
   const assignedWaiting = task.nodeType === "leaf" && task.status === "assigned" && !task.assignedRunId && !startingOver;
@@ -265,6 +291,7 @@ export function SwarmNodeDrawer({
     : primaryAction === "startOver" ? "Start this task over in a new sandbox, or open More actions for other options."
     : primaryAction === "fix" ? "Tell the worker what to change."
     : primaryAction === "retry" ? (task.status === "assigned" ? "Start a new worker attempt." : null)
+    : workerQuiet ? `No output from the worker for ${quietMinutes} minutes.`
     : workerActive ? (node.agentActive ? "The worker is running. Open Worker logs to follow its progress." : "Waiting for an agent to start.")
       : primaryAction === "add" ? "Add a task to this plan."
         : primaryAction === "edit" ? "Edit the task description."
@@ -368,6 +395,25 @@ export function SwarmNodeDrawer({
             {nextStep && <span>{nextStep}</span>}
           </div>
           {actionError && <p className="error-box" role="alert">{actionError}</p>}
+          {workerQuiet && (
+            <div className="swarm-worker-quiet" role="status">
+              <p className="swarm-attention-note">
+                Haven&apos;t heard from agent in awhile, please retry the agent task if the agent is stuck
+              </p>
+              <div className="action-grid">
+                {canRetry && (
+                  <button className="btn" type="button" disabled={busy} onClick={() => onRetry?.(task.id)}>
+                    Retry in the same sandbox
+                  </button>
+                )}
+                {canStartOver && (
+                  <button className="btn" type="button" disabled={busy} onClick={() => setConfirmingStartOver(true)}>
+                    Retry task
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
           {/* What the swarm's state takes off this list, said once. */}
           {hiddenBySwarm.length > 0 && <p className="muted swarm-node-swarm-note">{hiddenBySwarm[0]}</p>}
           {primaryAction && (

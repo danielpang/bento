@@ -1857,6 +1857,13 @@ export function swarmRoutes(ctx: AppContext) {
           endedAt: agentRuns.endedAt,
           error: agentRuns.error,
           sandboxProvider: agentRuns.sandboxProvider,
+          // Columns qualified by hand: drizzle leaves a single-table
+          // select unqualified, and a bare "id" here is the event's.
+          quietMs: sql<number | null>`case when ${agentRuns.status} in ('starting', 'running') then
+            (extract(epoch from now() - coalesce(
+              (select max(e.ts) from run_events e where e.run_id = "agent_runs"."id"),
+              ${agentRuns.startedAt}, ${agentRuns.queuedAt})) * 1000)::float8
+            end`,
         })
         .from(agentRuns)
         .where(and(eq(agentRuns.swarmTaskId, task.id), eq(agentRuns.role, "worker")))
