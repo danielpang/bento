@@ -1831,6 +1831,31 @@ test("cancelling takes the subtree's branches out of the merge queue, and works 
   assert.equal((first.flags as { landingErrorCode?: string }).landingErrorCode, undefined);
 });
 
+test("the detail says where each reported leaf stands with the planner it was handed to", async () => {
+  const swarm = await createSwarm();
+  const tree = await treeOf(swarm.id);
+  const { run: planner } = await plannerAtWork(swarm.id);
+  const toldAt = new Date().toISOString();
+  await db.update(swarmTasks).set({ status: "working", report: "Built it.", flags: {} }).where(eq(swarmTasks.id, tree.first.id));
+  await db.update(swarmTasks).set({
+    status: "working", report: "Built it too.", flags: { plannerToldAt: toldAt, plannerToldBy: planner.id },
+  }).where(eq(swarmTasks.id, tree.second.id));
+  const reviews = async () => {
+    const detail = await (await app.request(`/api/swarms/${swarm.id}`)).json() as { tasks: { id: string; review: string | null }[] };
+    return Object.fromEntries(detail.tasks.map((task) => [task.id, task.review]));
+  };
+
+  let now = await reviews();
+  assert.equal(now[tree.first.id], "waiting", "reported, not handed over yet");
+  assert.equal(now[tree.second.id], "reviewing", "handed to a planner that is running");
+  assert.equal(now[tree.plan.id], null);
+
+  await db.update(agentRuns).set({ status: "failed", endedAt: new Date() }).where(eq(agentRuns.id, planner.id));
+  ctx.running.delete(planner.id);
+  now = await reviews();
+  assert.equal(now[tree.second.id], "restarting", "its planner failed, so the next wake hands it over again");
+});
+
 test("a leaf of a failed swarm can be split", async () => {
   const swarm = await createSwarm();
   const tree = await treeOf(swarm.id);

@@ -256,9 +256,9 @@ function TreeNode({
 }) {
   const attention = isAttention(node.attention);
   const spend = formatUsd(cappedUsd(node.cost));
-  const words = diagramTaskWords(node.status, node.nodeType, node.agentActive, node.landing);
+  const words = diagramTaskWords(node.status, node.nodeType, node.agentActive, node.landing, node.review);
   const note = diagramAttentionWords(node.status, node.nodeType, node.attention, node.agentActive);
-  const tone = diagramTaskTone(node.status, node.nodeType, node.agentActive, node.landing);
+  const tone = diagramTaskTone(node.status, node.nodeType, node.agentActive, node.landing, node.review);
   return (
     <div
       className="swarm-node"

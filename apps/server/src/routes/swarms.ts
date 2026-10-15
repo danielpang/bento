@@ -63,6 +63,7 @@ import {
   splitLeaf,
 } from "../orchestrator/swarm/task-actions.js";
 import { quoteUntrusted } from "../orchestrator/swarm/planner-prompt.js";
+import { leafReview, leafReviewerId } from "../orchestrator/swarm/planner-news.js";
 import {
   collectPlanSources,
   insertPlanSources,
@@ -863,9 +864,34 @@ export function swarmRoutes(ctx: AppContext) {
        */
       const planSources = await listPlanSources(db(c, ctx), swarm.id);
       const retryable = await landingRetryableTasks(ctx, c, swarm, tasks);
+      const reviewerIds = [
+        ...new Set(
+          tasks
+            .filter((task) => leafReview(task, null) !== null)
+            .map((task) => leafReviewerId(task.flags))
+            .filter((id): id is string => id !== null),
+        ),
+      ];
+      const reviewers = new Map(
+        reviewerIds.length === 0
+          ? []
+          : (
+              await db(c, ctx)
+                .select({ id: agentRuns.id, status: agentRuns.status })
+                .from(agentRuns)
+                .where(and(eq(agentRuns.swarmId, swarm.id), inArray(agentRuns.id, reviewerIds)))
+            ).map((run) => [run.id, run.status] as const),
+      );
       return c.json({
         swarm,
-        tasks: tasks.map((task) => ({ ...task, canRetryLanding: retryable.has(task.id) })),
+        tasks: tasks.map((task) => {
+          const reviewerId = leafReviewerId(task.flags);
+          return {
+            ...task,
+            canRetryLanding: retryable.has(task.id),
+            review: leafReview(task, reviewerId ? reviewers.get(reviewerId) ?? null : null),
+          };
+        }),
         planSources,
         activeRuns: runs,
         agentTimeMs,

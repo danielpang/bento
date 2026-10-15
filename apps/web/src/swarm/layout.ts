@@ -1,4 +1,4 @@
-import type { NodeType, SpendTier, SwarmSpend, SwarmTask, TaskAttention, TaskStatus } from "./types.js";
+import type { LeafReview, NodeType, SpendTier, SwarmSpend, SwarmTask, TaskAttention, TaskStatus } from "./types.js";
 
 /**
  * The plan, as numbers.
@@ -90,6 +90,8 @@ export interface SwarmNode {
    * read as "pending", as if its agent had not started.
    */
   landing: NodeLanding;
+  /** Where a "review" landing stands with the planner. Null for any other landing. */
+  review: LeafReview | null;
   /** Derived, not copied: see `attentionFor`. */
   attention: TaskAttention;
   weight: number;
@@ -292,6 +294,7 @@ export function buildSwarmModel(tasks: SwarmTask[], options: ModelOptions = {}):
       status: task.status,
       agentActive,
       landing: nodeLanding(task),
+      review: nodeReview(task),
       attention: attentionFor(task, now, longRunMs, live ? { active: agentActive, startedAt: agentStartedAt } : undefined),
       weight: Number.isFinite(task.weight) && task.weight > 0 ? task.weight : 1,
       ownCost: task.cost,
@@ -598,6 +601,15 @@ export function nodeLanding(task: {
   return null;
 }
 
+/**
+ * Where a leaf waiting for review stands with the planner. Read only
+ * under a "review" landing, so a review the server sent before an
+ * optimistic accept or retry cannot outlive it.
+ */
+export function nodeReview(task: Parameters<typeof nodeLanding>[0] & { review?: LeafReview | null }): LeafReview | null {
+  return nodeLanding(task) === "review" ? task.review ?? "waiting" : null;
+}
+
 /** One row of the outline: the same node, read as a list rather than a tree. */
 export interface OutlineRow {
   id: string;
@@ -608,6 +620,7 @@ export interface OutlineRow {
   status: TaskStatus;
   agentActive: boolean;
   landing: NodeLanding;
+  review: LeafReview | null;
   attention: TaskAttention;
   completion: number;
   cost: SwarmSpend;
@@ -641,6 +654,7 @@ export function outlineRows(model: SwarmModel): OutlineRow[] {
     status: node.status,
     agentActive: node.agentActive,
     landing: node.landing,
+    review: node.review,
     attention: node.attention,
     completion: node.completion,
     cost: node.cost,

@@ -14,12 +14,13 @@ import {
   isAttention,
   isSwarmOver,
   pausedWords,
+  reviewNextStep,
   swarmTone,
   swarmWords,
   taskTone,
   taskWords,
 } from "./swarm/status.js";
-import { attentionFor, buildSwarmModel, elapsedFor, outlineRows, LONG_RUN_WARNING_MS } from "./swarm/layout.js";
+import { attentionFor, buildSwarmModel, elapsedFor, nodeReview, outlineRows, LONG_RUN_WARNING_MS } from "./swarm/layout.js";
 import { formatElapsed, elapsedSince } from "./swarm/time.js";
 import type { SwarmStatus, SwarmTask, TaskStatus } from "./swarm/types.js";
 
@@ -105,6 +106,12 @@ test("a task says working only while an agent is running, and pending or complet
   assert.equal(diagramTaskWords("working", "leaf", false, "review"), "waiting for review", "a reported leaf is not pending");
   assert.equal(diagramTaskTone("working", "leaf", false, "review"), "idle");
   assert.equal(diagramTaskWords("working", "leaf", true, "review"), "working", "an agent in the sandbox is working");
+  assert.equal(diagramTaskWords("working", "leaf", false, "review", "reviewing"), "planner reviewing");
+  assert.equal(diagramTaskTone("working", "leaf", false, "review", "reviewing"), "running", "a planner reviewing is work in motion");
+  assert.equal(diagramTaskWords("working", "leaf", false, "review", "restarting"), "planner restarting");
+  assert.equal(diagramTaskWords("working", "leaf", false, "review", "stopped"), "planner stopped");
+  assert.equal(diagramTaskWords("working", "leaf", false, "review", "undecided"), "not reviewed");
+  assert.equal(diagramTaskWords("working", "leaf", false, "waiting", "reviewing"), "waiting to land", "a review never outranks the landing");
   assert.equal(diagramTaskTone("working", "leaf", false, "failed"), "failed");
   assert.equal(diagramTaskWords("working", "leaf", true), "working");
   assert.equal(diagramTaskTone("working", "leaf", true), "running");
@@ -283,4 +290,19 @@ test("the controls a swarm offers follow the state it is in", () => {
   assert.equal(isSwarmOver("failed"), true);
   assert.equal(isSwarmOver("paused"), false);
   assert.equal(taskWords("landed"), "landed");
+});
+
+test("a reported leaf says where its review stands, and only while it waits for one", () => {
+  const reported = { nodeType: "leaf" as const, status: "working" as const, report: "Done.", flags: {} };
+  assert.equal(nodeReview(reported), "waiting", "an older server sends no review, which reads as not handed over");
+  assert.equal(nodeReview({ ...reported, review: "reviewing" }), "reviewing");
+  assert.equal(nodeReview({ ...reported, flags: { accepted: true }, review: "reviewing" }), null, "accepted is the merge queue's");
+  assert.equal(nodeReview({ ...reported, report: null, review: "reviewing" }), null, "no report, nothing to review");
+  for (const review of ["waiting", "reviewing", "restarting", "stopped", "undecided"] as const) {
+    const sentence = reviewNextStep(review);
+    assert.match(sentence, /^(The worker finished\.|Swarm worker completed)/, review);
+    assert.doesNotMatch(sentence, /[–—]| - /, `${review} has no dash`);
+  }
+  assert.match(reviewNextStep("reviewing"), /planner is reviewing/);
+  assert.match(reviewNextStep("restarting"), /Bento will restart planner to verify work/);
 });

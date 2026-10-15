@@ -460,7 +460,12 @@ export interface SwarmTaskRow {
   costNotionalUsd?: string;
   startedAt: string | null;
   endedAt: string | null;
+  /** Where a reported leaf's review stands. Absent from an older server. */
+  review?: SwarmLeafReview | null;
 }
+
+/** Where a reported leaf stands with the planner. */
+export type SwarmLeafReview = "waiting" | "reviewing" | "restarting" | "stopped" | "undecided";
 
 /** One source of the plan a person handed a swarm, without its text. */
 export interface SwarmPlanSourceRow {

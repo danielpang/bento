@@ -10022,6 +10022,8 @@ a.hours-person-name:hover {
 .swarm-failure-detail p { margin: 7px 0 12px; color: var(--text-dim); line-height: 1.5; }
 .swarm-failure-detail details { margin-top: 12px; color: var(--text-dim); }
 .swarm-failure-detail summary { cursor: pointer; }
+.swarm-review-status { flex: none; display: flex; align-items: center; gap: 8px; margin-top: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-raised); color: var(--text-dim); font-size: 12px; line-height: 1.5; }
+.swarm-review-status[data-review="restarting"], .swarm-review-status[data-review="undecided"] { border-color: color-mix(in srgb, var(--gated) 40%, var(--line)); }
 .swarm-failure-detail pre { max-height: 180px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; }
 
 .swarm-planner-step-main {
