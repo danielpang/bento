@@ -2548,6 +2548,49 @@ test("a wake the held planner could not take waits for the next tick", async () 
 });
 
 /**
+ * A planner held open on another server. This process cannot see whether
+ * it is between turns and cannot write into its stdin, so the tick names
+ * it and tickSwarm asks that server, over the bus, to run the tick where
+ * the session is. Nothing is started and nothing is latched here. A
+ * planner whose owner's lease has lapsed is nobody's, and the wake
+ * waits for its run to end (or for adoption) as it always did.
+ */
+test("a planner held open on another server is asked for over the bus", async () => {
+  const swarm = await makeSwarm({ status: "running" });
+  const task = await makeTask(swarm.id, { status: "working", report: "did it" });
+  const held = await plannerRun(swarm.id, "running", { ownerId: "server-elsewhere", ownerHeartbeatAt: new Date() });
+  const controls: { runId: string; action: string }[] = [];
+  const off = ctx.bus.onRunControl((control) => controls.push(control));
+  try {
+    const deps = { ...starter(), liveInputs: new Map(), instanceId: "this-server" };
+    const result = await tickSwarm(ctx, swarm.id, deps);
+    assert.equal(result?.plannerRunId, null, "no second planner is started");
+    assert.equal(result?.plannerToldLiveId, null);
+    assert.equal(result?.plannerHeldElsewhereId, held.id, "the tick names the planner held elsewhere");
+    assert.deepEqual(controls, [{ runId: held.id, action: "tick" }], "and its holder is asked to tick");
+    assert.equal((await read(task.id)).flags.plannerToldBy, undefined, "nothing is latched here");
+
+    // The same planner once its server has gone quiet past the lease:
+    // no process can be asked, so the wake waits as before.
+    controls.length = 0;
+    await db.update(agentRuns).set({ ownerHeartbeatAt: new Date(Date.now() - 10 * 60_000) }).where(eq(agentRuns.id, held.id));
+    const stale = await tickSwarm(ctx, swarm.id, deps);
+    assert.equal(stale?.plannerHeldElsewhereId, null);
+    assert.equal(stale?.plannerRunId, null);
+    assert.deepEqual(controls, []);
+
+    // And a planner this very process drives, on an adapter with no live
+    // mode, is not "elsewhere": it is simply mid turn.
+    await db.update(agentRuns).set({ ownerId: "this-server", ownerHeartbeatAt: new Date() }).where(eq(agentRuns.id, held.id));
+    const mine = await tickSwarm(ctx, swarm.id, deps);
+    assert.equal(mine?.plannerHeldElsewhereId, null);
+    assert.deepEqual(controls, []);
+  } finally {
+    off();
+  }
+});
+
+/**
  * Another turn of a held planner costs what a new run costs, so it is
  * refused for the same reasons. Refused, the wake is not written, the
  * swarm records the refusal the way a refused run does, and the held

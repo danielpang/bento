@@ -1,5 +1,5 @@
 import { zValidator } from "@hono/zod-validator";
-import { asc, eq, gt, and } from "drizzle-orm";
+import { and, asc, desc, eq, gt, lt, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { z } from "zod";
@@ -9,6 +9,7 @@ import type { AppContext } from "../context.js";
 import { deferAfterCommit, tenantDb as db } from "../middleware/tenant.js";
 import { actor } from "../middleware/actor.js";
 import { markCancelled } from "../orchestrator/run-executor.js";
+import { requestRunAbort } from "../orchestrator/run-ownership.js";
 import { modalNetworkForProject } from "../orchestrator/sandbox-network.js";
 import { markSandboxAwake } from "../orchestrator/hibernate-sandbox.js";
 import { CARD_BUSY, NO_REPOSITORIES, projectHasRepositories, startRunIfIdle } from "../orchestrator/start-run.js";
@@ -136,7 +137,7 @@ export function runRoutes(ctx: AppContext) {
       const run = found.run;
       if (TERMINAL.has(run.status)) return c.json({ error: `run already ${run.status}` }, 409);
 
-      ctx.running.get(run.id)?.abort();
+      requestRunAbort(ctx, run.id);
       await markCancelled(ctx, run.id);
       ctx.bus.emitBoardEvent({
         type: "run_updated",
@@ -290,6 +291,36 @@ export function runRoutes(ctx: AppContext) {
         }
       }
       return c.text(lines.join("\n"));
+    })
+    /**
+     * A page of a run's events before a sequence number, oldest first:
+     * what the conversation route left out of a long run's block. The
+     * answer carries where the page begins and how many lines still
+     * precede it, so a client can keep asking until there are none.
+     */
+    .get("/:id/events/before", async (c) => {
+      const runId = c.req.param("id");
+      const found = await getAccessibleRunOutput(ctx, c, runId);
+      if (!found || (found.swarm && await requireSwarms(ctx, c, found.swarm.organizationId))) return c.json({ error: "not found" }, 404);
+      const before = Number(c.req.query("seq"));
+      if (!Number.isInteger(before) || before < 1) return c.json({ error: "seq must be a positive integer" }, 400);
+      const limit = Math.min(Math.max(Number(c.req.query("limit") ?? 200) || 200, 1), 500);
+      const page = await db(c, ctx)
+        .select({ seq: runEvents.seq, payload: runEvents.payload })
+        .from(runEvents)
+        .where(and(eq(runEvents.runId, runId), lt(runEvents.seq, before)))
+        .orderBy(desc(runEvents.seq))
+        .limit(limit);
+      page.reverse();
+      const firstSeq = page[0]?.seq ?? null;
+      const earlierRows = firstSeq === null || firstSeq <= 1
+        ? []
+        : await db(c, ctx)
+            .select({ earlier: sql<number>`count(*)::int` })
+            .from(runEvents)
+            .where(and(eq(runEvents.runId, runId), lt(runEvents.seq, firstSeq)));
+      const earlier = earlierRows[0]?.earlier ?? 0;
+      return c.json({ events: page.map((row) => row.payload), firstSeq, earlier });
     })
     /**
      * SSE stream of a run's events. Replays persisted events after

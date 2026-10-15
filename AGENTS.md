@@ -249,7 +249,12 @@ environment and execs the command, so the URL carries only `sh
 running, not by the argv it was given (the real-sprite test saw a
 staged command listed as what the launcher had exec'd into), so a
 staged session is looked for by the launcher's line and by the
-command's first word, the rule an unstaged run already lives by. Do not trim
+command's first word, the rule an unstaged run already lives by. And
+it names a command spawned straight from the exec URL by its
+executable's resolved path (`sleep 12` is listed as `/usr/bin/sleep
+12`), so `sessionCommandMatches` compares the first word by basename;
+before that, a reattach to an unstaged live run could never find its
+session. Do not trim
 prompts in the executor to stay under it: Modal and Docker take argv
 out of band, and the sprite driver is the one place that knows what
 fits. The launcher carries the organization's keys, so it removes
@@ -544,6 +549,91 @@ whether they wake another planner.
 
 Both are behind the beta testers flag (`isBetaRun` in
 `swarmLiveConversation`), because a held planner is a held machine.
+
+## A run belongs to one process, by lease, and requests to it travel over the bus
+
+A run's agent stream, abort handle and stdin live in exactly one
+server process. Fly starts a second machine on web traffic, and that
+machine used to reattach on boot to every server run that said
+"running", including the ones the first machine was still driving:
+two loops on one agent, two writers on one transcript. And every door
+that reaches into a run (the cancel routes, a message into a live
+session, the stalled reaper) looked only in its own memory, so a Stop
+that landed on the other machine changed the row and reached no agent.
+
+`orchestrator/run-ownership.ts` is the rule. Each process mints an id
+at boot (`instanceId`): deliberately not the Fly machine id, which
+comes back after a suspend with a dead claim attached. The queue claim
+in `executeRun` writes `agent_runs.owner_id` in the same compare and
+set, and the process renews `owner_heartbeat_at` for every run it
+holds every `RUN_HEARTBEAT_MS`, in one statement, only while it holds
+any. A run whose heartbeat is older than `RUN_LEASE_MS` is nobody's:
+`adoptOrphanedRuns` (boot, the `runner.reap` schedule, a second pass
+one lease after boot, and a `released` control) takes it with a compare
+and set on the stale lease, so two servers sweeping at once split the
+orphans, and then follows the agent into its sandbox exactly as a boot
+always has. It never takes a run this process already holds, however
+stale the row looks: a heartbeat that fell behind is refreshed by the
+next one, and adopting it would put a second loop on a live agent. And
+the run worker releases a run only when its own invocation claimed it,
+because pg-boss retries an expired job while the agent is still
+working, and that retry returns from `executeRun` at once. A process that finds its lease taken disowns the run: it
+keeps consuming the stream (closing it could end the agent's exec
+session under the new owner) but writes nothing and ends nothing, the
+way a draining process treats all of its runs. `yielded(ctx, runId)`
+is that check, and every terminal path and transcript write asks it.
+`appendRunEvent` also carries the guard inside the insert, so a write
+racing the heartbeat is refused by the database rather than landing
+beside the new owner's, and a live session's hold timer asks
+`confirmRunOwnership` before it closes stdin, because a machine that
+resumes from a suspend fires that timer before its heartbeat has
+noticed the run was adopted. Shutdown calls `releaseOwnedRuns` before the
+pool closes, which clears the columns and announces each run, so the
+successor adopts at once instead of waiting out a lease.
+
+Anything that needs the process holding a run publishes a
+`run_control` on the event bus (`events.ts`, replicated by `pg-bus.ts`
+like every other bus event): `requestRunAbort` for a cancel, `nudgeRun`
+after a message row commits, `released` from a shutdown. Every process
+hears it; the one with the run in memory acts (`handleRunControl`, in
+`registerJobs`); the rest ignore it. So: never call
+`ctx.running.get(id)?.abort()` or `ctx.liveInputs.get(id)?.deliver()`
+as the only way to reach a run. Try the local handle if you like, then
+publish. The wire carries ids, never message text: the row is the
+message, and the holder claims it through its live session's `pump`.
+The two-server test is `run-ownership.e2e.test.ts`.
+
+Production is two Fly apps on one image (`infra/fly/fly.toml` and
+`infra/fly/fly.worker.toml`):
+the web app with `BENTO_ROLE = "web"`, which registers no run workers
+and never adopts a run (the shared `runner.reap` job can still land on
+it, so its pass announces each orphan it finds as `released` and a
+worker adopts), and the worker app with `BENTO_ROLE = "worker"`, which
+has no HTTP service and so is never suspended. The
+role is explicit on purpose: a slot count of zero once meant "web",
+and a process whose role was inferred from a number could be
+misconfigured into either half without anyone noticing. Read the role
+through `drivesRuns` and the slot count through `runSlots` in
+`env.ts`, never `BENTO_MAX_CONCURRENT_RUNS` directly, because a web
+process has no slots whatever that variable says, and setting it on
+one is refused at boot. `enqueueRun` publishes a
+`queued` control so the worker's pollers wake for a run the web app
+queued. `BENTO_DIRECT_DATABASE_URL` carries the LISTEN connection and
+the migration lock when `DATABASE_URL` is a transaction mode pooler.
+The card conversation route returns each run's last
+`CONVERSATION_EVENTS_PER_RUN` events and the runs route pages the rest
+(`/events/before`); the gate sweep evaluates only cards whose criteria
+can change without an event.
+
+The swarm coordinator follows the same rule. A tick that finds news
+for a planner held open between turns on another live process (the
+planner run's owner has a fresh lease and is not in this process's
+`liveInputs`) returns `plannerHeldElsewhereId`, and `tickSwarm`
+publishes a `tick` control; the holder runs the tick itself, where the
+session is, and the row lock at the top of `runTick` keeps the two
+ticks in order. A held planner refused another turn is closed the same
+way (`close`). A planner whose owner's lease has lapsed is nobody's, and
+its news waits for the run to end or be adopted, as before.
 
 ## Starting a run goes through startRunIfIdle, never a bare insert
 

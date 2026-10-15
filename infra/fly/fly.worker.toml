@@ -1,0 +1,48 @@
+# Hosted Bento, the worker half of production. Same image as fly.toml;
+# this app drives the agent runs and the web app (fly.toml) serves the
+# console and the API as BENTO_ROLE = "web". Splitting them
+# is what lets the web app scale on traffic and suspend when quiet
+# without ever holding an agent's stream, and what lets run capacity be
+# raised without touching the web app. The two talk through Postgres:
+# the queue, and the LISTEN/NOTIFY bus that carries viewer events and
+# run controls between processes (apps/server run-ownership.ts).
+#
+# No [http_service]: nothing routes HTTP here, so Fly never suspends
+# or autoscales it; a worker is started and stopped by hand
+# (`fly scale count`). The process still listens on PORT, which only
+# the machine's own health matters for.
+app = "bento-worker"
+primary_region = "iad"
+# Time between SIGTERM and SIGKILL on a deploy. Shutdown releases the
+# runs this process holds first, so the surviving worker or the next
+# one adopts them at once; the rest of the drain follows.
+kill_timeout = "30s"
+
+[build]
+  dockerfile = "../../infra/docker/Dockerfile"
+
+[env]
+  BENTO_MODE = "multi"
+  BENTO_ENVIRONMENT = "production"
+  BENTO_SANDBOX_DRIVER = "sprite"
+  PORT = "8080"
+  # The worker half: this process drives the agent runs and adopts the
+  # ones a stopped worker left behind.
+  BENTO_ROLE = "worker"
+  # How many agent runs this process drives at once. Sprites do the
+  # heavy work; this is sockets and keep-awake on the orchestrator.
+  BENTO_MAX_CONCURRENT_RUNS = "32"
+  # Agents in sandboxes reach the MCP gateway on the web app, never on
+  # this machine. BETTER_AUTH_URL (set as a secret, same value as the
+  # web app's) is the fallback; this pins it.
+  BENTO_MCP_GATEWAY_URL = "https://bento-production.fly.dev"
+
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "2gb"
+
+# Secrets are the web app's, set out of band and never committed:
+#   fly secrets set -a bento-worker DATABASE_URL=... BENTO_DIRECT_DATABASE_URL=... BETTER_AUTH_URL=... BETTER_AUTH_SECRET=... BENTO_SECRET_KEY=... SPRITES_TOKEN=...
+#   fly secrets set -a bento-worker MODAL_TOKEN_ID=... MODAL_TOKEN_SECRET=... MODAL_ENVIRONMENT=...
+#   fly secrets set -a bento-worker GITHUB_APP_ID=... GITHUB_APP_SLUG=... GITHUB_PRIVATE_KEY=... GITHUB_WEBHOOK_SECRET=...
+#   fly secrets set -a bento-worker POSTHOG_API_KEY=... (and the artifact bucket variables)

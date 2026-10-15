@@ -17,6 +17,11 @@ name: Deploy hosted
 #   FLY_API_TOKEN      per GitHub environment ("development" and
 #                      "production"). Deploy tokens are app-scoped,
 #                      which is why they live per environment
+#   FLY_WORKER_API_TOKEN
+#                      production environment only: a deploy token for
+#                      the bento-worker app, which runs the agent runs
+#                      (infra/fly/fly.worker.toml). Falls back to
+#                      FLY_API_TOKEN when that token covers both apps
 #   DATABASE_URL       per GitHub environment. Use the direct
 #                      (non-pooler) URL: migrations take a session
 #                      advisory lock, which transaction-mode pooling
@@ -202,3 +207,15 @@ jobs:
           docker tag bento-hosted:ci "registry.fly.io/bento-production:deploy-${GITHUB_SHA}"
           docker push "registry.fly.io/bento-production:deploy-${GITHUB_SHA}"
           flyctl deploy -c infra/fly/fly.toml --image "registry.fly.io/bento-production:deploy-${GITHUB_SHA}"
+
+      # The worker app, from the same image, after the web app: its
+      # shutdown releases the runs it holds and the new machine adopts
+      # them, so a deploy here is a hand-off rather than an outage.
+      - name: Push and deploy the production worker
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_WORKER_API_TOKEN || secrets.FLY_API_TOKEN }}
+        run: |
+          flyctl auth docker
+          docker tag bento-hosted:ci "registry.fly.io/bento-worker:deploy-${GITHUB_SHA}"
+          docker push "registry.fly.io/bento-worker:deploy-${GITHUB_SHA}"
+          flyctl deploy -c infra/fly/fly.worker.toml --image "registry.fly.io/bento-worker:deploy-${GITHUB_SHA}"

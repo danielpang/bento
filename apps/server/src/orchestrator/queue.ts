@@ -51,7 +51,19 @@ export const RUN_WORKER_POLL_SECONDS = 30;
  * database is about to be busy anyway. A context without workers (a
  * viewer's machine, a test that never registered jobs) just queues.
  */
-export async function enqueueRun(ctx: Pick<AppContext, "boss" | "runWorkers">, runId: string): Promise<void> {
+export async function enqueueRun(
+  ctx: Pick<AppContext, "boss" | "runWorkers"> & Partial<Pick<AppContext, "bus">>,
+  runId: string,
+): Promise<void> {
   await ctx.boss.send("run.execute", { runId });
   for (const id of ctx.runWorkers ?? []) ctx.boss.notifyWorker(id);
+  /**
+   * And the other processes' workers, over the bus. On the split
+   * deployment the route that queued the run is on the web app, which
+   * has no run workers of its own, and without this every run waited
+   * for the worker app's thirty second poll.
+   */
+  // Optional call as well as optional bus: tests stub the bus with the
+  // few methods they watch, and a queue must not fail a route for that.
+  ctx.bus?.emitRunControl?.({ runId, action: "queued" });
 }

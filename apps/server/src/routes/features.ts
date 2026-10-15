@@ -32,7 +32,7 @@ import {
 } from "@bento/db";
 import type { SandboxDriver, SandboxHandle } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
-import { deferAfterCommit, tenantDb as db } from "../middleware/tenant.js";
+import { deferAfterCommit, respondAfterCommit, tenantDb as db } from "../middleware/tenant.js";
 import { actor } from "../middleware/actor.js";
 import { canAccessProject, getAccessibleFeature } from "../access.js";
 import { driverForSandbox, SandboxDriverUnavailable } from "../orchestrator/sandbox-driver.js";
@@ -51,6 +51,7 @@ import {
 } from "../orchestrator/gate-evaluator.js";
 import { ACTIVE_RUN_STATUSES, CARD_BUSY, CARD_BUSY_DELETE, NO_REPOSITORIES, projectHasRepositories, startRunIfIdle } from "../orchestrator/start-run.js";
 import { enqueueRun } from "../orchestrator/queue.js";
+import { liveDeliveryOf, nudgeAndAwaitSent } from "../orchestrator/remote-live.js";
 import { queueLinearIssueCreate } from "../orchestrator/linear-sync.js";
 import {
   claimQueuedMessages,
@@ -358,6 +359,13 @@ class SandboxDestroyFailed extends Error {
   }
 }
 
+/**
+ * How many of a finished run's last events the conversation route
+ * returns per run. Enough for a whole ordinary run; a long one shows
+ * its tail and offers the rest on demand.
+ */
+export const CONVERSATION_EVENTS_PER_RUN = 200;
+
 export function featureRoutes(ctx: AppContext) {
   return new Hono()
     .get("/", async (c) => {
@@ -651,19 +659,39 @@ export function featureRoutes(ctx: AppContext) {
         : [];
       const names = new Map(profileRows.map((p) => [p.id, p.name]));
 
+      /**
+       * The tail of each run, not the whole of it. A long run's
+       * transcript is thousands of rows, most of them tool output, and
+       * thirty of those at once is what made a card slow to open. The
+       * block says how many earlier lines exist and where its first
+       * one sits, and the runs route serves the rest a page at a time
+       * when somebody asks for them (GET /api/runs/:id/events/before).
+       */
       const blocks = [];
       for (const run of finishedRuns) {
-        const events = await db(c, ctx)
-          .select({ payload: runEvents.payload })
+        const tail = await db(c, ctx)
+          .select({ seq: runEvents.seq, payload: runEvents.payload })
           .from(runEvents)
           .where(eq(runEvents.runId, run.id))
-          .orderBy(asc(runEvents.seq));
+          .orderBy(desc(runEvents.seq))
+          .limit(CONVERSATION_EVENTS_PER_RUN);
+        tail.reverse();
+        const firstSeq = tail[0]?.seq ?? null;
+        const earlierRows = firstSeq === null || firstSeq <= 1
+          ? []
+          : await db(c, ctx)
+              .select({ earlier: sql<number>`count(*)::int` })
+              .from(runEvents)
+              .where(and(eq(runEvents.runId, run.id), sql`${runEvents.seq} < ${firstSeq}`));
+        const earlier = earlierRows[0]?.earlier ?? 0;
         blocks.push({
           runId: run.id,
           agentName: names.get(run.agentProfileId) ?? "agent",
           queuedAt: run.queuedAt,
           status: run.status,
-          events: events.map((e) => e.payload),
+          events: tail.map((e) => e.payload),
+          firstSeq,
+          earlier,
         });
       }
       // Messages waiting for an agent, so a reload does not make a
@@ -758,6 +786,28 @@ export function featureRoutes(ctx: AppContext) {
             .where(eq(featureMessages.id, messageId));
           return c.json({ queued: false as const, live: true as const, delivery: liveSession.delivery });
         }
+        /*
+         * The run may be live on another server, whose stdin this
+         * process cannot see. The row is committed first, then that
+         * server is told to claim it (run-ownership.ts), and the row
+         * is watched for about a second for its answer: sent means the
+         * holder wrote it into the agent, and the response says live.
+         * A run with no live session anywhere leaves it parked until
+         * the run ends, as before, and the response says queued.
+         */
+        respondAfterCommit(c, async () => {
+          const sent = await nudgeAndAwaitSent(ctx, latest.id, async () => {
+            const [row] = await ctx.db
+              .select({ status: featureMessages.status })
+              .from(featureMessages)
+              .where(eq(featureMessages.id, messageId))
+              .limit(1);
+            return row?.status === "sent";
+          });
+          if (!sent) return null;
+          const delivery = (await liveDeliveryOf(ctx, latest.id)) ?? "queue";
+          return c.json({ queued: false as const, live: true as const, delivery });
+        });
         return c.json({ queued: true as const });
       }
       /**

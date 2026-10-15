@@ -7,6 +7,18 @@ const envSchema = z.object({
   /** 0 asks the OS for any free port, which embedded mode uses. */
   PORT: z.coerce.number().int().min(0).max(65535).default(4400),
   DATABASE_URL: z.string().default("postgres://postgres:postgres@localhost:5439/app"),
+  /**
+   * A direct (non pooled) connection to the same database, for the two
+   * things a transaction mode pooler cannot carry: the LISTEN connection
+   * the event bus replicates on, and the session advisory lock the
+   * migrations take. Set this when DATABASE_URL points at Neon's pooled
+   * endpoint so the per machine connection count stops being the thing
+   * that caps how many machines may run; leave it unset and both use
+   * DATABASE_URL, which is right for a single machine or a local
+   * install. The queue pool stays on DATABASE_URL: pg-boss locks at
+   * transaction level, which pooling carries.
+   */
+  BENTO_DIRECT_DATABASE_URL: z.string().optional(),
   /** Where worktrees and other server state live. */
   BENTO_DATA_DIR: z.string().default(path.join(os.homedir(), ".bento")),
   /**
@@ -38,11 +50,25 @@ const envSchema = z.object({
   CURSOR_API_KEY: z.string().optional(),
 
   /**
+   * Which half of a split deployment this process is. "all" (the
+   * default, and every single machine install) serves HTTP and drives
+   * runs. Hosted Fly runs two apps from one image and says so
+   * explicitly: "web" serves the console, the API, the MCP gateway and
+   * every queue but the run workers, and drives no runs (no run
+   * workers, no adoption of orphans), so Fly may suspend it without
+   * stranding an agent; "worker" drives the runs. The role, not a
+   * slot count of zero, is what says a process drives no runs, so a
+   * web process that sets BENTO_MAX_CONCURRENT_RUNS is refused at boot
+   * rather than guessed at. Read it through runSlots and drivesRuns.
+   */
+  BENTO_ROLE: z.enum(["all", "web", "worker"]).default("all"),
+  /**
    * How many agent runs this process drives at once. Not a plan limit:
    * sprites (or containers) do the work, and this is how many exec
    * sockets and keep-awake pings one Node process will hold. Local
-   * installs default to 4 so a laptop is not asked to run a fleet.
-   * Hosted Fly sets this higher in fly.toml.
+   * installs default to 4 so a laptop is not asked to run a fleet;
+   * the hosted worker app raises it. A web role process has no slots
+   * whatever this says, so it must not set this at all.
    */
   BENTO_MAX_CONCURRENT_RUNS: z.coerce.number().int().positive().default(4),
   /** A runner-claimed run with no report for this long is requeued. */
@@ -299,7 +325,33 @@ const envSchema = z.object({
 export type Env = z.infer<typeof envSchema>;
 
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
-  return envSchema.parse(withoutEmpty(source));
+  const given = withoutEmpty(source);
+  const env = envSchema.parse(given);
+  if (env.BENTO_ROLE === "web" && given.BENTO_MAX_CONCURRENT_RUNS !== undefined) {
+    throw new Error(
+      "BENTO_ROLE=web drives no agent runs, so BENTO_MAX_CONCURRENT_RUNS must not be set on it. Set the slot count on the worker (BENTO_ROLE=worker) instead.",
+    );
+  }
+  return env;
+}
+
+/**
+ * Whether this process drives agent runs: registers run workers, claims
+ * queued runs, adopts orphans. False only for the web half of a split
+ * deployment. The role decides, never the slot count.
+ */
+export function drivesRuns(env: Pick<Env, "BENTO_ROLE">): boolean {
+  return env.BENTO_ROLE !== "web";
+}
+
+/**
+ * How many runs this process drives at once: BENTO_MAX_CONCURRENT_RUNS
+ * for a process that drives runs, 0 for a web role process. Everything
+ * sized by the slot count (run workers, pools, the queue snapshot)
+ * reads it here so a web process never carries worker sized pools.
+ */
+export function runSlots(env: Pick<Env, "BENTO_ROLE" | "BENTO_MAX_CONCURRENT_RUNS">): number {
+  return drivesRuns(env) ? env.BENTO_MAX_CONCURRENT_RUNS : 0;
 }
 
 /**

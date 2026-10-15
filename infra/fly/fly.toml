@@ -1,7 +1,15 @@
-# Hosted Bento. Agents run in Fly Sprites rather than on this machine, so
-# the app itself stays small; it schedules work and holds the board.
+# Hosted Bento, the web half of production: the console, the API, the
+# MCP gateway, webhooks, and every queue but the run workers. Agent runs
+# are driven by the worker app (fly.worker.toml) from the same image;
+# the two share Postgres and the LISTEN/NOTIFY bus on it. With no runs
+# held here, Fly may suspend and scale this app on traffic alone.
 app = "bento-production"
 primary_region = "iad"
+# Time between SIGTERM and SIGKILL on a deploy. The server's shutdown
+# releases the runs it holds (so the new machine adopts them at once),
+# severs streams, stops the queue and flushes analytics; Fly's default
+# of five seconds was tight for that on a slow database.
+kill_timeout = "30s"
 
 [build]
   dockerfile = "../../infra/docker/Dockerfile"
@@ -11,9 +19,12 @@ primary_region = "iad"
   BENTO_ENVIRONMENT = "production"
   BENTO_SANDBOX_DRIVER = "sprite"
   PORT = "8080"
-  # How many agent runs this process drives at once. Sprites do the
-  # heavy work; this is sockets and keep-awake on the orchestrator.
-  BENTO_MAX_CONCURRENT_RUNS = "32"
+  # The web half: this process drives no agent runs, the worker app
+  # does. It still queues them, evaluates gates, and runs the Slack,
+  # Linear and sweep jobs, and it never adopts an orphaned run, so Fly
+  # suspending it strands nothing. BENTO_MAX_CONCURRENT_RUNS is not set
+  # here on purpose: a web process refuses it at boot.
+  BENTO_ROLE = "web"
   # The console is served from this same app, so the browser sees one
   # origin: session cookies, OAuth callbacks, the /device page and the
   # /accept-invitation link all work without CORS.
@@ -24,8 +35,9 @@ primary_region = "iad"
   force_https = true
   auto_stop_machines = "suspend"
   auto_start_machines = true
-  # Keep one machine warm: the orchestrator owns queue workers and the
-  # gate sweep, which should not stop when web traffic goes quiet.
+  # Keep one machine warm: it owns the gate sweep and the interactive
+  # queues (gates, Slack, Linear), which should not stop when web
+  # traffic goes quiet. The run workers live on the worker app.
   min_machines_running = 1
 
 [[vm]]

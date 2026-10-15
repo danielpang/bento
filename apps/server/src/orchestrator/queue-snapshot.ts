@@ -1,3 +1,4 @@
+import { runSlots } from "../env.js";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { agentRuns } from "@bento/db";
 import type { AppContext } from "../context.js";
@@ -67,7 +68,8 @@ export async function captureRunQueueDepth(
     properties: {
       queued,
       busy,
-      workers: ctx.env.BENTO_MAX_CONCURRENT_RUNS,
+      workers: runSlots(ctx.env),
+      role: ctx.env.BENTO_ROLE,
       ...(ctx.env.FLY_APP_NAME ? { app: ctx.env.FLY_APP_NAME } : {}),
       ...(ctx.env.FLY_MACHINE_ID ? { instance: ctx.env.FLY_MACHINE_ID } : {}),
     },

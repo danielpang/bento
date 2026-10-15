@@ -630,6 +630,18 @@ export const agentRuns = pgTable(
   /** Which runner claimed this run, for runner-executed work. */
   claimedBy: text("claimed_by"),
   claimedAt: timestamp("claimed_at", { withTimezone: true }),
+  /**
+   * Which server process is driving this run, and when it last said
+   * so. The id is minted by the process at boot, never a machine id:
+   * machines are destroyed and made again, and a process that lost a
+   * run must not find it again by name. The heartbeat is the lease
+   * (see orchestrator/run-ownership.ts): a run whose stamp is older
+   * than the lease has no process behind it and may be adopted by any
+   * live server. Null on runner-executed runs, on runs from before the
+   * column, and on a run its process released as it shut down.
+   */
+  ownerId: text("owner_id"),
+  ownerHeartbeatAt: timestamp("owner_heartbeat_at", { withTimezone: true }),
   cliSessionId: text("cli_session_id"),
   exitCode: integer("exit_code"),
   costUsd: numeric("cost_usd"),
@@ -722,6 +734,12 @@ export const agentRuns = pgTable(
     // The same question asked of a swarm, which reads its runs by
     // swarm rather than by card.
     index("agent_runs_swarm_queued_idx").on(t.swarmId, t.queuedAt),
+    // The runs in flight, which the orphan sweep, the stalled reaper
+    // and boot recovery ask for every few minutes. Partial: a handful
+    // of rows at any moment, out of every run ever made.
+    index("agent_runs_active_idx")
+      .on(t.executor, t.status)
+      .where(sql`${t.status} in ('queued', 'starting', 'running')`),
     /**
      * The discriminator and the columns have to agree, or the type is
      * decoration. A pipeline run is a card at a stage and nothing else;

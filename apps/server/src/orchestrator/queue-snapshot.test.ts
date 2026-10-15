@@ -69,11 +69,11 @@ test("a snapshot names the queued depth and this process's workers", async () =>
         { status: "running", n: 32 },
       ],
     },
-    env: { BENTO_MAX_CONCURRENT_RUNS: 32 },
+    env: { BENTO_ROLE: "all", BENTO_MAX_CONCURRENT_RUNS: 32 },
   } as unknown as AppContext);
   assert.equal(captured.length, 1);
   assert.equal(captured[0]?.event, RUN_QUEUE_SNAPSHOT_EVENT);
-  assert.deepEqual(captured[0]?.properties, { queued: 4, busy: 32, workers: 32 });
+  assert.deepEqual(captured[0]?.properties, { queued: 4, busy: 32, workers: 32, role: "all" });
 });
 
 test("a snapshot names the machine and app when the platform says", async () => {
@@ -98,8 +98,9 @@ test("a snapshot names the machine and app when the platform says", async () => 
       groupBy: async () => [{ status: "queued", n: 1 }],
     },
     env: {
+      BENTO_ROLE: "worker",
       BENTO_MAX_CONCURRENT_RUNS: 32,
-      FLY_APP_NAME: "bento-production",
+      FLY_APP_NAME: "bento-worker",
       FLY_MACHINE_ID: "148e21eb4d1289",
     },
   } as unknown as AppContext);
@@ -107,7 +108,8 @@ test("a snapshot names the machine and app when the platform says", async () => 
     queued: 1,
     busy: 0,
     workers: 32,
-    app: "bento-production",
+    role: "worker",
+    app: "bento-worker",
     instance: "148e21eb4d1289",
   });
 });

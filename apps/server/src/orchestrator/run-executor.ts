@@ -97,6 +97,7 @@ import { confirmSwarmMessagesDelivered, requeueUndeliveredNodeMessages, takeNode
 import { exportSwarmBranch, swarmBranchName } from "./swarm/sandbox.js";
 import { applyRunCharge, chargeForRun } from "./swarm/ledger.js";
 import { resolveAgentEnv } from "./agent-env.js";
+import { drivesRuns, runSlots } from "../env.js";
 import { customProviderRunEnv } from "./custom-provider.js";
 import { agentAuthEnv, agentAuthMounts, gitIdentityEnv } from "./agent-auth.js";
 import { prepareRunMcp } from "./mcp-run.js";
@@ -115,6 +116,22 @@ import { modalNetworkForProject, organizationRestrictsNetwork } from "./sandbox-
 import { stopLeftoverAgent } from "./leftover-agent.js";
 import { pipelineAgentBinaries } from "./pipeline-agents.js";
 import { appendRunEvent } from "./transcript.js";
+import {
+  adoptRun,
+  coalesced,
+  confirmRunOwnership,
+  endStdinUnlessDisowned,
+  handleRunControl,
+  holdRun,
+  orphanedRuns,
+  ownershipClaim,
+  ownershipOf,
+  releaseRun,
+  requestRunAbort,
+  RUN_HEARTBEAT_MS,
+  RUN_LEASE_MS,
+  yielded,
+} from "./run-ownership.js";
 import { isPersisted, loadPersistedIds, recoverMissedMessages } from "./recover-session.js";
 import { compactedConversation } from "./conversation-history.js";
 import { attachLiveConversation, cardConversation, headlessConversation, type LiveConversation, type LiveConversationHandle } from "./live-session.js";
@@ -127,7 +144,7 @@ import { REAP_SANDBOX_QUEUE, reapFinishedSandboxes, reapFinishedSwarmSandboxes, 
 import { latestConversationRun, resolveFollowUpRun } from "./stage-agent.js";
 import { asPipelineRun, isPipelineRun, type PipelineRun } from "./pipeline-run.js";
 import { describeRunSubject, type RunSubject } from "./run-subject.js";
-import { enqueueSwarmTick, SWARM_TICK_QUEUE, tickAllLiveSwarms } from "./swarm/coordinator.js";
+import { enqueueSwarmTick, SWARM_TICK_QUEUE, tickAllLiveSwarms, tickSwarm } from "./swarm/coordinator.js";
 import { SWARM_LAND_QUEUE, resumeClaimedLandings } from "./swarm/landing.js";
 import { SWARM_PUSH_QUEUE, ensureSwarmPushWorker, remoteBranchBundles } from "./swarm/remote-branches.js";
 import { SWARM_START_OVER_QUEUE } from "./swarm/start-over.js";
@@ -204,15 +221,19 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   // from its own queued_at and its own now(), so the number never
   // mixes this host's clock with the database's. Everything the
   // sandbox metric adds after this is a monotonic interval from here.
+  // The claim names this process as the run's owner in the same
+  // statement (run-ownership.ts), so no other server's boot or sweep
+  // mistakes a run that is being provisioned here for an orphan.
   const [claimed] = await ctx.db
     .update(agentRuns)
-    .set({ status: "starting", startedAt: new Date() })
+    .set({ status: "starting", startedAt: new Date(), ...ownershipClaim(ctx) })
     .where(and(eq(agentRuns.id, runId), eq(agentRuns.status, "queued")))
     .returning({
       id: agentRuns.id,
       queueWaitMs: sql<number>`(extract(epoch from (now() - ${agentRuns.queuedAt})) * 1000)::float8`,
     });
   if (!claimed) return; // a duplicate job claimed it first
+  holdRun(ctx, runId);
   const claimedTick = performance.now();
   emitBoard("starting");
 
@@ -771,6 +792,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       liveChannel,
       conversation: conversation ?? headlessConversation(),
       holdUntil: Date.now() + ctx.env.BENTO_RUN_TIMEOUT_MIN * 60_000 - HOLD_MARGIN_MS,
+      mayEnd: () => confirmRunOwnership(ctx, runId),
       sayAsUser,
       saySystem,
     });
@@ -783,10 +805,17 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
         deliver: liveHold.deliver,
         waiting: liveHold.waiting,
         close: liveHold.dispose,
+        // How a nudge from another server's message route reaches
+        // this session: the row is committed there, claimed here.
+        pump: liveHold.pump,
       });
     }
     liveSession = liveHold;
   }
+  // Should another server adopt this run (this process suspended past
+  // its lease), the hold timer must not close stdin under the new
+  // owner. The stream itself is left to run; see disownRun.
+  ownershipOf(ctx).onDisown.set(runId, () => liveSession?.detach());
 
   /**
    * A live conversation can settle rather than exit: after each
@@ -885,7 +914,8 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       onDelta: (delta) => ctx.bus.emitRunDelta(runId, delta),
       onEvent: async (event, cursor) => {
         // A draining process only consumes: its successor has the run.
-        if (ctx.draining) return;
+        // So does one whose run another server adopted.
+        if (yielded(ctx, runId)) return;
         if (!agentReported) {
           agentReported = true;
           if (announcesLaunchOnFirstEvent(adapter)) {
@@ -924,11 +954,12 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     ctx.running.delete(runId);
     ctx.liveInputs.delete(runId);
     liveSession?.dispose();
-    liveChannel?.end();
+    endStdinUnlessDisowned(ctx, runId, liveChannel);
     // A draining process does not end runs: the agent is still working
     // in the sandbox and the next boot reattaches to it. Whatever threw
-    // here is this process's shutdown seen from inside the loop.
-    if (ctx.draining) return;
+    // here is this process's shutdown seen from inside the loop. A run
+    // another server adopted is that server's to end.
+    if (yielded(ctx, runId)) return;
     // A cancelled run is not a failure: the user asked for it to stop.
     if (controller.signal.aborted) {
       await markCancelled(ctx, runId);
@@ -944,9 +975,9 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   ctx.running.delete(runId);
   ctx.liveInputs.delete(runId);
   liveSession?.dispose();
-  liveChannel?.end();
+  endStdinUnlessDisowned(ctx, runId, liveChannel);
 
-  if (ctx.draining) return;
+  if (yielded(ctx, runId)) return;
   if (controller.signal.aborted) {
     await markCancelled(ctx, runId);
     emitBoard("cancelled");
@@ -2190,9 +2221,10 @@ async function finishRun(
   },
   exitCode: number | null,
 ): Promise<void> {
-  // Ending runs belongs to the successor once shutdown starts; see the
-  // drain checks in the executor loops.
-  if (ctx.draining) return;
+  // Ending runs belongs to the successor once shutdown starts, and to
+  // the adopter once a run was adopted; see the yield checks in the
+  // executor loops.
+  if (yielded(ctx, runId)) return;
   const unbilled = outcome.ok ? null : unbilledReason(outcome.error);
   /**
    * What this run cost, and how well that is known, worked out before
@@ -2741,72 +2773,7 @@ export async function markCancelled(ctx: AppContext, runId: string): Promise<voi
  * other's run.
  */
 export async function recoverInterruptedRuns(ctx: AppContext): Promise<void> {
-  /**
-   * Both boards. A swarm's runs are this process's in exactly the way a
-   * card's are (the exec stream, the abort handle, the stdin channel
-   * all live in its memory), so a restart strands them the same way and
-   * leaving them out would mean a swarm run marked running forever,
-   * with its swarm waiting on a settlement that can never arrive.
-   */
-  const orphans = await ctx.db
-    .select()
-    .from(agentRuns)
-    .where(and(eq(agentRuns.executor, "server"), inArray(agentRuns.status, ["starting", "running"])));
-
-  let closed = 0;
-  let resuming = 0;
-  for (const orphan of orphans) {
-    // The sandbox is found through the run's own link, never by
-    // external id: sandboxes has no unique index on external_id, so a
-    // name lookup could hand back another row for the same sprite.
-    const sandbox =
-      orphan.status === "running" && orphan.sandboxId
-        ? (await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, orphan.sandboxId)).limit(1))[0]
-        : undefined;
-    let resumeDriver: SandboxDriver | undefined;
-    if (sandbox) {
-      try {
-        resumeDriver = driverForSandbox(ctx.drivers, sandbox);
-      } catch (err) {
-        console.warn(`run ${orphan.id} cannot resume:`, err);
-        resumeDriver = undefined;
-      }
-    }
-    if (!sandbox || !resumeDriver?.attach) {
-      await failRunAsInterrupted(ctx, orphan);
-      closed += 1;
-      continue;
-    }
-    resuming += 1;
-    /**
-     * Fire and forget: a resume lasts as long as the agent does, and
-     * boot must not wait behind it. Every failure inside falls back to
-     * the interrupted close, whose compare-and-set means a resume that
-     * already finished cannot be clobbered.
-     */
-    void resumeInterruptedRun(ctx, orphan, sandbox, resumeDriver).catch(async (err) => {
-      console.error(`could not resume run ${orphan.id} after the restart:`, err);
-      ctx.analytics?.captureException(err, orphan.startedBy, orphan.organizationId, {
-        run_id: orphan.id,
-        source: "resume_interrupted",
-      });
-      try {
-        await failRunAsInterrupted(ctx, orphan);
-      } catch (inner) {
-        console.error(`could not close run ${orphan.id} as interrupted either:`, inner);
-        ctx.analytics?.captureException(inner, orphan.startedBy, orphan.organizationId, {
-          run_id: orphan.id,
-          source: "resume_interrupted_close",
-        });
-      }
-    });
-  }
-  if (closed > 0) {
-    console.warn(`closed ${closed} run(s) interrupted by the restart`);
-  }
-  if (resuming > 0) {
-    console.warn(`reattaching to ${resuming} run(s) still working in their sandboxes`);
-  }
+  await adoptOrphanedRuns(ctx);
 
   await sweepStrandedMessages(ctx);
 
@@ -2819,6 +2786,124 @@ export async function recoverInterruptedRuns(ctx: AppContext): Promise<void> {
    * executeRun's atomic claim turns into a no-op.
    */
   await requeueWaitingRuns(ctx);
+}
+
+/**
+ * Takes over every server run nobody is driving, and follows each into
+ * its sandbox or closes it. On boot, on the reap schedule, and when a
+ * shutting down server announces a release.
+ *
+ * Only orphans. A run with a live lease (run-ownership.ts) is another
+ * server's, still being driven, and is left alone: before the lease, a
+ * machine booting beside a live one took over every run the live one
+ * held, which put two loops on one agent. Each adoption is a compare
+ * and set on the stale lease, so two servers sweeping at once split the
+ * orphans between them rather than both taking all.
+ *
+ * Both boards. A swarm's runs are a process's in exactly the way a
+ * card's are (the exec stream, the abort handle, the stdin channel all
+ * live in its memory), so losing their process strands them the same
+ * way and leaving them out would mean a swarm run marked running
+ * forever, with its swarm waiting on a settlement that can never
+ * arrive.
+ */
+export async function adoptOrphanedRuns(ctx: AppContext): Promise<{ resumed: number; closed: number }> {
+  if (ctx.draining) return { resumed: 0, closed: 0 };
+  const orphans = await orphanedRuns(ctx);
+  // The web half of a split deployment drives no runs, orphans
+  // included: Fly may suspend it, and a run it held would be stranded.
+  // But the reap schedule is one pg-boss job shared by every process,
+  // and the web app wins it as often as a worker does; a pass that
+  // found orphans and kept quiet would leave them waiting for a pass a
+  // worker wins. So it announces each one the way a shutting down
+  // server does, and the workers adopt on hearing it.
+  if (!drivesRuns(ctx.env)) {
+    for (const orphan of orphans) ctx.bus.emitRunControl({ runId: orphan.id, action: "released" });
+    if (orphans.length > 0) console.warn(`announced ${orphans.length} orphaned run(s) for a worker to adopt`);
+    return { resumed: 0, closed: 0 };
+  }
+
+  let closed = 0;
+  let resuming = 0;
+  for (const orphan of orphans) {
+    if (ctx.draining) break;
+    if (!(await adoptRun(ctx, orphan.id))) continue; // another server got there first
+    // From here the run is held and heartbeated by this process, so
+    // nothing below may leave without either resuming it or letting it
+    // go: a throw that kept the hold would keep every other server off
+    // a run nobody is driving, for as long as this process lives.
+    let sandbox: typeof sandboxes.$inferSelect | undefined;
+    let resumeDriver: SandboxDriver | undefined;
+    try {
+      // The sandbox is found through the run's own link, never by
+      // external id: sandboxes has no unique index on external_id, so a
+      // name lookup could hand back another row for the same sprite.
+      sandbox =
+        orphan.status === "running" && orphan.sandboxId
+          ? (await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, orphan.sandboxId)).limit(1))[0]
+          : undefined;
+      if (sandbox) {
+        try {
+          resumeDriver = driverForSandbox(ctx.drivers, sandbox);
+        } catch (err) {
+          console.warn(`run ${orphan.id} cannot resume:`, err);
+          resumeDriver = undefined;
+        }
+      }
+    } catch (err) {
+      console.error(`could not look up the sandbox of orphaned run ${orphan.id}:`, err);
+      ctx.analytics?.captureException(err, orphan.startedBy, orphan.organizationId, {
+        run_id: orphan.id,
+        source: "resume_interrupted_lookup",
+      });
+      // Let go rather than close: the lookup failing usually means the
+      // database is unwell, and the close would fail the same way. The
+      // lease lapses and the next sweep, here or elsewhere, tries again.
+      releaseRun(ctx, orphan.id);
+      continue;
+    }
+    if (!sandbox || !resumeDriver?.attach) {
+      try {
+        await failRunAsInterrupted(ctx, orphan);
+      } finally {
+        releaseRun(ctx, orphan.id);
+      }
+      closed += 1;
+      continue;
+    }
+    resuming += 1;
+    /**
+     * Fire and forget: a resume lasts as long as the agent does, and
+     * boot must not wait behind it. Every failure inside falls back to
+     * the interrupted close, whose compare-and-set means a resume that
+     * already finished cannot be clobbered.
+     */
+    void resumeInterruptedRun(ctx, orphan, sandbox, resumeDriver)
+      .catch(async (err) => {
+        console.error(`could not resume run ${orphan.id} after the restart:`, err);
+        ctx.analytics?.captureException(err, orphan.startedBy, orphan.organizationId, {
+          run_id: orphan.id,
+          source: "resume_interrupted",
+        });
+        try {
+          await failRunAsInterrupted(ctx, orphan);
+        } catch (inner) {
+          console.error(`could not close run ${orphan.id} as interrupted either:`, inner);
+          ctx.analytics?.captureException(inner, orphan.startedBy, orphan.organizationId, {
+            run_id: orphan.id,
+            source: "resume_interrupted_close",
+          });
+        }
+      })
+      .finally(() => releaseRun(ctx, orphan.id));
+  }
+  if (closed > 0) {
+    console.warn(`closed ${closed} run(s) whose server went away`);
+  }
+  if (resuming > 0) {
+    console.warn(`reattaching to ${resuming} run(s) still working in their sandboxes`);
+  }
+  return { resumed: resuming, closed };
 }
 
 /**
@@ -3022,7 +3107,7 @@ export async function reapStalledRuns(ctx: AppContext, stallMin: number = STALLE
     // move to running, and the read just before the agent is spawned)
     // and stops there. One that already spawned in this process is
     // aborted; its own close then loses the compare and set below.
-    ctx.running.get(run.id)?.abort();
+    requestRunAbort(ctx, run.id);
     await failRunAsInterrupted(ctx, run, { error: STALLED_RUN_ERROR, transcript: STALLED_RUN_TRANSCRIPT });
     closed.push(run.id);
     ctx.analytics?.captureException(new Error(`run ${run.id} stalled before its agent started`), run.startedBy, run.organizationId, {
@@ -3251,6 +3336,7 @@ async function resumeInterruptedRun(
       liveChannel,
       conversation: conversation ?? headlessConversation(),
       holdUntil: Date.now() + timeoutMs - HOLD_MARGIN_MS,
+      mayEnd: () => confirmRunOwnership(ctx, run.id),
       sayAsUser,
       saySystem,
     });
@@ -3260,6 +3346,7 @@ async function resumeInterruptedRun(
         deliver: liveSession.deliver,
         waiting: liveSession.waiting,
         close: liveSession.dispose,
+        pump: liveSession.pump,
       });
     }
   }
@@ -3267,6 +3354,9 @@ async function resumeInterruptedRun(
     if (!liveSession) return;
     await liveSession.onTurnFinished(ok);
   };
+  // As in executeRun: an adoption elsewhere clears the hold timer here
+  // so this side never closes stdin under the new owner.
+  ownershipOf(ctx).onDisown.set(run.id, () => liveSession?.detach());
 
   // A durable Docker replay starts after the last committed event. If
   // that event completed a live turn just before the deploy, rebuild
@@ -3340,7 +3430,8 @@ async function resumeInterruptedRun(
       onDelta: (delta) => ctx.bus.emitRunDelta(run.id, delta),
       onEvent: async (event, cursor) => {
         // A draining process only consumes: its successor has the run.
-        if (ctx.draining) return;
+        // So does one whose run another server adopted.
+        if (yielded(ctx, run.id)) return;
         // The session started in the run's first life, and that life
         // wrote the marker. An init here is the sandbox replaying it.
         if (event.type === "init") return;
@@ -3359,9 +3450,10 @@ async function resumeInterruptedRun(
     ctx.running.delete(run.id);
     ctx.liveInputs.delete(run.id);
     liveSession?.dispose();
-    liveChannel?.end();
-    // The next boot reattaches; this process just leaves quietly.
-    if (ctx.draining) return;
+    endStdinUnlessDisowned(ctx, run.id, liveChannel);
+    // The next boot reattaches; this process just leaves quietly. A run
+    // another server adopted is that server's to end.
+    if (yielded(ctx, run.id)) return;
     if (controller.signal.aborted) {
       await markCancelled(ctx, run.id);
       emitBoard("cancelled");
@@ -3376,9 +3468,9 @@ async function resumeInterruptedRun(
   ctx.running.delete(run.id);
   ctx.liveInputs.delete(run.id);
   liveSession?.dispose();
-  liveChannel?.end();
+  endStdinUnlessDisowned(ctx, run.id, liveChannel);
 
-  if (ctx.draining) return;
+  if (yielded(ctx, run.id)) return;
   if (controller.signal.aborted) {
     await markCancelled(ctx, run.id);
     emitBoard("cancelled");
@@ -3415,6 +3507,30 @@ async function requeueWaitingRuns(ctx: AppContext): Promise<void> {
 }
 
 export async function registerJobs(ctx: AppContext): Promise<void> {
+  /**
+   * Requests addressed to whichever process drives a run (a cancel, a
+   * nudge that messages are parked, a release by a shutting down
+   * server) arrive here from the bus, this process's own routes
+   * included. See run-ownership.ts.
+   */
+  // One sweep at a time, however many releases arrive together.
+  const adopt = coalesced(async () => {
+    await adoptOrphanedRuns(ctx);
+  });
+  ctx.bus.onRunControl((control) =>
+    handleRunControl(ctx, control, {
+      adopt,
+      // The tick runs here, in the process that holds the planner's
+      // session, so deliverPlannerWake finds it waiting and writes the
+      // wake in. The swarm row lock inside the tick serializes it with
+      // any tick the queue is running elsewhere.
+      tickHeldPlanner: async (runId) => {
+        const [run] = await ctx.db.select({ swarmId: agentRuns.swarmId }).from(agentRuns).where(eq(agentRuns.id, runId)).limit(1);
+        if (run?.swarmId) await tickSwarm(ctx, run.swarmId);
+      },
+    }),
+  );
+
   await ctx.boss.createQueue("run.execute");
   await ctx.boss.createQueue("gate.evaluate");
   await ctx.boss.createQueue("runner.reap");
@@ -3477,6 +3593,20 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
    */
   const ticked = await tickAllLiveSwarms(ctx);
   if (ticked > 0) console.log(`queued a tick for ${ticked} live swarm(s)`);
+
+  /**
+   * A second look once every lease that was live at boot has had time
+   * to lapse. Boot recovery adopts only runs nobody is driving, and a
+   * process that was killed outright (no release) still holds a fresh
+   * lease for up to RUN_LEASE_MS after it died; without this its runs
+   * would wait for the reap schedule's next pass.
+   */
+  setTimeout(() => {
+    adoptOrphanedRuns(ctx).catch((err: unknown) => {
+      console.warn("the post-boot adoption pass did not finish:", err);
+      ctx.analytics?.captureException(err, null, null, { source: "run_adopt" });
+    });
+  }, RUN_LEASE_MS + RUN_HEARTBEAT_MS).unref();
 
   /**
    * A finished card's sandbox goes away, because it costs money for as
@@ -3549,9 +3679,17 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
    * bare boss.send still runs, on the next poll.
    */
   ctx.runWorkers = [];
-  for (let slot = 0; slot < ctx.env.BENTO_MAX_CONCURRENT_RUNS; slot++) {
+  for (let slot = 0; slot < runSlots(ctx.env); slot++) {
     const workerId = await ctx.boss.work<{ runId: string }>("run.execute", { batchSize: 1, pollingIntervalSeconds: RUN_WORKER_POLL_SECONDS }, async (jobs) => {
       for (const job of jobs) {
+        // A job for a run this process already drives (pg-boss expired
+        // the first job and retried it while the agent was still
+        // working) returns from executeRun at once, and must not let
+        // go of the run on its way out: that would stop the heartbeat,
+        // let the lease lapse under a live agent, and have a sweep
+        // start a second loop on it. Only the invocation that took the
+        // run releases it.
+        const heldBefore = ownershipOf(ctx).owned.has(job.data.runId);
         try {
           await executeRun(ctx, job.data.runId);
         } catch (err) {
@@ -3562,6 +3700,10 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
           console.error(`run.execute ${job.data.runId} failed:`, err);
           ctx.analytics?.captureException(err, null, null, { queue: "run.execute", run_id: job.data.runId });
           throw err;
+        } finally {
+          // However the run ended, this process no longer holds it, so
+          // the heartbeat stops renewing its lease.
+          if (!heldBefore) releaseRun(ctx, job.data.runId);
         }
       }
     });
@@ -3621,6 +3763,10 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
     await reapStalledRuns(ctx);
     // And runs that never got that far: queued, with their job lost.
     await requeueStrandedRuns(ctx);
+    // And runs whose server went away without saying so (a machine Fly
+    // suspended or destroyed): their lease has run out, and this
+    // process reattaches to their agents.
+    await adoptOrphanedRuns(ctx);
   }));
 
   /**
@@ -3657,7 +3803,30 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
   await ctx.boss.createQueue("gate.sweep");
   await ctx.boss.schedule("gate.sweep", "*/5 * * * *");
   await ctx.boss.work("gate.sweep", captureJobErrors(ctx.analytics, "gate.sweep", async () => {
-    const gated = await ctx.db.select({ id: features.id }).from(features).where(eq(features.status, "gated"));
+    /**
+     * Only cards whose gate can change with no event to say so: a
+     * command to re-run, GitHub checks or review threads to re-read, a
+     * judge to ask. A card gated on a person (manual) or on its own
+     * run (run_succeeded, or no criteria at all) moves only when
+     * something on this server moves it, and that path queues its own
+     * evaluation; sweeping it was an evaluation per parked card every
+     * five minutes, with GitHub calls behind the ones that had a pull
+     * request, for nothing. The stage is read through the card's
+     * current stage; a card with none is not gated on anything.
+     */
+    const gated = await ctx.db
+      .select({ id: features.id })
+      .from(features)
+      .innerJoin(stages, eq(stages.id, features.currentStageId))
+      .where(
+        and(
+          eq(features.status, "gated"),
+          sql`exists (
+            select 1 from jsonb_array_elements(${stages.gateCriteria}) as c
+            where c ->> 'type' in ('command', 'checks_pass', 'pr_comments_resolved', 'agent_judge')
+          )`,
+        ),
+      );
     for (const row of gated) {
       await ctx.boss.send("gate.evaluate", { featureId: row.id });
     }

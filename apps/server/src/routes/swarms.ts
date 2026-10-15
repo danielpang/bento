@@ -33,12 +33,14 @@ import type { AppContext } from "../context.js";
 import type { BoardEvent } from "../events.js";
 import { runsForCaller } from "../feature-flags.js";
 import { actor } from "../middleware/actor.js";
-import { deferAfterCommit, deferOnRollback, tenantDb as db } from "../middleware/tenant.js";
+import { deferAfterCommit, deferOnRollback, respondAfterCommit, tenantDb as db } from "../middleware/tenant.js";
 import { queueSwarmSandboxReap, reapSwarmSandbox } from "../orchestrator/reap-sandbox.js";
 import { enqueueTaskStartOver } from "../orchestrator/swarm/start-over.js";
 import { enqueueSwarmPublish } from "../orchestrator/swarm/complete.js";
 import { driverForProject, driverForSandbox } from "../orchestrator/sandbox-driver.js";
 import { markCancelled } from "../orchestrator/run-executor.js";
+import { requestRunAbort } from "../orchestrator/run-ownership.js";
+import { liveDeliveryOf, nudgeAndAwaitSent } from "../orchestrator/remote-live.js";
 import { enqueueSwarmTick } from "../orchestrator/swarm/coordinator.js";
 import { MAX_PLAN_DEPTH, MAX_SWARM_GOAL_CHARS, MAX_SWARM_WORKERS } from "@bento/core";
 import { requireSwarms } from "../orchestrator/swarm/gate.js";
@@ -1122,7 +1124,7 @@ export function swarmRoutes(ctx: AppContext) {
         .from(agentRuns)
         .where(and(eq(agentRuns.swarmId, swarm.id), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)));
       for (const run of active) {
-        ctx.running.get(run.id)?.abort();
+        requestRunAbort(ctx, run.id);
         await markCancelled(ctx, run.id);
       }
 
@@ -1248,7 +1250,7 @@ export function swarmRoutes(ctx: AppContext) {
         .limit(1);
       if (!run) return c.json({ error: "The planner is not running." }, 409);
 
-      ctx.running.get(run.id)?.abort();
+      requestRunAbort(ctx, run.id);
       await markCancelled(ctx, run.id);
       deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
       saySwarmChanged(ctx, c, swarm);
@@ -1291,7 +1293,7 @@ export function swarmRoutes(ctx: AppContext) {
         .limit(1);
       if (!run) return c.json({ error: "No worker is running on this task." }, 409);
 
-      ctx.running.get(run.id)?.abort();
+      requestRunAbort(ctx, run.id);
       await markCancelled(ctx, run.id);
       deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));
       saySwarmChanged(ctx, c, swarm);
@@ -1673,6 +1675,31 @@ export function swarmRoutes(ctx: AppContext) {
             .where(eq(swarmMessages.id, message.id));
           return c.json({ ...message, status: "sent", runId: workerRunId, sentAt, live: true, delivery: liveWorker.delivery }, 201);
         }
+        /*
+         * The worker may be live on another server, whose stdin this
+         * process cannot see. The row is committed first, then that
+         * server is told to claim it (run-ownership.ts), and the row is
+         * watched for about a second for its answer: sent means the
+         * holder wrote it into the agent, and the response says live.
+         * A worker with no live session anywhere leaves it parked for
+         * the next agent, as before, and the response says not live.
+         */
+        if (workerRunId) {
+          const runId = workerRunId;
+          respondAfterCommit(c, async () => {
+            const sent = await nudgeAndAwaitSent(ctx, runId, async () => {
+              const [row] = await ctx.db
+                .select({ status: swarmMessages.status, sentAt: swarmMessages.sentAt })
+                .from(swarmMessages)
+                .where(eq(swarmMessages.id, message.id))
+                .limit(1);
+              return row?.status === "sent";
+            });
+            if (!sent) return null;
+            const delivery = (await liveDeliveryOf(ctx, runId)) ?? "queue";
+            return c.json({ ...message, status: "sent", runId, sentAt: new Date(), live: true, delivery }, 201);
+          });
+        }
         return c.json({ ...message, live: false }, 201);
       },
     )
@@ -1945,7 +1972,7 @@ export function swarmRoutes(ctx: AppContext) {
         .from(agentRuns)
         .where(and(eq(agentRuns.swarmTaskId, task.id), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)));
       for (const run of active) {
-        ctx.running.get(run.id)?.abort();
+        requestRunAbort(ctx, run.id);
         await markCancelled(ctx, run.id);
       }
 
@@ -2521,7 +2548,7 @@ async function stopRunsOnTask(ctx: AppContext, c: Context, taskId: string): Prom
     .from(agentRuns)
     .where(and(eq(agentRuns.swarmTaskId, taskId), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)));
   for (const run of active) {
-    ctx.running.get(run.id)?.abort();
+    requestRunAbort(ctx, run.id);
     await markCancelled(ctx, run.id);
   }
 }

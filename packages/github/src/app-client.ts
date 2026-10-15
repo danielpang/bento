@@ -36,6 +36,16 @@ export type GitHubAppConfig = Omit<AppConfig, "installationId">;
  */
 export class GitHubApp {
   private octokit: Octokit;
+  /**
+   * One client per installation, kept. Octokit's app auth caches the
+   * installation token inside the client, so a fresh client per call
+   * minted a fresh token per call: every gate evaluation of every
+   * gated card, every five minutes, began with a token request before
+   * it asked GitHub anything. That is the kind of traffic that walks a
+   * busy organization into its installation rate limit. Bounded by the
+   * number of installations this server has ever been asked about.
+   */
+  private clients = new Map<string, GitHubAppClient>();
 
   constructor(private config: GitHubAppConfig) {
     this.octokit = new Octokit({
@@ -45,7 +55,12 @@ export class GitHubApp {
   }
 
   forInstallation(installationId: string): GitHubAppClient {
-    return new GitHubAppClient({ ...this.config, installationId });
+    let client = this.clients.get(installationId);
+    if (!client) {
+      client = new GitHubAppClient({ ...this.config, installationId });
+      this.clients.set(installationId, client);
+    }
+    return client;
   }
 
   async installation(

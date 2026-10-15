@@ -2255,8 +2255,39 @@ type SpriteSession = Awaited<ReturnType<Sprite["listSessions"]>>[number];
  */
 function newestSessionFor(sessions: SpriteSession[], commandLines: string[]): SpriteSession | undefined {
   return sessions
-    .filter((s) => !s.tty && commandLines.some((line) => s.command === line || s.command.startsWith(`${line} `)))
+    .filter((s) => !s.tty && commandLines.some((line) => sessionCommandMatches(s.command, line)))
     .sort((a, b) => b.created.getTime() - a.created.getTime())[0];
+}
+
+/**
+ * Whether a listed session is the command a line describes.
+ *
+ * The sprite lists a session by the process that is running, and for a
+ * command spawned straight from the exec URL it names the executable by
+ * its resolved path: `sleep 12` is listed as `/usr/bin/sleep 12`, and
+ * `claude -p ...` as wherever the toolchain put claude. A command the
+ * launcher exec'd from a shell is listed as typed. The real-sprite test
+ * saw both. So the first word is compared by its basename and the rest
+ * of the line as before: the line is either the whole command or the
+ * command's head, never a word that merely begins another (`sleep` is
+ * not `sleeper`).
+ */
+export function sessionCommandMatches(listed: string, line: string): boolean {
+  if (listed === line || listed.startsWith(`${line} `)) return true;
+  const [listedHead, listedRest] = splitCommandLine(listed);
+  const [lineHead, lineRest] = splitCommandLine(line);
+  if (basenameOf(listedHead) !== basenameOf(lineHead)) return false;
+  return lineRest === "" || listedRest === lineRest || listedRest.startsWith(`${lineRest} `);
+}
+
+function splitCommandLine(command: string): [string, string] {
+  const space = command.indexOf(" ");
+  return space === -1 ? [command, ""] : [command.slice(0, space), command.slice(space + 1)];
+}
+
+function basenameOf(word: string): string {
+  const slash = word.lastIndexOf("/");
+  return slash === -1 ? word : word.slice(slash + 1);
 }
 
 /** Resolves on the connection opening, rejects on its error or the deadline. */

@@ -23,9 +23,37 @@ import {
   SPRITE_DESTROY_RETRY_DELAYS_MS,
   SPRITE_LOOKUP_RETRY_DELAYS_MS,
   sandboxErrorKind,
+  sessionCommandMatches,
   spriteExistsWithRetry,
   spriteName,
 } from "./sprite.js";
+
+/**
+ * How a reattach, a handshake retry and the leftover agent check find
+ * their session in the sprite's listing. The sprite names a command
+ * spawned from the exec URL by its executable's resolved path (the
+ * real-sprite test listed `sleep 12` as `/usr/bin/sleep 12`), and a
+ * command the launcher exec'd from a shell as typed; the matcher has to
+ * read both as the same command, and nothing else as it.
+ */
+test("a listed session matches its command whether the sprite resolved the executable or not", () => {
+  // As typed: the rule an unstaged run always lived by.
+  assert.equal(sessionCommandMatches("claude -p --input-format stream-json", "claude"), true);
+  assert.equal(sessionCommandMatches("sleep 12", "sleep"), true);
+  assert.equal(sessionCommandMatches("sh /tmp/bento-launch-k.sh", "sh /tmp/bento-launch-k.sh"), true);
+  // Resolved: what a direct spawn is listed as.
+  assert.equal(sessionCommandMatches("/usr/bin/sleep 12", "sleep"), true);
+  assert.equal(sessionCommandMatches("/usr/local/bin/claude -p --input-format stream-json", "claude"), true);
+  assert.equal(sessionCommandMatches("/usr/bin/git bundle create /tmp/x.bundle HEAD", "git bundle create /tmp/x.bundle"), true);
+  // A word that begins another is not it, resolved or not.
+  assert.equal(sessionCommandMatches("sleeper 12", "sleep"), false);
+  assert.equal(sessionCommandMatches("/usr/bin/sleeper 12", "sleep"), false);
+  // A line with arguments wants those arguments.
+  assert.equal(sessionCommandMatches("/usr/bin/sleep 12", "sleep 20"), false);
+  assert.equal(sessionCommandMatches("/usr/bin/git status", "git bundle create /tmp/x.bundle"), false);
+  // A different program at the same basename's path depth is not it either.
+  assert.equal(sessionCommandMatches("/usr/bin/node /x.js", "claude"), false);
+});
 
 /**
  * A sprite lives until something deletes it, and the e2e test's own

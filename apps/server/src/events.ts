@@ -75,7 +75,45 @@ export type BusWirePayload =
   | { kind: "run_event"; runId: string; seq: number }
   | { kind: "run_delta"; runId: string; delta: AgentDelta }
   | { kind: "run_done"; runId: string; status: string }
+  | { kind: "run_control"; runId: string; action: RunControlAction }
   | { kind: "board"; event: BoardEvent };
+
+/**
+ * A request addressed to whichever process is driving a run, in the
+ * shape a chat server routes a message to the one holding the socket:
+ * published to every process, acted on by the one that has the run in
+ * memory, ignored by the rest. The agent's stream, abort handle and
+ * stdin live in exactly one process, and before this a route that
+ * landed anywhere else could only change the row and hope.
+ *
+ * - cancel: abort the agent. The route has already marked the row;
+ *   the holder's loop sees the abort and closes as a cancel would.
+ * - nudge: messages were parked for this run in the database. The
+ *   holder claims them and writes them into the live session, if it
+ *   has one; a run with no live session leaves them for its end.
+ * - released: the process that held this run let it go on purpose (a
+ *   shutdown), so a live server may adopt it now rather than when the
+ *   lease runs out.
+ * - close: end the run's live session once nothing is waiting to be
+ *   read. The swarm coordinator's answer to a held planner refused
+ *   another turn, when the tick ran on a process that does not hold it.
+ * - tick: the holder of this run (a swarm planner held open between
+ *   turns) should run its swarm's tick itself, because a tick elsewhere
+ *   had news for the planner and only the holder can write it in.
+ * - queued: a run was just queued; every process with run workers
+ *   wakes them, so a run queued on a machine without workers (the web
+ *   app of a split deployment) starts now rather than on the next poll.
+ *
+ * Coordinates only, never payloads: a message's text is a row the
+ * holder reads, so the wire carries ids and the database stays the
+ * one source of what was said.
+ */
+export type RunControlAction = "cancel" | "nudge" | "released" | "close" | "tick" | "queued";
+
+export interface RunControl {
+  runId: string;
+  action: RunControlAction;
+}
 
 /**
  * Fan-out from the orchestrator to SSE subscribers.
@@ -226,6 +264,25 @@ export class EventBus {
   emitBoardEvent(event: BoardEvent): void {
     this.deliverBoardEvent(event);
     this.publisher?.({ kind: "board", event });
+  }
+
+  /**
+   * Asks whichever process holds the run to act on it. Delivered here
+   * too, so a holder on this process answers without a round trip and
+   * a single-process deployment needs no replication to work.
+   */
+  emitRunControl(control: RunControl): void {
+    this.deliverRunControl(control);
+    this.publisher?.({ kind: "run_control", runId: control.runId, action: control.action });
+  }
+
+  deliverRunControl(control: RunControl): void {
+    this.emitter.emit("run_control", control);
+  }
+
+  onRunControl(listener: (control: RunControl) => void): () => void {
+    this.emitter.on("run_control", listener);
+    return () => this.emitter.off("run_control", listener);
   }
 
   deliverBoardEvent(event: BoardEvent): void {
