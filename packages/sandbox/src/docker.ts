@@ -6,6 +6,21 @@ import { DURABLE_DIR, DURABLE_READER, DURABLE_RUNNER, SANDBOX_NODE, parseDurable
 
 const DEFAULT_IMAGE = "bento-sandbox:dev";
 
+/**
+ * The longest any single Docker API call may take. The daemon can stop
+ * answering without closing its socket (OrbStack's VM freezing on a full
+ * disk), and an unbounded call there kept a run "running" for fifteen
+ * hours past its limit.
+ */
+const DOCKER_CALL_TIMEOUT_MS = 30_000;
+/** How long a durable run's stop may take before its reader is ended without the exit record. */
+const DURABLE_STOP_DEADLINE_MS = 45_000;
+/** How long the reader is given to deliver the exit record a stop wrote. */
+const DURABLE_EXIT_GRACE_MS = 2_000;
+/** Silence after which a durable run asks whether its container is still up. */
+const DEFAULT_LIVENESS_MS = 60_000;
+export const SANDBOX_STOPPED_MESSAGE = "The sandbox stopped while the command was running.";
+
 /** Maps host.docker.internal to the host, so a sandbox can reach the gateway. */
 export const HOST_GATEWAY_ALIAS = "host.docker.internal:host-gateway";
 
@@ -27,10 +42,12 @@ export class DockerDriver implements SandboxDriver {
   readonly workspace = "host" as const;
   supportsStdin = true;
   private docker: Docker;
+  private livenessMs: number;
 
-  constructor(docker?: Docker, restrictedNetwork?: string) {
+  constructor(docker?: Docker, restrictedNetwork?: string, options?: { livenessMs?: number }) {
     this.docker = docker ?? createDockerClient();
     this.restrictedNetwork = restrictedNetwork;
+    this.livenessMs = options?.livenessMs ?? DEFAULT_LIVENESS_MS;
   }
 
   /** Only when the operator has named a network to use for it. */
@@ -125,7 +142,7 @@ export class DockerDriver implements SandboxDriver {
     // Inherited by child processes, including detached background commands.
     // Docker's exec PID is a host PID; it cannot safely be killed inside the container.
     const executionId = randomUUID();
-    const exec = await container.exec({
+    const exec = await withDeadline(container.exec({
       Cmd: argv,
       AttachStdin: opts?.stdin !== undefined,
       AttachStdout: true,
@@ -143,8 +160,12 @@ export class DockerDriver implements SandboxDriver {
         ...Object.entries(opts?.env ?? {}).map(([k, v]) => `${k}=${v}`),
         `BENTO_EXEC_ID=${executionId}`,
       ],
-    });
-    const stream = await exec.start({ hijack: true, stdin: opts?.stdin !== undefined });
+    }), "docker exec create");
+    const stream = await withDeadline(
+      exec.start({ hijack: true, stdin: opts?.stdin !== undefined }),
+      "docker exec start",
+      (late) => late.destroy(),
+    );
 
     // Live sessions: lines pushed by the executor flow into the
     // process; the iterable ending is end-of-input, which is how the
@@ -203,7 +224,7 @@ export class DockerDriver implements SandboxDriver {
     stream.on("end", async () => {
       if (stopping || done) return;
       try {
-        const info = await exec.inspect();
+        const info = await withDeadline(exec.inspect(), "docker exec inspect");
         if (!stopping) finish(info.ExitCode ?? -1);
       } catch (err) {
         stop(String(err));
@@ -253,14 +274,14 @@ export class DockerDriver implements SandboxDriver {
     }
     const key = durableKey(opts.sessionKey);
     const container = this.docker.getContainer(handle.externalId);
-    const execution = await container.exec({
+    const execution = await withDeadline(container.exec({
       Cmd: [SANDBOX_NODE, "-e", DURABLE_RUNNER, JSON.stringify({
         key, argv, cwd: opts.cwd ?? handle.workdir, stdin: Boolean(opts.stdin),
       })],
       WorkingDir: opts.cwd ?? handle.workdir,
       Env: ["IS_SANDBOX=1", `BENTO_EXEC_ID=${key}`, ...Object.entries(opts.env ?? {}).map(([k, v]) => `${k}=${v}`)],
-    });
-    const detached = await execution.start({ Detach: true });
+    }), "docker exec create");
+    const detached = await withDeadline(execution.start({ Detach: true }), "docker exec start", (late) => late.destroy());
     detached.resume();
     if (!(await this.waitForDurableRun(handle, key))) throw new Error("sandbox run did not start");
     yield* this.durableStream(handle, key, opts);
@@ -291,19 +312,43 @@ export class DockerDriver implements SandboxDriver {
     const container = this.docker.getContainer(handle.externalId);
     let finished = false;
     let stopping: Promise<void> | undefined;
+    // Set when the run must end without its exit record: the reader is
+    // aborted and the reason is reported as the run's own exit.
+    let forced: string | undefined;
+    const reader = new AbortController();
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    const later = (ms: number, fn: () => void) => {
+      const timer = setTimeout(fn, ms);
+      timer.unref?.();
+      timers.push(timer);
+    };
+    const force = (reason: string) => {
+      if (finished || forced !== undefined) return;
+      forced = reason;
+      reader.abort();
+    };
     const stop = (reason: string) => {
       if (finished || stopping) return;
       stopping = (async () => {
         try {
           await stopDockerExec(container, key);
-        } finally {
+        } catch {
+          // A container that is gone has nothing left to stop.
+        }
+        try {
           const payload = JSON.stringify({ kind: "stderr", data: Buffer.from(reason).toString("base64"), seq: 0 }) + "\n"
             + JSON.stringify({ kind: "exit", exitCode: -1, seq: 0 }) + "\n";
           await collectExec(this.exec(handle, [SANDBOX_NODE, "-e",
             "require('node:fs').appendFileSync(process.argv[1], Buffer.from(process.argv[2], 'base64'))",
             `${DURABLE_DIR}/${key}/events`, Buffer.from(payload).toString("base64")], { timeoutMs: 5000 }));
+        } catch {
+          // The reader is ended below instead.
         }
       })();
+      // The record normally ends the reader. A daemon that stopped
+      // answering, or a container that is gone, never delivers it.
+      void stopping.then(() => later(DURABLE_EXIT_GRACE_MS, () => force(reason)));
+      later(DURABLE_STOP_DEADLINE_MS, () => force(reason));
     };
     const onAbort = () => stop("cancelled");
     opts?.signal?.addEventListener("abort", onAbort, { once: true });
@@ -311,6 +356,29 @@ export class DockerDriver implements SandboxDriver {
     const timeout = opts?.timeoutMs
       ? setTimeout(() => stop(`exec timeout: the command reached its ${opts.timeoutMs! / 1000} second limit`), opts.timeoutMs)
       : null;
+
+    // The reader is silent while the agent is, so silence alone says
+    // nothing. A container that is no longer up does.
+    let heard = true;
+    let checking = false;
+    const liveness = setInterval(() => {
+      if (heard || checking || finished || forced !== undefined) {
+        heard = false;
+        return;
+      }
+      checking = true;
+      this.running(handle)
+        .then((up) => {
+          if (!up) force(SANDBOX_STOPPED_MESSAGE);
+        })
+        .catch(() => {
+          // Not an answer. The run's own timeout still applies.
+        })
+        .finally(() => {
+          checking = false;
+        });
+    }, this.livenessMs);
+    liveness.unref?.();
 
     if (opts?.stdin) {
       void (async () => {
@@ -336,7 +404,16 @@ export class DockerDriver implements SandboxDriver {
 
     let pending = "";
     try {
-      for await (const chunk of this.exec(handle, [SANDBOX_NODE, "-e", DURABLE_READER, key, String(opts?.afterCursor ?? 0)])) {
+      for await (const chunk of this.exec(handle, [SANDBOX_NODE, "-e", DURABLE_READER, key, String(opts?.afterCursor ?? 0)], {
+        signal: reader.signal,
+      })) {
+        heard = true;
+        if (forced !== undefined) {
+          if (chunk.kind !== "exit") continue;
+          yield { kind: "stderr", data: forced };
+          yield { kind: "exit", exitCode: -1 };
+          return;
+        }
         if (chunk.kind === "exit") {
           if (!finished) throw new Error(`durable output reader exited with ${chunk.exitCode}`);
           break;
@@ -363,8 +440,20 @@ export class DockerDriver implements SandboxDriver {
       }
     } finally {
       if (timeout) clearTimeout(timeout);
+      clearInterval(liveness);
+      for (const timer of timers) clearTimeout(timer);
       opts?.signal?.removeEventListener("abort", onAbort);
       await stopping;
+    }
+  }
+
+  async running(handle: SandboxHandle): Promise<boolean> {
+    try {
+      const info = await withDeadline(this.docker.getContainer(handle.externalId).inspect(), "docker inspect");
+      return Boolean(info.State?.Running);
+    } catch (err) {
+      if ((err as { statusCode?: number }).statusCode === 404) return false;
+      throw err;
     }
   }
 
@@ -415,7 +504,7 @@ export class DockerDriver implements SandboxDriver {
 
 /** Closing a Docker exec socket only detaches. Explicitly stop this exec and its children. */
 async function stopDockerExec(container: Docker.Container, executionId: string): Promise<void> {
-  const command = await container.exec({
+  const command = await withDeadline(container.exec({
     Cmd: ["sh", "-c", `
 set -eu
 command -v grep >/dev/null
@@ -430,18 +519,49 @@ done
 `, "bento-stop-exec", executionId],
     AttachStdout: true,
     AttachStderr: true,
-  });
-  const stream = await command.start({ hijack: true });
+  }), "process cleanup", undefined, 5000);
+  const stream = await withDeadline(command.start({ hijack: true }), "process cleanup", (late) => late.destroy(), 5000);
   const timer = setTimeout(() => stream.destroy(new Error("process cleanup timed out")), 5000);
   try {
     // The script never prints process environments or credentials.
     for await (const _chunk of stream) { /* Drain Docker's framed output. */ }
-    const info = await command.inspect();
+    const info = await withDeadline(command.inspect(), "process cleanup", undefined, 5000);
     if (info.ExitCode !== 0) throw new Error(`process cleanup exited with ${info.ExitCode}`);
   } finally {
     clearTimeout(timer);
     stream.destroy();
   }
+}
+
+/**
+ * Rejects once `ms` has passed without an answer. `discard` releases
+ * what the call returns if it answers after all.
+ */
+function withDeadline<T>(
+  call: Promise<T>,
+  what: string,
+  discard?: (late: T) => void,
+  ms: number = DOCKER_CALL_TIMEOUT_MS,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let expired = false;
+    const timer = setTimeout(() => {
+      expired = true;
+      reject(new Error(`${what} timed out: Docker did not answer within ${Math.round(ms / 1000)} seconds`));
+    }, ms);
+    timer.unref?.();
+    call.then(
+      (value) => {
+        clearTimeout(timer);
+        if (expired) discard?.(value);
+        else resolve(value);
+      },
+      (err: unknown) => {
+        clearTimeout(timer);
+        if (!expired) reject(err);
+      },
+    );
+  });
 }
 
 /**

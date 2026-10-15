@@ -1689,6 +1689,11 @@ export class SpriteDriver implements SandboxDriver {
   async exists(handle: SandboxHandle): Promise<boolean> {
     return spriteExists(this.client, handle.externalId);
   }
+
+  /** A sprite with an exec in it stays awake, so one that exists is up. */
+  async running(handle: SandboxHandle): Promise<boolean> {
+    return spriteExists(this.client, handle.externalId);
+  }
 }
 
 /**

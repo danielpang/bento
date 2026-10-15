@@ -4,16 +4,16 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { DockerDriver } from "./docker.js";
+import { DockerDriver, SANDBOX_STOPPED_MESSAGE } from "./docker.js";
 import { createDockerClient } from "./docker-client.js";
-import { collectExec, LineChannel } from "./driver.js";
+import { collectExec, LineChannel, type ExecChunk } from "./driver.js";
 
 // Uses only the installed sandbox image, no agent credentials or network.
 test(
   "Docker stops timed-out and cancelled execs without stopping unrelated commands",
   {
     skip: process.env.BENTO_DOCKER_E2E !== "1",
-    timeout: 60000,
+    timeout: 120000,
   },
   async (t) => {
     const directory = await mkdtemp(path.join(tmpdir(), "bento-exec-test-"));
@@ -167,6 +167,59 @@ wait
         const status = await collectExec(driver.exec(handle, ["ps", "-eo", "pid,stat"]));
         const line = status.stdout.split("\n").find((entry) => entry.trim().split(/\s+/)[0] === pid);
         assert.ok(!line || line.trim().split(/\s+/)[1]!.startsWith("Z"), `process still running: ${line}`);
+      });
+      await t.test("a durable run whose container stopped answering still ends at its timeout", async () => {
+        const container = docker.getContainer(handle.externalId);
+        const chunks: ExecChunk[] = [];
+        let paused = false;
+        const started = Date.now();
+        try {
+          for await (const chunk of driver.exec(handle, ["sh", "-c", "echo started; sleep 300"], {
+            sessionKey: randomUUID(),
+            timeoutMs: 2000,
+          })) {
+            chunks.push(chunk);
+            if (chunk.kind === "stdout" && !paused) {
+              paused = true;
+              await container.pause();
+            }
+          }
+        } finally {
+          if (paused) await container.unpause();
+        }
+        assert.ok(paused);
+        assert.deepEqual(chunks.at(-1), { kind: "exit", exitCode: -1 });
+        assert.ok(chunks.some((chunk) => chunk.kind === "stderr" && /exec timeout/.test(chunk.data)));
+        assert.ok(Date.now() - started < 30_000, "the stop must not wait on a container that cannot answer");
+      });
+      await t.test("a durable run ends when its container is no longer running", async () => {
+        let stopped = false;
+        const lying = new Proxy(docker, {
+          get(target, prop) {
+            if (prop === "getContainer") {
+              return (id: string) =>
+                new Proxy(target.getContainer(id), {
+                  get(container, key) {
+                    if (key === "inspect" && stopped) return async () => ({ State: { Running: false } });
+                    const value = Reflect.get(container, key, container) as unknown;
+                    return typeof value === "function" ? value.bind(container) : value;
+                  },
+                });
+            }
+            const value = Reflect.get(target, prop, target) as unknown;
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+        const watched = new DockerDriver(lying, "none", { livenessMs: 300 });
+        const chunks: ExecChunk[] = [];
+        for await (const chunk of watched.exec(handle, ["sh", "-c", "echo started; sleep 300"], { sessionKey: randomUUID() })) {
+          chunks.push(chunk);
+          if (chunk.kind === "stdout") stopped = true;
+        }
+        assert.deepEqual(chunks.at(-2), { kind: "stderr", data: SANDBOX_STOPPED_MESSAGE });
+        assert.deepEqual(chunks.at(-1), { kind: "exit", exitCode: -1 });
+        assert.equal(await watched.running({ ...handle, externalId: `missing-${randomUUID()}` }), false);
+        assert.equal(await driver.running(handle), true);
       });
     } finally {
       await driver.destroy(handle);

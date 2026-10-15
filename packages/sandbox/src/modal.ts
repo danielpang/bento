@@ -641,6 +641,11 @@ export class ModalDriver implements SandboxDriver {
     return image !== null;
   }
 
+  /** A hibernation image does not count: no agent runs in an image. */
+  async running(handle: SandboxHandle): Promise<boolean> {
+    return (await this.runningBox(await this.api(), handle.externalId)) !== null;
+  }
+
   /** Running sandboxes in the App, for the nightly sweep. */
   async listRunning(): Promise<{ externalId: string; tags: Record<string, string> }[]> {
     return (await this.api()).listRunning();

@@ -21,7 +21,9 @@ import { loadEnv } from "../../env.js";
 import {
   markCancelled,
   QUEUED_RUN_REQUEUE_MIN,
+  reapRunsWithStoppedSandbox,
   reapStalledRuns,
+  SANDBOX_STOPPED_RUN_ERROR,
   recoverInterruptedRuns,
   requeueStrandedRuns,
 } from "../run-executor.js";
@@ -699,4 +701,79 @@ test("an interrupted run whose subject cannot be read still ticks its swarm", as
     queued.some((job) => job.queue === "swarm.tick" && (job.data as { swarmId: string }).swarmId === swarm.id),
     "its swarm is ticked anyway",
   );
+});
+
+/** A Docker-shaped driver whose machines are up unless named here. */
+function machineDriver(stopped: Set<string>, unreachable = new Set<string>()): SandboxDriver {
+  const driver = new LocalProcessDriver() as unknown as SandboxDriver & { provider: string };
+  driver.provider = "docker";
+  driver.running = async (handle: SandboxHandle) => {
+    if (unreachable.has(handle.externalId)) throw new Error("docker did not answer");
+    return !stopped.has(handle.externalId);
+  };
+  return driver;
+}
+
+async function runInMachine(swarmId: string, externalId: string, quietMinutes: number) {
+  const [sandbox] = await db
+    .insert(sandboxes)
+    .values({ projectId: PROJECT, provider: "docker", externalId, workdir: "/workspace", status: "busy", swarmId })
+    .returning();
+  const run = await stalledRun(
+    swarmId,
+    quietMinutes + 5,
+    [{ minutesAgo: quietMinutes, type: "init", payload: { type: "init", sessionId: "s1" } }],
+    PROFILE,
+    quietMinutes + 4,
+  );
+  await db.update(agentRuns).set({ sandboxId: sandbox!.id }).where(eq(agentRuns.id, run.id));
+  return run;
+}
+
+test("a quiet run whose machine stopped is closed, and its swarm is told", async () => {
+  /**
+   * The shape that found this: OrbStack's VM froze and restarted under a
+   * held planner, the container exited, and the run said running for
+   * fifteen hours while three workers' reports waited for it.
+   */
+  const swarm = await makeSwarm();
+  const dead = await runInMachine(swarm.id, "bento-sbx-dead", 20);
+  const controller = new AbortController();
+  ctx.running.set(dead.id, controller);
+  const drivers = ctx.drivers;
+  ctx.drivers = singleDriver(machineDriver(new Set(["bento-sbx-dead"])));
+  try {
+    assert.deepEqual(await reapRunsWithStoppedSandbox(ctx), [dead.id]);
+  } finally {
+    ctx.drivers = drivers;
+    ctx.running.delete(dead.id);
+  }
+  assert.ok(controller.signal.aborted, "the loop still holding it is told to stop");
+  const [row] = await db.select().from(agentRuns).where(eq(agentRuns.id, dead.id));
+  assert.equal(row!.status, "failed");
+  assert.equal(row!.error, SANDBOX_STOPPED_RUN_ERROR);
+  const lines = await db.select().from(runEvents).where(eq(runEvents.runId, dead.id));
+  assert.match((lines.at(-1)!.payload as { text: string }).text, /sandbox stopped while this run was working/);
+  assert.ok(
+    queued.some((job) => job.queue === "swarm.tick" && (job.data as { swarmId: string }).swarmId === swarm.id),
+    "the reconciler is told, so a fresh planner can be woken",
+  );
+});
+
+test("a run whose machine is up, is unreachable, or spoke recently is left alone", async () => {
+  const swarm = await makeSwarm();
+  const up = await runInMachine(swarm.id, "bento-sbx-up", 30);
+  const unknown = await runInMachine(swarm.id, "bento-sbx-unknown", 30);
+  const recent = await runInMachine(swarm.id, "bento-sbx-recent", 2);
+  const drivers = ctx.drivers;
+  ctx.drivers = singleDriver(machineDriver(new Set(["bento-sbx-recent"]), new Set(["bento-sbx-unknown"])));
+  try {
+    assert.deepEqual(await reapRunsWithStoppedSandbox(ctx), []);
+  } finally {
+    ctx.drivers = drivers;
+  }
+  for (const run of [up, unknown, recent]) {
+    const [row] = await db.select().from(agentRuns).where(eq(agentRuns.id, run.id));
+    assert.equal(row!.status, "running");
+  }
 });
