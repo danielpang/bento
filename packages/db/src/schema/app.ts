@@ -1724,8 +1724,15 @@ export const swarms = pgTable(
      * or a plan change.
      */
     pausedReason: text("paused_reason", {
-      enum: ["manual", "budget", "time_limit", "attention", "plan_limit", "error"],
+      enum: ["manual", "budget", "time_limit", "attention", "plan_limit", "error", "usage_limit"],
     }),
+    /**
+     * The reset a usage limit pause waits for. Kept after it lifts: limit
+     * failures that ended before it are already handled.
+     */
+    pausedUntil: timestamp("paused_until", { withTimezone: true }),
+    /** The status a usage limit pause interrupted, which lifting it restores. */
+    pausedFrom: text("paused_from", { enum: ["planning", "running", "blocked"] }),
     /** The single branch every task lands onto. */
     branchName: text("branch_name"),
     /** When its local checkout was removed so the branch can be opened elsewhere. */

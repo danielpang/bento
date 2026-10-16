@@ -172,6 +172,33 @@ wait
         const line = status.stdout.split("\n").find((entry) => entry.trim().split(/\s+/)[0] === pid);
         assert.ok(!line || line.trim().split(/\s+/)[1]!.startsWith("Z"), `process still running: ${line}`);
       });
+      await t.test("attach without a key finds only a live run of the command, and aborting it stops it", async () => {
+        const finished = await collectExec(driver.exec(handle, ["env", "true"], { sessionKey: randomUUID() }));
+        assert.equal(finished.exitCode, 0);
+        const replacement = new DockerDriver(docker, "none");
+        assert.equal(await replacement.attach(handle, ["env"]), null, "a finished run is not a leftover");
+
+        let pid: string | undefined;
+        for await (const chunk of driver.exec(handle, ["env", "sh", "-c", "echo up:$$; sleep 300"], { sessionKey: randomUUID() })) {
+          if (chunk.kind === "stdout") {
+            pid = /up:(\d+)/.exec(chunk.data)?.[1];
+            break;
+          }
+        }
+        assert.ok(pid);
+        assert.equal(await replacement.attach(handle, ["sleep"]), null, "another command's run is not this one");
+
+        const controller = new AbortController();
+        const attached = await replacement.attach(handle, ["env"], { signal: controller.signal });
+        assert.ok(attached, "the live run is found by its command");
+        controller.abort();
+        const ended = await collectExec(attached);
+        assert.equal(ended.exitCode, -1);
+        assert.equal(await replacement.attach(handle, ["env"]), null, "nothing is left once it was stopped");
+        const status = await collectExec(driver.exec(handle, ["ps", "-eo", "pid,stat"]));
+        const line = status.stdout.split("\n").find((entry) => entry.trim().split(/\s+/)[0] === pid);
+        assert.ok(!line || line.trim().split(/\s+/)[1]!.startsWith("Z"), `process still running: ${line}`);
+      });
       await t.test("a durable run ends at its timeout when Docker stops answering", async () => {
         // Every connection open now goes silent and every new request goes
         // unanswered: what a frozen VM looks like from the server.

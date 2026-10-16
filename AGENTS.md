@@ -697,6 +697,41 @@ count); an agent that started and went quiet is usually running a long
 command. A text-mode agent (dsh) says nothing until it exits, so once
 `agentStartedAt` is stamped (as it is exec'd) it is never reaped.
 
+## An agent's usage limit pauses a swarm until the reset, and nothing is retried into it
+
+A local swarm hit Claude's session limit: the planner was started
+nine times in two minutes, three leaves were handed to the planner as
+failures, and after the reset nothing moved until a person wrote.
+`orchestrator/usage-limit.ts` recognises the CLI's sentence ("You've
+hit your session limit · resets 7:30pm (UTC)", Codex's "try again in
+...") only at the start of the error, which is the CLI's own result
+text: a run's error can carry the agent's stderr after another
+opening, and an agent must not be able to print its way to an endless
+retry. A limited run is still billed for the work it did, because the
+session carries on from it after the reset. The coordinator puts a limited node, or a limited resolver's
+conflict, back without failing it, and `holdForUsageLimit` pauses the
+swarm (`pausedReason` "usage_limit", `pausedUntil` at the reset,
+`pausedFrom` the status it interrupted) before anything is started in
+that tick. The watchdog ticks it every minute; the first tick past the
+reset restores `pausedFrom`, the spawn step puts agents back, and
+`restartInterruptedPlanner` replays a limited planner's prompt with
+whatever people sent during the pause. `pausedUntil` stays set as the
+line between limit failures already handled and new ones, and Resume
+moves it to that moment, which overrides the reset. No wait is shorter
+than `USAGE_LIMIT_MIN_WAIT_MS`, and a node, a conflict's resolvers, or
+the planner waits out at most `MAX_USAGE_LIMIT_WAITS` limits in a row.
+
+The same incident had two more causes that hold without any limit.
+The Docker driver's `attach` required a session key, and the leftover
+agent check (`stopLeftoverAgent`) asks by command alone, so every
+swarm run in a reused Docker machine was refused as "an agent from an
+earlier run is still running". Docker now answers a keyless attach
+from its durable runners that are still alive (`LIVE_DURABLE_FINDER`),
+the way Sprite and Modal find a session by its command. And node
+messages taken into a run that never reached its agent, failed on its
+sandbox, or hit a limit were lost; `requeueUndeliveredNodeMessages`
+gives them back.
+
 ## A stop ends the stream itself, and a run outlives its machine by minutes at most
 
 A local swarm planner sat "running" for fifteen hours, past its 120

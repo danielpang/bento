@@ -133,6 +133,32 @@ const poll = setInterval(() => {
 }, 40);
 `;
 
+/**
+ * Prints the key of the newest durable run of a command whose runner is
+ * alive. The spec in the runner's command line must name the record, so
+ * a pid reused after a container restart is never taken for it.
+ */
+export const LIVE_DURABLE_FINDER = String.raw`
+const fs = require('node:fs');
+const path = require('node:path');
+const want = path.basename(process.argv[1]);
+let best = null;
+let keys = [];
+try { keys = fs.readdirSync('${DURABLE_DIR}'); } catch {}
+for (const key of keys) {
+  try {
+    const ready = path.join('${DURABLE_DIR}', key, 'ready');
+    const pid = Number(fs.readFileSync(ready, 'utf8'));
+    const args = fs.readFileSync('/proc/' + pid + '/cmdline', 'utf8').split('\0').filter(Boolean);
+    const spec = JSON.parse(args[args.length - 1]);
+    if (spec.key !== key || path.basename(spec.argv[0]) !== want) continue;
+    const stamp = fs.statSync(ready).mtimeMs;
+    if (!best || stamp > best.stamp) best = { key, stamp };
+  } catch {}
+}
+if (best) process.stdout.write(best.key);
+`;
+
 export function parseDurableRecord(line: string):
   | { kind: "stdout" | "stderr"; data: string; seq: number }
   | { kind: "exit"; exitCode: number; seq: number } {

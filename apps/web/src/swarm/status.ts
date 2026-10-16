@@ -301,7 +301,8 @@ export function isSwarmOver(status: SwarmStatus): boolean {
  */
 export function pausedWords(
   status: SwarmStatus,
-  reason: "manual" | "budget" | "time_limit" | "attention" | "plan_limit" | "error" | null,
+  reason: "manual" | "budget" | "time_limit" | "attention" | "plan_limit" | "error" | "usage_limit" | null,
+  until: string | null = null,
 ): string | null {
   if (status === "budget_exhausted") {
     return BUDGET_LIMIT_WARNING;
@@ -321,6 +322,12 @@ export function pausedWords(
       return "Something in this swarm is waiting on you.";
     case "error":
       return "This swarm stopped on an error. Its plan and everything that landed are still here.";
+    case "usage_limit": {
+      const at = until ? new Date(until) : null;
+      return at && !Number.isNaN(at.getTime())
+        ? `Your agents hit their usage limit. This swarm starts again by itself at ${at.toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" })}.`
+        : "Your agents hit their usage limit. This swarm starts again by itself once it resets.";
+    }
     default:
       return "This swarm is paused. Resume it to continue.";
   }

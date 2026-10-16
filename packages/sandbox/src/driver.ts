@@ -372,7 +372,9 @@ export interface SandboxDriver {
    * Picks up a command a previous process started with exec and left
    * running in the sandbox, so a server restart does not have to end
    * the runs it was carrying. Sprite finds the running session by
-   * argv's first word. Docker finds its durable record by sessionKey.
+   * argv's first word. Docker finds its durable record by sessionKey,
+   * or without one the newest still running record of argv's first
+   * word, the way the other drivers look.
    * cwd and env in opts are ignored because the live process already
    * carries them. Resolves null when the sandbox answers but cannot
    * find that session or record. A rejection means the question could

@@ -417,7 +417,8 @@ export interface SwarmRow {
     | "cancelled"
     | "budget_exhausted"
     | "timed_out";
-  pausedReason: "manual" | "budget" | "time_limit" | "attention" | "plan_limit" | "error" | null;
+  pausedReason: "manual" | "budget" | "time_limit" | "attention" | "plan_limit" | "error" | "usage_limit" | null;
+  pausedUntil?: string | null;
   branchName: string | null;
   deliverable?: "code" | "document";
   startBranch?: string | null;

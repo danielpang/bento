@@ -96,3 +96,8 @@ test("additional rules support exceptions and reject invalid matches", () => {
     /empty prefix/,
   );
 });
+
+test("a run stopped by its usage limit is still billed for the work it did", () => {
+  assert.equal(unbilledReason("You've hit your session limit · resets 7:30pm (UTC)"), null);
+  assert.equal(unbilledReason("Claude AI usage limit reached|1760558400"), null);
+});

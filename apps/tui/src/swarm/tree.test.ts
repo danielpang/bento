@@ -203,6 +203,7 @@ test("a swarm's state is said in the words the console uses", () => {
   assert.equal(swarmWords({ status: "budget_exhausted", pausedReason: "budget" }), "out of budget");
   assert.equal(swarmWords({ status: "timed_out", pausedReason: "time_limit" }), "out of time");
   assert.equal(swarmWords({ status: "paused", pausedReason: "plan_limit" }), "paused, out of agent hours");
+  assert.equal(swarmWords({ status: "paused", pausedReason: "usage_limit" }), "paused, agents at their usage limit");
   assert.equal(swarmWords({ status: "paused", pausedReason: "manual" }), "paused");
 });
 

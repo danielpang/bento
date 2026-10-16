@@ -2,7 +2,7 @@ import type Docker from "dockerode";
 import { randomUUID } from "node:crypto";
 import { createDockerClient } from "./docker-client.js";
 import { collectExec, execTimeoutMessage, type ExecChunk, type ExecOptions, type ProvisionSpec, type SandboxDriver, type SandboxHandle } from "./driver.js";
-import { DURABLE_DIR, DURABLE_READER, DURABLE_RUNNER, SANDBOX_NODE, parseDurableRecord } from "./docker-durable.js";
+import { DURABLE_DIR, DURABLE_READER, DURABLE_RUNNER, LIVE_DURABLE_FINDER, SANDBOX_NODE, parseDurableRecord } from "./docker-durable.js";
 
 const DEFAULT_IMAGE = "bento-sandbox:dev";
 
@@ -289,12 +289,26 @@ export class DockerDriver implements SandboxDriver {
 
   async attach(
     handle: SandboxHandle,
-    _argv: string[],
+    argv: string[],
     opts?: ExecOptions,
   ): Promise<AsyncIterable<ExecChunk> | null> {
-    const key = durableKey(opts?.sessionKey);
+    if (!opts?.sessionKey) {
+      // By command alone, as the leftover agent check asks: only a live runner counts.
+      const [command] = argv;
+      if (!command) throw new Error("empty argv");
+      const key = await this.liveDurableRunFor(handle, command);
+      return key ? this.durableStream(handle, key, opts) : null;
+    }
+    const key = durableKey(opts.sessionKey);
     if (!(await this.waitForDurableRun(handle, key))) return null;
     return this.durableStream(handle, key, opts);
+  }
+
+  private async liveDurableRunFor(handle: SandboxHandle, command: string): Promise<string | null> {
+    const result = await collectExec(this.exec(handle, [SANDBOX_NODE, "-e", LIVE_DURABLE_FINDER, command], { timeoutMs: 10_000 }));
+    if (result.exitCode !== 0) throw new Error(`could not list durable runs: ${result.stderr.trim() || `exit code ${result.exitCode}`}`);
+    const key = result.stdout.trim();
+    return key ? durableKey(key) : null;
   }
 
   private async waitForDurableRun(handle: SandboxHandle, key: string): Promise<boolean> {

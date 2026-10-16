@@ -122,6 +122,21 @@ test(
       assert.match(rest.stdout, /beta/);
       assert.equal(rest.exitCode, 0);
 
+      // The leftover agent check: an attach by command alone finds a
+      // running process, aborting it stops it, and then nothing is found.
+      const leftover = driver.exec(handle, ["sh", "-c", "echo up; sleep 300"])[Symbol.asyncIterator]();
+      for (;;) {
+        const next = await leftover.next();
+        if (next.done || next.value.kind === "stdout") break;
+      }
+      await leftover.return?.(undefined);
+      const controller = new AbortController();
+      const found = await driver.attach(handle, ["sh"], { signal: controller.signal });
+      assert.ok(found, "the running command is found by its first word");
+      controller.abort();
+      await collectExec(found);
+      assert.equal(await driver.attach(handle, ["sh"]), null, "nothing is left once it was stopped");
+
       await collectExec(driver.exec(handle, ["sh", "-c", "echo kept > /workspace/marker"], { timeoutMs: 30_000 }));
       const saved = await driver.hibernate(handle);
       assert.ok(saved.imageId);
