@@ -135,9 +135,8 @@ const poll = setInterval(() => {
 
 /**
  * Prints the key of the newest durable run of a command whose runner is
- * still alive, or nothing. The runner's own command line carries its
- * spec, which is checked against the record's key so a pid reused after
- * a container restart is never mistaken for the run that wrote it.
+ * alive. The spec in the runner's command line must name the record, so
+ * a pid reused after a container restart is never taken for it.
  */
 export const LIVE_DURABLE_FINDER = String.raw`
 const fs = require('node:fs');
