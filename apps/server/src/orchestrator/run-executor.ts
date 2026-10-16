@@ -114,6 +114,7 @@ import { captureRunQueueDepth } from "./queue-snapshot.js";
 import { ACTIVE_RUN_STATUSES, projectHasRepositories, startRunIfIdle } from "./start-run.js";
 import { enqueueRun, INTERACTIVE_POLL_SECONDS, QUEUE_POLL_SECONDS, RUN_WORKER_POLL_SECONDS } from "./queue.js";
 import { registerSandboxOperationReconciliation } from "./sandbox-operations.js";
+import { pruneSandboxUsage } from "./sandbox-usage.js";
 import { HIBERNATE_SANDBOX_QUEUE, MODAL_SWEEP_QUEUE, SandboxGone, scheduleModalHibernation, hibernateSandbox, sweepOrphanModalSandboxes, wakeSwarmSandbox } from "./hibernate-sandbox.js";
 import { modalNetworkForProject, organizationRestrictsNetwork } from "./sandbox-network.js";
 import { stopLeftoverAgent } from "./leftover-agent.js";
@@ -2028,7 +2029,7 @@ async function swarmBranchBundles(
     try {
       await wakeSwarmSandbox(ctx, row, swarm, swarm.plannerProfileId);
       return await exportSwarmBranch(
-        driverForSandbox(ctx.drivers, row),
+        driverForSandbox(ctx.drivers, row, ctx),
         { externalId: row.externalId, provider: row.provider, workdir: row.workdir },
         repoRows.map((repo) => ({ name: repo.name, defaultBranch: repo.defaultBranch })),
         swarm.branchName ?? swarmBranchName(swarm.slug),
@@ -2860,7 +2861,7 @@ export async function adoptOrphanedRuns(ctx: AppContext): Promise<{ resumed: num
           : undefined;
       if (sandbox) {
         try {
-          resumeDriver = driverForSandbox(ctx.drivers, sandbox);
+          resumeDriver = driverForSandbox(ctx.drivers, sandbox, ctx);
         } catch (err) {
           console.warn(`run ${orphan.id} cannot resume:`, err);
           resumeDriver = undefined;
@@ -3190,7 +3191,7 @@ export async function reapRunsWithStoppedSandbox(
   for (const { run, sandbox } of candidates) {
     let up: boolean;
     try {
-      const driver = driverForSandbox(ctx.drivers, sandbox);
+      const driver = driverForSandbox(ctx.drivers, sandbox, ctx);
       if (!driver.running) continue;
       up = await driver.running({
         externalId: sandbox.externalId,
@@ -3817,6 +3818,7 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
    */
   await ctx.boss.schedule("runner.reap", "*/5 * * * *");
   await ctx.boss.work("runner.reap", captureJobErrors(ctx.analytics, "runner.reap", async () => {
+    await pruneSandboxUsage(ctx);
     const cutoff = new Date(Date.now() - ctx.env.BENTO_RUNNER_CLAIM_TIMEOUT_MIN * 60_000);
     const stale = await ctx.db
       .update(agentRuns)

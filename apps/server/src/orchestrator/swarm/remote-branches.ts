@@ -259,7 +259,7 @@ async function branchSource(
   wake: () => Promise<void>,
 ): Promise<{ driver: SandboxDriver; handle: SandboxHandle } | { worktreeKey: string } | null> {
   if (row) {
-    const driver = driverForSandbox(ctx.drivers, row);
+    const driver = driverForSandbox(ctx.drivers, row, ctx);
     if (driver.workspace === "clone") {
       if (!driver.exportRepository) return null;
       await wake();

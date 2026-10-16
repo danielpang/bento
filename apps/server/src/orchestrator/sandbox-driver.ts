@@ -1,3 +1,4 @@
+import { usingSandboxDriver } from "./sandbox-usage.js";
 import { and, desc, eq, isNull, ne } from "drizzle-orm";
 import { features, projects, sandboxes, swarms, type Db } from "@bento/db";
 import type { SandboxDriver } from "@bento/sandbox";
@@ -32,13 +33,13 @@ export class SandboxDriverUnavailable extends Error {
  * drivers.get. An unconfigured provider throws. Guessing, and falling
  * through to the default, is the failure this exists to prevent.
  */
-export function driverForSandbox(drivers: SandboxDrivers, row: { provider: string }): SandboxDriver {
+export function driverForSandbox(drivers: SandboxDrivers, row: { provider: string; id?: string }, ctx?: AppContext): SandboxDriver {
   if (row.provider === "docker" && drivers.default.provider === "local-process") {
-    return drivers.default;
+    return ctx && row.id ? usingSandboxDriver(ctx, drivers.default, row.id) : drivers.default;
   }
   const driver = drivers.get(row.provider);
   if (!driver) throw new SandboxDriverUnavailable(row.provider);
-  return driver;
+  return ctx && row.id ? usingSandboxDriver(ctx, driver, row.id) : driver;
 }
 
 /**
@@ -289,7 +290,7 @@ export async function driversForSwarmProvision(
  * provider gets that provider or a failed run, as everywhere else.
  */
 function workerDrivers(ctx: AppContext, swarmRow: { provider: string }, byProject: ProvisionDrivers): ProvisionDrivers {
-  const first = driverForSandbox(ctx.drivers, swarmRow);
+  const first = driverForSandbox(ctx.drivers, swarmRow, ctx);
   if (byProject.selection !== "auto") return { driver: first, fallbacks: [], selection: "existing" };
   const order = allCandidates(byProject);
   const at = order.indexOf(first);

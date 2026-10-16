@@ -159,7 +159,7 @@ export async function evaluateFeatureGate(ctx: AppContext, featureId: string): P
       // driver; an unconfigured provider fails the evaluation rather
       // than running the command on a different machine.
       try {
-        const driver = driverForSandbox(ctx.drivers, sandbox);
+        const driver = driverForSandbox(ctx.drivers, sandbox, ctx);
         const repoRows = await ctx.db.select().from(repositories).where(eq(repositories.projectId, feature.projectId));
         const workdir = repoRows.length === 1 ? `${sandbox.workdir}/${repoRows[0]!.name}` : sandbox.workdir;
         gateCtx.sandbox = {

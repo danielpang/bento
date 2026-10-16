@@ -446,7 +446,7 @@ async function swarmCloneWorkspace(
       .from(sandboxes)
       .where(eq(sandboxes.id, swarm.sandboxId))
       .limit(1);
-    if (row && row.status !== "destroyed") return driverForSandbox(ctx.drivers, row).workspace === "clone";
+    if (row && row.status !== "destroyed") return driverForSandbox(ctx.drivers, row, ctx).workspace === "clone";
   }
   // No machine yet. A project set to a clone driver (Sprite or Modal)
   // still lands inside the sandbox. A project left on the default
@@ -2344,7 +2344,7 @@ export function swarmRoutes(ctx: AppContext) {
       const owned = await db(c, ctx).select().from(sandboxes).where(eq(sandboxes.swarmId, swarm.id));
       for (const sandbox of owned.filter((row) => row.status !== "destroyed")) {
         try {
-          const driver = driverForSandbox(ctx.drivers, sandbox);
+          const driver = driverForSandbox(ctx.drivers, sandbox, ctx);
           const handle: SandboxHandle = {
             externalId: sandbox.externalId,
             provider: driver.provider,

@@ -28,6 +28,7 @@ const TENANT_TABLES = [
   "feature_pull_requests",
   "sandboxes",
   "sandbox_operations",
+  "sandbox_usage_leases",
   "agent_runs",
   "run_events",
   "run_artifacts",
@@ -1057,5 +1058,16 @@ test("sandbox operation receipts inherit tenant scope and cannot be read by anot
   await asOrg("org-b", async (client) => {
     const result = await client.query("select id from sandbox_operations where id=$1", [op.id]);
     assert.equal(result.rowCount, 0);
+  });
+});
+
+test("sandbox usage leases inherit the machine's tenant and hide from other organizations", async () => {
+  const { rows: [sandbox] } = await pool.query(`insert into sandboxes(project_id,external_id,provider)
+    values ('00000001-0000-0000-0000-000000000000','lease-tenant-check','docker') returning id`);
+  const { rows: [lease] } = await pool.query(`insert into sandbox_usage_leases(sandbox_id,generation,purpose,expires_at)
+    values ($1,1,'export',now()+interval '1 minute') returning id,organization_id`, [sandbox.id]);
+  assert.equal(lease.organization_id, "org-a");
+  await asOrg("org-b", async (client) => {
+    assert.equal((await client.query("select id from sandbox_usage_leases where id=$1", [lease.id])).rowCount, 0);
   });
 });

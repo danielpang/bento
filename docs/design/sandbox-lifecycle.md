@@ -42,3 +42,17 @@ finished, so reopening a card preserves its workspace.
 This fences Bento's recorded transitions. It cannot revoke a request already
 accepted by a provider, or protect against an operator independently deleting and
 recreating a provider name. Provider-side immutable identities remain preferable.
+
+## Shared usage leases
+
+Execution streams and repository imports/exports acquire shared leases. Acquisition
+locks the sandbox row, the same lock automatic hibernation and destruction hold
+while checking leases and committing the terminal state. Readers may coexist;
+cleanup waits for all readers. Existing run and landing checks still apply.
+
+Leases last 90 seconds and renew every 20 seconds. Renewal never resurrects an
+expired lease. A failed renewal or local deadline aborts the command's signal;
+callers must propagate that signal and stop issuing work. Lease expiry recovers
+capacity after a crashed holder, but does not prove a remote process has stopped.
+Provider cancellation remains best effort during a network partition. Active-run
+checks and generation fencing must not be removed on the strength of lease expiry.

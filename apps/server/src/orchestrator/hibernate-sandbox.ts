@@ -1,3 +1,4 @@
+import { sandboxHasUsage } from "./sandbox-usage.js";
 import { sandboxOperation } from "./sandbox-operations.js";
 import { and, eq, gt, inArray, isNull, ne, sql } from "drizzle-orm";
 import { agentProfiles, agentRuns, sandboxes, swarmLandings, swarms } from "@bento/db";
@@ -245,7 +246,7 @@ export async function hibernateSandbox(ctx: AppContext, sandboxId: string, gener
     return;
   }
 
-  const driver = driverForSandbox(ctx.drivers, row);
+  const driver = driverForSandbox(ctx.drivers, row, ctx);
   if (!(driver instanceof ModalDriver)) return;
   const result = await driver.hibernate(
     {
@@ -280,6 +281,7 @@ export async function hibernateSandbox(ctx: AppContext, sandboxId: string, gener
           // worker start, a landing, a push stamp the row as they
           // begin), so its warm window starts again from there.
           if (warmWindowLeftMs(current.lastUsedAt) > 0) return;
+          if (await sandboxHasUsage(tx, row.id)) return;
           const imageId = await sandboxOperation(ctx, { projectId: row.projectId, workspaceKey: row.id, provider: row.provider, action: "hibernate",
             handle: { externalId: row.externalId, provider: row.provider, workdir: row.workdir } }, async (recordHandle) => {
             const image = await apply();
@@ -388,7 +390,7 @@ export async function wakeHibernatedSandbox(
   network: Pick<SandboxHandle, "network" | "allowedHosts">,
 ): Promise<void> {
   if (row.status !== "hibernated") return;
-  const driver = driverForSandbox(ctx.drivers, row);
+  const driver = driverForSandbox(ctx.drivers, row, ctx);
   if (!driver.wake) return;
   const woke = await wakeOrMarkGone(ctx, driver, row, network);
   const awake = await markSandboxAwake(ctx.db, ctx, row.id, woke.imageRef);
@@ -570,7 +572,7 @@ export async function wakeSwarmSandbox(
   if (row.status === "destroyed") throw new SandboxGone(row);
   // A run is making this machine; there is nothing to wake yet.
   if (row.status === "provisioning") return;
-  const driver = driverForSandbox(ctx.drivers, row);
+  const driver = driverForSandbox(ctx.drivers, row, ctx);
   if (!driver.wake) {
     await confirmSandboxExists(ctx, driver, row);
     return;
