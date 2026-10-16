@@ -43,9 +43,11 @@ export async function armModalHibernation(
   sandboxId: string,
   delayMs: number = MODAL_WARM_WINDOW_MS,
 ): Promise<void> {
+  const [target] = await ctx.db.select({ generation: sandboxes.generation }).from(sandboxes).where(eq(sandboxes.id, sandboxId));
+  if (!target) return;
   await ctx.boss.send(
     HIBERNATE_SANDBOX_QUEUE,
-    { sandboxId },
+    { sandboxId, generation: target.generation },
     { startAfter: new Date(Date.now() + delayMs) },
   );
 }
@@ -201,9 +203,9 @@ export async function scheduleModalHibernation(ctx: AppContext, runId: string): 
  * is left running, and a later job is armed. A missing exit snapshot
  * clears the stored image, so the next start says it is a fresh clone.
  */
-export async function hibernateSandbox(ctx: AppContext, sandboxId: string): Promise<void> {
+export async function hibernateSandbox(ctx: AppContext, sandboxId: string, generation?: number): Promise<void> {
   const [row] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, sandboxId)).limit(1);
-  if (!row) return;
+  if (!row || (generation !== undefined && row.generation !== generation)) return;
   const active = await workspaceHasActiveRun(ctx.db, row);
   /*
    * Busy with nothing running in it: the finish that would have moved
@@ -264,12 +266,12 @@ export async function hibernateSandbox(ctx: AppContext, sandboxId: string): Prom
           }
           await tx.execute(sql`select id from sandboxes where id = ${row.id} for update`);
           const [current] = await tx
-            .select({ status: sandboxes.status, lastUsedAt: sandboxes.lastUsedAt })
+            .select({ status: sandboxes.status, lastUsedAt: sandboxes.lastUsedAt, generation: sandboxes.generation })
             .from(sandboxes)
             .where(eq(sandboxes.id, row.id))
             .limit(1);
           const stillActive = await workspaceHasActiveRun(tx, row);
-          if (!current || current.status !== "ready" || stillActive) return;
+          if (!current || current.generation !== row.generation || current.status !== "ready" || stillActive) return;
           // Something read from the machine during the snapshot (a
           // worker start, a landing, a push stamp the row as they
           // begin), so its warm window starts again from there.
@@ -451,7 +453,7 @@ async function wakeStoppedSandbox(
   if (!woke.booted) return;
   const [updated] = await ctx.db
     .update(sandboxes)
-    .set({ status: "ready", lastUsedAt: new Date(), ...(woke.imageRef ? { imageRef: woke.imageRef } : {}) })
+    .set({ status: "ready", generation: sql`${sandboxes.generation} + 1`, lastUsedAt: new Date(), ...(woke.imageRef ? { imageRef: woke.imageRef } : {}) })
     .where(and(eq(sandboxes.id, row.id), inArray(sandboxes.status, ["ready", "busy"])))
     .returning({ provider: sandboxes.provider });
   if (updated) {

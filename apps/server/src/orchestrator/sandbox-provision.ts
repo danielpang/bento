@@ -554,6 +554,7 @@ export async function provisionWorkspace(
       .onConflictDoUpdate({
         target: sandboxes.externalId,
         set: sandboxProvisionConflict({
+          ...(handle.createdSandbox !== undefined ? { createdSandbox: handle.createdSandbox } : {}),
           ...input.owner,
           provider: persistedSandboxProvider(handle.provider),
           workdir: handle.workdir,
@@ -804,6 +805,7 @@ async function cleanupFailedAttempt(
  * the machine is a worker's.
  */
 export function sandboxProvisionConflict(input: {
+  createdSandbox?: boolean;
   featureId?: string;
   swarmId?: string;
   swarmTaskId?: string | null;
@@ -817,6 +819,7 @@ export function sandboxProvisionConflict(input: {
     ...(input.swarmId !== undefined
       ? { swarmId: input.swarmId, swarmTaskId: input.swarmTaskId ?? null }
       : {}),
+    ...(input.createdSandbox ? { generation: sql`${sandboxes.generation} + 1` } : {}),
     status: "busy" as const,
     workdir: input.workdir,
     ...(input.size ? { size: input.size } : {}),

@@ -23,3 +23,16 @@ lost before the provider returned an identity.
 A provision that returned a newly created machine retains its handle across
 journal failures and destroys that machine if its final journal write fails.
 A reused machine is preserved, as it may hold the owner's only work.
+
+## Machine generations
+
+A database trigger advances a sandbox's generation when its provider identity
+changes or a dormant/destroyed row becomes active again. Delayed reap and
+hibernation jobs carry the generation they were requested for. Deferrals preserve
+that identity rather than silently selecting a newer machine. Reaping rechecks the
+captured generation under a row lock before issuing a provider mutation; the row
+update also compares the generation. Hibernation rechecks under its existing lock.
+
+This fences Bento's recorded transitions. It cannot revoke a request already
+accepted by a provider, or protect against an operator independently deleting and
+recreating a provider name. Provider-side immutable identities remain preferable.

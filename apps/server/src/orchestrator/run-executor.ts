@@ -3721,11 +3721,11 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
     // leaf's worker was given.
     for (const job of jobs) await runSandboxReapJob(ctx, job.data);
   }));
-  await ctx.boss.work<{ sandboxId: string }>(
+  await ctx.boss.work<{ sandboxId: string; generation?: number }>(
     HIBERNATE_SANDBOX_QUEUE,
     { batchSize: 1, pollingIntervalSeconds: QUEUE_POLL_SECONDS },
     captureJobErrors(ctx.analytics, HIBERNATE_SANDBOX_QUEUE, async (jobs) => {
-      for (const job of jobs) await hibernateSandbox(ctx, job.data.sandboxId);
+      for (const job of jobs) await hibernateSandbox(ctx, job.data.sandboxId, job.data.generation);
     }),
   );
   await ctx.boss.schedule(MODAL_SWEEP_QUEUE, "0 9 * * *");

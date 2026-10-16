@@ -864,3 +864,17 @@ test("the orphan sweep judges a swarm machine by its row, and one failure does n
   assert.deepEqual(terminated.sort(), [swarmName, orphanName].sort(), "the swarm machine is judged, and the rest still are");
   assert.equal(captured.length, 1, "the one that could not be destroyed is recorded");
 });
+
+test("a hibernation queued for an older incarnation leaves the restored machine alone", async () => {
+  const card = await seed({ title: "stale hibernate", sandboxStatus: "hibernated", imageRef: "im-stored" });
+  const [old] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, card.sandboxId));
+  await ctx.db.update(sandboxes).set({ status: "ready", lastUsedAt: new Date(0) }).where(eq(sandboxes.id, card.sandboxId));
+  const [restored] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, card.sandboxId));
+  assert.equal(restored!.generation, old!.generation + 1);
+  let stopped = false;
+  useModal(idleApi({ onTerminate: () => { stopped = true; } }));
+  await hibernateSandbox(ctx, card.sandboxId, old!.generation);
+  assert.equal(stopped, false);
+  const [after] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, card.sandboxId));
+  assert.equal(after!.status, "ready");
+});

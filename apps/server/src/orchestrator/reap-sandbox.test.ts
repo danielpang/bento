@@ -837,3 +837,16 @@ test("a swarm machine this process cannot drive stays, and the rest still go", a
   const [gone] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, swarm.sandboxId));
   assert.equal(gone?.status, "destroyed");
 });
+
+test("a delayed reap cannot destroy a replacement with the same provider name", async () => {
+  const card = await seedCard({ title: "replacement" });
+  const [old] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.featureId, card.featureId));
+  await ctx.db.update(sandboxes).set({ status: "destroyed" }).where(eq(sandboxes.id, old!.id));
+  await ctx.db.update(sandboxes).set({ status: "ready" }).where(eq(sandboxes.id, old!.id));
+  const count = destroyed.length;
+  await runSandboxReapJob(ctx, { featureId: card.featureId, machines: [{ id: old!.id, generation: old!.generation }] });
+  assert.equal(destroyed.length, count);
+  const [row] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, old!.id));
+  assert.equal(row!.status, "ready");
+  assert.equal(row!.generation, old!.generation + 1);
+});
