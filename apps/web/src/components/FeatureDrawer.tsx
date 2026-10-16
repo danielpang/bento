@@ -597,6 +597,22 @@ export function FeatureDrawer({
       : runActive
         ? "An agent is working this card. Publish when it finishes."
         : undefined;
+  /**
+   * Manual publish, beside the other card actions. The stage toggle is
+   * what decides it exists: a stage that does not open a pull request
+   * has no button, and one that does can be published before the run
+   * finishes.
+   */
+  const createPrAction = showPullRequests ? (
+    <button
+      className="btn"
+      disabled={publishDisabled || noRepositories}
+      title={noRepositories ? REPOSITORY_SETUP_MESSAGE : publishDisabledReason}
+      onClick={() => void publishNow()}
+    >
+      {publishing ? "Creating..." : "Create PR"}
+    </button>
+  ) : null;
   const resolveDisabled = busy || runActive;
   const resolveDisabledReason = runActive
     ? "An agent is working this card. Fix conflicts when it finishes."
@@ -872,9 +888,12 @@ export function FeatureDrawer({
           )}
           <div className="action-grid">
             {finished ? (
-              <button className="btn" disabled={busy} onClick={() => act(() => client.moveFeatureBack(feature.id))}>
-                Reopen
-              </button>
+              <>
+                <button className="btn" disabled={busy} onClick={() => act(() => client.moveFeatureBack(feature.id))}>
+                  Reopen
+                </button>
+                {createPrAction}
+              </>
             ) : feature.currentStageId ? (
               <>
                 <button
@@ -900,6 +919,7 @@ export function FeatureDrawer({
                 <button className="btn" disabled={busy} onClick={() => setDialog("reject")}>
                   Reject
                 </button>
+                {createPrAction}
               </>
             ) : (
               <button
@@ -912,6 +932,12 @@ export function FeatureDrawer({
               </button>
             )}
           </div>
+          {showPullRequests &&
+            publishNotes.map((note, i) => (
+              <p key={i} className={note.failed ? "warn" : "muted"}>
+                {note.text}
+              </p>
+            ))}
           {needsRecovery && stageAgent && !finished && !noRepositories && <button className="btn btn-primary recovery-action" disabled={busy || detailsPending || loadFailed} onClick={() => act(() => client.startRun({ featureId: feature.id, agentProfileId: stageAgent.id }))}>Try again with {stageAgent.name}</button>}
           {needsRecovery && !stageAgent && !finished && <button className="btn btn-primary recovery-action" onClick={showConversation}>Review the last run</button>}
           {/* Why the last run failed, where the eye lands. The same
