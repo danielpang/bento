@@ -607,6 +607,7 @@ export interface WireSwarm {
   goal: string;
   status: string;
   pausedReason: Swarm["pausedReason"];
+  pausedUntil?: string | null;
   branchName: string | null;
   /*
    * How it is run. Optional for the reason the notional tier is: a
@@ -934,6 +935,7 @@ export function toSwarm(row: WireSwarm, workersActive = 0): Swarm {
     goal: row.goal,
     status: swarmStatusOf(row),
     pausedReason: row.pausedReason,
+    pausedUntil: row.pausedUntil ?? null,
     branchName: row.branchName,
     deliverable: row.deliverable ?? "code",
     settings: {

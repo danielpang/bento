@@ -33,6 +33,7 @@ import { applyRunCharge } from "./ledger.js";
 import { MAX_PLANNER_RETELLS } from "./planner-news.js";
 import { MAX_LANDING_ATTEMPTS } from "./landing.js";
 import { performTaskStartOver } from "./start-over.js";
+import { requeueUndeliveredNodeMessages } from "./node-messages.js";
 
 /**
  * The coordinator, against a real database and a stubbed run starter.
@@ -1129,6 +1130,116 @@ test("a worker that stopped after its agent started is not restarted", async () 
   await tickSwarm(ctx, swarm.id, deps);
   assert.equal((await read(leaf.id)).status, "failed", "an agent that ran and failed is the planner's, as before");
   assert.equal(deps.calls.filter((call) => call.role === "worker").length, 0);
+});
+
+/** What Claude Code's result says when the account behind it is out of usage. */
+const LIMITED = "You've hit your session limit · resets 7:30pm (UTC)";
+const LIMIT_ENDED = new Date("2026-10-15T15:40:40Z");
+const RESET = new Date("2026-10-15T19:30:00Z");
+const at = (iso: string) => () => new Date(iso);
+
+test("a worker stopped by its usage limit waits in the queue, and the swarm pauses until the reset", async () => {
+  /**
+   * A swarm on October 15th: every agent hit the limit, the planner was
+   * started nine times in two minutes, the leaves were handed on as
+   * failures, and nothing moved after the reset until a person wrote.
+   */
+  const swarm = await makeSwarm({ status: "running" });
+  const leaf = await makeTask(swarm.id, { title: "limited", status: "working" });
+  const dead = await runOn(swarm.id, leaf.id, "failed", LIMITED);
+  await db.update(agentRuns).set({ endedAt: LIMIT_ENDED }).where(eq(agentRuns.id, dead.id));
+
+  let deps = { ...starter(), now: at("2026-10-15T15:41:00Z") };
+  let result = await tickSwarm(ctx, swarm.id, deps);
+  let row = await read(leaf.id);
+  assert.equal(row.status, "assigned", "not failed: the work is fine, the account is out");
+  assert.equal(row.assignedRunId, null);
+  assert.equal(row.attention, null);
+  assert.equal((row.flags as { sandboxRestarts?: number }).sandboxRestarts, undefined, "and it spends no restart");
+  let paused = await readSwarm(swarm.id);
+  assert.equal(paused.status, "paused");
+  assert.equal(paused.pausedReason, "usage_limit");
+  assert.equal(paused.pausedUntil?.toISOString(), RESET.toISOString());
+  assert.equal(deps.calls.length, 0, "nothing is started into a limit that is still on");
+  assert.equal(result?.plannerRunId, null);
+
+  deps = { ...starter(), now: at("2026-10-15T18:00:00Z") };
+  await tickSwarm(ctx, swarm.id, deps);
+  assert.equal((await readSwarm(swarm.id)).status, "paused", "the watchdog's ticks before the reset change nothing");
+  assert.equal(deps.calls.length, 0);
+
+  deps = { ...starter(), now: at("2026-10-15T19:31:00Z") };
+  result = await tickSwarm(ctx, swarm.id, deps);
+  paused = await readSwarm(swarm.id);
+  assert.equal(paused.status, "running", "the first tick after the reset lifts the pause");
+  assert.equal(paused.pausedReason, null);
+  row = await read(leaf.id);
+  assert.equal(row.status, "working");
+  assert.ok(row.assignedRunId && row.assignedRunId !== dead.id, "and puts an agent back on the leaf");
+  assert.equal(deps.calls.filter((call) => call.role === "planner").length, 0, "without a planner turn");
+});
+
+test("a planner stopped by its usage limit is started again with its prompt after the reset", async () => {
+  const swarm = await makeSwarm({ status: "running" });
+  await makeTask(swarm.id, { title: "waiting", status: "assigned" });
+  const failed = await plannerRun(swarm.id, "failed", { error: LIMITED, prompt: "the wake", endedAt: LIMIT_ENDED, startedBy: "u1" });
+  const [message] = await db
+    .insert(swarmMessages)
+    .values({ swarmId: swarm.id, source: "person", text: "continue", status: "sent", runId: failed.id })
+    .returning();
+
+  let deps = { ...starter(), now: at("2026-10-15T15:41:00Z") };
+  await tickSwarm(ctx, swarm.id, deps);
+  assert.equal((await readSwarm(swarm.id)).pausedReason, "usage_limit");
+  assert.equal(deps.calls.length, 0, "neither the planner nor a worker is started into the limit");
+
+  deps = { ...starter(), now: at("2026-10-15T19:31:00Z") };
+  const result = await tickSwarm(ctx, swarm.id, deps);
+  const planners = deps.calls.filter((call) => call.role === "planner");
+  assert.equal(planners.length, 1);
+  assert.equal(planners[0]?.prompt, "the wake", "the turn the limit cut off, as it was");
+  const moved = (await db.select().from(swarmMessages).where(eq(swarmMessages.id, message!.id)))[0]!;
+  assert.equal(moved.runId, result?.plannerRunId, "the message goes with it rather than being handed over twice");
+  assert.equal((await readSwarm(swarm.id)).status, "running");
+});
+
+test("a person's Resume overrides the reset, and an old limit does not pause the swarm again", async () => {
+  const swarm = await makeSwarm({ status: "running" });
+  await plannerRun(swarm.id, "failed", { error: LIMITED, prompt: "the wake", endedAt: LIMIT_ENDED, startedBy: "u1" });
+  await tickSwarm(ctx, swarm.id, { ...starter(), now: at("2026-10-15T15:41:00Z") });
+  assert.equal((await readSwarm(swarm.id)).pausedReason, "usage_limit");
+
+  // What the start route writes for a person resuming this pause.
+  const resumedAt = new Date("2026-10-15T16:00:00Z");
+  await db.update(swarms).set({ status: "running", pausedReason: null, pausedUntil: resumedAt }).where(eq(swarms.id, swarm.id));
+  const deps = { ...starter(), now: at("2026-10-15T16:00:05Z") };
+  await tickSwarm(ctx, swarm.id, deps);
+  assert.equal((await readSwarm(swarm.id)).status, "running");
+  assert.equal(deps.calls.filter((call) => call.role === "planner").length, 1, "the planner is tried at once");
+});
+
+test("a run whose agent never started gives back the node messages its prompt took", async () => {
+  const swarm = await makeSwarm({ status: "running" });
+  const leaf = await makeTask(swarm.id, { title: "refused", status: "working" });
+  const refused = await runOn(swarm.id, leaf.id, "failed", "An agent from an earlier run of this task is still running");
+  const ran = await runOn(swarm.id, leaf.id, "failed", "the agent ran out of context");
+  await db.update(agentRuns).set({ agentStartedAt: new Date() }).where(eq(agentRuns.id, ran.id));
+  const now = new Date();
+  const [lost, heard] = await db
+    .insert(swarmMessages)
+    .values([
+      { swarmId: swarm.id, taskId: leaf.id, source: "person", text: "continue", status: "delivered", runId: refused.id, sentAt: now, deliveredAt: now },
+      { swarmId: swarm.id, taskId: leaf.id, source: "person", text: "and this", status: "delivered", runId: ran.id, sentAt: now, deliveredAt: now },
+    ])
+    .returning();
+
+  await requeueUndeliveredNodeMessages(db, refused.id);
+  await requeueUndeliveredNodeMessages(db, ran.id);
+  const byId = async (id: string) => (await db.select().from(swarmMessages).where(eq(swarmMessages.id, id)))[0]!;
+  const back = await byId(lost!.id);
+  assert.equal(back.status, "queued", "the prompt never reached an agent, so the next one gets it");
+  assert.equal(back.runId, null);
+  assert.equal((await byId(heard!.id)).status, "delivered", "an agent that started had it in its prompt");
 });
 
 /** A planner run the executor finished, as its row reads afterwards. */

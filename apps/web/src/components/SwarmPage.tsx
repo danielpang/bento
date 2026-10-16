@@ -286,7 +286,7 @@ export function SwarmPage({
   const swarm = detail.swarm;
   const live = canPause(swarm.status);
   const now = useNow(live);
-  const stopped = pausedWords(swarm.status, swarm.pausedReason);
+  const stopped = pausedWords(swarm.status, swarm.pausedReason, swarm.pausedUntil);
   const planReady = detail.tasks.some((task) => task.nodeType === "leaf" && task.status !== "cancelled");
   const openLeaves = detail.tasks.filter((task) => task.nodeType === "leaf" && task.status === "open" && task.attention === "none");
   const plannerActive = detail.plannerRun != null && ["queued", "starting", "running"].includes(detail.plannerRun.status);

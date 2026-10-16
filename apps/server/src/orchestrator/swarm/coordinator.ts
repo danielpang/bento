@@ -47,6 +47,7 @@ import { ensureSwarmWatchdog, hasWatchedSwarms, stopSwarmWatchdog, WATCHED_SWARM
 import { captureSwarmSpend, type SwarmSpendOutcome } from "./spend.js";
 import { queueSwarmSlackNotify } from "../slack-notify.js";
 import { ownershipOf, RUN_LEASE_MS } from "../run-ownership.js";
+import { isUsageLimitError, usageLimitResetsAt } from "../usage-limit.js";
 
 /**
  * The swarm's reconciler: one function, run behind one queue, that
@@ -632,6 +633,7 @@ async function runTick(
    * wake until it has been heard.
    */
   await flagUndecidedLeaves(tx, swarm, changed.tasks, events, now);
+  await holdForUsageLimit(tx, swarm, changed.tasks, events, now);
   /*
    * A ceiling that refused the planner or a resolver is collected here,
    * so the swarm pauses (or ends on its budget) the way it does when a
@@ -989,6 +991,15 @@ async function settleWorkedLeaves(
     // left that could still report, so this is the same case.
     if (run && (ACTIVE_RUN_STATUSES as readonly string[]).includes(run.status)) continue;
     /*
+     * Nor is an agent whose account ran out of usage. The node waits in
+     * the queue, uncounted, and holdForUsageLimit below pauses the swarm
+     * until the reset, when the spawn step puts an agent on it again.
+     */
+    if (run?.status === "failed" && isUsageLimitError(run.error)) {
+      await returnToQueue(tx, swarm, task, run, { flags: task.flags, detail: { reason: "usage_limit", error: run.error } }, events, now);
+      continue;
+    }
+    /*
      * A machine that could not be made is not a worker that stopped.
      * The node goes back to the queue and the spawn step below puts
      * another agent on it this same tick, on the same branch and, on
@@ -997,7 +1008,18 @@ async function settleWorkedLeaves(
      */
     const restarts = run && failedBeforeAgentStarted(run) ? sandboxRestarts(task.flags) : null;
     if (run && restarts !== null && restarts < MAX_SANDBOX_RESTARTS) {
-      await restartAfterSandboxFailure(tx, swarm, task, run, restarts + 1, events, now);
+      await returnToQueue(
+        tx,
+        swarm,
+        task,
+        run,
+        {
+          flags: { ...task.flags, [SANDBOX_RESTARTS_FLAG]: restarts + 1 },
+          detail: { reason: "sandbox", restart: restarts + 1, of: MAX_SANDBOX_RESTARTS, error: run.error },
+        },
+        events,
+        now,
+      );
       continue;
     }
     /*
@@ -1090,7 +1112,8 @@ async function settleWorkedLeaves(
 }
 
 /**
- * Puts a node whose machine could not be made back in the queue.
+ * Puts a node whose machine could not be made, or whose agent ran out
+ * of usage, back in the queue.
  *
  * Back to "assigned", which is the state the spawn step starts from
  * for a leaf and for a plan node alike, with the dead run taken off
@@ -1103,16 +1126,15 @@ async function settleWorkedLeaves(
  * Not through handLeafToPlanner: this is the one stop the planner is
  * deliberately not told about, so the latch is left as it was.
  */
-async function restartAfterSandboxFailure(
+async function returnToQueue(
   tx: Tx,
   swarm: typeof swarms.$inferSelect,
   task: Task,
-  run: { id: string; error: string | null },
-  restart: number,
+  run: { id: string },
+  { flags, detail }: { flags: Record<string, unknown>; detail: Record<string, unknown> },
   events: BoardEvent[],
   now: Date,
 ): Promise<void> {
-  const flags = { ...task.flags, [SANDBOX_RESTARTS_FLAG]: restart };
   await tx
     .update(swarmTasks)
     .set({ status: "assigned", assignedRunId: null, flags, updatedAt: now })
@@ -1123,12 +1145,7 @@ async function restartAfterSandboxFailure(
     fromStatus: task.status,
     toStatus: "assigned",
     runId: run.id,
-    detail: {
-      reason: "sandbox",
-      restart,
-      of: MAX_SANDBOX_RESTARTS,
-      error: run.error,
-    },
+    detail,
   });
   // The in-memory row too, so the spawn step this tick sees a node
   // waiting for an agent rather than the row as it was read.
@@ -1502,13 +1519,21 @@ async function restartPlannerAfterSandboxFailure(
     .orderBy(desc(agentRuns.queuedAt), desc(agentRuns.id))
     .limit(MAX_SANDBOX_RESTARTS + 1);
   const latest = recent[0];
-  if (!latest || !failedBeforeAgentStarted(latest)) return null;
-  let trailing = 0;
-  for (const run of recent) {
-    if (!failedBeforeAgentStarted(run)) break;
-    trailing += 1;
+  if (!latest) return null;
+  /*
+   * A planner stopped by its account's usage limit is started again
+   * once the swarm is out of the pause that limit put it in, with no
+   * bound: another failure is a new limit, and pauses it again.
+   */
+  if (!(latest.status === "failed" && isUsageLimitError(latest.error))) {
+    if (!failedBeforeAgentStarted(latest)) return null;
+    let trailing = 0;
+    for (const run of recent) {
+      if (!failedBeforeAgentStarted(run)) break;
+      trailing += 1;
+    }
+    if (trailing > MAX_SANDBOX_RESTARTS) return null;
   }
-  if (trailing > MAX_SANDBOX_RESTARTS) return null;
 
   const profileId = (await plannerProfileFor(tx, swarm)) ?? latest.agentProfileId;
   if (!profileId) return null;
@@ -2049,6 +2074,74 @@ async function flagUndecidedLeaves(
       status: "working",
     });
   }
+}
+
+/**
+ * Pauses a swarm whose agents ran out of their account's usage, until
+ * the reset the CLI printed, and lifts the pause once it has passed.
+ *
+ * Before the planner and spawn steps, so nothing is started into a
+ * limit that is still on: a planner restarted every tick failed nine
+ * times in two minutes, and the leaves it was told about were handed
+ * on as failures. The leaves wait in the queue (settleWorkedLeaves) and
+ * the planner's prompt on its failed run (restartPlannerAfterSandboxFailure),
+ * so lifting the pause is all it takes to carry on. The watchdog ticks
+ * a paused swarm every minute, which is what notices the reset.
+ *
+ * pausedUntil also marks the failures already acted on: only a limit
+ * failure that ended after it pauses the swarm, so one that was
+ * followed by a reset, or by a person's Resume, is not read again.
+ */
+async function holdForUsageLimit(
+  tx: Tx,
+  swarm: typeof swarms.$inferSelect,
+  tasks: Task[],
+  events: BoardEvent[],
+  now: Date,
+): Promise<void> {
+  if (swarm.status === "paused" && swarm.pausedReason === "usage_limit") {
+    if (swarm.pausedUntil && swarm.pausedUntil.getTime() > now.getTime()) return;
+    const status = tasks.length === 0 ? ("planning" as const) : ("running" as const);
+    await tx
+      .update(swarms)
+      .set({ status, pausedReason: null, updatedAt: now })
+      .where(and(eq(swarms.id, swarm.id), eq(swarms.status, "paused"), eq(swarms.pausedReason, "usage_limit")));
+    swarm.status = status;
+    swarm.pausedReason = null;
+    events.push({ type: "swarm_updated", projectId: swarm.projectId, swarmId: swarm.id, status });
+    return;
+  }
+  if (swarm.status !== "planning" && swarm.status !== "running" && swarm.status !== "blocked" && !pausedOnPlanLimit(swarm)) {
+    return;
+  }
+
+  const failures = await tx
+    .select({ error: agentRuns.error, endedAt: agentRuns.endedAt })
+    .from(agentRuns)
+    .where(
+      and(
+        eq(agentRuns.swarmId, swarm.id),
+        eq(agentRuns.status, "failed"),
+        sql`${agentRuns.endedAt} > ${swarm.pausedUntil ?? new Date(0)}`,
+        sql`(${agentRuns.error} ilike '%limit%' or ${agentRuns.error} ilike '%usage%')`,
+      ),
+    );
+  let until: Date | null = null;
+  for (const failure of failures) {
+    if (!failure.endedAt) continue;
+    const resetsAt = usageLimitResetsAt(failure.error, failure.endedAt);
+    if (resetsAt && resetsAt.getTime() > now.getTime() && (!until || resetsAt > until)) until = resetsAt;
+  }
+  if (!until) return;
+
+  await tx
+    .update(swarms)
+    .set({ status: "paused", pausedReason: "usage_limit", pausedUntil: until, updatedAt: now })
+    .where(eq(swarms.id, swarm.id));
+  swarm.status = "paused";
+  swarm.pausedReason = "usage_limit";
+  swarm.pausedUntil = until;
+  events.push({ type: "swarm_updated", projectId: swarm.projectId, swarmId: swarm.id, status: "paused" });
 }
 
 /** Whether the swarm is paused waiting for its plan's hours, the one pause nobody chose. */

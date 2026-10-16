@@ -870,6 +870,30 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
     assert.equal(second.exitCode, 0, "and so did the second: attaching did not end or disturb it");
   });
 
+  /*
+   * The leftover agent check before a swarm task's run: an attach by
+   * the command alone (no session key) finds a running agent, aborting
+   * that attach stops it, and a finished one is never found.
+   */
+  await t.test("an attach by command finds only a live session, and aborting it stops the process", { skip: needsSprite() }, async () => {
+    const finished = await collectExec(driver.exec(handle, ["true"], { timeoutMs: 60_000 }));
+    assert.equal(finished.exitCode, 0);
+    assert.equal(await driver.attach(handle, ["true"]), null, "a finished command is not a leftover");
+
+    const original = collectExec(driver.exec(handle, ["sleep", "300"], { timeoutMs: 600_000 }));
+    const controller = new AbortController();
+    let attached: AsyncIterable<ExecChunk> | null = null;
+    for (let i = 0; i < 8 && !attached; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      attached = await driver.attach(handle, ["sleep"], { signal: controller.signal, timeoutMs: 60_000 });
+    }
+    assert.ok(attached, "the running command is found by its first word");
+    controller.abort();
+    await collectExec(attached);
+    await original;
+    assert.equal(await driver.attach(handle, ["sleep"]), null, "nothing is left once it was stopped");
+  });
+
   /**
    * A swarm's worker, provisioned the way a swarm actually provisions
    * one: from bundles rather than from a remote.
