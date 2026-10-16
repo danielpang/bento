@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { USAGE_LIMIT_FALLBACK_MS, isUsageLimitError, usageLimitResetsAt } from "./usage-limit.js";
+import { USAGE_LIMIT_FALLBACK_MS, USAGE_LIMIT_MIN_WAIT_MS, isUsageLimitError, usageLimitResetsAt } from "./usage-limit.js";
 
 const ended = new Date("2026-10-15T15:40:40Z");
 
@@ -40,4 +40,9 @@ test("a limit with no readable reset waits the fallback, and other errors are no
   assert.equal(usageLimitResetsAt("API Error: 429 rate_limit_error", ended), null);
   assert.equal(usageLimitResetsAt("the agent working it stopped: exit code 1", ended), null);
   assert.equal(isUsageLimitError(null), false);
+});
+
+test("a reset a minute away still waits the minimum, so a printed line cannot buy a restart a minute", () => {
+  const error = "You've hit your session limit · resets 3:41pm (UTC)";
+  assert.equal(usageLimitResetsAt(error, ended)?.getTime(), ended.getTime() + USAGE_LIMIT_MIN_WAIT_MS);
 });

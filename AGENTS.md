@@ -717,7 +717,11 @@ pause, the spawn step puts agents back on the leaves, and
 with its own prompt and the messages it carried. `pausedUntil` stays
 set as the line between limit failures already acted on and new ones,
 and a person's Resume moves it to that moment, which overrides the
-reset (a key with headroom, say).
+reset (a key with headroom, say). A run's error can carry the tail of
+the agent's own stderr, so the sentence alone buys little: no wait is
+shorter than `USAGE_LIMIT_MIN_WAIT_MS`, and a leaf (`usageLimitWaits`)
+or the planner waits out at most `MAX_USAGE_LIMIT_WAITS` limits in a
+row before it is handled as an ordinary failure.
 
 The same incident had two more causes that hold without any limit.
 The Docker driver's `attach` required a session key, and the leftover
