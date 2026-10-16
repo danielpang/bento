@@ -97,9 +97,7 @@ test("additional rules support exceptions and reject invalid matches", () => {
   );
 });
 
-test("an agent's usage limit is not billed, and an agent cannot print its way there", () => {
-  assert.equal(unbilledReason("You've hit your session limit · resets 7:30pm (UTC)")?.id, "usage-limit");
-  assert.equal(unbilledReason("Claude AI usage limit reached|1760558400")?.id, "usage-limit");
-  assert.equal(unbilledReason("Claude Code reported error during execution: You've hit your session limit · resets 7:30pm (UTC)"), null);
-  assert.equal(unbilledReason("exit code 1: You've hit your session limit"), null);
+test("a run stopped by its usage limit is still billed for the work it did", () => {
+  assert.equal(unbilledReason("You've hit your session limit · resets 7:30pm (UTC)"), null);
+  assert.equal(unbilledReason("Claude AI usage limit reached|1760558400"), null);
 });

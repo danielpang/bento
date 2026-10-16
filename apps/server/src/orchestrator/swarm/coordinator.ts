@@ -393,9 +393,8 @@ function failedBeforeAgentStarted(run: { status: string; error: string | null })
   const reason = unbilledReason(run.error);
   // A lost branch is unbilled (no agent ran) but not a sandbox blip:
   // another start finds the same nothing, so it goes to the planner and
-  // the person rather than round the restart loop. A usage limit waits
-  // for its reset instead (holdForUsageLimit).
-  return reason !== null && reason.id !== "swarm-branch-lost" && reason.id !== "usage-limit";
+  // the person rather than round the restart loop.
+  return reason !== null && reason.id !== "swarm-branch-lost";
 }
 
 /**

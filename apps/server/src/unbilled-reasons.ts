@@ -1,5 +1,3 @@
-import { USAGE_LIMIT_OPENING } from "./orchestrator/usage-limit.js";
-
 /**
  * Reasons a failed run is marked not billable.
  *
@@ -126,11 +124,6 @@ export const UNBILLED_REASONS: readonly UnbilledReason[] = [
     id: "previous-agent-running",
     summary: "An earlier run's agent was still in the task's sandbox and could not be stopped, so no second agent ran.",
     match: { kind: "prefix", text: PREVIOUS_AGENT_RUNNING_PREFIX },
-  },
-  {
-    id: "usage-limit",
-    summary: "The agent's own account reached its usage limit, so the swarm waits for the reset and runs it again.",
-    match: { kind: "pattern", text: USAGE_LIMIT_OPENING.source },
   },
   {
     id: "swarm-branch-lost",

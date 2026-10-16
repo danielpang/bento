@@ -706,9 +706,9 @@ failures, and after the reset nothing moved until a person wrote.
 hit your session limit · resets 7:30pm (UTC)", Codex's "try again in
 ...") only at the start of the error, which is the CLI's own result
 text: a run's error can carry the agent's stderr after another
-opening, and an agent must not be able to print its way to a free or
-endless retry. The same match is the `usage-limit` unbilled reason.
-The coordinator puts a limited node, or a limited resolver's
+opening, and an agent must not be able to print its way to an endless
+retry. A limited run is still billed for the work it did, because the
+session carries on from it after the reset. The coordinator puts a limited node, or a limited resolver's
 conflict, back without failing it, and `holdForUsageLimit` pauses the
 swarm (`pausedReason` "usage_limit", `pausedUntil` at the reset,
 `pausedFrom` the status it interrupted) before anything is started in
@@ -728,8 +728,9 @@ swarm run in a reused Docker machine was refused as "an agent from an
 earlier run is still running". Docker now answers a keyless attach
 from its durable runners that are still alive (`LIVE_DURABLE_FINDER`),
 the way Sprite and Modal find a session by its command. And node
-messages taken into a run that never reached its agent, or ended
-unbilled, were lost; `requeueUndeliveredNodeMessages` gives them back.
+messages taken into a run that never reached its agent, failed on its
+sandbox, or hit a limit were lost; `requeueUndeliveredNodeMessages`
+gives them back.
 
 ## A stop ends the stream itself, and a run outlives its machine by minutes at most
 
