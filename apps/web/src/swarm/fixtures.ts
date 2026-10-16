@@ -305,6 +305,7 @@ function swarmShell(overrides: Partial<Swarm> & Pick<Swarm, "id" | "name" | "sta
     slug: overrides.id,
     goal: "",
     pausedReason: null,
+    pausedUntil: null,
     branchName: `bento/${overrides.id}`,
     deliverable: "code",
     settings: { ...DEFAULT_SETTINGS },

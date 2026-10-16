@@ -1,5 +1,5 @@
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
-import { swarmMessages, type Db } from "@bento/db";
+import { agentRuns, swarmMessages, type Db } from "@bento/db";
 
 /**
  * Messages people leave on one node, and how they reach an agent.
@@ -123,16 +123,23 @@ export async function confirmSwarmMessagesDelivered(db: Db, runId: string): Prom
  * agent on the leaf is handed them. Only a node's: a planner's unread
  * messages are put back by the coordinator, which reads how the run
  * ended to decide whether they wake another planner.
+ *
+ * A run whose agent never started also gives back what its prompt took
+ * (takeNodeMessages marks those delivered): the prompt never reached an
+ * agent. A run refused because an earlier agent was still in its
+ * machine once swallowed every "continue" a person left on the leaf.
  */
 export async function requeueUndeliveredNodeMessages(db: Db, runId: string): Promise<void> {
   await db
     .update(swarmMessages)
-    .set({ status: "queued", runId: null, sentAt: null })
+    .set({ status: "queued", runId: null, sentAt: null, deliveredAt: null })
     .where(
       and(
         eq(swarmMessages.runId, runId),
-        eq(swarmMessages.status, "sent"),
         sql`${swarmMessages.taskId} is not null`,
+        sql`(${swarmMessages.status} = 'sent' or (${swarmMessages.status} = 'delivered' and exists (
+          select 1 from ${agentRuns} where ${agentRuns.id} = ${runId} and ${agentRuns.agentStartedAt} is null
+        )))`,
       ),
     );
 }

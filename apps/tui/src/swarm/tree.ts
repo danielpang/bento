@@ -77,7 +77,9 @@ export function swarmWords(swarm: Pick<SwarmRow, "status" | "pausedReason">): st
   if (swarm.status === "budget_exhausted") return "out of budget";
   if (swarm.status === "timed_out") return "out of time";
   if (swarm.status === "paused") {
-    return swarm.pausedReason === "plan_limit" ? "paused, out of agent hours" : "paused";
+    if (swarm.pausedReason === "plan_limit") return "paused, out of agent hours";
+    if (swarm.pausedReason === "usage_limit") return "paused, agents at their usage limit";
+    return "paused";
   }
   return swarm.status;
 }

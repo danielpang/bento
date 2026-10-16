@@ -235,7 +235,9 @@ export interface Swarm {
   goal: string;
   status: SwarmStatus;
   /** Why a paused swarm is paused, so the header prints the right sentence. */
-  pausedReason: "manual" | "budget" | "time_limit" | "attention" | "plan_limit" | "error" | null;
+  pausedReason: "manual" | "budget" | "time_limit" | "attention" | "plan_limit" | "error" | "usage_limit" | null;
+  /** When a swarm paused on its agents' usage limit starts again by itself. ISO. */
+  pausedUntil: string | null;
   /** The single branch every leaf lands onto. */
   branchName: string | null;
   deliverable: "code" | "document";

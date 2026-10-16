@@ -149,7 +149,8 @@ export async function hasWatchedSwarms(ctx: Pick<AppContext, "db">): Promise<boo
  * The swarms the clock looks at, and the reconcile pass ticks.
  *
  * Every state a tick can still move: being planned, being worked,
- * blocked on a person, and paused on the plan's hours. And the two
+ * blocked on a person, and paused on the plan's hours or on the agents'
+ * usage limit, whose reset only a tick notices. And the two
  * ceilings, but only while something is still in flight under them:
  * nothing is killed for a budget or a time limit, so the workers that
  * were running finish and their branches land, and that landing is
@@ -160,7 +161,7 @@ export async function hasWatchedSwarms(ctx: Pick<AppContext, "db">): Promise<boo
  */
 export const WATCHED_SWARMS = or(
   inArray(swarms.status, ["planning", "running", "blocked"]),
-  and(eq(swarms.status, "paused"), eq(swarms.pausedReason, "plan_limit")),
+  and(eq(swarms.status, "paused"), inArray(swarms.pausedReason, ["plan_limit", "usage_limit"])),
   and(
     inArray(swarms.status, ["budget_exhausted", "timed_out"]),
     sql`(

@@ -428,6 +428,13 @@
       "when": 1791100840000,
       "tag": "0060_sandbox_execution_identity",
       "breakpoints": true
+    },
+    {
+      "idx": 61,
+      "version": "7",
+      "when": 1791100900000,
+      "tag": "0061_swarm_paused_until",
+      "breakpoints": true
     }
   ]
 }
