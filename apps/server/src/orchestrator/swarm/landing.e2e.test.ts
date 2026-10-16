@@ -560,6 +560,8 @@ test("a worker made on Modal lands onto a swarm on a sprite", async () => {
     async destroy() {},
   } as unknown as SandboxDriver;
   const modalDriver = {
+    persistence: { hibernation: "filesystem-snapshot" },
+    async hibernate() { throw new Error("unexpected hibernation during landing"); },
     provider: "modal",
     workspace: "clone",
     exportRepository: exportFrom("modal", fx.workerTree),
@@ -641,6 +643,8 @@ test("a landing wakes hibernated machines rather than calling them unavailable",
     return trees.get(handle.externalId)!;
   };
   const modalDriver = {
+    persistence: { hibernation: "filesystem-snapshot" },
+    async hibernate() { throw new Error("unexpected hibernation during landing"); },
     provider: "modal",
     workspace: "clone",
     async wake(handle: SandboxHandle) {
@@ -816,8 +820,18 @@ test("a machine a landing is using is not hibernated under it", async () => {
   const inFlight = await queueLanding(fx.swarm.id, fx.task.id, fx.branch);
   await db.update(swarmLandings).set({ startedAt: new Date() }).where(eq(swarmLandings.id, inFlight.id));
   queued.length = 0;
-  await hibernateSandbox(ctx, swarmSandbox.id);
-  await hibernateSandbox(ctx, workerSandbox.id);
+  const activeDrivers = ctx.drivers;
+  ctx.drivers = singleDriver({
+    provider: "modal", workspace: "clone",
+    persistence: { hibernation: "filesystem-snapshot" },
+    async hibernate() { throw new Error("must not snapshot an active landing"); },
+  } as unknown as SandboxDriver);
+  try {
+    await hibernateSandbox(ctx, swarmSandbox.id);
+    await hibernateSandbox(ctx, workerSandbox.id);
+  } finally {
+    ctx.drivers = activeDrivers;
+  }
   const rearmed = queued.filter((job) => job.queue === "sandbox.hibernate").map((job) => job.data.sandboxId);
   assert.deepEqual(
     rearmed.sort(),
@@ -834,8 +848,7 @@ test("a machine a landing is using is not hibernated under it", async () => {
     .where(eq(swarmLandings.id, inFlight.id));
   queued.length = 0;
   const original = ctx.drivers;
-  // Past the activity check the job asks for the machine's driver, and
-  // only a real Modal driver snapshots: this one stops there.
+  // A driver without the hibernation capability does not snapshot.
   ctx.drivers = singleDriver({ provider: "modal", workspace: "clone" } as unknown as SandboxDriver);
   try {
     await hibernateSandbox(ctx, swarmSandbox.id);
