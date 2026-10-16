@@ -1,0 +1,45 @@
+import { after, before, test } from "node:test";
+import assert from "node:assert/strict";
+import pg from "pg";
+import { eq } from "drizzle-orm";
+import { createDb, createPool, projects, pipelines, stages, features, agentProfiles, agentRuns, sandboxes, runMigrations } from "@bento/db";
+import { ensureLocalUser, type AppContext } from "../context.js";
+import { executionMatchesSandbox, recordSandboxExecution } from "./sandbox-execution.js";
+const base = process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5439/app";
+const url = base.replace(/\/[^/]+$/, "/sandbox_execution_test");
+let ctx: AppContext;
+let sandbox: typeof sandboxes.$inferSelect;
+let run: typeof agentRuns.$inferSelect;
+before(async () => {
+  const admin = new pg.Client({ connectionString: base }); await admin.connect();
+  await admin.query("DROP DATABASE IF EXISTS sandbox_execution_test WITH (FORCE)");
+  await admin.query("CREATE DATABASE sandbox_execution_test"); await admin.end();
+  await runMigrations(url);
+  const pool = createPool(url), db = createDb(pool);
+  const ownerId = await ensureLocalUser(db);
+  const [project] = await db.insert(projects).values({ ownerId, name: "Execution" }).returning();
+  const [pipeline] = await db.insert(pipelines).values({ projectId: project!.id, name: "Pipeline" }).returning();
+  const [stage] = await db.insert(stages).values({ pipelineId: pipeline!.id, name: "Work", slug: "work", position: 0 }).returning();
+  const [feature] = await db.insert(features).values({ projectId: project!.id, pipelineId: pipeline!.id, title: "Work" }).returning();
+  const [profile] = await db.insert(agentProfiles).values({ ownerId, name: "Agent", cli: "fake", model: "fake" }).returning();
+  [sandbox] = await db.insert(sandboxes).values({ projectId: project!.id, provider: "docker", externalId: "execution-box", status: "ready" }).returning() as [typeof sandbox];
+  [run] = await db.insert(agentRuns).values({ featureId: feature!.id, stageId: stage!.id, agentProfileId: profile!.id, sandboxId: sandbox.id, status: "running", prompt: "work", type: "pipeline" }).returning() as [typeof run];
+  ctx = { db, pool } as AppContext;
+});
+after(async () => { await ctx?.pool.end(); });
+
+test("execution identity is persisted only by the current owner for the current generation", async () => {
+  const identity = { provider: "docker" as const, id: "execution-one" };
+  await recordSandboxExecution(ctx, run.id, sandbox, identity);
+  const [saved] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, run.id));
+  assert.deepEqual(saved!.sandboxExecution, { ...identity, sandboxId: sandbox.id, generation: sandbox.generation });
+  assert.equal(executionMatchesSandbox(saved!.sandboxExecution!, sandbox), true);
+  assert.equal(executionMatchesSandbox(saved!.sandboxExecution!, { ...sandbox, generation: sandbox.generation + 1 }), false);
+  await ctx.db.update(agentRuns).set({ ownerId: "another-process" }).where(eq(agentRuns.id, run.id));
+  await assert.rejects(recordSandboxExecution(ctx, run.id, sandbox, { ...identity, id: "wrong-owner" }));
+  await ctx.db.update(agentRuns).set({ ownerId: null }).where(eq(agentRuns.id, run.id));
+  await ctx.db.update(sandboxes).set({ generation: sandbox.generation + 1 }).where(eq(sandboxes.id, sandbox.id));
+  await assert.rejects(recordSandboxExecution(ctx, run.id, sandbox, { ...identity, id: "stale-generation" }));
+  const [unchanged] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, run.id));
+  assert.equal(unchanged!.sandboxExecution!.id, identity.id);
+});

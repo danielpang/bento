@@ -79,3 +79,18 @@ logs and pushed Git branches remain necessary recovery sources.
 Orchestration selects hibernation through the declared capability, honors its idle
 window, and no longer requires a ModalDriver instance. The Modal orphan inventory
 sweep remains provider-specific because its listing and tagging interface is.
+
+## Execution identity and recovery
+
+Runs persist the provider execution identity together with the sandbox row ID
+and generation. Docker uses its durable runner key; Modal records its exact
+execution directory; Sprites records a native session ID when the newly started
+session can be identified unambiguously. A known ID is authoritative: its
+absence never selects a newer command with the same executable. Recovery
+refuses an identity belonging to an older sandbox generation.
+
+Older runs and a Sprite start whose session listing fails or is ambiguous keep
+the existing command-matching recovery path. This is a compatibility fallback,
+not a guarantee of exact identity. CLI session-log recovery and native message
+ID deduplication still fill output gaps before the live stream is consumed;
+provider execution identity does not replace the transcript record.

@@ -281,6 +281,7 @@ export class DockerDriver implements SandboxDriver {
       return;
     }
     const key = durableKey(opts.sessionKey);
+    await opts.onExecution?.({ provider: "docker", id: key });
     const container = this.docker.getContainer(handle.externalId);
     const execution = await withDeadline(container.exec({
       Cmd: [SANDBOX_NODE, "-e", DURABLE_RUNNER, JSON.stringify({
@@ -300,8 +301,10 @@ export class DockerDriver implements SandboxDriver {
     _argv: string[],
     opts?: ExecOptions,
   ): Promise<AsyncIterable<ExecChunk> | null> {
-    const key = durableKey(opts?.sessionKey);
+    if (opts?.execution && opts.execution.provider !== "docker") throw new Error("Execution belongs to another provider");
+    const key = durableKey(opts?.execution?.id ?? opts?.sessionKey);
     if (!(await this.waitForDurableRun(handle, key))) return null;
+    await opts?.onExecution?.({ provider: "docker", id: key });
     return this.durableStream(handle, key, opts);
   }
 

@@ -421,6 +421,13 @@
       "when": 1791100780000,
       "tag": "0059_sandbox_usage_leases",
       "breakpoints": true
+    },
+    {
+      "idx": 60,
+      "version": "7",
+      "when": 1791100840000,
+      "tag": "0060_sandbox_execution_identity",
+      "breakpoints": true
     }
   ]
 }

@@ -644,6 +644,12 @@ export const agentRuns = pgTable(
   ownerId: text("owner_id"),
   ownerHeartbeatAt: timestamp("owner_heartbeat_at", { withTimezone: true }),
   cliSessionId: text("cli_session_id"),
+  sandboxExecution: jsonb("sandbox_execution").$type<{
+    provider: "docker" | "sprite" | "modal" | "local-process";
+    id: string;
+    sandboxId: string;
+    generation: number;
+  }>(),
   exitCode: integer("exit_code"),
   costUsd: numeric("cost_usd"),
   /**

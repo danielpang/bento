@@ -234,7 +234,16 @@ export function isExecTimeout(text: string): boolean {
   return text.includes("exec timeout: ");
 }
 
+export interface SandboxExecutionIdentity {
+  provider: SandboxHandle["provider"];
+  id: string;
+}
+
 export interface ExecOptions {
+  /** Exact process identity, when recorded. Never fall back to another command if it is gone. */
+  execution?: SandboxExecutionIdentity;
+  /** Await persistence before exposing output (or starting a durable runner). */
+  onExecution?: (execution: SandboxExecutionIdentity) => Promise<void>;
   cwd?: string;
   env?: Record<string, string>;
   timeoutMs?: number;

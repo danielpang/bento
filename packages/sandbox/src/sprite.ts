@@ -909,7 +909,10 @@ export class SpriteDriver implements SandboxDriver {
         return;
       }
     }
-    const session = this.openSession(handle, launch, opts, sprite);
+    const before = opts?.onExecution
+      ? await sprite.listSessions().then((rows) => new Set(rows.map((row) => row.id))).catch(() => undefined)
+      : undefined;
+    const session = this.openSession(handle, launch, opts, sprite, before);
     session.adoptInitial(sprite);
     yield* session.stream();
   }
@@ -933,9 +936,11 @@ export class SpriteDriver implements SandboxDriver {
     const launch = planAttachLaunch(argv, opts);
     const { command } = launch.spawn;
     const sprite = await this.openSprite(handle.externalId);
-    const mine = newestSessionFor(await sprite.listSessions(), launch.commandLines);
+    if (opts?.execution && opts.execution.provider !== "sprite") throw new Error("Execution belongs to another provider");
+    const mine = selectSpriteSession(await sprite.listSessions(), launch.commandLines, opts?.execution?.id);
     if (!mine) return null;
 
+    await opts?.onExecution?.({ provider: "sprite", id: mine.id });
     const child = sprite.spawn(command, [], { sessionId: mine.id });
     const guard = defuseKeepalive(child);
     try {
@@ -955,7 +960,7 @@ export class SpriteDriver implements SandboxDriver {
      * why the session is built eagerly here while exec builds it
      * lazily inside its generator.
      */
-    const session = this.openSession(handle, launch, opts, sprite);
+    const session = this.openSession(handle, launch, { ...opts, execution: { provider: "sprite", id: mine.id } }, sprite);
     session.adoptAttached(child, guard);
     return session.stream();
   }
@@ -967,7 +972,24 @@ export class SpriteDriver implements SandboxDriver {
    * that already exists. Everything arms at call time, not at first
    * iteration.
    */
-  private openSession(handle: SandboxHandle, launch: ExecLaunch, opts: ExecOptions | undefined, sprite: Sprite): OpenSession {
+  private openSession(handle: SandboxHandle, launch: ExecLaunch, opts: ExecOptions | undefined, sprite: Sprite, before?: Set<string>): OpenSession {
+    let executionId = opts?.execution?.id;
+    let identityPending: Promise<void> = Promise.resolve();
+    let identityRequested = false;
+    const identify = () => {
+      if (identityRequested || executionId || !before || !opts?.onExecution) return;
+      identityRequested = true;
+      identityPending = (async () => {
+        const sessions = await sprite.listSessions().catch(() => []);
+        const mine = sessions.filter((s) => !before.has(s.id) && !s.tty && launch.commandLines.some((line) => sessionCommandMatches(s.command, line)));
+        // Ambiguity is not an identity. Legacy command matching remains available only when no ID was recorded.
+        if (mine.length !== 1) return;
+        executionId = mine[0]!.id;
+        await opts.onExecution!({ provider: "sprite", id: executionId });
+      })();
+      // The stream awaits this before yielding; attach an immediate rejection handler too.
+      void identityPending.catch(() => {});
+    };
     const { command } = launch.spawn;
 
     /**
@@ -1185,7 +1207,7 @@ export class SpriteDriver implements SandboxDriver {
           const fresh = await this.openSprite(handle.externalId);
           const sessions = await fresh.listSessions();
           if (done || killed) return;
-          const mine = newestSessionFor(sessions, launch.commandLines);
+          const mine = selectSpriteSession(sessions, launch.commandLines, executionId);
           if (!mine) {
             /**
              * Why the process is gone, when the sandbox can say so.
@@ -1268,6 +1290,7 @@ export class SpriteDriver implements SandboxDriver {
         connectDeadline.unref?.();
       }
       const activate = () => {
+        identify();
         active = child;
         if (stdinDone) child.stdin.end();
         wakeStdin();
@@ -1344,7 +1367,7 @@ export class SpriteDriver implements SandboxDriver {
     const killOverHttp = async () => {
       try {
         const fresh = await this.openSprite(handle.externalId);
-        const mine = newestSessionFor(await fresh.listSessions(), launch.commandLines);
+        const mine = selectSpriteSession(await fresh.listSessions(), launch.commandLines, executionId);
         if (!mine) return;
         const stream = await fresh.killSession(mine.id, "SIGTERM", "10s");
         await stream.processAll(() => {});
@@ -1411,6 +1434,7 @@ export class SpriteDriver implements SandboxDriver {
         while (true) {
           while (queue.length > 0) {
             const chunk = queue.shift()!;
+            await identityPending;
             yield chunk;
             if (chunk.kind === "exit") return;
           }
@@ -2275,6 +2299,11 @@ type SpriteSession = Awaited<ReturnType<Sprite["listSessions"]>>[number];
  * The newest non-tty session whose command line is one of the given
  * lines, or starts with one followed by its arguments.
  */
+/** A known native ID is authoritative, including when it is absent. */
+export function selectSpriteSession(sessions: SpriteSession[], commandLines: string[], executionId?: string): SpriteSession | undefined {
+  return executionId ? sessions.find((session) => session.id === executionId && !session.tty) : newestSessionFor(sessions, commandLines);
+}
+
 function newestSessionFor(sessions: SpriteSession[], commandLines: string[]): SpriteSession | undefined {
   return sessions
     .filter((s) => !s.tty && commandLines.some((line) => sessionCommandMatches(s.command, line)))
