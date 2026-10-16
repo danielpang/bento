@@ -400,6 +400,13 @@
       "when": 1791100600000,
       "tag": "0056_agent_runs_active_idx",
       "breakpoints": true
+    },
+    {
+      "idx": 57,
+      "version": "7",
+      "when": 1791100660000,
+      "tag": "0057_sandbox_operations",
+      "breakpoints": true
     }
   ]
 }

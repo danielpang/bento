@@ -1,3 +1,4 @@
+import { sandboxOperation } from "./sandbox-operations.js";
 import { and, eq, isNull, ne, sql } from "drizzle-orm";
 import { repositories, sandboxes } from "@bento/db";
 import { execFile } from "node:child_process";
@@ -376,7 +377,9 @@ export async function provisionWorkspace(
 
   const provisionWith = async (candidate: SandboxDriver): Promise<SandboxHandle> => {
     const restore = candidate.provider === "modal" ? await hibernatedRestore(ctx, input.owner) : undefined;
-    return candidate.provision({
+    return sandboxOperation(ctx, { projectId: input.projectId, workspaceKey, provider: candidate.provider, action: "provision" }, async (recordHandle) => {
+    const handle = await candidate.provision({
+      onAcquired: recordHandle,
       projectId: input.projectId,
       workspaceKey,
       ...(input.organizationId ? { organizationId: input.organizationId } : {}),
@@ -399,6 +402,9 @@ export async function provisionWorkspace(
       mounts: [...repoGitMounts(candidate), ...input.authMounts],
       image: ctx.env.BENTO_SANDBOX_IMAGE,
       onProgress: input.say,
+    });
+    await recordHandle(handle);
+    return handle;
     });
   };
 

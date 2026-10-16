@@ -27,6 +27,7 @@ const TENANT_TABLES = [
   "feature_messages",
   "feature_pull_requests",
   "sandboxes",
+  "sandbox_operations",
   "agent_runs",
   "run_events",
   "run_artifacts",
@@ -1047,4 +1048,14 @@ test("a card run still has to name its stage", async () => {
     ),
     /must name its card and its stage/,
   );
+});
+
+test("sandbox operation receipts inherit tenant scope and cannot be read by another organization", async () => {
+  const { rows: [op] } = await pool.query(`insert into sandbox_operations(project_id,workspace_key,provider,action)
+    values ('00000001-0000-0000-0000-000000000000','tenant-check','sprite','provision') returning id,organization_id`);
+  assert.equal(op.organization_id, "org-a");
+  await asOrg("org-b", async (client) => {
+    const result = await client.query("select id from sandbox_operations where id=$1", [op.id]);
+    assert.equal(result.rowCount, 0);
+  });
 });

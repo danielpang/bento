@@ -2238,3 +2238,18 @@ export const modelCatalogSnapshots = pgTable(
   },
   (t) => [check("model_catalog_snapshots_singleton", sql`${t.id} = 'current'`)],
 );
+
+/** Durable receipts for provider actions. Never store prompts, keys or environment here. */
+export const sandboxOperations = pgTable("sandbox_operations", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  projectId: uuid("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
+  workspaceKey: text("workspace_key").notNull(),
+  provider: text("provider").notNull(),
+  action: text("action", { enum: ["provision", "hibernate", "wake", "destroy"] }).notNull(),
+  state: text("state", { enum: ["executing", "succeeded", "unknown"] }).notNull().default("executing"),
+  handle: jsonb("handle").$type<{ externalId: string; provider: "docker" | "sprite" | "modal" | "local-process"; workdir: string; imageRef?: string }>(),
+  heartbeatAt: timestamp("heartbeat_at", { withTimezone: true }).notNull().defaultNow(),
+  errorClass: text("error_class"),
+  ...timestamps,
+}, (t) => [index("sandbox_operations_unfinished_idx").on(t.heartbeatAt).where(sql`${t.state} <> 'succeeded'`)]);

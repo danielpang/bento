@@ -113,6 +113,7 @@ import { shouldIncludeStageNotes, shouldShareAgentAuth } from "../settings.js";
 import { captureRunQueueDepth } from "./queue-snapshot.js";
 import { ACTIVE_RUN_STATUSES, projectHasRepositories, startRunIfIdle } from "./start-run.js";
 import { enqueueRun, INTERACTIVE_POLL_SECONDS, QUEUE_POLL_SECONDS, RUN_WORKER_POLL_SECONDS } from "./queue.js";
+import { reconcileSandboxOperations } from "./sandbox-operations.js";
 import { HIBERNATE_SANDBOX_QUEUE, MODAL_SWEEP_QUEUE, SandboxGone, scheduleModalHibernation, hibernateSandbox, sweepOrphanModalSandboxes, wakeSwarmSandbox } from "./hibernate-sandbox.js";
 import { modalNetworkForProject, organizationRestrictsNetwork } from "./sandbox-network.js";
 import { stopLeftoverAgent } from "./leftover-agent.js";
@@ -3605,6 +3606,7 @@ async function requeueWaitingRuns(ctx: AppContext): Promise<void> {
 }
 
 export async function registerJobs(ctx: AppContext): Promise<void> {
+  await reconcileSandboxOperations(ctx);
   /**
    * Requests addressed to whichever process drives a run (a cancel, a
    * nudge that messages are parked, a release by a shutting down
@@ -3815,6 +3817,7 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
    */
   await ctx.boss.schedule("runner.reap", "*/5 * * * *");
   await ctx.boss.work("runner.reap", captureJobErrors(ctx.analytics, "runner.reap", async () => {
+    await reconcileSandboxOperations(ctx);
     const cutoff = new Date(Date.now() - ctx.env.BENTO_RUNNER_CLAIM_TIMEOUT_MIN * 60_000);
     const stale = await ctx.db
       .update(agentRuns)

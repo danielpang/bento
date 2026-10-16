@@ -1,3 +1,4 @@
+import { sandboxOperation } from "./sandbox-operations.js";
 import { execFile } from "node:child_process";
 import { readdir } from "node:fs/promises";
 import path from "node:path";
@@ -230,7 +231,10 @@ export async function reapSandbox(ctx: AppContext, featureId: string): Promise<v
       workdir: row.workdir,
       ...(row.imageRef ? { imageRef: row.imageRef } : {}),
     };
-    await driver.destroy(handle);
+    await sandboxOperation(ctx, { projectId: row.projectId, workspaceKey: row.id, provider: driver.provider, action: "destroy", handle }, async () => {
+      await driver.destroy(handle);
+      if (driver.exists && await driver.exists(handle)) throw new Error("Sandbox is still there after being destroyed");
+    });
 
     // Drivers that can answer are asked. One that cannot is taken at
     // its word, which is right for the local ones: a container on
@@ -378,7 +382,10 @@ async function destroyAndConfirm(
     workdir: row.workdir,
     ...(row.imageRef ? { imageRef: row.imageRef } : {}),
   };
-  await driver.destroy(handle);
+  await sandboxOperation(ctx, { projectId: row.projectId, workspaceKey: row.id, provider: driver.provider, action: "destroy", handle }, async () => {
+      await driver.destroy(handle);
+      if (driver.exists && await driver.exists(handle)) throw new Error("Sandbox is still there after being destroyed");
+    });
   if (driver.exists && (await driver.exists(handle))) {
     throw new Error(`sandbox ${row.externalId} is still there after being destroyed; will retry`);
   }
