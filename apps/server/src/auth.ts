@@ -31,6 +31,15 @@ import {
 /** A week to accept: invitations cross weekends and time zones. */
 const INVITATION_DAYS = 7;
 
+/**
+ * How long the signed OAuth state cookie lives.
+ *
+ * Matches the verification row better-auth writes in
+ * generateGenericState (ten minutes). The library's own default for
+ * the cookie is five, which is shorter than the row it is checking.
+ */
+const OAUTH_STATE_MAX_AGE_SEC = 10 * 60;
+
 /** Long enough to survive a mail queue, short enough to be a poor stolen token. */
 const LINK_HOURS = 24;
 
@@ -176,6 +185,22 @@ function buildAuth(env: Env, db: Db, mailer: Mailer, hooks: AuthHooks) {
       transaction: true,
     }),
     trustedOrigins: env.BENTO_TRUSTED_ORIGINS,
+    /**
+     * The OAuth state cookie has to outlive a trip through GitHub.
+     *
+     * The database strategy stores the verification row for ten minutes
+     * and, unless told otherwise, signs the matching cookie for five.
+     * Two-factor, an account picker, or a slow consent page then comes
+     * back with a row that is still valid and a cookie the browser has
+     * already dropped. The callback reports that as state_mismatch.
+     * SameSite stays Lax: GitHub sends the browser back with a top
+     * level GET, which is when a Lax cookie is included.
+     */
+    advanced: {
+      cookies: {
+        state: { attributes: { maxAge: OAUTH_STATE_MAX_AGE_SEC } },
+      },
+    },
     // Sign in and sign up outcomes, for PostHog. See auth-events.ts.
     ...(hooks.onAuthEvent
       ? {
