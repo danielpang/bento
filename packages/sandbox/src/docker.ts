@@ -303,12 +303,7 @@ export class DockerDriver implements SandboxDriver {
   ): Promise<AsyncIterable<ExecChunk> | null> {
     if (opts?.execution && opts.execution.provider !== "docker") throw new Error("Execution belongs to another provider");
     if (!opts?.execution && !opts?.sessionKey) {
-      /*
-       * No key: the caller is asking whether anything of this command
-       * is still running, as the leftover agent check does. Only a live
-       * runner answers, because a finished record still has its ready
-       * file and would read as an agent that never stops.
-       */
+      // By command alone, as the leftover agent check asks: only a live runner counts.
       const [command] = argv;
       if (!command) throw new Error("empty argv");
       const key = await this.liveDurableRunFor(handle, command);
@@ -320,7 +315,6 @@ export class DockerDriver implements SandboxDriver {
     return this.durableStream(handle, key, opts);
   }
 
-  /** The newest durable run of this command whose runner is still alive. */
   private async liveDurableRunFor(handle: SandboxHandle, command: string): Promise<string | null> {
     const result = await collectExec(this.exec(handle, [SANDBOX_NODE, "-e", LIVE_DURABLE_FINDER, command], { timeoutMs: 10_000 }));
     if (result.exitCode !== 0) throw new Error(`could not list durable runs: ${result.stderr.trim() || `exit code ${result.exitCode}`}`);

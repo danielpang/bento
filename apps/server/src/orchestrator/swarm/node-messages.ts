@@ -1,5 +1,6 @@
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { agentRuns, swarmMessages, type Db } from "@bento/db";
+import { unbilledReason } from "../../unbilled-reasons.js";
 
 /**
  * Messages people leave on one node, and how they reach an agent.
@@ -124,12 +125,17 @@ export async function confirmSwarmMessagesDelivered(db: Db, runId: string): Prom
  * messages are put back by the coordinator, which reads how the run
  * ended to decide whether they wake another planner.
  *
- * A run whose agent never started also gives back what its prompt took
- * (takeNodeMessages marks those delivered): the prompt never reached an
- * agent. A run refused because an earlier agent was still in its
- * machine once swallowed every "continue" a person left on the leaf.
+ * A run that never reached its agent, or ended unbilled (its sandbox
+ * failed, or its account hit a usage limit), also gives back what it
+ * was handed: the next agent starts fresh and would never see it.
  */
 export async function requeueUndeliveredNodeMessages(db: Db, runId: string): Promise<void> {
+  const [run] = await db
+    .select({ status: agentRuns.status, error: agentRuns.error, agentStartedAt: agentRuns.agentStartedAt })
+    .from(agentRuns)
+    .where(eq(agentRuns.id, runId))
+    .limit(1);
+  const unheard = !run?.agentStartedAt || (run.status === "failed" && unbilledReason(run.error) !== null);
   await db
     .update(swarmMessages)
     .set({ status: "queued", runId: null, sentAt: null, deliveredAt: null })
@@ -137,9 +143,7 @@ export async function requeueUndeliveredNodeMessages(db: Db, runId: string): Pro
       and(
         eq(swarmMessages.runId, runId),
         sql`${swarmMessages.taskId} is not null`,
-        sql`(${swarmMessages.status} = 'sent' or (${swarmMessages.status} = 'delivered' and exists (
-          select 1 from ${agentRuns} where ${agentRuns.id} = ${runId} and ${agentRuns.agentStartedAt} is null
-        )))`,
+        inArray(swarmMessages.status, unheard ? ["sent", "delivered"] : ["sent"]),
       ),
     );
 }

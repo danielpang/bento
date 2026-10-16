@@ -1734,12 +1734,12 @@ export const swarms = pgTable(
       enum: ["manual", "budget", "time_limit", "attention", "plan_limit", "error", "usage_limit"],
     }),
     /**
-     * When a swarm paused on its agents' usage limit starts again: the
-     * reset the CLI printed. Left set after the pause lifts, because it
-     * is also the line between limit failures already acted on and new
-     * ones, and a person's Resume moves it to that moment.
+     * The reset a usage limit pause waits for. Kept after it lifts: limit
+     * failures that ended before it are already handled.
      */
     pausedUntil: timestamp("paused_until", { withTimezone: true }),
+    /** The status a usage limit pause interrupted, which lifting it restores. */
+    pausedFrom: text("paused_from", { enum: ["planning", "running", "blocked"] }),
     /** The single branch every task lands onto. */
     branchName: text("branch_name"),
     /** When its local checkout was removed so the branch can be opened elsewhere. */

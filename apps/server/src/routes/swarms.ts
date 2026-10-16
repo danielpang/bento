@@ -1435,9 +1435,7 @@ export function swarmRoutes(ctx: AppContext) {
           status: "running",
           pausedReason: null,
           branchReleasedAt: null,
-          // A person resuming a swarm paused on its agents' usage limit
-          // overrides the reset it was waiting for (a key with headroom,
-          // say): the limit failures so far count as handled.
+          // Resuming a usage limit pause overrides the reset: the failures so far count as handled.
           ...(swarm.status === "paused" && swarm.pausedReason === "usage_limit" ? { pausedUntil: now } : {}),
           updatedAt: now,
         })

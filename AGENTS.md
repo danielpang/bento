@@ -700,41 +700,36 @@ command. A text-mode agent (dsh) says nothing until it exits, so once
 ## An agent's usage limit pauses a swarm until the reset, and nothing is retried into it
 
 A local swarm hit Claude's session limit: the planner was started
-nine times in two minutes, each failing in two seconds, three leaves
-were handed to the planner as failures, and after the reset nothing
-moved until a person wrote. A limit is not the work failing, so
-`usage-limit.ts` in `apps/server/src/orchestrator` recognises the
-CLI's sentence ("You've hit your session limit · resets 7:30pm
-(UTC)", Codex's "try again in ...") and reads the reset from it,
-falling back to `USAGE_LIMIT_FALLBACK_MS` after the run ended. The
-coordinator puts a limited leaf back in the queue uncounted
-(`returnToQueue`), and `holdForUsageLimit` pauses the swarm with
-`pausedReason` "usage_limit" and `pausedUntil` at the reset, before
-any planner or worker is started in that tick. The watchdog ticks a
-paused swarm every minute; the first tick past the reset lifts the
-pause, the spawn step puts agents back on the leaves, and
-`restartPlannerAfterSandboxFailure` starts a limited planner again
-with its own prompt and the messages it carried. `pausedUntil` stays
-set as the line between limit failures already acted on and new ones,
-and a person's Resume moves it to that moment, which overrides the
-reset (a key with headroom, say). A run's error can carry the tail of
-the agent's own stderr, so the sentence alone buys little: no wait is
-shorter than `USAGE_LIMIT_MIN_WAIT_MS`, and a leaf (`usageLimitWaits`)
-or the planner waits out at most `MAX_USAGE_LIMIT_WAITS` limits in a
-row before it is handled as an ordinary failure.
+nine times in two minutes, three leaves were handed to the planner as
+failures, and after the reset nothing moved until a person wrote.
+`orchestrator/usage-limit.ts` recognises the CLI's sentence ("You've
+hit your session limit · resets 7:30pm (UTC)", Codex's "try again in
+...") only at the start of the error, which is the CLI's own result
+text: a run's error can carry the agent's stderr after another
+opening, and an agent must not be able to print its way to a free or
+endless retry. The same match is the `usage-limit` unbilled reason.
+The coordinator puts a limited node, or a limited resolver's
+conflict, back without failing it, and `holdForUsageLimit` pauses the
+swarm (`pausedReason` "usage_limit", `pausedUntil` at the reset,
+`pausedFrom` the status it interrupted) before anything is started in
+that tick. The watchdog ticks it every minute; the first tick past the
+reset restores `pausedFrom`, the spawn step puts agents back, and
+`restartInterruptedPlanner` replays a limited planner's prompt with
+whatever people sent during the pause. `pausedUntil` stays set as the
+line between limit failures already handled and new ones, and Resume
+moves it to that moment, which overrides the reset. No wait is shorter
+than `USAGE_LIMIT_MIN_WAIT_MS`, and a node, a conflict's resolvers, or
+the planner waits out at most `MAX_USAGE_LIMIT_WAITS` limits in a row.
 
 The same incident had two more causes that hold without any limit.
 The Docker driver's `attach` required a session key, and the leftover
 agent check (`stopLeftoverAgent`) asks by command alone, so every
 swarm run in a reused Docker machine was refused as "an agent from an
-earlier run is still running" until Bento started the task over and
-threw its machine away. Docker now answers a keyless attach from the
-durable runners that are still alive (`LIVE_DURABLE_FINDER`), the way
-Sprite and Modal find a session by its command. And a node message
-taken into a prompt is marked delivered, so a run refused before its
-agent started swallowed every "continue" a person left;
-`requeueUndeliveredNodeMessages` now gives those back when the run's
-`agentStartedAt` was never stamped.
+earlier run is still running". Docker now answers a keyless attach
+from its durable runners that are still alive (`LIVE_DURABLE_FINDER`),
+the way Sprite and Modal find a session by its command. And node
+messages taken into a run that never reached its agent, or ended
+unbilled, were lost; `requeueUndeliveredNodeMessages` gives them back.
 
 ## A stop ends the stream itself, and a run outlives its machine by minutes at most
 

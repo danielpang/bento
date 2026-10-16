@@ -1,60 +1,30 @@
-/**
- * An agent CLI that stopped because the account behind it ran out of
- * its plan's usage, and when that usage comes back.
- *
- * Claude Code ends the turn with a result that says so ("You've hit
- * your session limit · resets 7:30pm (UTC)"), and Codex prints its own
- * sentence. Nothing about the work is wrong, and every agent started
- * before the reset fails the same way in two seconds: a swarm restarted
- * its planner nine times in two minutes on one, and then sat until a
- * person noticed hours after the reset.
- */
+/** An agent CLI that stopped because its account ran out of usage, and when that usage comes back. */
 
-/** How long to wait when the CLI said it was limited but not until when. */
 export const USAGE_LIMIT_FALLBACK_MS = 30 * 60_000;
-
-/**
- * The shortest wait, whatever the reset says. A run's error can carry
- * the tail of the agent's own stderr, so an agent that printed a reset
- * a minute away must not buy itself a restart a minute.
- */
+/** A run's error can carry the agent's stderr, so a printed reset a minute away must not buy a restart a minute. */
 export const USAGE_LIMIT_MIN_WAIT_MS = 15 * 60_000;
-
-/**
- * How many times one node, or the planner, waits out a limit in a row
- * before it is handled as the failure it may really be: the worker's
- * to the planner, the planner's to a person.
- */
+/** Limits waited out in a row before the run is handled as an ordinary failure. */
 export const MAX_USAGE_LIMIT_WAITS = 5;
 
-const LIMIT_PATTERNS = [
-  /\bhit your (?:[\w-]+ )*limit\b/i,
-  /\busage limit reached\b/i,
-  /\b(?:session|weekly|daily|hourly|[0-9]+-hour) limit reached\b/i,
-  /\bout of (?:extra )?usage\b/i,
-];
+/**
+ * Anchored at the start of the error, which is the CLI's own result text;
+ * an agent's stderr only ever follows another opening.
+ */
+export const USAGE_LIMIT_OPENING =
+  /^\s*(?:You(?:'|\u2019)ve hit your (?:[\w-]+ )*limit\b|(?:Claude AI )?[Uu]sage limit reached\b|(?:[Ss]ession|[Ww]eekly|[Dd]aily|\d+-hour) limit reached\b)/;
 
 const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
 
-/** Whether a run's error is the provider's usage limit. */
 export function isUsageLimitError(error: string | null | undefined): boolean {
-  if (!error) return false;
-  return LIMIT_PATTERNS.some((pattern) => pattern.test(error));
+  return Boolean(error && USAGE_LIMIT_OPENING.test(error));
 }
 
-/**
- * When the limit in this error lifts, read from the CLI's own words,
- * relative to when the run ended. Null when the error is not a usage
- * limit. A reset the text does not give, or gives in a shape this does
- * not read, is USAGE_LIMIT_FALLBACK_MS after the run ended, and no reset
- * is sooner than USAGE_LIMIT_MIN_WAIT_MS after it.
- */
+/** Null when the error is not a usage limit. Never sooner than USAGE_LIMIT_MIN_WAIT_MS after the run ended. */
 export function usageLimitResetsAt(error: string | null | undefined, endedAt: Date): Date | null {
-  if (!error || !isUsageLimitError(error)) return null;
-  const earliest = endedAt.getTime() + USAGE_LIMIT_MIN_WAIT_MS;
-  const parsed = parseReset(error, endedAt);
-  if (!parsed || parsed.getTime() <= endedAt.getTime()) return new Date(Math.max(earliest, endedAt.getTime() + USAGE_LIMIT_FALLBACK_MS));
-  return new Date(Math.max(earliest, parsed.getTime()));
+  if (!isUsageLimitError(error)) return null;
+  const parsed = parseReset(error!, endedAt);
+  const resetsAt = parsed && parsed.getTime() > endedAt.getTime() ? parsed.getTime() : endedAt.getTime() + USAGE_LIMIT_FALLBACK_MS;
+  return new Date(Math.max(resetsAt, endedAt.getTime() + USAGE_LIMIT_MIN_WAIT_MS));
 }
 
 function parseReset(error: string, endedAt: Date): Date | null {
@@ -101,13 +71,12 @@ function parseReset(error: string, endedAt: Date): Date | null {
     if (at.getTime() <= endedAt.getTime()) at = zonedToUtc(today.year + 1, month, day, hour, minute, zone);
     return at;
   }
-  // A time alone is the next time the clock reads it after the run ended.
   let at = zonedToUtc(today.year, today.month, today.day, hour, minute, zone);
   if (at.getTime() <= endedAt.getTime()) at = zonedToUtc(today.year, today.month, today.day + 1, hour, minute, zone);
   return at;
 }
 
-/** A zone Intl can use, or null. UTC when the CLI named none, which is how it prints in a sandbox. */
+/** UTC when the CLI named none, which is how it prints in a sandbox. */
 function normalizeZone(zone: string | undefined): string | null {
   const name = !zone || /^(utc|gmt|z)$/i.test(zone) ? "UTC" : zone;
   try {
@@ -141,11 +110,10 @@ function partsIn(at: Date, zone: string): { year: number; month: number; day: nu
   };
 }
 
-/** The instant a wall clock in this zone reads this time. */
 function zonedToUtc(year: number, month: number, day: number, hour: number, minute: number, zone: string): Date {
   const wall = Date.UTC(year, month, day, hour, minute);
   let guess = wall;
-  // Twice, so a guess that crossed a DST change settles on the right offset.
+  // Twice, so a guess across a DST change settles.
   for (let i = 0; i < 2; i++) {
     const seen = partsIn(new Date(guess), zone);
     const seenWall = Date.UTC(seen.year, seen.month, seen.day, seen.hour, seen.minute);

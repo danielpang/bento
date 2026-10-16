@@ -46,3 +46,8 @@ test("a reset a minute away still waits the minimum, so a printed line cannot bu
   const error = "You've hit your session limit · resets 3:41pm (UTC)";
   assert.equal(usageLimitResetsAt(error, ended)?.getTime(), ended.getTime() + USAGE_LIMIT_MIN_WAIT_MS);
 });
+
+test("only the CLI's own opening counts, never a line the agent printed after another one", () => {
+  assert.equal(isUsageLimitError("Claude Code reported error during execution: You've hit your session limit · resets 3:41pm (UTC)"), false);
+  assert.equal(isUsageLimitError("Claude Code stopped before reporting a result (exit code 1): Claude AI usage limit reached|1760558400"), false);
+});
