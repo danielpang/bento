@@ -343,7 +343,37 @@ export type RepositoryImportOutcome =
  * inside it with permission checks disabled, so drivers must never expose
  * the host Docker socket, host SSH keys, or host git config to the sandbox.
  */
+/** These describe recovery guarantees, not merely the presence of a method. */
+export interface SandboxPersistence {
+  filesystemAfterStop: "preserved" | "requires-snapshot" | "host-managed";
+  hostFailure: "provider-managed" | "requires-backup";
+  processesAfterWake: "restart" | "provider-dependent" | "host-managed";
+  outputReplay: "durable-record" | "agent-log" | "none";
+  networkAfterWake: "reapplied" | "preserved" | "unsupported" | "host-managed";
+  /** Only filesystem snapshots currently have a shared hibernation implementation. */
+  hibernation: "filesystem-snapshot" | "provider-managed" | "none";
+  idleMs?: number;
+}
+
+export interface SandboxHibernateResult {
+  /** A completed, provider-acknowledged filesystem snapshot. Null means nothing survives. */
+  imageId: string | null;
+  freshClone: boolean;
+  committed: boolean;
+}
+export interface SandboxHibernateOptions {
+  /** Called after preparing a snapshot, before stopping. The caller serializes and may refuse. */
+  finish?: (apply: () => Promise<string | null>) => Promise<boolean>;
+}
+
+export function canHibernate(driver: SandboxDriver): driver is SandboxDriver & { hibernate: NonNullable<SandboxDriver["hibernate"]> } {
+  return driver.persistence?.hibernation === "filesystem-snapshot" && typeof driver.hibernate === "function";
+}
+
 export interface SandboxDriver {
+  /** Absent means unknown. Callers must not infer guarantees from a provider name. */
+  readonly persistence?: SandboxPersistence;
+  hibernate?(handle: SandboxHandle, options?: SandboxHibernateOptions): Promise<SandboxHibernateResult>;
   provider: SandboxHandle["provider"];
   /**
    * Host drivers mount a worktree the server prepared. Clone drivers

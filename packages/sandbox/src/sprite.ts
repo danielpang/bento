@@ -358,6 +358,14 @@ export function spriteBlame(phase: ProvisionPhase, err: unknown): ProvisionBlame
  */
 export class SpriteDriver implements SandboxDriver {
   provider = "sprite" as const;
+  readonly persistence = {
+    filesystemAfterStop: "preserved",
+    hostFailure: "provider-managed",
+    processesAfterWake: "provider-dependent",
+    outputReplay: "agent-log",
+    networkAfterWake: "unsupported",
+    hibernation: "provider-managed",
+  } as const;
   readonly workspace = "clone" as const;
   /**
    * Which row of the price list an hour here belongs to.
@@ -1666,13 +1674,6 @@ export class SpriteDriver implements SandboxDriver {
     }
   }
 
-  /** Sprites hibernate on their own; this is here for symmetry. */
-  async hibernate(): Promise<void> {
-    // Nothing to do: the platform suspends idle sprites automatically.
-    // The one thing that defers that is a keep-awake task, which every
-    // command releases when it ends and which expires by itself if a
-    // dying server never got to.
-  }
 
   /**
    * A sprite is a billed machine, so a failure to delete one has to

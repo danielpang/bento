@@ -897,3 +897,27 @@ test("a transactional wake schedules the new generation and hibernates it", asyn
   assert.equal(stopped, true);
   assert.equal((await sandboxRow(card.sandboxId)).status, "hibernated");
 });
+
+test("a driver with an explicit filesystem hibernation contract works without being a ModalDriver", async () => {
+  const card = await seed({ title: "capability hibernate", provider: "docker", sandboxStatus: "ready" });
+  await ctx.db.update(sandboxes).set({ lastUsedAt: new Date(0) }).where(eq(sandboxes.id, card.sandboxId));
+  let stopped = false;
+  const driver: SandboxDriver = {
+    provider: "docker", workspace: "host",
+    persistence: { filesystemAfterStop: "requires-snapshot", hostFailure: "requires-backup", processesAfterWake: "restart",
+      outputReplay: "durable-record", networkAfterWake: "preserved", hibernation: "filesystem-snapshot", idleMs: 1000 },
+    async provision() { throw new Error("unused"); },
+    async *exec() { yield { kind: "exit", exitCode: 0 }; },
+    async destroy() {},
+    async hibernate(_handle, options) {
+      const committed = await options!.finish!(async () => { stopped = true; return "snapshot-capability"; });
+      return { committed, imageId: committed ? "snapshot-capability" : null, freshClone: false };
+    },
+  };
+  ctx.drivers = singleDriver(driver);
+  await hibernateSandbox(ctx, card.sandboxId);
+  const [row] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, card.sandboxId));
+  assert.equal(stopped, true);
+  assert.equal(row!.status, "hibernated");
+  assert.equal(row!.imageRef, "snapshot-capability");
+});

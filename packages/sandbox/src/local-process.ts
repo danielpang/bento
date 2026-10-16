@@ -9,6 +9,14 @@ import { execTimeoutMessage, type ExecChunk, type ExecOptions, type ProvisionSpe
  */
 export class LocalProcessDriver implements SandboxDriver {
   provider = "local-process" as const;
+  readonly persistence = {
+    filesystemAfterStop: "host-managed",
+    hostFailure: "requires-backup",
+    processesAfterWake: "host-managed",
+    outputReplay: "none",
+    networkAfterWake: "host-managed",
+    hibernation: "none",
+  } as const;
   readonly workspace = "host" as const;
   supportsStdin = true;
 

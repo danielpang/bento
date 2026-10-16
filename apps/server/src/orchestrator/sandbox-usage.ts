@@ -157,6 +157,10 @@ export function usingSandboxDriver(ctx: AppContext, driver: SandboxDriver, sandb
           args[3] = signals(args[3] as ExecOptions | undefined, signal);
           return value.apply(proxy, args);
         });
+
+      }
+      if (property === "snapshot" && typeof value === "function") {
+        return (...args: unknown[]) => withSandboxUsage(ctx, sandboxId, property, () => value.apply(proxy, args));
       }
       return typeof value === "function" ? value.bind(target) : value;
     },

@@ -14,6 +14,7 @@ import {
   type RepositoryImportOutcome,
   type SandboxDriver,
   type SandboxHandle,
+  type SandboxHibernateResult,
 } from "./driver.js";
 import { BENTO_EXEC_PYTHON, FrameDecoder, execDirectory, execStamp } from "./modal-exec.js";
 import { spriteSize } from "./sprite.js";
@@ -148,13 +149,7 @@ export class ModalProvisionLeak extends Error {
   }
 }
 
-export interface ModalHibernateResult {
-  /** Image to store. Null means the next start is a fresh clone. */
-  imageId: string | null;
-  freshClone: boolean;
-  /** False when a live run took the machine and it was left running. */
-  committed: boolean;
-}
+export type ModalHibernateResult = SandboxHibernateResult;
 
 export interface ModalDriverOptions {
   tokenId: string;
@@ -247,6 +242,15 @@ function hostnameOf(value: string): string | null {
  */
 export class ModalDriver implements SandboxDriver {
   provider = "modal" as const;
+  readonly persistence = {
+    filesystemAfterStop: "requires-snapshot",
+    hostFailure: "provider-managed",
+    processesAfterWake: "restart",
+    outputReplay: "durable-record",
+    networkAfterWake: "reapplied",
+    hibernation: "filesystem-snapshot",
+    idleMs: MODAL_WARM_WINDOW_MS,
+  } as const;
   readonly workspace = "clone" as const;
   /** A third exec writes the named pipe. The SDK stdin stream cannot. */
   supportsStdin = true;
