@@ -47,7 +47,7 @@ import { ensureSwarmWatchdog, hasWatchedSwarms, stopSwarmWatchdog, WATCHED_SWARM
 import { captureSwarmSpend, type SwarmSpendOutcome } from "./spend.js";
 import { queueSwarmSlackNotify } from "../slack-notify.js";
 import { ownershipOf, RUN_LEASE_MS } from "../run-ownership.js";
-import { isUsageLimitError, usageLimitResetsAt } from "../usage-limit.js";
+import { isUsageLimitError, MAX_USAGE_LIMIT_WAITS, usageLimitResetsAt } from "../usage-limit.js";
 
 /**
  * The swarm's reconciler: one function, run behind one queue, that
@@ -352,7 +352,18 @@ export const MAX_SANDBOX_RESTARTS = 3;
 const SANDBOX_RESTARTS_FLAG = "sandboxRestarts";
 
 function sandboxRestarts(flags: unknown): number {
-  const value = typeof flags === "object" && flags !== null ? (flags as Record<string, unknown>)[SANDBOX_RESTARTS_FLAG] : 0;
+  return countFlag(flags, SANDBOX_RESTARTS_FLAG);
+}
+
+/** Where a node counts the usage limits it has waited out. */
+const USAGE_LIMIT_WAITS_FLAG = "usageLimitWaits";
+
+function usageLimitWaits(flags: unknown): number {
+  return countFlag(flags, USAGE_LIMIT_WAITS_FLAG);
+}
+
+function countFlag(flags: unknown, name: string): number {
+  const value = typeof flags === "object" && flags !== null ? (flags as Record<string, unknown>)[name] : 0;
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
 }
 
@@ -992,11 +1003,25 @@ async function settleWorkedLeaves(
     if (run && (ACTIVE_RUN_STATUSES as readonly string[]).includes(run.status)) continue;
     /*
      * Nor is an agent whose account ran out of usage. The node waits in
-     * the queue, uncounted, and holdForUsageLimit below pauses the swarm
-     * until the reset, when the spawn step puts an agent on it again.
+     * the queue, and holdForUsageLimit below pauses the swarm until the
+     * reset, when the spawn step puts an agent on it again. Counted and
+     * bounded, because the error can carry the agent's own stderr: past
+     * MAX_USAGE_LIMIT_WAITS the planner is told, as for any stop.
      */
-    if (run?.status === "failed" && isUsageLimitError(run.error)) {
-      await returnToQueue(tx, swarm, task, run, { flags: task.flags, detail: { reason: "usage_limit", error: run.error } }, events, now);
+    const limitWaits = usageLimitWaits(task.flags);
+    if (run?.status === "failed" && isUsageLimitError(run.error) && limitWaits < MAX_USAGE_LIMIT_WAITS) {
+      await returnToQueue(
+        tx,
+        swarm,
+        task,
+        run,
+        {
+          flags: { ...task.flags, [USAGE_LIMIT_WAITS_FLAG]: limitWaits + 1 },
+          detail: { reason: "usage_limit", wait: limitWaits + 1, of: MAX_USAGE_LIMIT_WAITS, error: run.error },
+        },
+        events,
+        now,
+      );
       continue;
     }
     /*
@@ -1091,7 +1116,7 @@ async function settleWorkedLeaves(
       // that queues this leaf again starts a new one, with the policy
       // whole; left in place, every later machine that could not be
       // made would skip straight here, saying "four in a row" of one.
-      flags: { workerStopped: reason, [SANDBOX_RESTARTS_FLAG]: undefined },
+      flags: { workerStopped: reason, [SANDBOX_RESTARTS_FLAG]: undefined, [USAGE_LIMIT_WAITS_FLAG]: undefined },
       set: { endedAt: task.endedAt ?? now },
       runId: task.assignedRunId,
       detail: { reason },
@@ -1517,15 +1542,24 @@ async function restartPlannerAfterSandboxFailure(
     .from(agentRuns)
     .where(and(eq(agentRuns.swarmId, swarm.id), eq(agentRuns.role, "planner")))
     .orderBy(desc(agentRuns.queuedAt), desc(agentRuns.id))
-    .limit(MAX_SANDBOX_RESTARTS + 1);
+    .limit(Math.max(MAX_SANDBOX_RESTARTS, MAX_USAGE_LIMIT_WAITS) + 1);
   const latest = recent[0];
   if (!latest) return null;
   /*
    * A planner stopped by its account's usage limit is started again
-   * once the swarm is out of the pause that limit put it in, with no
-   * bound: another failure is a new limit, and pauses it again.
+   * once the swarm is out of the pause that limit put it in. Bounded
+   * like a sandbox failure, because the error can carry the agent's own
+   * stderr: past MAX_USAGE_LIMIT_WAITS in a row it waits for a person.
    */
-  if (!(latest.status === "failed" && isUsageLimitError(latest.error))) {
+  const limited = (run: { status: string; error: string | null }) => run.status === "failed" && isUsageLimitError(run.error);
+  if (limited(latest)) {
+    let trailing = 0;
+    for (const run of recent) {
+      if (!limited(run)) break;
+      trailing += 1;
+    }
+    if (trailing > MAX_USAGE_LIMIT_WAITS) return null;
+  } else {
     if (!failedBeforeAgentStarted(latest)) return null;
     let trailing = 0;
     for (const run of recent) {

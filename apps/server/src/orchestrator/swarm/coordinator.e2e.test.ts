@@ -34,6 +34,7 @@ import { MAX_PLANNER_RETELLS } from "./planner-news.js";
 import { MAX_LANDING_ATTEMPTS } from "./landing.js";
 import { performTaskStartOver } from "./start-over.js";
 import { requeueUndeliveredNodeMessages } from "./node-messages.js";
+import { MAX_USAGE_LIMIT_WAITS } from "../usage-limit.js";
 
 /**
  * The coordinator, against a real database and a stubbed run starter.
@@ -1216,6 +1217,31 @@ test("a person's Resume overrides the reset, and an old limit does not pause the
   await tickSwarm(ctx, swarm.id, deps);
   assert.equal((await readSwarm(swarm.id)).status, "running");
   assert.equal(deps.calls.filter((call) => call.role === "planner").length, 1, "the planner is tried at once");
+});
+
+test("a limit that keeps coming back is bounded: the leaf goes to the planner, the planner to a person", async () => {
+  /*
+   * A run's error can carry the agent's own stderr, so the text alone
+   * must not buy unlimited restarts.
+   */
+  const swarm = await makeSwarm({ status: "running" });
+  const leaf = await makeTask(swarm.id, { title: "always limited", status: "working", flags: { usageLimitWaits: MAX_USAGE_LIMIT_WAITS } });
+  const dead = await runOn(swarm.id, leaf.id, "failed", LIMITED);
+  await db.update(agentRuns).set({ endedAt: LIMIT_ENDED }).where(eq(agentRuns.id, dead.id));
+  await tickSwarm(ctx, swarm.id, { ...starter(), now: at("2026-10-15T15:41:00Z") });
+  const row = await read(leaf.id);
+  assert.equal(row.status, "failed", "past its waits the leaf is the planner's");
+  assert.equal((row.flags as { usageLimitWaits?: number }).usageLimitWaits, undefined, "and the count ends with the series");
+
+  const planning = await makeSwarm({ status: "running" });
+  for (let i = 0; i <= MAX_USAGE_LIMIT_WAITS; i++) {
+    await plannerRun(planning.id, "failed", { error: LIMITED, prompt: "the wake", endedAt: LIMIT_ENDED, queuedAt: new Date(Date.UTC(2026, 9, 15, 15, i)) });
+  }
+  // A Resume past the reset, so only the bound decides.
+  await db.update(swarms).set({ pausedUntil: new Date("2026-10-15T19:30:00Z") }).where(eq(swarms.id, planning.id));
+  const deps = { ...starter(), now: at("2026-10-15T19:31:00Z") };
+  await tickSwarm(ctx, planning.id, deps);
+  assert.equal(deps.calls.filter((call) => call.role === "planner").length, 0, "a planner limited every time waits for a person");
 });
 
 test("a run whose agent never started gives back the node messages its prompt took", async () => {

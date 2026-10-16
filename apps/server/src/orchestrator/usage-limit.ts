@@ -13,6 +13,20 @@
 /** How long to wait when the CLI said it was limited but not until when. */
 export const USAGE_LIMIT_FALLBACK_MS = 30 * 60_000;
 
+/**
+ * The shortest wait, whatever the reset says. A run's error can carry
+ * the tail of the agent's own stderr, so an agent that printed a reset
+ * a minute away must not buy itself a restart a minute.
+ */
+export const USAGE_LIMIT_MIN_WAIT_MS = 15 * 60_000;
+
+/**
+ * How many times one node, or the planner, waits out a limit in a row
+ * before it is handled as the failure it may really be: the worker's
+ * to the planner, the planner's to a person.
+ */
+export const MAX_USAGE_LIMIT_WAITS = 5;
+
 const LIMIT_PATTERNS = [
   /\bhit your (?:[\w-]+ )*limit\b/i,
   /\busage limit reached\b/i,
@@ -32,14 +46,15 @@ export function isUsageLimitError(error: string | null | undefined): boolean {
  * When the limit in this error lifts, read from the CLI's own words,
  * relative to when the run ended. Null when the error is not a usage
  * limit. A reset the text does not give, or gives in a shape this does
- * not read, is USAGE_LIMIT_FALLBACK_MS after the run ended, and a reset
- * is never earlier than that end.
+ * not read, is USAGE_LIMIT_FALLBACK_MS after the run ended, and no reset
+ * is sooner than USAGE_LIMIT_MIN_WAIT_MS after it.
  */
 export function usageLimitResetsAt(error: string | null | undefined, endedAt: Date): Date | null {
   if (!error || !isUsageLimitError(error)) return null;
+  const earliest = endedAt.getTime() + USAGE_LIMIT_MIN_WAIT_MS;
   const parsed = parseReset(error, endedAt);
-  if (parsed && parsed.getTime() > endedAt.getTime()) return parsed;
-  return new Date(endedAt.getTime() + USAGE_LIMIT_FALLBACK_MS);
+  if (!parsed || parsed.getTime() <= endedAt.getTime()) return new Date(Math.max(earliest, endedAt.getTime() + USAGE_LIMIT_FALLBACK_MS));
+  return new Date(Math.max(earliest, parsed.getTime()));
 }
 
 function parseReset(error: string, endedAt: Date): Date | null {
