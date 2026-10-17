@@ -314,6 +314,7 @@ export class ModalDriver implements SandboxDriver {
     }
     this.remembered.set(name, box);
     try {
+      await spec.onAcquired?.({ externalId: name, provider: "modal", workdir: "/workspace", createdSandbox: created });
       await this.prepareRepositories(box, spec, say);
     } catch (err) {
       if (created) {

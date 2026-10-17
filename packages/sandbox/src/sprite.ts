@@ -411,6 +411,7 @@ export class SpriteDriver implements SandboxDriver {
     };
 
     const { sprite, created } = await phase("acquire", () => this.acquireSprite(name, say));
+    await spec.onAcquired?.({ externalId: name, provider: "sprite", workdir: this.workdir, createdSandbox: created });
     await say(created ? `Created cloud sandbox ${name}.` : `Reusing this card's cloud sandbox (${name}).`);
 
     /**

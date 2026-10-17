@@ -99,6 +99,8 @@ export function provisionBlame(err: unknown): ProvisionBlame | null {
 }
 
 export interface ProvisionSpec {
+  /** Persist machine identity before installing tools or cloning repositories. */
+  onAcquired?: (handle: SandboxHandle) => Promise<void>;
   projectId: string;
   /**
    * What this workspace is called: the stem of the container or sprite

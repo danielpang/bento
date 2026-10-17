@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { createDb, createPool, features, pipelines, projects, repositories, runMigrations, sandboxes } from "@bento/db";
 import { ProvisionFailure, WorktreeManager, spriteName, type ProvisionSpec, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
 import pg from "pg";
@@ -840,3 +840,40 @@ test("a locked team's preflight refusal names the lockable provider it would hav
   assert.equal(finals.length, 1);
   assert.equal(finals[0]?.properties?.provider, "modal");
 });
+
+for (const phase of ["handle", "completion"] as const) {
+  for (const createdSandbox of [true, false]) {
+    test(`a journal ${phase} failure ${createdSandbox ? "cleans up a new machine" : "preserves a reused machine"}`, async () => {
+      const featureId = await seedFeature(`Journal ${phase}`);
+      const destroyed: SandboxHandle[] = [];
+      const driver = stubDriver("modal", []);
+      const originalProvision = driver.provision.bind(driver);
+      driver.provision = async (spec) => ({ ...await originalProvision(spec), createdSandbox, imageRef: "image-to-clean" });
+      driver.destroy = async (handle) => { destroyed.push(handle); };
+      // Inject a real PostgreSQL write failure after the provider returned.
+      // The stub does not call onAcquired, isolating the outer journal writes.
+      await ctx.db.execute(sql.raw(`CREATE FUNCTION fail_provision_journal() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          IF ${phase === "handle" ? "NEW.handle IS NOT NULL" : "NEW.state = 'succeeded'"} THEN
+            RAISE EXCEPTION 'injected journal write failure';
+          END IF;
+          RETURN NEW;
+        END $$`));
+      await ctx.db.execute(sql`CREATE TRIGGER fail_provision_journal BEFORE UPDATE ON sandbox_operations
+        FOR EACH ROW EXECUTE FUNCTION fail_provision_journal()`);
+      try {
+        await assert.rejects(provisionOn(featureId, driver, [], []), SandboxProvisionError);
+        assert.equal(destroyed.length, createdSandbox ? 1 : 0);
+        if (createdSandbox) {
+          assert.equal(destroyed[0]!.externalId, `modal-${featureId}`);
+          assert.equal(destroyed[0]!.imageRef, "image-to-clean");
+        }
+        const rows = await ctx.db.select().from(sandboxes).where(eq(sandboxes.featureId, featureId));
+        assert.equal(rows.length, 0);
+      } finally {
+        await ctx.db.execute(sql`DROP TRIGGER fail_provision_journal ON sandbox_operations`);
+        await ctx.db.execute(sql`DROP FUNCTION fail_provision_journal()`);
+      }
+    });
+  }
+}

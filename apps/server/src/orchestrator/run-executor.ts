@@ -113,6 +113,7 @@ import { shouldIncludeStageNotes, shouldShareAgentAuth } from "../settings.js";
 import { captureRunQueueDepth } from "./queue-snapshot.js";
 import { ACTIVE_RUN_STATUSES, projectHasRepositories, startRunIfIdle } from "./start-run.js";
 import { enqueueRun, INTERACTIVE_POLL_SECONDS, QUEUE_POLL_SECONDS, RUN_WORKER_POLL_SECONDS } from "./queue.js";
+import { registerSandboxOperationReconciliation } from "./sandbox-operations.js";
 import { HIBERNATE_SANDBOX_QUEUE, MODAL_SWEEP_QUEUE, SandboxGone, scheduleModalHibernation, hibernateSandbox, sweepOrphanModalSandboxes, wakeSwarmSandbox } from "./hibernate-sandbox.js";
 import { modalNetworkForProject, organizationRestrictsNetwork } from "./sandbox-network.js";
 import { stopLeftoverAgent } from "./leftover-agent.js";
@@ -3632,6 +3633,7 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
   await ctx.boss.createQueue("run.execute");
   await ctx.boss.createQueue("gate.evaluate");
   await ctx.boss.createQueue("runner.reap");
+  await registerSandboxOperationReconciliation(ctx);
   await ctx.boss.createQueue(REAP_SANDBOX_QUEUE);
   /**
    * The swarm reconciler's queue, keyed by swarm.

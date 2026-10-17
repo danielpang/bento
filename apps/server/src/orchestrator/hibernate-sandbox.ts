@@ -1,3 +1,4 @@
+import { sandboxOperation } from "./sandbox-operations.js";
 import { and, eq, gt, inArray, isNull, ne, sql } from "drizzle-orm";
 import { agentProfiles, agentRuns, sandboxes, swarmLandings, swarms } from "@bento/db";
 import {
@@ -273,7 +274,12 @@ export async function hibernateSandbox(ctx: AppContext, sandboxId: string): Prom
           // worker start, a landing, a push stamp the row as they
           // begin), so its warm window starts again from there.
           if (warmWindowLeftMs(current.lastUsedAt) > 0) return;
-          const imageId = await apply();
+          const imageId = await sandboxOperation(ctx, { projectId: row.projectId, workspaceKey: row.id, provider: row.provider, action: "hibernate",
+            handle: { externalId: row.externalId, provider: row.provider, workdir: row.workdir } }, async (recordHandle) => {
+            const image = await apply();
+            if (image) await recordHandle({ externalId: row.externalId, provider: row.provider, workdir: row.workdir, imageRef: image });
+            return image;
+          });
           const [updated] = await tx
             .update(sandboxes)
             .set({
@@ -415,7 +421,8 @@ async function wakeOrMarkGone(
     ...network,
   };
   try {
-    return await driver.wake!(handle, { organizationId: row.organizationId });
+    return await sandboxOperation(ctx, { projectId: row.projectId, workspaceKey: row.id, provider: driver.provider, action: "wake", handle },
+      () => driver.wake!(handle, { organizationId: row.organizationId }));
   } catch (err) {
     if (!(err instanceof SandboxImageLost)) throw err;
     await markSandboxGone(ctx, row);
