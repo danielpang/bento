@@ -3,6 +3,7 @@ import { WORKSPACE_ARTIFACT_DIR } from "@bento/core";
 import { AGENT_BINARIES, TOOLCHAIN_VERSION, agentToolchainScript } from "./agent-toolchain.js";
 import {
   execTimeoutMessage,
+  collectExec,
   SandboxImageLost,
   type ExecChunk,
   type ExecOptions,
@@ -482,8 +483,11 @@ export class ModalDriver implements SandboxDriver {
     baseBranch: string,
     options: RepositoryExportOptions = {},
   ): Promise<RepositoryBundle | null> {
+    options.signal?.throwIfAborted();
     const api = await this.api();
+    options.signal?.throwIfAborted();
     const box = await this.requireRunning(api, handle.externalId);
+    options.signal?.throwIfAborted();
     const dir = `${handle.workdir}/${repositoryName}`;
     const bundlePath = `/tmp/bento-bundle-${repositoryName}`;
     const script = [
@@ -504,7 +508,8 @@ export class ModalDriver implements SandboxDriver {
         : `git bundle create ${shellQuote(bundlePath)} HEAD "^$base_sha" >/dev/null`,
       'printf "%s\\n%s\\n" "$base_sha" "$head_sha"',
     ].join("\n");
-    const result = await runShell(box, script, 60_000);
+    const result = await collectExec(this.exec(handle, ["sh", "-c", script], { timeoutMs: 60_000, ...(options.signal ? { signal: options.signal } : {}) }));
+    options.signal?.throwIfAborted();
     if (result.exitCode === 3) return null;
     if (result.exitCode !== 0) {
       throw new Error(`could not export ${repositoryName}: ${result.stderr.trim() || `exit ${result.exitCode}`}`);
@@ -512,6 +517,7 @@ export class ModalDriver implements SandboxDriver {
     const [baseSha, headSha] = result.stdout.trim().split("\n");
     if (!baseSha || !headSha) throw new Error(`could not export ${repositoryName}: malformed bundle response`);
     const data = Buffer.from(await box.readBytes(bundlePath));
+    options.signal?.throwIfAborted();
     await box.remove(bundlePath).catch(() => {});
     return { baseSha, headSha, data };
   }
@@ -533,14 +539,18 @@ export class ModalDriver implements SandboxDriver {
     if (!/^[0-9a-f]{40,64}$/i.test(options.expectedHeadSha) || !/^[0-9a-f]{40,64}$/i.test(bundle.headSha)) {
       return { ok: false, reason: "error", detail: "the landing bundle contains an invalid commit id." };
     }
+    options.signal?.throwIfAborted();
     const api = await this.api();
+    options.signal?.throwIfAborted();
     const box = await this.requireRunning(api, handle.externalId);
+    options.signal?.throwIfAborted();
     const token = createHash("sha256").update(`${Date.now()}-${repositoryName}-${bundle.headSha}`).digest("hex").slice(0, 16);
     const bundlePath = `/tmp/bento-landing-${token}.bundle`;
     const ref = `refs/bento/landing/${token}`;
     const dir = `${handle.workdir}/${repositoryName}`;
     await box.writeBytes(bundle.data, bundlePath);
     try {
+      options.signal?.throwIfAborted();
       const script = [
         "set -eu",
         `cd ${shellQuote(dir)}`,
@@ -562,12 +572,13 @@ export class ModalDriver implements SandboxDriver {
         'git merge --ff-only "$fetched" >/dev/null',
         'git rev-parse "HEAD^{commit}"',
       ].join("\n");
-      const result = await runShell(box, script, 60_000);
+      const result = await collectExec(this.exec(handle, ["sh", "-c", script], { timeoutMs: 60_000, ...(options.signal ? { signal: options.signal } : {}) }));
+      options.signal?.throwIfAborted();
       if (result.exitCode === 0) return { ok: true, headSha: result.stdout.trim() };
       const detail = result.stderr.trim() || `git exited ${result.exitCode}`;
       return result.exitCode === 12 ? { ok: false, reason: "moved", detail } : { ok: false, reason: "error", detail };
     } finally {
-      await box.remove(bundlePath).catch(() => {});
+      if (!options.signal?.aborted) await box.remove(bundlePath).catch(() => {});
     }
   }
 
@@ -878,8 +889,10 @@ export class ModalDriver implements SandboxDriver {
     opts: ExecOptions | undefined,
     start: boolean,
   ): AsyncIterable<ExecChunk> {
+    opts?.signal?.throwIfAborted();
     if (start) {
       await this.installExec(box);
+      opts?.signal?.throwIfAborted();
       const started = await runShell(
         box,
         "",

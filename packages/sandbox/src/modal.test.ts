@@ -831,3 +831,59 @@ function runPython(
     });
   });
 }
+
+test("repository import stops after an upload loses its usage lease", async () => {
+  const f = fake();
+  const controller = new AbortController();
+  f.box.writeBytes = async () => { controller.abort(new Error("usage lost")); };
+  const driver = new ModalDriver({ tokenId: "id", tokenSecret: "secret", api: f.api });
+  await assert.rejects(driver.importRepository(
+    { externalId: "box", provider: "modal", workdir: "/workspace" }, "app",
+    { baseSha: "1".repeat(40), headSha: "2".repeat(40), data: Buffer.from("bundle") },
+    { branch: "main", expectedHeadSha: "1".repeat(40), signal: controller.signal },
+  ), /usage lost/);
+  assert.equal(f.execs.length, 0, "the merge must never start after lease loss");
+});
+
+test("repository export cancels its command and does not read the bundle after lease loss", async () => {
+  const f = fake();
+  const controller = new AbortController();
+  const original = f.box.exec;
+  let reads = 0;
+  f.box.readBytes = async () => { reads++; return new Uint8Array(); };
+  f.box.exec = async (argv, options) => {
+    if (argv[0] === "bento-exec" && argv[1] === "follow") {
+      f.execs.push(argv);
+      return {
+        ...textProc(0),
+        async *stdout() {
+          controller.abort(new Error("usage lost"));
+          yield Buffer.from("x 0\n");
+        },
+      };
+    }
+    return original(argv, options);
+  };
+  const driver = new ModalDriver({ tokenId: "id", tokenSecret: "secret", api: f.api });
+  await assert.rejects(driver.exportRepository(
+    { externalId: "box", provider: "modal", workdir: "/workspace" }, "app", "main",
+    { signal: controller.signal },
+  ), /usage lost/);
+  assert.ok(f.execs.some((argv) => argv[0] === "bento-exec" && argv[1] === "kill"));
+  assert.equal(reads, 0);
+});
+
+test("repository export still reads a completed bundle through the cancellable command path", async () => {
+  const f = fake();
+  const baseSha = "1".repeat(40), headSha = "2".repeat(40);
+  const output = baseSha + "\n" + headSha + "\n";
+  const original = f.box.exec;
+  f.box.exec = async (argv, options) => argv[0] === "bento-exec" && argv[1] === "follow"
+    ? frameProc([Buffer.from("o " + Buffer.byteLength(output) + "\n" + output), Buffer.from("x 0\n")])
+    : original(argv, options);
+  f.box.readBytes = async () => Buffer.from("bundle");
+  const driver = new ModalDriver({ tokenId: "id", tokenSecret: "secret", api: f.api });
+  assert.deepEqual(await driver.exportRepository(
+    { externalId: "box", provider: "modal", workdir: "/workspace" }, "app", "main",
+  ), { baseSha, headSha, data: Buffer.from("bundle") });
+});

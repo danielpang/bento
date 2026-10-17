@@ -1514,7 +1514,9 @@ export class SpriteDriver implements SandboxDriver {
     baseBranch: string,
     options: RepositoryExportOptions = {},
   ): Promise<RepositoryBundle | null> {
+    options.signal?.throwIfAborted();
     const sprite = await this.openSprite(handle.externalId);
+    options.signal?.throwIfAborted();
     const dir = `${handle.workdir}/${repositoryName}`;
     const id = randomUUID();
     const bundlePath = `/tmp/bento-export-${id}.bundle`;
@@ -1561,19 +1563,22 @@ export class SpriteDriver implements SandboxDriver {
     try {
       let lastReason = "the export did not finish";
       for (let attempt = 0; attempt < EXPORT_ATTEMPTS; attempt++) {
+        options.signal?.throwIfAborted();
         const result = await collectExec(
-          this.exec(handle, ["sh", "-lc", script], { timeoutMs: 60_000, sessionCommands: [gitLine] }),
+          this.exec(handle, ["sh", "-lc", script], { timeoutMs: 60_000, sessionCommands: [gitLine], ...(options.signal ? { signal: options.signal } : {}) }),
         );
+        options.signal?.throwIfAborted();
         if (result.exitCode === 3) return null;
         if (result.exitCode === 0) {
-          return await readCompletedExport(sprite, repositoryName, bundlePath, metaPath, result.stdout);
+          return await readCompletedExport(sprite, repositoryName, bundlePath, metaPath, result.stdout, options.signal);
         }
         const reason = result.stderr.trim() || `exit ${result.exitCode}`;
         lastReason = reason;
         // A negative code is the socket, not the script. A script's
         // own failure (git's 128, a missing checkout) is not retried.
         if (result.exitCode < 0 && !isExecTimeout(result.stderr)) {
-          const recovered = await readExportIfReady(sprite, bundlePath, metaPath);
+          const recovered = await readExportIfReady(sprite, bundlePath, metaPath, options.signal);
+          options.signal?.throwIfAborted();
           if (recovered) return recovered;
           // The listing can miss git for a moment and then show it.
           // Starting another copy would delete the file that git is
@@ -1587,7 +1592,7 @@ export class SpriteDriver implements SandboxDriver {
       }
       throw new Error(`could not export ${repositoryName}: ${lastReason}`);
     } finally {
-      await removeExportFiles(sprite, bundlePath, metaPath);
+      if (!options.signal?.aborted) await removeExportFiles(sprite, bundlePath, metaPath);
     }
   }
 
@@ -1611,17 +1616,20 @@ export class SpriteDriver implements SandboxDriver {
       return { ok: false, reason: "error", detail: "the landing bundle contains an invalid commit id." };
     }
 
+    options.signal?.throwIfAborted();
     const sprite = await this.openSprite(handle.externalId);
+    options.signal?.throwIfAborted();
     const token = randomUUID();
     const bundlePath = `/tmp/bento-landing-${token}.bundle`;
     const ref = `refs/bento/landing/${token}`;
     const dir = `${handle.workdir}/${repositoryName}`;
     await callFilesystem(
-      () => sprite.filesystem("/").writeFile(bundlePath, bundle.data),
+      () => { options.signal?.throwIfAborted(); return sprite.filesystem("/").writeFile(bundlePath, bundle.data); },
       `uploading the landing bundle for ${repositoryName}`,
     );
 
     try {
+      options.signal?.throwIfAborted();
       const script = [
         "set -eu",
         `cd ${shellQuote(dir)}`,
@@ -1643,15 +1651,16 @@ export class SpriteDriver implements SandboxDriver {
         'git merge --ff-only "$fetched" >/dev/null',
         'git rev-parse "HEAD^{commit}"',
       ].join("\n");
-      const result = await collectExec(this.exec(handle, ["sh", "-lc", script], { timeoutMs: 60_000 }));
+      const result = await collectExec(this.exec(handle, ["sh", "-lc", script], { timeoutMs: 60_000, ...(options.signal ? { signal: options.signal } : {}) }));
+      options.signal?.throwIfAborted();
       if (result.exitCode === 0) return { ok: true, headSha: result.stdout.trim() };
       const detail = result.stderr.trim() || `git exited ${result.exitCode}`;
       return result.exitCode === 12
         ? { ok: false, reason: "moved", detail }
         : { ok: false, reason: "error", detail };
     } finally {
-      await callFilesystem(
-        () => sprite.filesystem("/").rm(bundlePath),
+      if (!options.signal?.aborted) await callFilesystem(
+        () => { options.signal?.throwIfAborted(); return sprite.filesystem("/").rm(bundlePath); },
         `removing the landing bundle for ${repositoryName}`,
       ).catch(() => {});
     }
@@ -1904,6 +1913,7 @@ async function readCompletedExport(
   bundlePath: string,
   metaPath: string,
   stdout: string,
+  signal?: AbortSignal,
 ): Promise<RepositoryBundle> {
   let shas = parseExportShas(stdout);
   if (!shas) {
@@ -1911,8 +1921,10 @@ async function readCompletedExport(
     shas = text ? parseExportShas(text) : null;
   }
   if (!shas) throw new Error(`could not export ${repositoryName}: malformed bundle response`);
+  signal?.throwIfAborted();
   const data = await readSpriteBytes(sprite, bundlePath, "throw");
   if (!data || data.length === 0) throw new Error(`could not export ${repositoryName}: the bundle file was missing`);
+  signal?.throwIfAborted();
   return { baseSha: shas.baseSha, headSha: shas.headSha, data };
 }
 
@@ -1921,13 +1933,16 @@ async function readExportIfReady(
   sprite: Sprite,
   bundlePath: string,
   metaPath: string,
+  signal?: AbortSignal,
 ): Promise<RepositoryBundle | null> {
   const text = await readSpriteText(sprite, metaPath);
   if (!text) return null;
   const shas = parseExportShas(text);
   if (!shas) return null;
+  signal?.throwIfAborted();
   const data = await readSpriteBytes(sprite, bundlePath, "null");
   if (!data || data.length === 0) return null;
+  signal?.throwIfAborted();
   return { baseSha: shas.baseSha, headSha: shas.headSha, data };
 }
 

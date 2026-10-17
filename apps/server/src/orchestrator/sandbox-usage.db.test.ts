@@ -5,6 +5,7 @@ import { eq, sql } from "drizzle-orm";
 import { createDb, createPool, projects, sandboxes, sandboxUsageLeases, runMigrations } from "@bento/db";
 import type { SandboxDriver } from "@bento/sandbox";
 import { ensureLocalUser, type AppContext } from "../context.js";
+import { stopLeftoverAgent } from "./leftover-agent.js";
 import { withSandboxGeneration } from "./sandbox-generation.js";
 import { acquireSandboxUsage, renewSandboxUsage, usingSandboxDriver, withSandboxUsage, SandboxInUse } from "./sandbox-usage.js";
 const base = process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5439/app";
@@ -99,4 +100,97 @@ test("cancelling while a command waits for its usage lease prevents the command 
   await rejected;
   assert.equal(started, false);
   assert.equal((await ctx.db.select().from(sandboxUsageLeases)).length, 0);
+});
+
+test("stopping a leftover agent releases its attachment lease on the exit chunk", async () => {
+  const [box] = await ctx.db.insert(sandboxes).values({ projectId: row.projectId, provider: "docker", externalId: "attach-leak", status: "ready" }).returning();
+  let calls = 0;
+  const raw = { provider: "docker", workspace: "host", async attach() {
+    if (++calls > 1) return null;
+    return (async function* () { yield { kind: "exit", exitCode: 0 } as const; })();
+  } } as unknown as SandboxDriver;
+  const driver = usingSandboxDriver(ctx, raw, box!.id);
+  assert.equal(await stopLeftoverAgent(driver, { externalId: "attach-leak", provider: "docker", workdir: "/workspace" }, [["agent"]], { stopMs: 100 }), "stopped");
+  const leases = await ctx.db.select().from(sandboxUsageLeases).where(eq(sandboxUsageLeases.sandboxId, box!.id));
+  assert.equal(leases.length, 0);
+  await withSandboxGeneration(ctx, box!, async () => {});
+});
+
+test("returning an attachment before its first next releases its lease", async () => {
+  const [box] = await ctx.db.insert(sandboxes).values({ projectId: row.projectId, provider: "docker", externalId: "unstarted", status: "ready" }).returning();
+  const raw = { provider: "docker", workspace: "host", async attach() {
+    return (async function* () { yield { kind: "exit", exitCode: 0 } as const; })();
+  } } as unknown as SandboxDriver;
+  const driver = usingSandboxDriver(ctx, raw, box!.id);
+  const stream = await driver.attach!({ externalId: "unstarted", provider: "docker", workdir: "/workspace" }, ["agent"]);
+  await stream![Symbol.asyncIterator]().return!();
+  assert.equal((await ctx.db.select().from(sandboxUsageLeases).where(eq(sandboxUsageLeases.sandboxId, box!.id))).length, 0);
+});
+
+test("renewal cannot resurrect a lease that expires while its row is locked", async () => {
+  const [box] = await ctx.db.insert(sandboxes).values({ projectId: row.projectId, provider: "docker", externalId: "renew-race", status: "ready" }).returning();
+  const lease = await acquireSandboxUsage(ctx, box!.id, "renewing");
+  await ctx.db.update(sandboxUsageLeases).set({ expiresAt: sql`clock_timestamp() + interval '1 second'` }).where(eq(sandboxUsageLeases.id, lease.id));
+  let unlock!: () => void, locked!: () => void;
+  const gate = new Promise<void>((resolve) => { unlock = resolve; });
+  const ready = new Promise<void>((resolve) => { locked = resolve; });
+  const blocker = ctx.db.transaction(async (tx) => {
+    await tx.select().from(sandboxUsageLeases).where(eq(sandboxUsageLeases.id, lease.id)).for("update");
+    locked();
+    await gate;
+  });
+  await ready;
+  const renewal = renewSandboxUsage(ctx, lease.id);
+  await new Promise((resolve) => setTimeout(resolve, 1_500));
+  unlock();
+  await blocker;
+  assert.equal(await renewal, false);
+  await withSandboxGeneration(ctx, box!, async () => {});
+});
+
+test("acquisition dates the lease after its sandbox lock wait", async () => {
+  const [box] = await ctx.db.insert(sandboxes).values({ projectId: row.projectId, provider: "docker", externalId: "acquire-wait", status: "ready" }).returning();
+  let unlock!: () => void, locked!: () => void;
+  const gate = new Promise<void>((resolve) => { unlock = resolve; });
+  const ready = new Promise<void>((resolve) => { locked = resolve; });
+  const blocker = ctx.db.transaction(async (tx) => {
+    await tx.select().from(sandboxes).where(eq(sandboxes.id, box!.id)).for("update");
+    locked();
+    await gate;
+  });
+  await ready;
+  const acquisition = acquireSandboxUsage(ctx, box!.id, "waiting");
+  await new Promise((resolve) => setTimeout(resolve, 1_500));
+  unlock();
+  await blocker;
+  const lease = await acquisition;
+  const result = await ctx.db.execute<{ remaining: number }>(sql`select extract(epoch from (expires_at - clock_timestamp()))::float8 as remaining from sandbox_usage_leases where id = ${lease.id}`);
+  assert.ok(result.rows[0]!.remaining > 89, "the lock wait must not consume the newly issued lease");
+  await ctx.db.delete(sandboxUsageLeases).where(eq(sandboxUsageLeases.id, lease.id));
+});
+
+test("repository transfers receive the usage signal combined with caller cancellation", async () => {
+  const [box] = await ctx.db.insert(sandboxes).values({ projectId: row.projectId, provider: "docker", externalId: "transfer-cancel", status: "ready" }).returning();
+  const controller = new AbortController();
+  let entered!: () => void;
+  const started = new Promise<void>((resolve) => { entered = resolve; });
+  const raw = { provider: "docker", workspace: "host", async exportRepository(_handle, _repository, _base, options) {
+    assert.ok(options?.signal);
+    assert.notEqual(options.signal, controller.signal);
+    assert.equal(options.signal.aborted, false);
+    const leases = await ctx.db.select().from(sandboxUsageLeases).where(eq(sandboxUsageLeases.sandboxId, box!.id));
+    assert.equal(leases.length, 1);
+    const cancelled = new Promise<never>((_resolve, reject) => {
+      options.signal!.addEventListener("abort", () => reject(options.signal!.reason), { once: true });
+    });
+    entered();
+    return cancelled;
+  } } as SandboxDriver;
+  const driver = usingSandboxDriver(ctx, raw, box!.id);
+  const transfer = driver.exportRepository!({ externalId: box!.externalId, provider: "docker", workdir: "/workspace" }, "repo", "main", { signal: controller.signal });
+  const rejected = assert.rejects(transfer, /cancelled transfer/);
+  await started;
+  controller.abort(new Error("cancelled transfer"));
+  await rejected;
+  assert.equal((await ctx.db.select().from(sandboxUsageLeases).where(eq(sandboxUsageLeases.sandboxId, box!.id))).length, 0);
 });

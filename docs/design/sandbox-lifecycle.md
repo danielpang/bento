@@ -51,7 +51,11 @@ while checking leases and committing the terminal state. Readers may coexist;
 cleanup waits for all readers. Existing run and landing checks still apply.
 
 Leases last 90 seconds and renew every 20 seconds. Renewal never resurrects an
-expired lease. A failed renewal or local deadline aborts the command's signal;
+expired lease. Renewal locks the sandbox and lease before checking the current
+database clock, and local deadlines count database response time. Attachments
+release on an exit event as well as iterator closure, including closure before the
+first read. Imports and exports propagate cancellation through provider commands
+and check it between file operations. A failed renewal or local deadline aborts the command's signal;
 callers must propagate that signal and stop issuing work. Lease expiry recovers
 capacity after a crashed holder, but does not prove a remote process has stopped.
 Provider cancellation remains best effort during a network partition. Active-run

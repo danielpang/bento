@@ -27,47 +27,61 @@ export async function acquireSandboxUsage(ctx: AppContext, sandboxId: string, pu
     const [row] = await tx.select().from(sandboxes).where(eq(sandboxes.id, sandboxId)).for("update");
     if (!row || row.status === "destroyed") throw new SandboxUsageLost();
     const [lease] = await tx.insert(sandboxUsageLeases).values({ sandboxId, purpose, generation: row.generation,
-      expiresAt: sql`now() + interval '90 seconds'` }).returning();
+      expiresAt: sql`clock_timestamp() + interval '90 seconds'` }).returning();
     if (!lease) throw new SandboxUsageLost();
     return lease;
   });
 }
 
 export async function renewSandboxUsage(ctx: AppContext, id: string): Promise<boolean> {
-  // Never resurrect a lease after expiry: cleanup may already have claimed the machine.
-  const rows = await ctx.db.update(sandboxUsageLeases).set({ expiresAt: sql`now() + interval '90 seconds'` })
-    .where(and(eq(sandboxUsageLeases.id, id), gt(sandboxUsageLeases.expiresAt, sql`now()`),
-      sql`exists (select 1 from sandboxes s where s.id = ${sandboxUsageLeases.sandboxId}
-        and s.generation = ${sandboxUsageLeases.generation} and s.status <> 'destroyed')`))
-    .returning({ id: sandboxUsageLeases.id });
-  return rows.length === 1;
+  // Lock in the same order as acquisition/cleanup. A statement snapshot taken
+  // before a lock wait must not renew a claim that expired during that wait.
+  return ctx.db.transaction(async (tx) => {
+    const [lease] = await tx.select().from(sandboxUsageLeases).where(eq(sandboxUsageLeases.id, id));
+    if (!lease) return false;
+    const [sandbox] = await tx.select().from(sandboxes).where(eq(sandboxes.id, lease.sandboxId)).for("update");
+    if (!sandbox || sandbox.status === "destroyed" || sandbox.generation !== lease.generation) return false;
+    await tx.select({ id: sandboxUsageLeases.id }).from(sandboxUsageLeases).where(eq(sandboxUsageLeases.id, id)).for("update");
+    const rows = await tx.update(sandboxUsageLeases).set({ expiresAt: sql`clock_timestamp() + interval '90 seconds'` })
+      .where(and(eq(sandboxUsageLeases.id, id), gt(sandboxUsageLeases.expiresAt, sql`clock_timestamp()`)))
+      .returning({ id: sandboxUsageLeases.id });
+    return rows.length === 1;
+  });
 }
 
 async function holdUsage(ctx: AppContext, sandboxId: string, purpose: string) {
+  const acquiredAt = performance.now();
   const lease = await acquireSandboxUsage(ctx, sandboxId, purpose);
   const controller = new AbortController();
   let closed = false;
   let renewing = false;
-  let deadline = setTimeout(() => controller.abort(new SandboxUsageLost()), USAGE_LEASE_MS - 5_000);
-  deadline.unref();
+  const armDeadline = (requestedAt: number) => {
+    const remaining = USAGE_LEASE_MS - 5_000 - (performance.now() - requestedAt);
+    if (remaining <= 0) controller.abort(new SandboxUsageLost());
+    const timer = setTimeout(() => controller.abort(new SandboxUsageLost()), Math.max(0, remaining));
+    timer.unref();
+    return timer;
+  };
+  let deadline = armDeadline(acquiredAt);
   const timer = setInterval(async () => {
     if (renewing || closed || controller.signal.aborted) return;
     renewing = true;
+    const requestedAt = performance.now();
     try {
       if (!await renewSandboxUsage(ctx, lease.id)) throw new SandboxUsageLost();
       if (!closed && !controller.signal.aborted) {
         clearTimeout(deadline);
-        deadline = setTimeout(() => controller.abort(new SandboxUsageLost()), USAGE_LEASE_MS - 5_000);
-        deadline.unref();
+        deadline = armDeadline(requestedAt);
       }
     } catch { controller.abort(new SandboxUsageLost()); }
     finally { renewing = false; }
   }, 20_000);
   timer.unref();
-  return { signal: controller.signal, release: async () => {
+  let releasing: Promise<unknown> | undefined;
+  return { signal: controller.signal, release: () => {
     closed = true;
     clearTimeout(timer); clearTimeout(deadline);
-    await ctx.db.delete(sandboxUsageLeases).where(eq(sandboxUsageLeases.id, lease.id));
+    return releasing ??= ctx.db.delete(sandboxUsageLeases).where(eq(sandboxUsageLeases.id, lease.id)).execute();
   } };
 }
 
@@ -78,6 +92,7 @@ export async function withSandboxUsage<T>(ctx: AppContext, sandboxId: string, pu
   if (held?.sandboxId === sandboxId) { held.signal.throwIfAborted(); return work(held.signal); }
   const lease = await holdUsage(ctx, sandboxId, purpose);
   try {
+    lease.signal.throwIfAborted();
     const result = await current.run({ sandboxId, signal: lease.signal }, () => work(lease.signal));
     lease.signal.throwIfAborted();
     return result;
@@ -113,15 +128,35 @@ export function usingSandboxDriver(ctx: AppContext, driver: SandboxDriver, sandb
         try {
           const stream = await target.attach!(handle, argv, signals(opts, lease.signal));
           if (!stream) { await lease.release(); return null; }
-          return (async function* () {
-            try { yield* stream; lease.signal.throwIfAborted(); }
+          const iterator = stream[Symbol.asyncIterator]();
+          // An attach is already live before its first next(). A generator's
+          // finally does not run when return() precedes next(), and consumers
+          // may stop on an exit chunk without asking for a final done result.
+          const close = async () => {
+            try { await iterator.return?.(); }
             finally { await lease.release(); }
-          })();
+          };
+          return {
+            [Symbol.asyncIterator]() { return this; },
+            async next() {
+              try {
+                const result = await iterator.next();
+                lease.signal.throwIfAborted();
+                if (result.done || result.value.kind === "exit") await close();
+                return result;
+              } catch (err) { await close(); throw err; }
+            },
+            async return() { await close(); return { done: true, value: undefined } as const; },
+            async throw(err: unknown) { await close(); throw err; },
+          };
         } catch (err) { await lease.release(); throw err; }
       };
       const value = Reflect.get(target, property, target);
       if ((property === "exportRepository" || property === "importRepository") && typeof value === "function") {
-        return (...args: unknown[]) => withSandboxUsage(ctx, sandboxId, property, () => value.apply(proxy, args));
+        return (...args: unknown[]) => withSandboxUsage(ctx, sandboxId, property, (signal) => {
+          args[3] = signals(args[3] as ExecOptions | undefined, signal);
+          return value.apply(proxy, args);
+        });
       }
       return typeof value === "function" ? value.bind(target) : value;
     },

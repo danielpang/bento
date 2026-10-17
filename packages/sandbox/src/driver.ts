@@ -315,6 +315,8 @@ export interface RepositoryBundle {
 }
 
 export interface RepositoryExportOptions {
+  /** Stop issuing work when the caller loses access to the machine. */
+  signal?: AbortSignal;
   /**
    * Include every object reachable from HEAD rather than only the
    * objects newer than baseSha. The merge queue uses this when its
@@ -324,6 +326,8 @@ export interface RepositoryExportOptions {
 }
 
 export interface RepositoryImportOptions {
+  /** Stop issuing work when the caller loses access to the machine. */
+  signal?: AbortSignal;
   /** Branch that must be checked out and is allowed to move. */
   branch: string;
   /** Compare-and-swap precondition for moving branch. */
