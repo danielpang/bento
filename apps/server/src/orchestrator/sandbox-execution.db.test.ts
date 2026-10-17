@@ -43,3 +43,19 @@ test("execution identity is persisted only by the current owner for the current 
   const [unchanged] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, run.id));
   assert.equal(unchanged!.sandboxExecution!.id, identity.id);
 });
+
+test("recovery can identify a cancelled execution for cleanup without weakening ownership or generation checks", async () => {
+  await ctx.db.update(sandboxes).set({ generation: sandbox.generation }).where(eq(sandboxes.id, sandbox.id));
+  await ctx.db.update(agentRuns).set({ status: "cancelled", ownerId: null }).where(eq(agentRuns.id, run.id));
+  const identity = { provider: "docker" as const, id: "cancelled-execution" };
+  await assert.rejects(recordSandboxExecution(ctx, run.id, sandbox, identity));
+  await recordSandboxExecution(ctx, run.id, sandbox, identity, "attach");
+  const [saved] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, run.id));
+  assert.equal(saved!.status, "cancelled");
+  assert.equal(saved!.sandboxExecution!.id, identity.id);
+  await ctx.db.update(agentRuns).set({ ownerId: "another-process" }).where(eq(agentRuns.id, run.id));
+  await assert.rejects(recordSandboxExecution(ctx, run.id, sandbox, identity, "attach"));
+  await ctx.db.update(agentRuns).set({ ownerId: null }).where(eq(agentRuns.id, run.id));
+  await ctx.db.update(sandboxes).set({ generation: sandbox.generation + 1 }).where(eq(sandboxes.id, sandbox.id));
+  await assert.rejects(recordSandboxExecution(ctx, run.id, sandbox, identity, "attach"));
+});

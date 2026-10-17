@@ -912,6 +912,15 @@ export class SpriteDriver implements SandboxDriver {
     const before = opts?.onExecution
       ? await sprite.listSessions().then((rows) => new Set(rows.map((row) => row.id))).catch(() => undefined)
       : undefined;
+    // The identity lookup can outlast a Stop or an expired usage lease.
+    // Do not install a future-only abort listener and then start an agent.
+    if (opts?.signal?.aborted) {
+      if (launch.launcher) {
+        // No stream was opened to run its usual staged-secret cleanup.
+        void bounded(sprite.filesystem("/").rm(launch.launcher.path, { force: true }), FILESYSTEM_TIMEOUT_MS, "removing the launcher").catch(() => {});
+      }
+      opts.signal.throwIfAborted();
+    }
     const session = this.openSession(handle, launch, opts, sprite, before);
     session.adoptInitial(sprite);
     yield* session.stream();

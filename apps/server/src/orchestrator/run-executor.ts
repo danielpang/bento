@@ -3379,7 +3379,7 @@ async function resumeInterruptedRun(
         return await driver.attach!(handle, argv, {
           sessionKey: run.id,
           ...(run.sandboxExecution ? { execution: run.sandboxExecution } : {}),
-          onExecution: (identity) => recordSandboxExecution(ctx, run.id, sandbox, identity),
+          onExecution: (identity) => recordSandboxExecution(ctx, run.id, sandbox, identity, "attach"),
           afterCursor,
           timeoutMs,
           signal: controller.signal,

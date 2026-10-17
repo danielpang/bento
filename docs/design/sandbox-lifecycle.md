@@ -87,7 +87,11 @@ and generation. Docker uses its durable runner key; Modal records its exact
 execution directory; Sprites records a native session ID when the newly started
 session can be identified unambiguously. A known ID is authoritative: its
 absence never selects a newer command with the same executable. Recovery
-refuses an identity belonging to an older sandbox generation.
+refuses an identity belonging to an older sandbox generation. These identities stay
+internal to recovery and are omitted from run API responses. Recovery may record
+an attachment after a run ends so it can stop and drain that process, while fresh
+starts still require an active run. Sprite startup rechecks cancellation after
+the session lookup, before launching the command.
 
 Older runs and a Sprite start whose session listing fails or is ambiguous keep
 the existing command-matching recovery path. This is a compatibility fallback,

@@ -186,11 +186,18 @@ function withBudget<T>(promise: Promise<T>, ms: number): Promise<T | null> {
  * only, and the field is dropped here for everyone else, so the API is
  * not a way around the console.
  */
-export async function runsForCaller<T extends { sandboxProvider?: string | null }>(
+export async function runsForCaller<T extends { sandboxProvider?: string | null; sandboxExecution?: unknown }>(
   ctx: AppContext,
   c: Context,
   runs: T[],
 ): Promise<T[]> {
-  if (runs.length === 0 || (await getBetaTester(ctx, c))) return runs;
-  return runs.map(({ sandboxProvider: _hidden, ...rest }) => rest as T);
+  if (runs.length === 0) return runs;
+  const beta = await getBetaTester(ctx, c);
+  // Native process identity is recovery bookkeeping, not part of the run API.
+  // In particular its nested provider must not bypass the beta-only field.
+  return runs.map(({ sandboxExecution: _execution, ...run }) => {
+    if (beta) return run as T;
+    const { sandboxProvider: _provider, ...rest } = run;
+    return rest as T;
+  });
 }

@@ -930,3 +930,19 @@ test("a known Modal execution never falls back to a newer command", async () => 
   assert.ok(env.execs.some((argv) => argv[1] === "follow" && argv.includes(id)));
   await assert.rejects(driver(env.api).attach(handle, ["sh"], { execution: { provider: "modal", id: "../../wrong" } }));
 });
+
+test("cancelling an attached Modal execution before its first output still kills that process", async () => {
+  const env = fake({ running: true });
+  const controller = new AbortController();
+  const id = "/var/bento/exec/sh-10";
+  env.box.readText = async (file) => file === `${id}/pid` ? "42" : null;
+  const attached = await driver(env.api).attach(
+    { externalId: "box", provider: "modal", workdir: "/workspace" }, ["sh"],
+    { execution: { provider: "modal", id }, signal: controller.signal },
+  );
+  assert.ok(attached);
+  controller.abort();
+  await collectExec(attached);
+  assert.ok(env.execs.some((argv) => argv[1] === "kill" && argv[2] === id));
+  assert.equal(env.execs.some((argv) => argv[1] === "start"), false);
+});
