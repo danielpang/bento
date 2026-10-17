@@ -1,6 +1,7 @@
 import { and, eq, lt, ne, sql } from "drizzle-orm";
 import { sandboxOperations } from "@bento/db";
 import type { SandboxHandle } from "@bento/sandbox";
+import { captureJobErrors } from "../analytics.js";
 import type { AppContext } from "../context.js";
 
 type Operation = typeof sandboxOperations.$inferInsert;
@@ -38,26 +39,55 @@ export async function sandboxOperation<T>(
   }
 }
 
+export const SANDBOX_RECONCILE_QUEUE = "sandbox.reconcile";
+const RECONCILE_LIMIT = 10;
+const LOOKUP_TIMEOUT_MS = 2_000;
+
+/** Register independent housekeeping; never await provider calls during startup. */
+export async function registerSandboxOperationReconciliation(ctx: AppContext): Promise<void> {
+  await ctx.boss.createQueue(SANDBOX_RECONCILE_QUEUE, { name: SANDBOX_RECONCILE_QUEUE, policy: "short" });
+  await ctx.boss.work(SANDBOX_RECONCILE_QUEUE, captureJobErrors(ctx.analytics, SANDBOX_RECONCILE_QUEUE, async () => {
+    if (!ctx.draining) await reconcileSandboxOperations(ctx);
+  }));
+  await ctx.boss.schedule(SANDBOX_RECONCILE_QUEUE, "*/5 * * * *", {}, { singletonKey: SANDBOX_RECONCILE_QUEUE });
+  await ctx.boss.send(SANDBOX_RECONCILE_QUEUE, {}, { singletonKey: SANDBOX_RECONCILE_QUEUE });
+}
+
 /** Observation only: recovery must never replay an ambiguous destructive request. */
-export async function reconcileSandboxOperations(ctx: AppContext): Promise<void> {
+export async function reconcileSandboxOperations(ctx: AppContext, options: { lookupTimeoutMs?: number } = {}): Promise<void> {
+  const stale = sql`now() - interval '5 minutes'`;
   const rows = await ctx.db.select().from(sandboxOperations).where(and(
-    ne(sandboxOperations.state, "succeeded"),
-    lt(sandboxOperations.heartbeatAt, sql`now() - interval '5 minutes'`),
-  )).orderBy(sandboxOperations.heartbeatAt).limit(100);
+    ne(sandboxOperations.state, "succeeded"), lt(sandboxOperations.heartbeatAt, stale),
+  )).orderBy(sandboxOperations.heartbeatAt).limit(RECONCILE_LIMIT);
   for (const op of rows) {
+    // Claim before calling a provider. Failures and timeouts must back off too,
+    // and another server must not inspect the same receipt concurrently.
+    const [claimed] = await ctx.db.update(sandboxOperations).set({ heartbeatAt: sql`now()` })
+      .where(and(eq(sandboxOperations.id, op.id), eq(sandboxOperations.state, op.state),
+        lt(sandboxOperations.heartbeatAt, stale))).returning({ id: sandboxOperations.id });
+    if (!claimed) continue;
     let state: "succeeded" | "unknown" = "unknown";
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      const driver = ctx.drivers.get(op.provider);
-      if (driver && op.handle) {
-        if (op.action === "destroy" && driver.exists && !(await driver.exists(op.handle))) state = "succeeded";
-        // A live machine proves a wake, but not a completed checkout or a durable snapshot.
-        if (op.action === "wake" && driver.running && await driver.running(op.handle)) state = "succeeded";
-      }
-      await ctx.db.update(sandboxOperations).set({ state, heartbeatAt: sql`now()`, updatedAt: sql`now()` })
-        .where(and(eq(sandboxOperations.id, op.id), eq(sandboxOperations.state, op.state),
-          lt(sandboxOperations.heartbeatAt, sql`now() - interval '5 minutes'`)));
+      const observe = async () => {
+        const driver = ctx.drivers.get(op.provider);
+        if (driver && op.handle) {
+          if (op.action === "destroy" && driver.exists && !(await driver.exists(op.handle))) return "succeeded" as const;
+          if (op.action === "wake" && driver.running && await driver.running(op.handle)) return "succeeded" as const;
+        }
+        return "unknown" as const;
+      };
+      state = await Promise.race([observe(), new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("Sandbox reconciliation lookup timed out")), options.lookupTimeoutMs ?? LOOKUP_TIMEOUT_MS);
+      })]);
     } catch (err) {
       console.warn("Could not reconcile sandbox operation", op.id, err);
+    } finally {
+      if (timer) clearTimeout(timer);
     }
+    // A late provider response cannot change state: only the bounded observation
+    // above writes. A live operation that completed meanwhile keeps its result.
+    await ctx.db.update(sandboxOperations).set({ state, updatedAt: sql`now()` })
+      .where(and(eq(sandboxOperations.id, op.id), eq(sandboxOperations.state, op.state)));
   }
 }

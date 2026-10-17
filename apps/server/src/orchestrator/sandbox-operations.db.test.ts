@@ -61,3 +61,54 @@ test("a live machine does not prove an interrupted checkout succeeded", async ()
   const rows = await ctx.db.select().from(sandboxOperations).where(eq(sandboxOperations.action, "provision"));
   assert.equal(rows[0]!.state, "unknown");
 });
+
+test("registering reconciliation queues work without contacting a provider", async () => {
+  const { registerSandboxOperationReconciliation, SANDBOX_RECONCILE_QUEUE } = await import("./sandbox-operations.js");
+  const calls: string[] = [];
+  const registered = { ...ctx, boss: {
+    createQueue: async (name: string) => { calls.push(`create:${name}`); },
+    work: async (name: string) => { calls.push(`work:${name}`); },
+    schedule: async (name: string) => { calls.push(`schedule:${name}`); },
+    send: async (name: string) => { calls.push(`send:${name}`); },
+  }, db: { select() { throw new Error("startup must not run reconciliation"); } } } as unknown as AppContext;
+  await registerSandboxOperationReconciliation(registered);
+  assert.deepEqual(calls, ["create", "work", "schedule", "send"].map((verb) => `${verb}:${SANDBOX_RECONCILE_QUEUE}`));
+});
+
+test("timed out observations are bounded, back off, and ignore late answers", async () => {
+  await ctx.db.delete(sandboxOperations);
+  await ctx.db.insert(sandboxOperations).values(Array.from({ length: 11 }, (_, n) => ({
+    ...spec(), workspaceKey: `timeout-${n}`, heartbeatAt: new Date(Date.now() - 600_000),
+  })));
+  let lookups = 0;
+  const pending: Array<(exists: boolean) => void> = [];
+  const slow = { ...ctx, drivers: singleDriver({ provider: "sprite", exists: () => {
+    lookups++;
+    return new Promise<boolean>((resolve) => { pending.push(resolve); });
+  } } as SandboxDriver) };
+  const started = performance.now();
+  await reconcileSandboxOperations(slow, { lookupTimeoutMs: 5 });
+  assert.ok(performance.now() - started < 2_000, "never-ending lookups cannot hold a pass indefinitely");
+  assert.equal(lookups, 10, "each pass has a bounded batch");
+  await reconcileSandboxOperations(slow, { lookupTimeoutMs: 5 });
+  assert.equal(lookups, 11, "the next pass advances past the failed batch");
+  await reconcileSandboxOperations(slow, { lookupTimeoutMs: 5 });
+  assert.equal(lookups, 11, "failed observations must wait before retrying");
+  for (const resolve of pending) resolve(false);
+  await new Promise((resolve) => setImmediate(resolve));
+  const rows = await ctx.db.select().from(sandboxOperations);
+  assert.ok(rows.every((row) => row.state === "unknown"), "late responses cannot overwrite timed-out observations");
+});
+
+test("provider lookup errors back off instead of retrying the oldest receipt forever", async () => {
+  await ctx.db.delete(sandboxOperations);
+  await ctx.db.insert(sandboxOperations).values({ ...spec(), heartbeatAt: new Date(Date.now() - 600_000) });
+  let lookups = 0;
+  const failing = { ...ctx, drivers: singleDriver({ provider: "sprite", exists: async () => {
+    lookups++;
+    throw new Error("provider unavailable");
+  } } as SandboxDriver) };
+  await reconcileSandboxOperations(failing);
+  await reconcileSandboxOperations(failing);
+  assert.equal(lookups, 1);
+});

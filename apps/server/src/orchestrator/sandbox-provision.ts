@@ -377,35 +377,48 @@ export async function provisionWorkspace(
 
   const provisionWith = async (candidate: SandboxDriver): Promise<SandboxHandle> => {
     const restore = candidate.provider === "modal" ? await hibernatedRestore(ctx, input.owner) : undefined;
-    return sandboxOperation(ctx, { projectId: input.projectId, workspaceKey, provider: candidate.provider, action: "provision" }, async (recordHandle) => {
-    const handle = await candidate.provision({
-      onAcquired: recordHandle,
-      projectId: input.projectId,
-      workspaceKey,
-      ...(input.organizationId ? { organizationId: input.organizationId } : {}),
-      ...(restore?.imageRef ? { imageRef: restore.imageRef } : {}),
-      ...(restore?.missingSnapshot ? { missingSnapshot: true } : {}),
-      ...(restrictNetwork ? { network: "restricted" as const } : {}),
-      ...(input.allowedHosts ? { allowedHosts: input.allowedHosts } : {}),
-      hostWorkspacePath: ctx.worktrees.workspacePath(workspaceKey),
-      // Drivers with no host filesystem clone these instead of mounting.
-      repositories: repoRows.map((r) => ({
-        name: r.name,
-        cloneUrl: r.repoUrl ?? undefined,
-        branch,
-        baseBranch: seedBaseBranches.get(r.id) ?? r.defaultBranch,
-        seedBundle: seedBundles.get(r.id),
-        startBundle: input.startFromBundles?.get(r.name),
-      })),
-      // Local mode can share the user's own agent logins and git identity.
-      ...(input.agentBinaries ? { agentBinaries: input.agentBinaries } : {}),
-      mounts: [...repoGitMounts(candidate), ...input.authMounts],
-      image: ctx.env.BENTO_SANDBOX_IMAGE,
-      onProgress: input.say,
-    });
-    await recordHandle(handle);
-    return handle;
-    });
+    let completedHandle: SandboxHandle | undefined;
+    try {
+      return await sandboxOperation(ctx, { projectId: input.projectId, workspaceKey, provider: candidate.provider, action: "provision" }, async (recordHandle) => {
+        completedHandle = await candidate.provision({
+          onAcquired: recordHandle,
+          projectId: input.projectId,
+          workspaceKey,
+          ...(input.organizationId ? { organizationId: input.organizationId } : {}),
+          ...(restore?.imageRef ? { imageRef: restore.imageRef } : {}),
+          ...(restore?.missingSnapshot ? { missingSnapshot: true } : {}),
+          ...(restrictNetwork ? { network: "restricted" as const } : {}),
+          ...(input.allowedHosts ? { allowedHosts: input.allowedHosts } : {}),
+          hostWorkspacePath: ctx.worktrees.workspacePath(workspaceKey),
+          // Drivers with no host filesystem clone these instead of mounting.
+          repositories: repoRows.map((r) => ({
+            name: r.name,
+            cloneUrl: r.repoUrl ?? undefined,
+            branch,
+            baseBranch: seedBaseBranches.get(r.id) ?? r.defaultBranch,
+            seedBundle: seedBundles.get(r.id),
+            startBundle: input.startFromBundles?.get(r.name),
+          })),
+          // Local mode can share the user's own agent logins and git identity.
+          ...(input.agentBinaries ? { agentBinaries: input.agentBinaries } : {}),
+          mounts: [...repoGitMounts(candidate), ...input.authMounts],
+          image: ctx.env.BENTO_SANDBOX_IMAGE,
+          onProgress: input.say,
+        });
+        await recordHandle(completedHandle);
+        return completedHandle;
+      });
+    } catch (err) {
+      // The driver already returned, so its internal failure cleanup no longer
+      // applies. A journal failure must not lose the newly created machine.
+      // Reused machines may contain the owner's only work and must survive.
+      if (completedHandle?.createdSandbox) {
+        await candidate.destroy(completedHandle).catch((destroyErr) => {
+          console.warn(`could not destroy sandbox ${completedHandle!.externalId} after a journal failure:`, destroyErr);
+        });
+      }
+      throw err;
+    }
   };
 
   /**
