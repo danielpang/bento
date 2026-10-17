@@ -115,7 +115,7 @@ import { ACTIVE_RUN_STATUSES, projectHasRepositories, startRunIfIdle } from "./s
 import { enqueueRun, INTERACTIVE_POLL_SECONDS, QUEUE_POLL_SECONDS, RUN_WORKER_POLL_SECONDS } from "./queue.js";
 import { registerSandboxOperationReconciliation } from "./sandbox-operations.js";
 import { pruneSandboxUsage } from "./sandbox-usage.js";
-import { HIBERNATE_SANDBOX_QUEUE, MODAL_SWEEP_QUEUE, SandboxGone, scheduleModalHibernation, hibernateSandbox, sweepOrphanModalSandboxes, wakeSwarmSandbox } from "./hibernate-sandbox.js";
+import { HIBERNATE_SANDBOX_QUEUE, MODAL_SWEEP_QUEUE, SandboxGone, scheduleSandboxHibernation, hibernateSandbox, sweepOrphanModalSandboxes, wakeSwarmSandbox } from "./hibernate-sandbox.js";
 import { modalNetworkForProject, organizationRestrictsNetwork } from "./sandbox-network.js";
 import { stopLeftoverAgent } from "./leftover-agent.js";
 import { pipelineAgentBinaries } from "./pipeline-agents.js";
@@ -2681,7 +2681,7 @@ async function announceRunFinished(
   }
   await captureRunFinished(ctx, runId, status);
   try {
-    await scheduleModalHibernation(ctx, runId);
+    await scheduleSandboxHibernation(ctx, runId);
   } catch (err) {
     console.warn(`could not schedule hibernation for run ${runId}:`, err);
     ctx.analytics?.captureException(err, null, null, { run_id: runId, source: "sandbox_hibernate" });

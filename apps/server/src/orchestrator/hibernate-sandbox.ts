@@ -4,6 +4,7 @@ import { and, eq, gt, inArray, isNull, ne, sql } from "drizzle-orm";
 import { agentProfiles, agentRuns, sandboxes, swarmLandings, swarms } from "@bento/db";
 import {
   ModalDriver,
+  canHibernate,
   MODAL_REPO_PREPARE_TIMEOUT_MS,
   MODAL_WARM_WINDOW_MS,
   SandboxImageLost,
@@ -39,21 +40,22 @@ export { MODAL_WARM_WINDOW_MS };
 export const MODAL_SWEEP_GRACE_MS = 2 * MODAL_REPO_PREPARE_TIMEOUT_MS + 15 * 60 * 1000;
 
 /** Queue a hibernation after the warm window. A duplicate job is safe: the worker skips a row that is already hibernated. */
-export async function armModalHibernation(
+export async function armSandboxHibernation(
   ctx: AppContext,
   sandboxId: string,
-  delayMs: number = MODAL_WARM_WINDOW_MS,
-  generation?: number,
+  delayMs?: number,
+  incarnation?: Pick<typeof sandboxes.$inferSelect, "generation" | "provider">,
 ): Promise<void> {
-  // A transactional caller supplies its returned generation instead of rereading outside it.
-  const [target] = generation === undefined
-    ? await ctx.db.select({ generation: sandboxes.generation }).from(sandboxes).where(eq(sandboxes.id, sandboxId))
-    : [{ generation }];
+  // A transactional caller supplies its returned row instead of rereading outside it.
+  const [target] = incarnation
+    ? [incarnation]
+    : await ctx.db.select({ generation: sandboxes.generation, provider: sandboxes.provider }).from(sandboxes).where(eq(sandboxes.id, sandboxId));
   if (!target) return;
+  const idleMs = driverForSandbox(ctx.drivers, target).persistence?.idleMs ?? MODAL_WARM_WINDOW_MS;
   await ctx.boss.send(
     HIBERNATE_SANDBOX_QUEUE,
     { sandboxId, generation: target.generation },
-    { startAfter: new Date(Date.now() + delayMs) },
+    { startAfter: new Date(Date.now() + (delayMs ?? idleMs)) },
   );
 }
 
@@ -68,9 +70,9 @@ export async function armModalHibernation(
  * the run ends. Production saw a swarm worker hibernated thirty five
  * seconds after it reported, while its branch was waiting to land.
  */
-export function warmWindowLeftMs(lastUsedAt: Date | null, now: number = Date.now()): number {
+export function warmWindowLeftMs(lastUsedAt: Date | null, now: number = Date.now(), idleMs = MODAL_WARM_WINDOW_MS): number {
   if (!lastUsedAt) return 0;
-  return Math.max(0, lastUsedAt.getTime() + MODAL_WARM_WINDOW_MS - now);
+  return Math.max(0, lastUsedAt.getTime() + idleMs - now);
 }
 
 /**
@@ -81,8 +83,9 @@ export function warmWindowLeftMs(lastUsedAt: Date | null, now: number = Date.now
 function shouldRearmHibernation(
   row: { provider: string; status: string },
   activeRun: boolean,
+  supported = row.provider === "modal",
 ): boolean {
-  if (row.provider !== "modal") return false;
+  if (!supported) return false;
   if (row.status === "hibernated" || row.status === "destroyed") return false;
   return activeRun || row.status === "busy";
 }
@@ -156,8 +159,9 @@ async function workspaceHasActiveRun(
 export function hibernateShouldSkip(
   row: { provider: string; status: string } | null | undefined,
   activeRun: boolean,
+  supported = row?.provider === "modal",
 ): boolean {
-  if (!row || row.provider !== "modal") return true;
+  if (!row || !supported) return true;
   if (row.status === "hibernated" || row.status === "destroyed") return true;
   if (activeRun) return true;
   return false;
@@ -168,7 +172,7 @@ export function hibernateShouldSkip(
  * this job snapshots it. The row moves to ready now, so the next run
  * in that window sees a live machine and sets it back to busy.
  */
-export async function scheduleModalHibernation(ctx: AppContext, runId: string): Promise<void> {
+export async function scheduleSandboxHibernation(ctx: AppContext, runId: string): Promise<void> {
   const [row] = await ctx.db
     .select({
       sandboxId: agentRuns.sandboxId,
@@ -179,14 +183,14 @@ export async function scheduleModalHibernation(ctx: AppContext, runId: string): 
     .innerJoin(sandboxes, eq(sandboxes.id, agentRuns.sandboxId))
     .where(eq(agentRuns.id, runId))
     .limit(1);
-  if (!row?.sandboxId || row.provider !== "modal") return;
+  if (!row?.sandboxId || !canHibernate(driverForSandbox(ctx.drivers, row))) return;
   const [updated] = await ctx.db
     .update(sandboxes)
     .set({ status: "ready", lastUsedAt: new Date() })
-    .where(and(eq(sandboxes.id, row.sandboxId), eq(sandboxes.provider, "modal"), eq(sandboxes.status, "busy")))
+    .where(and(eq(sandboxes.id, row.sandboxId), eq(sandboxes.provider, row.provider), eq(sandboxes.status, "busy")))
     .returning({ id: sandboxes.id });
   if (updated) {
-    await armModalHibernation(ctx, row.sandboxId);
+    await armSandboxHibernation(ctx, row.sandboxId);
     return;
   }
   // The row was already ready: this finish would otherwise arm nothing,
@@ -196,8 +200,8 @@ export async function scheduleModalHibernation(ctx: AppContext, runId: string): 
     .from(sandboxes)
     .where(eq(sandboxes.id, row.sandboxId))
     .limit(1);
-  if (current?.provider === "modal" && current.status === "ready") {
-    await armModalHibernation(ctx, row.sandboxId);
+  if (current && canHibernate(driverForSandbox(ctx.drivers, current)) && current.status === "ready") {
+    await armSandboxHibernation(ctx, row.sandboxId);
   }
 }
 
@@ -211,6 +215,9 @@ export async function scheduleModalHibernation(ctx: AppContext, runId: string): 
 export async function hibernateSandbox(ctx: AppContext, sandboxId: string, generation?: number): Promise<void> {
   const [row] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, sandboxId)).limit(1);
   if (!row || (generation !== undefined && row.generation !== generation)) return;
+  const driver = driverForSandbox(ctx.drivers, row, ctx);
+  if (!canHibernate(driver)) return;
+  const idleMs = driver.persistence?.idleMs ?? MODAL_WARM_WINDOW_MS;
   const active = await workspaceHasActiveRun(ctx.db, row);
   /*
    * Busy with nothing running in it: the finish that would have moved
@@ -220,7 +227,7 @@ export async function hibernateSandbox(ctx: AppContext, sandboxId: string, gener
    * Modal's cap and started again. Nothing is using it, so it is
    * ready from now and gets a whole warm window, as a finish gives.
    */
-  if (row.provider === "modal" && row.status === "busy" && !active) {
+  if (row.status === "busy" && !active) {
     const [released] = await ctx.db
       .update(sandboxes)
       .set({ status: "ready", lastUsedAt: new Date() })
@@ -228,30 +235,28 @@ export async function hibernateSandbox(ctx: AppContext, sandboxId: string, gener
       .returning({ id: sandboxes.id });
     if (released) {
       console.log(`sandbox ${row.externalId} was busy with no run in it; ready again`);
-      await armModalHibernation(ctx, row.id);
+      await armSandboxHibernation(ctx, row.id);
       return;
     }
     // Something else moved the row first. Whatever it is now, the
     // next job decides with fresh eyes.
-    await armModalHibernation(ctx, row.id);
+    await armSandboxHibernation(ctx, row.id);
     return;
   }
-  if (hibernateShouldSkip(row, active) || shouldRearmHibernation(row, active)) {
-    if (shouldRearmHibernation(row, active)) await armModalHibernation(ctx, row.id);
+  if (hibernateShouldSkip(row, active, true) || shouldRearmHibernation(row, active, true)) {
+    if (shouldRearmHibernation(row, active, true)) await armSandboxHibernation(ctx, row.id);
     return;
   }
-  const warmLeft = warmWindowLeftMs(row.lastUsedAt);
+  const warmLeft = warmWindowLeftMs(row.lastUsedAt, Date.now(), idleMs);
   if (warmLeft > 0) {
-    await armModalHibernation(ctx, row.id, warmLeft);
+    await armSandboxHibernation(ctx, row.id, warmLeft);
     return;
   }
 
-  const driver = driverForSandbox(ctx.drivers, row, ctx);
-  if (!(driver instanceof ModalDriver)) return;
   const result = await driver.hibernate(
     {
       externalId: row.externalId,
-      provider: "modal",
+      provider: driver.provider,
       workdir: row.workdir,
       ...(row.imageRef ? { imageRef: row.imageRef } : {}),
     },
@@ -280,7 +285,7 @@ export async function hibernateSandbox(ctx: AppContext, sandboxId: string, gener
           // Something read from the machine during the snapshot (a
           // worker start, a landing, a push stamp the row as they
           // begin), so its warm window starts again from there.
-          if (warmWindowLeftMs(current.lastUsedAt) > 0) return;
+          if (warmWindowLeftMs(current.lastUsedAt, Date.now(), idleMs) > 0) return;
           if (await sandboxHasUsage(tx, row.id)) return;
           const imageId = await sandboxOperation(ctx, { projectId: row.projectId, workspaceKey: row.id, provider: row.provider, action: "hibernate",
             handle: { externalId: row.externalId, provider: row.provider, workdir: row.workdir } }, async (recordHandle) => {
@@ -309,8 +314,8 @@ export async function hibernateSandbox(ctx: AppContext, sandboxId: string, gener
     .from(sandboxes)
     .where(eq(sandboxes.id, row.id))
     .limit(1);
-  if (after && after.provider === "modal" && after.status !== "hibernated" && after.status !== "destroyed") {
-    await armModalHibernation(ctx, row.id, warmWindowLeftMs(after.lastUsedAt) || MODAL_WARM_WINDOW_MS);
+  if (after && canHibernate(driverForSandbox(ctx.drivers, after)) && after.status !== "hibernated" && after.status !== "destroyed") {
+    await armSandboxHibernation(ctx, row.id, warmWindowLeftMs(after.lastUsedAt, Date.now(), idleMs) || idleMs);
   }
 }
 
@@ -464,7 +469,7 @@ async function wakeStoppedSandbox(
     .returning({ provider: sandboxes.provider });
   if (updated) {
     console.log(`sandbox ${row.externalId} had stopped; booted it again from its snapshot`);
-    if (updated.provider === "modal") await armModalHibernation(ctx, row.id);
+    if (canHibernate(driverForSandbox(ctx.drivers, updated))) await armSandboxHibernation(ctx, row.id);
     return;
   }
   const [current] = await ctx.db
@@ -537,7 +542,7 @@ export async function markSandboxAwake(
     .where(and(eq(sandboxes.id, sandboxId), eq(sandboxes.status, "hibernated")))
     .returning({ provider: sandboxes.provider, generation: sandboxes.generation });
   if (!updated) return false;
-  if (updated.provider === "modal") await armModalHibernation(ctx, sandboxId, MODAL_WARM_WINDOW_MS, updated.generation);
+  if (canHibernate(driverForSandbox(ctx.drivers, updated))) await armSandboxHibernation(ctx, sandboxId, undefined, updated);
   return true;
 }
 
@@ -708,3 +713,6 @@ async function sweepOrphanModalSandbox(
   });
   console.log(`destroyed orphan Modal sandbox ${item.externalId}`);
 }
+
+// Compatibility for integrations importing the previous names.
+export { armSandboxHibernation as armModalHibernation, scheduleSandboxHibernation as scheduleModalHibernation };

@@ -60,3 +60,22 @@ callers must propagate that signal and stop issuing work. Lease expiry recovers
 capacity after a crashed holder, but does not prove a remote process has stopped.
 Provider cancellation remains best effort during a network partition. Active-run
 checks and generation fencing must not be removed on the strength of lease expiry.
+
+## Driver persistence contract
+
+Every built-in driver declares filesystem behavior after stop, host-failure
+recovery, process behavior after wake, output replay, restored networking, and
+hibernation support. An absent declaration means unknown, not durable. A method's
+presence alone is not a persistence guarantee.
+
+The shared hibernation interface prepares a filesystem snapshot, then asks the
+caller to serialize the stop and commit its image. A completed image reference
+means the provider acknowledged the snapshot, not that Bento independently proved
+its storage durability. Modal restores files and starts new processes. Sprite
+process continuity depends on whether the provider performs a warm or cold wake.
+Docker and local processes require external backups for host loss. Agent session
+logs and pushed Git branches remain necessary recovery sources.
+
+Orchestration selects hibernation through the declared capability, honors its idle
+window, and no longer requires a ModalDriver instance. The Modal orphan inventory
+sweep remains provider-specific because its listing and tagging interface is.

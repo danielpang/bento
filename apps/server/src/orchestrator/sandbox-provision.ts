@@ -6,6 +6,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import {
   ModalProvisionLeak,
+  canHibernate,
   ProvisionFailure,
   persistedSandboxProvider,
   provisionBlame,
@@ -377,7 +378,7 @@ export async function provisionWorkspace(
   }
 
   const provisionWith = async (candidate: SandboxDriver): Promise<SandboxHandle> => {
-    const restore = candidate.provider === "modal" ? await hibernatedRestore(ctx, input.owner) : undefined;
+    const restore = canHibernate(candidate) ? await hibernatedRestore(ctx, input.owner) : undefined;
     let completedHandle: SandboxHandle | undefined;
     try {
       return await sandboxOperation(ctx, { projectId: input.projectId, workspaceKey, provider: candidate.provider, action: "provision" }, async (recordHandle) => {
