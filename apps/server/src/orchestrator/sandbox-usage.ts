@@ -86,8 +86,13 @@ export async function withSandboxUsage<T>(ctx: AppContext, sandboxId: string, pu
 
 /** One interface covers runs, exports, imports, checks, and publishing callers. */
 export function usingSandboxDriver(ctx: AppContext, driver: SandboxDriver, sandboxId: string): SandboxDriver {
-  const signals = (opts: ExecOptions | undefined, signal: AbortSignal): ExecOptions => ({ ...opts,
-    signal: opts?.signal ? AbortSignal.any([opts.signal, signal]) : signal });
+  const signals = (opts: ExecOptions | undefined, signal: AbortSignal): ExecOptions => {
+    const combined = opts?.signal ? AbortSignal.any([opts.signal, signal]) : signal;
+    // Cancellation may arrive while acquiring the lease. Some drivers listen
+    // only for future abort events, so never start them with an aborted signal.
+    combined.throwIfAborted();
+    return { ...opts, signal: combined };
+  };
   const proxy: SandboxDriver = new Proxy(driver, {
     get(target, property) {
       if (property === "exec") return async function* (handle: SandboxHandle, argv: string[], opts?: ExecOptions) {

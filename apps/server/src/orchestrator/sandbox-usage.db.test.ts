@@ -71,3 +71,32 @@ test("destruction commits while holding its lock so a later reader cannot enter 
   await destroying;
   await reader;
 });
+
+
+test("cancelling while a command waits for its usage lease prevents the command from starting", async () => {
+  const [box] = await ctx.db.insert(sandboxes).values({ projectId: row.projectId, provider: "docker", externalId: "cancel-box", status: "ready" }).returning();
+  let entered!: () => void, finish!: () => void;
+  const acquired = new Promise<void>((resolve) => { entered = resolve; });
+  const gate = new Promise<void>((resolve) => { finish = resolve; });
+  const locked = ctx.db.transaction(async (tx) => {
+    await tx.select().from(sandboxes).where(eq(sandboxes.id, box!.id)).for("update");
+    entered();
+    await gate;
+  });
+  await acquired;
+  let started = false;
+  const raw = { provider: "docker", workspace: "host", async *exec() {
+    started = true;
+    yield { kind: "exit", exitCode: 0 } as const;
+  } } as SandboxDriver;
+  const controller = new AbortController();
+  const driver = usingSandboxDriver(ctx, raw, box!.id);
+  const stream = driver.exec({ externalId: box!.externalId, provider: "docker", workdir: "/workspace" }, ["test"], { signal: controller.signal });
+  const rejected = assert.rejects(stream[Symbol.asyncIterator]().next(), /aborted/);
+  controller.abort();
+  finish();
+  await locked;
+  await rejected;
+  assert.equal(started, false);
+  assert.equal((await ctx.db.select().from(sandboxUsageLeases)).length, 0);
+});
