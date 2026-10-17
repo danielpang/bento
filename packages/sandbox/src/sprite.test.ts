@@ -12,6 +12,7 @@ import { LineChannel, ProvisionFailure, collectExec } from "./driver.js";
 import {
   FILESYSTEM_RETRY_DELAYS_MS,
   SpriteDriver,
+  selectSpriteSession,
   EXEC_HANDSHAKE_RETRY_DELAYS_MS,
   EXEC_URL_MAX_BYTES,
   execUrlBytes,
@@ -4581,4 +4582,39 @@ test("Sprite repository import never starts a merge after upload loses its lease
     { branch: "main", expectedHeadSha: "1".repeat(40), signal: controller.signal },
   ), /usage lost/);
   assert.equal(commands, 0);
+});
+
+test("a recorded Sprite session is authoritative even beside a newer matching command", () => {
+  const sessions = [1, 2].map((n) => ({ id: `session-${n}`, command: "claude -p task", workdir: "/w", created: new Date(n), bytesPerSecond: 0, isActive: true, tty: false }));
+  assert.equal(selectSpriteSession(sessions, ["claude"], "session-1")?.id, "session-1");
+  assert.equal(selectSpriteSession(sessions, ["claude"], "missing"), undefined);
+  assert.equal(selectSpriteSession(sessions, ["claude"])?.id, "session-2");
+});
+
+test("cancelling during the initial execution identity lookup never starts an agent", async () => {
+  const controller = new AbortController();
+  let entered!: () => void;
+  let finishListing!: (rows: never[]) => void;
+  const listingStarted = new Promise<void>((resolve) => { entered = resolve; });
+  const listing = new Promise<never[]>((resolve) => { finishListing = resolve; });
+  let spawns = 0;
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, {
+    listSessions: () => { entered(); return listing; },
+    spawn: () => {
+      spawns += 1;
+      const child = fakeChild();
+      queueMicrotask(() => { child.emit("spawn"); child.emit("exit", 0); });
+      return child;
+    },
+  });
+  const result = collectExec(driver.exec(
+    { externalId: "box", provider: "sprite", workdir: "/workspace" }, ["claude"],
+    { signal: controller.signal, onExecution: async () => {} },
+  ));
+  await listingStarted;
+  controller.abort(new Error("run was cancelled"));
+  finishListing([]);
+  await assert.rejects(result, /run was cancelled/);
+  assert.equal(spawns, 0);
 });

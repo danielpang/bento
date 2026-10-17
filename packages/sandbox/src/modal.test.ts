@@ -902,3 +902,47 @@ test("a cancelled Modal attachment still reaches the existing process to kill it
   assert.ok(env.execs.some((argv) => argv[1] === "kill" && argv[2] === "/var/bento/exec/sh-10"));
   assert.equal(env.execs.some((argv) => argv[1] === "start"), false);
 });
+
+test("a run records its exact Modal execution before starting the command", async () => {
+  const env = fake({ running: true });
+  let identity: { provider: string; id: string } | undefined;
+  await collectExec(driver(env.api).exec(
+    { externalId: "bento-feature-1", provider: "modal", workdir: "/workspace" }, ["sh", "-c", "true"],
+    { sessionKey: "run-one", onExecution: async (value) => {
+      assert.equal(env.execs.some((argv) => argv[1] === "start"), false);
+      identity = value;
+    } },
+  ));
+  assert.equal(identity?.provider, "modal");
+  assert.match(identity!.id, /^\/var\/bento\/exec\/sh-\d+$/);
+});
+
+test("a known Modal execution never falls back to a newer command", async () => {
+  const env = fake({ running: true });
+  const id = "/var/bento/exec/sh-10";
+  env.box.listDir = async () => { throw new Error("must not scan sessions"); };
+  const handle = { externalId: "bento-feature-1", provider: "modal" as const, workdir: "/workspace" };
+  assert.equal(await driver(env.api).attach(handle, ["sh"], { execution: { provider: "modal", id } }), null);
+  env.box.readText = async (file) => file === `${id}/pid` ? "42" : null;
+  const stream = await driver(env.api).attach(handle, ["sh"], { execution: { provider: "modal", id } });
+  assert.ok(stream);
+  assert.equal((await collectExec(stream)).stdout, "hello");
+  assert.ok(env.execs.some((argv) => argv[1] === "follow" && argv.includes(id)));
+  await assert.rejects(driver(env.api).attach(handle, ["sh"], { execution: { provider: "modal", id: "../../wrong" } }));
+});
+
+test("cancelling an attached Modal execution before its first output still kills that process", async () => {
+  const env = fake({ running: true });
+  const controller = new AbortController();
+  const id = "/var/bento/exec/sh-10";
+  env.box.readText = async (file) => file === `${id}/pid` ? "42" : null;
+  const attached = await driver(env.api).attach(
+    { externalId: "box", provider: "modal", workdir: "/workspace" }, ["sh"],
+    { execution: { provider: "modal", id }, signal: controller.signal },
+  );
+  assert.ok(attached);
+  controller.abort();
+  await collectExec(attached);
+  assert.ok(env.execs.some((argv) => argv[1] === "kill" && argv[2] === id));
+  assert.equal(env.execs.some((argv) => argv[1] === "start"), false);
+});

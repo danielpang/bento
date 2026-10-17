@@ -366,6 +366,7 @@ export class ModalDriver implements SandboxDriver {
     const api = await this.api();
     const box = await this.requireRunning(api, handle.externalId);
     const dir = execDirectory(command);
+    await opts?.onExecution?.({ provider: "modal", id: dir });
     yield* this.followCommand(box, dir, argv, opts, true);
   }
 
@@ -383,10 +384,13 @@ export class ModalDriver implements SandboxDriver {
     if (!command) throw new Error("empty argv");
     const api = await this.api();
     const box = await this.requireRunning(api, handle.externalId);
-    const dir = await this.newestExecDir(box, command);
+    if (opts?.execution && opts.execution.provider !== "modal") throw new Error("Execution belongs to another provider");
+    const dir = opts?.execution ? checkedModalExecutionDirectory(opts.execution.id) : await this.newestExecDir(box, command);
     if (!dir) return null;
     const exit = await box.readText(`${dir}/exit`);
     if (exit !== null) return null;
+    if (opts?.execution && await box.readText(`${dir}/pid`) === null) return null;
+    await opts?.onExecution?.({ provider: "modal", id: dir });
     return this.followCommand(box, dir, argv, opts, false);
   }
 
@@ -1133,4 +1137,9 @@ async function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boo
   } finally {
     clearTimeout(timer);
   }
+}
+
+function checkedModalExecutionDirectory(id: string): string {
+  if (!/^\/var\/bento\/exec\/[A-Za-z0-9_-][A-Za-z0-9._-]*$/.test(id)) throw new Error("Invalid sandbox execution directory");
+  return id;
 }

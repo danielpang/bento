@@ -8,7 +8,7 @@ import net from "node:net";
 import Docker from "dockerode";
 import { DockerDriver, SANDBOX_STOPPED_MESSAGE } from "./docker.js";
 import { createDockerClient, resolveDockerSocket } from "./docker-client.js";
-import { collectExec, LineChannel, type ExecChunk } from "./driver.js";
+import { collectExec, LineChannel, type SandboxExecutionIdentity, type ExecChunk } from "./driver.js";
 
 // Uses only the installed sandbox image, no agent credentials or network.
 test(
@@ -111,8 +111,10 @@ wait
       await t.test("a detached agent keeps working and a new driver reads only missing output", async () => {
         const key = randomUUID();
         let cursor = 0;
+        let execution: SandboxExecutionIdentity | undefined;
         for await (const chunk of driver.exec(handle, ["sh", "-c", "printf 'before\\n'; sleep 1; printf 'after\\n'"], {
           sessionKey: key,
+          onExecution: async (identity) => { execution = identity; },
         })) {
           if (chunk.kind === "stdout") {
             assert.equal(chunk.data, "before\n");
@@ -121,8 +123,9 @@ wait
           }
         }
         assert.ok(cursor > 0);
+        assert.ok(execution);
         const replacement = new DockerDriver(docker, "none");
-        const attached = await replacement.attach(handle, ["sh"], { sessionKey: key, afterCursor: cursor });
+        const attached = await replacement.attach(handle, ["sh"], { sessionKey: "different-key", execution, afterCursor: cursor });
         assert.ok(attached);
         const resumed = await collectExec(attached);
         assert.equal(resumed.stdout, "after\n");

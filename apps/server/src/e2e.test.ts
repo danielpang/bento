@@ -558,7 +558,11 @@ test("a card's sandbox wait is measured from queueing, new first and reused afte
   assert.equal(provisioned[0]!.properties?.provider, "local-process");
   const [firstRow] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, first.id));
   assert.equal(firstRow?.sandboxProvider, "local-process");
+  await ctx.db.update(agentRuns).set({
+    sandboxExecution: { provider: "modal", id: "/var/bento/exec/private-session", sandboxId: firstRow!.sandboxId!, generation: 1 },
+  }).where(eq(agentRuns.id, first.id));
   const runBody = await json<{ sandboxProvider: string | null }>(await app.request(`/api/runs/${first.id}`));
+  assert.equal("sandboxExecution" in runBody, false, "native execution identity stays internal even for beta testers");
   assert.equal(runBody.sandboxProvider, "local-process", "the run route says which provider ran it");
   const card = await json<{ runs: { id: string; sandboxProvider: string | null }[] }>(
     await app.request(`/api/features/${feature.id}`),
@@ -571,9 +575,11 @@ test("a card's sandbox wait is measured from queueing, new first and reused afte
   try {
     const hiddenRun = await json<Record<string, unknown>>(await app.request(`/api/runs/${first.id}`));
     assert.equal("sandboxProvider" in hiddenRun, false, "the run route leaves it out");
+    assert.equal("sandboxExecution" in hiddenRun, false, "nested provider identity cannot bypass the beta flag");
     const hiddenCard = await json<{ runs: Record<string, unknown>[] }>(await app.request(`/api/features/${feature.id}`));
     assert.ok(hiddenCard.runs.length > 0);
     assert.ok(hiddenCard.runs.every((r) => !("sandboxProvider" in r)), "and so does the card");
+    assert.ok(hiddenCard.runs.every((r) => !("sandboxExecution" in r)), "card responses also hide recovery identities");
   } finally {
     ctx.featureFlags = flags;
   }
@@ -7632,4 +7638,50 @@ test("an opencode run keeps its own ollama provider until Ollama credentials are
       assert.deepEqual(env, { OLLAMA_BASE_URL: "http://gpu-box:11434" });
     },
   );
+});
+
+test("a cancellation during recovery identity persistence still stops the attached agent", { timeout: 30_000 }, async () => {
+  const { project, stages: projectStages } = await setupProject("Cancelled identity recovery");
+  const feature = await createFeature(project.id, "Cancelled during attach");
+  const profile = await fakeProfile("cancel-identity-fake");
+  const [sandbox] = await ctx.db.insert(sandboxes).values({
+    projectId: project.id, featureId: feature.id, provider: "sprite", externalId: `bento-${feature.id}`,
+    status: "busy", workdir: "/workspace",
+  }).returning();
+  const identity = { provider: "sprite" as const, id: "exact-cancelled-session", sandboxId: sandbox!.id, generation: sandbox!.generation };
+  const [running] = await ctx.db.insert(agentRuns).values({
+    type: "pipeline", featureId: feature.id, stageId: projectStages[0]!.id, agentProfileId: profile.id,
+    prompt: "half finished work", status: "running", executor: "server", sandboxId: sandbox!.id,
+    sandboxExecution: identity, startedAt: new Date(),
+  }).returning();
+  let stopped!: () => void;
+  const drained = new Promise<void>((resolve) => { stopped = resolve; });
+  let attached = 0;
+  const previousDrivers = ctx.drivers;
+  ctx.drivers = singleDriver({
+    provider: "sprite",
+    async provision() { throw new Error("recovery must not provision"); },
+    exec() { throw new Error("recovery must not start an agent"); },
+    async attach(_handle, _argv, opts) {
+      attached += 1;
+      assert.deepEqual(opts?.execution, identity);
+      // Stop reaches the database while the provider is finding the session,
+      // before recovery has registered its in-memory abort controller.
+      await ctx.db.update(agentRuns).set({ status: "cancelled" }).where(eq(agentRuns.id, running!.id));
+      await opts!.onExecution!({ provider: "sprite", id: identity.id });
+      return (async function* () {
+        assert.equal(opts!.signal!.aborted, true, "recovery stops the agent rather than resuming output");
+        stopped();
+        yield { kind: "exit" as const, exitCode: -1 };
+      })();
+    },
+    async destroy() {},
+  } as SandboxDriver);
+  try {
+    await recoverInterruptedRuns(ctx);
+    await drained;
+    assert.equal(attached, 1);
+    const [saved] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, running!.id));
+    assert.equal(saved!.status, "cancelled");
+  } finally { ctx.drivers = previousDrivers; }
 });

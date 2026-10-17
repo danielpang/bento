@@ -114,6 +114,7 @@ import { captureRunQueueDepth } from "./queue-snapshot.js";
 import { ACTIVE_RUN_STATUSES, projectHasRepositories, startRunIfIdle } from "./start-run.js";
 import { enqueueRun, INTERACTIVE_POLL_SECONDS, QUEUE_POLL_SECONDS, RUN_WORKER_POLL_SECONDS } from "./queue.js";
 import { registerSandboxOperationReconciliation } from "./sandbox-operations.js";
+import { recordSandboxExecution, executionMatchesSandbox } from "./sandbox-execution.js";
 import { pruneSandboxUsage } from "./sandbox-usage.js";
 import { HIBERNATE_SANDBOX_QUEUE, MODAL_SWEEP_QUEUE, SandboxGone, scheduleSandboxHibernation, hibernateSandbox, sweepOrphanModalSandboxes, wakeSwarmSandbox } from "./hibernate-sandbox.js";
 import { modalNetworkForProject, organizationRestrictsNetwork } from "./sandbox-network.js";
@@ -356,6 +357,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   if (disk?.warning) await saySystem(disk.warning);
 
   let handle: SandboxHandle;
+  let executionSandbox: { id: string; generation: number } | undefined;
   let prepared: PreparedRepository[] = [];
   /**
    * How long the driver alone took, and what it did, for the sandbox
@@ -502,6 +504,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     provisionMs = performance.now() - provisionStarted;
     sandboxOrigin = workspace.origin;
     handle = workspace.handle;
+    executionSandbox = workspace.sandboxRow;
     prepared = workspace.prepared;
     // The driver that made the machine, which on "auto" is the fallback
     // when the first choice could not. Everything from here (exec,
@@ -912,6 +915,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
           cwd: workdir,
           env: execEnv,
           sessionKey: runId,
+          ...(executionSandbox ? { onExecution: (identity: import("@bento/sandbox").SandboxExecutionIdentity) => recordSandboxExecution(ctx, runId, executionSandbox!, identity) } : {}),
           timeoutMs: ctx.env.BENTO_RUN_TIMEOUT_MIN * 60 * 1000,
           signal: controller.signal,
           ...(liveChannel ? { stdin: liveChannel } : {}),
@@ -3284,6 +3288,10 @@ async function resumeInterruptedRun(
   sandbox: typeof sandboxes.$inferSelect,
   driver: SandboxDriver,
 ): Promise<void> {
+  if (run.sandboxExecution && !executionMatchesSandbox(run.sandboxExecution, sandbox)) {
+    await failRunAsInterrupted(ctx, run);
+    return;
+  }
   const subject = await describeRunSubject(ctx, run);
   const { profile, repoRows } = subject;
 
@@ -3370,6 +3378,8 @@ async function resumeInterruptedRun(
       try {
         return await driver.attach!(handle, argv, {
           sessionKey: run.id,
+          ...(run.sandboxExecution ? { execution: run.sandboxExecution } : {}),
+          onExecution: (identity) => recordSandboxExecution(ctx, run.id, sandbox, identity, "attach"),
           afterCursor,
           timeoutMs,
           signal: controller.signal,
