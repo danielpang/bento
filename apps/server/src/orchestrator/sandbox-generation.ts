@@ -1,3 +1,4 @@
+import { sandboxHasUsage, SandboxInUse } from "./sandbox-usage.js";
 import { and, eq } from "drizzle-orm";
 import { sandboxes } from "@bento/db";
 import type { AppContext } from "../context.js";
@@ -11,6 +12,9 @@ export async function withSandboxGeneration<T>(ctx: AppContext, row: typeof sand
   return ctx.db.transaction(async (tx) => {
     const [current] = await tx.select().from(sandboxes).where(and(eq(sandboxes.id, row.id), eq(sandboxes.generation, row.generation))).for("update");
     if (!current || current.externalId !== row.externalId || current.provider !== row.provider || current.status === "destroyed") return undefined;
-    return work();
+    if (await sandboxHasUsage(tx, row.id)) throw new SandboxInUse();
+    const result = await work();
+    await tx.update(sandboxes).set({ status: "destroyed" }).where(and(eq(sandboxes.id, row.id), eq(sandboxes.generation, row.generation)));
+    return result;
   });
 }

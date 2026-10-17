@@ -1,3 +1,4 @@
+import { SandboxInUse } from "./sandbox-usage.js";
 import { matchesSandboxGeneration, withSandboxGeneration, type SandboxGeneration } from "./sandbox-generation.js";
 import { sandboxOperation } from "./sandbox-operations.js";
 import { execFile } from "node:child_process";
@@ -227,7 +228,7 @@ export async function reapSandbox(ctx: AppContext, featureId: string, machines?:
   for (const row of rows) {
     let driver: SandboxDriver;
     try {
-      driver = driverForSandbox(ctx.drivers, row);
+      driver = driverForSandbox(ctx.drivers, row, ctx);
     } catch (err) {
       if (!(err instanceof SandboxDriverUnavailable)) throw err;
       // Permanent: this process cannot delete the machine, so the row
@@ -383,7 +384,7 @@ async function destroyAndConfirm(
 ): Promise<boolean> {
   let driver: SandboxDriver;
   try {
-    driver = driverForSandbox(ctx.drivers, row);
+    driver = driverForSandbox(ctx.drivers, row, ctx);
   } catch (err) {
     if (!(err instanceof SandboxDriverUnavailable)) throw err;
     console.warn(`not reaping sandbox ${row.externalId} for ${owner}: ${err.message}`);
@@ -670,6 +671,7 @@ export async function runSandboxReapJob(ctx: AppContext, data: SandboxReapTarget
   try {
     await reapTarget(ctx, data);
   } catch (err) {
+    if (err instanceof SandboxInUse) err = new SandboxReapDeferred(err.message, data);
     if (!(err instanceof SandboxReapDeferred)) throw err;
     const deferrals = (data.deferrals ?? 0) + 1;
     if (deferrals > MAX_SANDBOX_REAP_DEFERRALS) throw err;
@@ -698,6 +700,7 @@ async function sweepReap(ctx: AppContext, data: SandboxReapTarget, now?: Date): 
   try {
     await reapTarget(ctx, data, now);
   } catch (err) {
+    if (err instanceof SandboxInUse) return;
     if (!(err instanceof SandboxReapDeferred)) throw err;
     console.log(`${err.message}; the next sweep will ask again`);
   }

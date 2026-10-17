@@ -840,7 +840,7 @@ async function executeDocumentAssembly(ctx: AppContext, taskId: string): Promise
     if (!repository) throw new Error("the project has no repository for the document");
     const assembled = await assembleSwarmDocumentInSandbox(ctx.db, {
       swarm,
-      driver: driverForSandbox(ctx.drivers, sandbox),
+      driver: driverForSandbox(ctx.drivers, sandbox, ctx),
       handle: { externalId: sandbox.externalId, provider: sandbox.provider, workdir: sandbox.workdir },
       repositoryName: repository.name,
       branch: swarm.branchName,

@@ -1131,7 +1131,7 @@ async function writeDesign(ctx: AppContext, caller: SwarmCaller, args: Args<"wri
   }
 
   try {
-    const driver = driverForSandbox(ctx.drivers, workspace);
+    const driver = driverForSandbox(ctx.drivers, workspace, ctx);
     await commitSwarmDesignDocument({
       driver,
       handle: { provider: driver.provider, externalId: workspace.externalId, workdir: workspace.workdir },
@@ -1198,7 +1198,7 @@ async function planCopyAvailable(ctx: AppContext, runId: string): Promise<boolea
   const [box] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, run.sandboxId)).limit(1);
   if (!box || box.status === "destroyed") return ctx.drivers.default.supportsStdin === true;
   try {
-    return driverForSandbox(ctx.drivers, box).supportsStdin === true;
+    return driverForSandbox(ctx.drivers, box, ctx).supportsStdin === true;
   } catch {
     return false;
   }

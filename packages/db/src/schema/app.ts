@@ -2254,3 +2254,12 @@ export const sandboxOperations = pgTable("sandbox_operations", {
   errorClass: text("error_class"),
   ...timestamps,
 }, (t) => [index("sandbox_operations_unfinished_idx").on(t.heartbeatAt).where(sql`${t.state} <> 'succeeded'`)]);
+
+export const sandboxUsageLeases = pgTable("sandbox_usage_leases", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  sandboxId: uuid("sandbox_id").notNull().references(() => sandboxes.id, { onDelete: "cascade" }),
+  organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
+  generation: integer("generation").notNull(),
+  purpose: text("purpose").notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+}, (t) => [index("sandbox_usage_leases_sandbox_idx").on(t.sandboxId, t.expiresAt)]);

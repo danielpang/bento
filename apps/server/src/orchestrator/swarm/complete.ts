@@ -399,7 +399,7 @@ async function swarmSandbox(
   if (!row || row.status === "destroyed") return null;
   return {
     handle: { externalId: row.externalId, provider: row.provider, workdir: row.workdir },
-    driver: driverForSandbox(ctx.drivers, row),
+    driver: driverForSandbox(ctx.drivers, row, ctx),
   };
 }
 

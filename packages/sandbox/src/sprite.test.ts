@@ -4560,3 +4560,25 @@ test("the driver's words for a command that never started are recognizable, by k
   );
   assert.equal(sandboxNeverStartedCommand("exit code 1"), null);
 });
+
+test("Sprite repository import never starts a merge after upload loses its lease", async () => {
+  const controller = new AbortController();
+  let commands = 0;
+  const sprite = {
+    spawn() { commands++; return fakeChild(); },
+    filesystem() {
+      return {
+        async writeFile() { controller.abort(new Error("usage lost")); },
+        async rm() {},
+      };
+    },
+  };
+  const driver = new SpriteDriver({ token: "sprite-control-token" });
+  stubClient(driver, sprite);
+  await assert.rejects(driver.importRepository(
+    { externalId: "sprite", provider: "sprite", workdir: "/workspace" }, "app",
+    { baseSha: "1".repeat(40), headSha: "2".repeat(40), data: Buffer.from("bundle") },
+    { branch: "main", expectedHeadSha: "1".repeat(40), signal: controller.signal },
+  ), /usage lost/);
+  assert.equal(commands, 0);
+});

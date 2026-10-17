@@ -468,7 +468,7 @@ async function landingDriverFor(ctx: AppContext, swarmSandboxId: string | null):
   if (!swarmSandboxId) return null;
   const [row] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, swarmSandboxId)).limit(1);
   if (!row || row.status === "destroyed") return null;
-  return driverForSandbox(ctx.drivers, row);
+  return driverForSandbox(ctx.drivers, row, ctx);
 }
 
 /**
@@ -563,7 +563,7 @@ async function landingSandboxHandlesFromRows(
   if (failures.length > 0) {
     throw new LandingWakeFailed(failures.find((reason) => reason instanceof SandboxGone) ?? failures[0]);
   }
-  const workerDriver = driverForSandbox(ctx.drivers, workerSandbox);
+  const workerDriver = driverForSandbox(ctx.drivers, workerSandbox, ctx);
   const workerHandle: SandboxHandle = {
     externalId: workerSandbox.externalId,
     provider: workerSandbox.provider,
@@ -692,7 +692,7 @@ async function runLandingTests(
   const handle = { externalId: sandbox.externalId, provider: sandbox.provider, workdir: sandbox.workdir };
   let driver: SandboxDriver;
   try {
-    driver = driverForSandbox(ctx.drivers, sandbox);
+    driver = driverForSandbox(ctx.drivers, sandbox, ctx);
   } catch (err) {
     return {
       kind: "unavailable",

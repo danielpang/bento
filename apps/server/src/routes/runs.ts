@@ -174,7 +174,7 @@ export function runRoutes(ctx: AppContext) {
 
       let driver: SandboxDriver;
       try {
-        driver = sandbox ? driverForSandbox(ctx.drivers, sandbox) : ctx.drivers.default;
+        driver = sandbox ? driverForSandbox(ctx.drivers, sandbox, ctx) : ctx.drivers.default;
       } catch (err) {
         if (!(err instanceof SandboxDriverUnavailable)) throw err;
         // The driver was never asked to restore. "Does not support

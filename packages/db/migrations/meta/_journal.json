@@ -414,6 +414,13 @@
       "when": 1791100720000,
       "tag": "0058_sandbox_generation",
       "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "7",
+      "when": 1791100780000,
+      "tag": "0059_sandbox_usage_leases",
+      "breakpoints": true
     }
   ]
 }

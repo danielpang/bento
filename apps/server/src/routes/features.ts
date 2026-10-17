@@ -542,7 +542,7 @@ export function featureRoutes(ctx: AppContext) {
           const owned = await tx.select().from(sandboxes).where(eq(sandboxes.featureId, feature.id));
           for (const sandbox of owned.filter((s) => s.status !== "destroyed")) {
             try {
-              const driver = driverForSandbox(ctx.drivers, sandbox);
+              const driver = driverForSandbox(ctx.drivers, sandbox, ctx);
               const handle: SandboxHandle = {
                 externalId: sandbox.externalId,
                 provider: driver.provider,
@@ -749,7 +749,7 @@ export function featureRoutes(ctx: AppContext) {
           .orderBy(desc(sandboxes.createdAt)).limit(1);
         if (!sandbox) return c.json({ error: "This card has no available agent workspace. Start an agent before attaching files." }, 409);
         try {
-          const driver = driverForSandbox(ctx.drivers, sandbox);
+          const driver = driverForSandbox(ctx.drivers, sandbox, ctx);
           const files = await writeMessageAttachments(driver, { externalId: sandbox.externalId, provider: driver.provider, workdir: sandbox.workdir }, body.attachments);
           text = `${text || "Please review the attached files."}\n\nAttached files in your workspace (use your file or image-reading tools to inspect them):\n${files.map(file => JSON.stringify(file)).join("\n")}`;
         } catch (error) {
@@ -1222,7 +1222,7 @@ export function featureRoutes(ctx: AppContext) {
         .limit(1);
       let publishDriver: SandboxDriver;
       try {
-        publishDriver = sandbox ? driverForSandbox(ctx.drivers, sandbox) : ctx.drivers.default;
+        publishDriver = sandbox ? driverForSandbox(ctx.drivers, sandbox, ctx) : ctx.drivers.default;
       } catch (err) {
         return c.json({ error: err instanceof Error ? err.message : "no driver configured on this server" }, 409);
       }

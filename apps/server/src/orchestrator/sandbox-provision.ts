@@ -1,3 +1,4 @@
+import { usingSandboxDriver } from "./sandbox-usage.js";
 import { sandboxOperation } from "./sandbox-operations.js";
 import { and, eq, isNull, ne, sql } from "drizzle-orm";
 import { repositories, sandboxes } from "@bento/db";
@@ -575,7 +576,7 @@ export async function provisionWorkspace(
       handle,
       prepared,
       sandboxRow,
-      driver: driverUsed,
+      driver: sandboxRow ? usingSandboxDriver(ctx, driverUsed, sandboxRow.id) : driverUsed,
       origin: sandboxOrigin({ createdSandbox: handle.createdSandbox, hadMachine }),
     };
   } catch (err) {

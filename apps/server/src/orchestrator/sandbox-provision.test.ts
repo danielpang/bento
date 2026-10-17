@@ -161,7 +161,7 @@ test("auto lands on the sprite when Fly answers, and says so in the metric", asy
   const result = await provisionOn(featureId, sprite, [modal], said);
 
   assert.deepEqual(asked, ["sprite"]);
-  assert.equal(result.driver, sprite);
+  assert.equal(result.driver.provider, sprite.provider);
   assert.equal(result.handle.provider, "sprite");
   // The stub says it made the machine, and the card had no row: a cold start.
   assert.equal(result.origin, "new");
@@ -200,8 +200,8 @@ test("auto falls back to Modal when the sprite cannot be provisioned", async () 
   const result = await provisionOn(featureId, sprite, [modal], said);
 
   assert.deepEqual(asked, ["sprite", "modal"]);
-  assert.equal(result.driver, modal);
-  assert.notEqual(result.driver, sprite);
+  assert.equal(result.driver.provider, modal.provider);
+  assert.notEqual(result.driver.provider, sprite.provider);
   assert.equal(result.handle.provider, "modal");
   assert.equal(result.handle.externalId, `modal-${featureId}`);
   const [row] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.featureId, featureId));
@@ -300,7 +300,7 @@ test("a locked network never asks the sprite and goes straight to Modal", async 
   const result = await provisionOn(featureId, sprite, [modal], said, true);
 
   assert.deepEqual(asked, ["modal"]);
-  assert.equal(result.driver, modal);
+  assert.equal(result.driver.provider, modal.provider);
   assert.deepEqual(said, []);
   const events = provisionEvents().slice(before);
   assert.equal(events[0]?.properties?.provider, "modal");
@@ -340,7 +340,7 @@ test("a card whose machine predates the lock keeps its open network, and says so
     },
   });
 
-  assert.equal(result.driver, sprite);
+  assert.equal(result.driver.provider, sprite.provider);
   assert.deepEqual(asked, ["sprite"]);
   assert.deepEqual(networks, [undefined]);
   assert.deepEqual(said, [
@@ -394,7 +394,7 @@ test("a failure the driver blames on the provider moves on to Modal, with its ph
 
   const result = await provisionOn(featureId, sprite, [modal], said);
 
-  assert.equal(result.driver, modal);
+  assert.equal(result.driver.provider, modal.provider);
   assert.deepEqual(asked, ["sprite", "modal"]);
   assert.deepEqual(destroyed, [spriteName(featureId)]);
   assert.deepEqual(said, ["Failed to provision sandbox, retrying."]);
@@ -473,7 +473,7 @@ test("a clone URL the server can reach passes the check and the drivers are aske
     run: null,
     say: async () => {},
   });
-  assert.equal(result.driver, sprite);
+  assert.equal(result.driver.provider, sprite.provider);
   assert.deepEqual(asked, ["sprite"]);
 });
 
@@ -508,7 +508,7 @@ test("a sprite that failed is destroyed by name when the loop moves on to Modal,
 
   const result = await provisionOn(featureId, sprite, [modal], said);
 
-  assert.equal(result.driver, modal);
+  assert.equal(result.driver.provider, modal.provider);
   assert.deepEqual(asked, ["sprite", "modal"]);
   assert.deepEqual(destroyed, [spriteName(featureId)]);
   assert.equal(destroyed[0], `bento-${featureId}`);
@@ -547,7 +547,7 @@ test("a destroy that fails does not stop the fallback", async () => {
   const modal = stubDriver("modal", asked, { restricted: true });
 
   const result = await provisionOn(featureId, sprite, [modal], said);
-  assert.equal(result.driver, modal);
+  assert.equal(result.driver.provider, modal.provider);
   assert.deepEqual(asked, ["sprite", "modal"]);
 });
 
@@ -575,7 +575,7 @@ test("a transcript that cannot be written does not stop the fallback", async () 
     },
   });
 
-  assert.equal(result.driver, modal);
+  assert.equal(result.driver.provider, modal.provider);
   assert.deepEqual(asked, ["sprite", "modal"]);
 });
 
@@ -620,7 +620,7 @@ test("a sprite that auto moved on from is one failed attempt, marked as a fallba
   const before = failedEvents().length;
 
   const result = await provisionOn(featureId, sprite, [modal], said);
-  assert.equal(result.driver, modal);
+  assert.equal(result.driver.provider, modal.provider);
 
   const events = failedEvents().slice(before);
   assert.equal(events.length, 1);
