@@ -889,8 +889,10 @@ export class ModalDriver implements SandboxDriver {
     opts: ExecOptions | undefined,
     start: boolean,
   ): AsyncIterable<ExecChunk> {
-    opts?.signal?.throwIfAborted();
+    // An attached process already exists. Even a pre-aborted reader must
+    // reach the kill handler below; only a new start can exit immediately.
     if (start) {
+      opts?.signal?.throwIfAborted();
       await this.installExec(box);
       opts?.signal?.throwIfAborted();
       const started = await runShell(

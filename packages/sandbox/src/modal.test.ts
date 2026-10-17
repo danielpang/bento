@@ -887,3 +887,18 @@ test("repository export still reads a completed bundle through the cancellable c
     { externalId: "box", provider: "modal", workdir: "/workspace" }, "app", "main",
   ), { baseSha, headSha, data: Buffer.from("bundle") });
 });
+
+
+test("a cancelled Modal attachment still reaches the existing process to kill it", async () => {
+  const env = fake({ running: true, dirs: [{ name: "sh-10", type: "directory" }] });
+  const controller = new AbortController();
+  const attached = await driver(env.api).attach(
+    { externalId: "box", provider: "modal", workdir: "/workspace" }, ["sh"],
+    { signal: controller.signal },
+  );
+  assert.ok(attached);
+  controller.abort();
+  await collectExec(attached);
+  assert.ok(env.execs.some((argv) => argv[1] === "kill" && argv[2] === "/var/bento/exec/sh-10"));
+  assert.equal(env.execs.some((argv) => argv[1] === "start"), false);
+});
