@@ -41,11 +41,14 @@ import {
   reapFinishedSandboxes,
   reapFinishedSwarmSandboxes,
   reapSandbox,
+  queueSandboxReap,
+  type SandboxReapTarget,
   reapSwarmSandbox,
   reapSwarmTaskSandbox,
   runSandboxReapJob,
   swarmMachineReleasable,
 } from "./reap-sandbox.js";
+import { evaluateFeatureGate } from "./gate-evaluator.js";
 import { swarmReleasesMachine } from "./swarm/coordinator.js";
 import { swarmWorkspaceKey } from "./swarm/sandbox.js";
 
@@ -849,4 +852,56 @@ test("a delayed reap cannot destroy a replacement with the same provider name", 
   const [row] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, old!.id));
   assert.equal(row!.status, "ready");
   assert.equal(row!.generation, old!.generation + 1);
+});
+
+
+test("settlement reaps a machine provisioned after its card was finished", async () => {
+  const card = await seedCard({ title: "finished during provision", sandbox: false });
+  const run = await seedSucceededRun(card.featureId, card.stageId);
+  await ctx.db.update(agentRuns).set({ status: "starting" }).where(eq(agentRuns.id, run.id));
+  const jobs: SandboxReapTarget[] = [];
+  const previous = ctx.boss;
+  ctx.boss = { send: async (_name: string, data: SandboxReapTarget) => { jobs.push(data); return "job"; } } as AppContext["boss"];
+  try {
+    await queueSandboxReap(ctx, card.featureId);
+    assert.deepEqual(jobs[0]!.machines, []);
+    await runSandboxReapJob(ctx, jobs[0]!);
+    assert.equal(jobs[1]!.deferrals, 1);
+    const [machine] = await ctx.db.insert(sandboxes).values({
+      projectId: card.projectId, featureId: card.featureId, provider: "docker",
+      externalId: `box-${card.featureId}`, status: "ready", workdir: "/workspace",
+    }).returning();
+    await ctx.db.update(agentRuns).set({ status: "succeeded" }).where(eq(agentRuns.id, run.id));
+    await runSandboxReapJob(ctx, jobs[1]!);
+    assert.equal(destroyed.includes(machine!.externalId), false);
+    // Every card run's settle queues gate.evaluate, including an already-done card.
+    await evaluateFeatureGate(ctx, card.featureId);
+    assert.deepEqual(jobs[2]!.machines, [{ id: machine!.id, generation: machine!.generation }]);
+    await runSandboxReapJob(ctx, jobs[2]!);
+    assert.equal(destroyed.includes(machine!.externalId), true);
+  } finally {
+    ctx.boss = previous;
+  }
+});
+
+test("completion cleanup leaves a card reopened before settlement or reap alone", async () => {
+  const card = await seedCard({ title: "reopened before cleanup" });
+  const jobs: SandboxReapTarget[] = [];
+  const previous = ctx.boss;
+  ctx.boss = { send: async (_name: string, data: SandboxReapTarget) => { jobs.push(data); return "job"; } } as AppContext["boss"];
+  try {
+    await evaluateFeatureGate(ctx, card.featureId);
+    assert.equal(jobs.length, 1);
+    await ctx.db.update(features).set({ status: "active" }).where(eq(features.id, card.featureId));
+    await evaluateFeatureGate(ctx, card.featureId);
+    assert.equal(jobs.length, 1);
+    const count = destroyed.length;
+    await runSandboxReapJob(ctx, jobs[0]!);
+    assert.equal(destroyed.length, count);
+    const [machine] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.featureId, card.featureId));
+    assert.equal(machine!.status, "ready");
+    assert.ok(await stat(ctx.worktrees.workspacePath(card.featureId)));
+  } finally {
+    ctx.boss = previous;
+  }
 });

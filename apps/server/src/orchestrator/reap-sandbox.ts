@@ -181,6 +181,12 @@ export async function queueSwarmTaskSandboxReap(ctx: AppContext, swarmTaskId: st
  * once the driver has been asked again and said the machine is gone.
  */
 export async function reapSandbox(ctx: AppContext, featureId: string, machines?: SandboxGeneration[]): Promise<void> {
+  if (machines !== undefined) {
+    const [feature] = await ctx.db.select({ status: features.status }).from(features).where(eq(features.id, featureId));
+    // A queued completion cleanup must not remove a reopened card's work.
+    // Direct deletion/start-over callers deliberately omit generation targets.
+    if (feature && feature.status !== "done" && feature.status !== "cancelled") return;
+  }
   /**
    * A card is not supposed to finish with an agent still working it,
    * but the gate evaluator and a manual start can race, and killing a

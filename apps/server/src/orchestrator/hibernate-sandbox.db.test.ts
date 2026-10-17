@@ -30,6 +30,7 @@ import {
   MODAL_SWEEP_GRACE_MS,
   MODAL_WARM_WINDOW_MS,
   hibernateSandbox,
+  markSandboxAwake,
   scheduleModalHibernation,
   SandboxGone,
   sweepOrphanModalSandboxes,
@@ -43,7 +44,7 @@ const testDbName = "hibernate_sandbox_test";
 const testUrl = baseUrl.replace(/\/[^/]+$/, `/${testDbName}`);
 
 let ctx: AppContext;
-const jobs: { name: string; data: { sandboxId?: string }; startAfter?: Date }[] = [];
+const jobs: { name: string; data: { sandboxId?: string; generation?: number }; startAfter?: Date }[] = [];
 
 async function scratchDir(prefix: string): Promise<string> {
   return realpath(await mkdtemp(path.join(tmpdir(), prefix)));
@@ -72,7 +73,7 @@ before(async () => {
     db,
     pool,
     boss: {
-      send: async (name: string, data: { sandboxId?: string }, options?: { startAfter?: Date }) => {
+      send: async (name: string, data: { sandboxId?: string; generation?: number }, options?: { startAfter?: Date }) => {
         jobs.push({ name, data, ...(options?.startAfter ? { startAfter: options.startAfter } : {}) });
         return "job";
       },
@@ -877,4 +878,22 @@ test("a hibernation queued for an older incarnation leaves the restored machine 
   assert.equal(stopped, false);
   const [after] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, card.sandboxId));
   assert.equal(after!.status, "ready");
+});
+
+
+test("a transactional wake schedules the new generation and hibernates it", async () => {
+  const card = await seed({ title: "transactional wake", sandboxStatus: "hibernated", imageRef: "im-stored" });
+  const before = await sandboxRow(card.sandboxId);
+  await ctx.db.transaction(async (tx) => {
+    assert.equal(await markSandboxAwake(tx, ctx, card.sandboxId), true);
+  });
+  const [job] = jobsFor(card.sandboxId);
+  assert.equal(job!.data.generation, before.generation + 1);
+  assert.equal(job!.data.generation, (await sandboxRow(card.sandboxId)).generation);
+  await ctx.db.update(sandboxes).set({ lastUsedAt: new Date(0) }).where(eq(sandboxes.id, card.sandboxId));
+  let stopped = false;
+  useModal(idleApi({ running: true, onTerminate: () => { stopped = true; } }));
+  await hibernateSandbox(ctx, card.sandboxId, job!.data.generation);
+  assert.equal(stopped, true);
+  assert.equal((await sandboxRow(card.sandboxId)).status, "hibernated");
 });

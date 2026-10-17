@@ -33,6 +33,12 @@ that identity rather than silently selecting a newer machine. Reaping rechecks t
 captured generation under a row lock before issuing a provider mutation; the row
 update also compares the generation. Hibernation rechecks under its existing lock.
 
+A wake inside a tenant transaction schedules the generation returned by its update,
+not the older version still visible to other connections. When a run settles after
+its card was finished during provisioning, gate evaluation requests a fresh reap
+for the machine that now exists. Queued card reaps also check that the card remains
+finished, so reopening a card preserves its workspace.
+
 This fences Bento's recorded transitions. It cannot revoke a request already
 accepted by a provider, or protect against an operator independently deleting and
 recreating a provider name. Provider-side immutable identities remain preferable.

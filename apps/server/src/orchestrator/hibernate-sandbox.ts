@@ -42,8 +42,12 @@ export async function armModalHibernation(
   ctx: AppContext,
   sandboxId: string,
   delayMs: number = MODAL_WARM_WINDOW_MS,
+  generation?: number,
 ): Promise<void> {
-  const [target] = await ctx.db.select({ generation: sandboxes.generation }).from(sandboxes).where(eq(sandboxes.id, sandboxId));
+  // A transactional caller supplies its returned generation instead of rereading outside it.
+  const [target] = generation === undefined
+    ? await ctx.db.select({ generation: sandboxes.generation }).from(sandboxes).where(eq(sandboxes.id, sandboxId))
+    : [{ generation }];
   if (!target) return;
   await ctx.boss.send(
     HIBERNATE_SANDBOX_QUEUE,
@@ -529,9 +533,9 @@ export async function markSandboxAwake(
     .update(sandboxes)
     .set({ status: "ready", lastUsedAt: new Date(), ...(imageRef ? { imageRef } : {}) })
     .where(and(eq(sandboxes.id, sandboxId), eq(sandboxes.status, "hibernated")))
-    .returning({ provider: sandboxes.provider });
+    .returning({ provider: sandboxes.provider, generation: sandboxes.generation });
   if (!updated) return false;
-  if (updated.provider === "modal") await armModalHibernation(ctx, sandboxId);
+  if (updated.provider === "modal") await armModalHibernation(ctx, sandboxId, MODAL_WARM_WINDOW_MS, updated.generation);
   return true;
 }
 
