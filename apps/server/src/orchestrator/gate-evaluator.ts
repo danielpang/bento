@@ -29,8 +29,14 @@ type Stage = typeof stages.$inferSelect;
  */
 export async function evaluateFeatureGate(ctx: AppContext, featureId: string): Promise<void> {
   const [feature] = await ctx.db.select().from(features).where(eq(features.id, featureId));
-  if (!feature?.currentStageId) return;
-  if (feature.status === "done" || feature.status === "cancelled") return;
+  if (!feature) return;
+  if (feature.status === "done" || feature.status === "cancelled") {
+    // Run settlement arrives here even when a person finished the card
+    // during provisioning. Its earlier reap cannot target the new machine.
+    await queueSandboxReap(ctx, featureId);
+    return;
+  }
+  if (!feature.currentStageId) return;
 
   const [stage] = await ctx.db.select().from(stages).where(eq(stages.id, feature.currentStageId));
   if (!stage) return;

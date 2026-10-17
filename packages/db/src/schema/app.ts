@@ -417,6 +417,7 @@ export const featureEvents = pgTable(
 
 
 export const sandboxes = pgTable("sandboxes", {
+  generation: integer("generation").notNull().default(1),
   id: uuid("id").primaryKey().defaultRandom(),
   projectId: uuid("project_id")
     .notNull()

@@ -1,3 +1,4 @@
+import { matchesSandboxGeneration, withSandboxGeneration, type SandboxGeneration } from "./sandbox-generation.js";
 import { sandboxOperation } from "./sandbox-operations.js";
 import { execFile } from "node:child_process";
 import { readdir } from "node:fs/promises";
@@ -43,6 +44,7 @@ export const MAX_SANDBOX_REAP_DEFERRALS = 240;
 
 /** Which machine a reap job is about. A job names exactly one of these. */
 export interface SandboxReapTarget {
+  machines?: SandboxGeneration[];
   featureId?: string;
   swarmId?: string;
   swarmTaskId?: string;
@@ -104,12 +106,14 @@ const FEATURE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
  * because Fly was slow. A job retries; a click does not.
  */
 export async function queueSandboxReap(ctx: AppContext, featureId: string): Promise<void> {
-  await ctx.boss.send(REAP_SANDBOX_QUEUE, { featureId });
+  const machines = await ctx.db.select({ id: sandboxes.id, generation: sandboxes.generation }).from(sandboxes).where(eq(sandboxes.featureId, featureId));
+  await ctx.boss.send(REAP_SANDBOX_QUEUE, { featureId, machines });
 }
 
 /** The same request for a swarm that is over, through the same queue. */
 export async function queueSwarmSandboxReap(ctx: AppContext, swarmId: string): Promise<void> {
-  await ctx.boss.send(REAP_SANDBOX_QUEUE, { swarmId });
+  const machines = await ctx.db.select({ id: sandboxes.id, generation: sandboxes.generation }).from(sandboxes).where(eq(sandboxes.swarmId, swarmId));
+  await ctx.boss.send(REAP_SANDBOX_QUEUE, { swarmId, machines });
 }
 
 /** A swarm this reaper treats as over: nothing of it will run again. */
@@ -152,7 +156,8 @@ export const FAILED_SWARM_MACHINE_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
  * outlive every leaf.
  */
 export async function queueSwarmTaskSandboxReap(ctx: AppContext, swarmTaskId: string): Promise<void> {
-  await ctx.boss.send(REAP_SANDBOX_QUEUE, { swarmTaskId });
+  const machines = await ctx.db.select({ id: sandboxes.id, generation: sandboxes.generation }).from(sandboxes).where(eq(sandboxes.swarmTaskId, swarmTaskId));
+  await ctx.boss.send(REAP_SANDBOX_QUEUE, { swarmTaskId, machines });
 }
 
 /**
@@ -175,7 +180,13 @@ export async function queueSwarmTaskSandboxReap(ctx: AppContext, swarmTaskId: st
  * failure this exists to prevent. The row is only marked destroyed
  * once the driver has been asked again and said the machine is gone.
  */
-export async function reapSandbox(ctx: AppContext, featureId: string): Promise<void> {
+export async function reapSandbox(ctx: AppContext, featureId: string, machines?: SandboxGeneration[]): Promise<void> {
+  if (machines !== undefined) {
+    const [feature] = await ctx.db.select({ status: features.status }).from(features).where(eq(features.id, featureId));
+    // A queued completion cleanup must not remove a reopened card's work.
+    // Direct deletion/start-over callers deliberately omit generation targets.
+    if (feature && feature.status !== "done" && feature.status !== "cancelled") return;
+  }
   /**
    * A card is not supposed to finish with an agent still working it,
    * but the gate evaluator and a manual start can race, and killing a
@@ -212,6 +223,7 @@ export async function reapSandbox(ctx: AppContext, featureId: string): Promise<v
    * one has a new id. Reaping a single row left the earlier machines
    * with nothing pointing at them.
    */
+  if (rows.some((row) => !matchesSandboxGeneration(row, machines))) return;
   for (const row of rows) {
     let driver: SandboxDriver;
     try {
@@ -231,10 +243,10 @@ export async function reapSandbox(ctx: AppContext, featureId: string): Promise<v
       workdir: row.workdir,
       ...(row.imageRef ? { imageRef: row.imageRef } : {}),
     };
-    await sandboxOperation(ctx, { projectId: row.projectId, workspaceKey: row.id, provider: driver.provider, action: "destroy", handle }, async () => {
+    await withSandboxGeneration(ctx, row, () => sandboxOperation(ctx, { projectId: row.projectId, workspaceKey: row.id, provider: driver.provider, action: "destroy", handle }, async () => {
       await driver.destroy(handle);
       if (driver.exists && await driver.exists(handle)) throw new Error("Sandbox is still there after being destroyed");
-    });
+    }));
 
     // Drivers that can answer are asked. One that cannot is taken at
     // its word, which is right for the local ones: a container on
@@ -244,7 +256,7 @@ export async function reapSandbox(ctx: AppContext, featureId: string): Promise<v
       throw new Error(`sandbox ${row.externalId} is still there after being destroyed; will retry`);
     }
 
-    await ctx.db.update(sandboxes).set({ status: "destroyed" }).where(eq(sandboxes.id, row.id));
+    await ctx.db.update(sandboxes).set({ status: "destroyed" }).where(and(eq(sandboxes.id, row.id), eq(sandboxes.generation, row.generation)));
     console.log(`reaped sandbox ${row.externalId} for finished feature ${featureId}`);
   }
 
@@ -287,7 +299,7 @@ export async function reapSandbox(ctx: AppContext, featureId: string): Promise<v
 export async function reapSwarmSandbox(
   ctx: AppContext,
   swarmId: string,
-  options: { now?: Date } = {},
+  options: { now?: Date; machines?: SandboxGeneration[] } = {},
 ): Promise<void> {
   const now = options.now ?? new Date();
   await ctx.db.transaction(async (tx) => {
@@ -342,8 +354,9 @@ export async function reapSwarmSandbox(
       );
 
     for (const row of rows) {
+      if (!matchesSandboxGeneration(row, options.machines)) continue;
       if (!(await destroyAndConfirm(ctx, row, `swarm ${swarmId}`))) continue;
-      await tx.update(sandboxes).set({ status: "destroyed" }).where(eq(sandboxes.id, row.id));
+      await tx.update(sandboxes).set({ status: "destroyed" }).where(and(eq(sandboxes.id, row.id), eq(sandboxes.generation, row.generation)));
       console.log(`reaped sandbox ${row.externalId} for finished swarm ${swarmId}`);
     }
   });
@@ -382,10 +395,10 @@ async function destroyAndConfirm(
     workdir: row.workdir,
     ...(row.imageRef ? { imageRef: row.imageRef } : {}),
   };
-  await sandboxOperation(ctx, { projectId: row.projectId, workspaceKey: row.id, provider: driver.provider, action: "destroy", handle }, async () => {
+  await withSandboxGeneration(ctx, row, () => sandboxOperation(ctx, { projectId: row.projectId, workspaceKey: row.id, provider: driver.provider, action: "destroy", handle }, async () => {
       await driver.destroy(handle);
       if (driver.exists && await driver.exists(handle)) throw new Error("Sandbox is still there after being destroyed");
-    });
+    }));
   if (driver.exists && (await driver.exists(handle))) {
     throw new Error(`sandbox ${row.externalId} is still there after being destroyed; will retry`);
   }
@@ -533,7 +546,7 @@ async function removeFeatureWorkspace(ctx: AppContext, featureId: string): Promi
  * machine belongs to, and a single function taking either would have
  * had to guess which column a null meant.
  */
-export async function reapSwarmTaskSandbox(ctx: AppContext, swarmTaskId: string): Promise<void> {
+export async function reapSwarmTaskSandbox(ctx: AppContext, swarmTaskId: string, machines?: SandboxGeneration[]): Promise<void> {
   /**
    * Never under a live agent. A leaf that landed should have no run on
    * it, but a resolver started for its conflict and a worker the
@@ -560,9 +573,10 @@ export async function reapSwarmTaskSandbox(ctx: AppContext, swarmTaskId: string)
     .from(sandboxes)
     .where(and(eq(sandboxes.swarmTaskId, swarmTaskId), ne(sandboxes.status, "destroyed")));
 
+  if (rows.some((row) => !matchesSandboxGeneration(row, machines))) return;
   for (const row of rows) {
     if (!(await destroyAndConfirm(ctx, row, `swarm task ${swarmTaskId}`))) continue;
-    await ctx.db.update(sandboxes).set({ status: "destroyed" }).where(eq(sandboxes.id, row.id));
+    await ctx.db.update(sandboxes).set({ status: "destroyed" }).where(and(eq(sandboxes.id, row.id), eq(sandboxes.generation, row.generation)));
     console.log(`reaped sandbox ${row.externalId} for finished swarm task ${swarmTaskId}`);
   }
 
@@ -659,7 +673,7 @@ export async function runSandboxReapJob(ctx: AppContext, data: SandboxReapTarget
     if (!(err instanceof SandboxReapDeferred)) throw err;
     const deferrals = (data.deferrals ?? 0) + 1;
     if (deferrals > MAX_SANDBOX_REAP_DEFERRALS) throw err;
-    await rescheduleSandboxReap(ctx, err, deferrals);
+    await rescheduleSandboxReap(ctx, new SandboxReapDeferred(err.message, { ...err.reap, ...(data.machines ? { machines: data.machines } : {}) }), deferrals);
   }
 }
 
@@ -668,9 +682,9 @@ async function reapTarget(ctx: AppContext, data: SandboxReapTarget, now?: Date):
   // The leaf is asked first because it is the narrowest. A target
   // naming none of them is one nothing can act on, so it is dropped
   // rather than retried forever.
-  if (data.swarmTaskId) await reapSwarmTaskSandbox(ctx, data.swarmTaskId);
-  else if (data.swarmId) await reapSwarmSandbox(ctx, data.swarmId, now ? { now } : {});
-  else if (data.featureId) await reapSandbox(ctx, data.featureId);
+  if (data.swarmTaskId) await reapSwarmTaskSandbox(ctx, data.swarmTaskId, data.machines);
+  else if (data.swarmId) await reapSwarmSandbox(ctx, data.swarmId, { ...(now ? { now } : {}), ...(data.machines ? { machines: data.machines } : {}) });
+  else if (data.featureId) await reapSandbox(ctx, data.featureId, data.machines);
 }
 
 /**

@@ -1466,7 +1466,7 @@ test("stopping a swarm hands its own machine to the reaper", async () => {
   assert.equal((await post(`/api/swarms/${swarm.id}/cancel`)).status, 200);
   assert.deepEqual(
     queued.filter((job) => job.queue === "sandbox.reap").map((job) => job.data),
-    [{ swarmId: swarm.id }],
+    [{ swarmId: swarm.id, machines: [] }],
     "the machine is queued rather than destroyed inline, the way a finished card's is",
   );
 });
@@ -2494,7 +2494,7 @@ test("archiving a finished swarm reaps its machine, and archiving a live one doe
     assert.equal(archiveReapsSandboxes({ status }), true, `${status} is finished with`);
   }
 
-  await sandboxFor(live.id, "bento-swarm-4");
+  const box = await sandboxFor(live.id, "bento-swarm-4");
   queued.length = 0;
   await patch(`/api/swarms/${live.id}`, { archived: true });
   assert.equal(
@@ -2508,7 +2508,7 @@ test("archiving a finished swarm reaps its machine, and archiving a live one doe
   await patch(`/api/swarms/${live.id}`, { archived: true });
   const reaps = queued.filter((job) => job.queue === "sandbox.reap");
   assert.equal(reaps.length, 1, "a finished one does not");
-  assert.deepEqual(reaps[0]!.data, { swarmId: live.id });
+  assert.deepEqual(reaps[0]!.data, { swarmId: live.id, machines: [{ id: box.id, generation: box.generation }] });
 
   // And restoring it simply takes it out again: the next run
   // provisions a machine the way the first one appeared.
