@@ -291,6 +291,55 @@ export function deleteAccountMessage(input: LinkEmailInput): Message {
   return { to: input.email, subject, text, html: body };
 }
 
+export interface WaitlistInvitationEmailInput {
+  email: string;
+  signupUrl: string;
+  expiresInDays: number;
+  appUrl: string;
+}
+
+/**
+ * The waitlist invitation. Bound to an address, not a bearer token:
+ * the person still proves the mailbox through verification or a
+ * social provider that returns this same address.
+ */
+export function waitlistInvitationMessage(input: WaitlistInvitationEmailInput): Message {
+  const subject = "You can create a Bento account";
+  const note = `The invite expires in ${input.expiresInDays} days. No action is needed if you did not request this.`;
+  const footerNote = "You are receiving this because this address joined the Bento waitlist.";
+
+  const text = renderText({
+    lines: [
+      "You can now create a Bento account.",
+      "",
+      `Create it with this exact address: ${input.email}. An invite applies only to that address.`,
+      "",
+      "Create your account:",
+      input.signupUrl,
+      "",
+      `The invite expires in ${input.expiresInDays} days.`,
+      "No action is needed if you did not request this.",
+    ],
+    footerNote,
+    appUrl: input.appUrl,
+  });
+
+  const body = renderEmail({
+    appUrl: input.appUrl,
+    preheader: "Your waitlist invite is ready.",
+    heading: "You can create a Bento account",
+    paragraphs: [
+      "You can now create a Bento account.",
+      html`Create it with this exact address: <strong>${input.email}</strong>. An invite applies only to that address.`,
+    ],
+    action: { label: "Create your account", url: input.signupUrl },
+    note,
+    footerNote,
+  });
+
+  return { to: input.email, subject, text, html: body };
+}
+
 export interface NoticeEmailInput {
   to: string;
   subject: string;
