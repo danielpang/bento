@@ -158,7 +158,7 @@ test("an inaccessible GitHub repository is explained without the git command", (
   );
   const sentence = inaccessibleCloneExplanation("acme/missing", "https://github.com/acme/missing.git", err);
   assert.match(sentence ?? "", /acme\/missing could not be cloned/);
-  assert.match(sentence ?? "", /GitHub connection cannot see a private repository/);
+  assert.match(sentence ?? "", /GitHub token cannot read the repository/);
   assert.match(sentence ?? "", /Settings, GitHub/);
   assert.doesNotMatch(sentence ?? "", /Command failed|credential\.helper|BENTO_PUSH_TOKEN/);
 });
@@ -276,7 +276,7 @@ test("createRepositorySeed stops when GitHub will not show the repository", asyn
     (err: unknown) => {
       assert.ok(isRepositoryAccessError(err));
       assert.match(err.message, /danielpang\/bento-cloud could not be cloned/);
-      assert.match(err.message, /GitHub connection cannot see a private repository/);
+      assert.match(err.message, /GitHub token cannot read the repository/);
       assert.doesNotMatch(err.message, /Command failed|credential\.helper|BENTO_PUSH_TOKEN/);
       return true;
     },

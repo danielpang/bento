@@ -110,10 +110,10 @@ export function isRepositoryAccessError(err: unknown): err is RepositoryAccessEr
 /** What to tell a person when GitHub will not show the repository at all. */
 export function inaccessibleRepositoryMessage(label: string): string {
   return (
-    `${label} could not be cloned. GitHub says the repository was not found. ` +
-    "That is also what GitHub says when this organization's GitHub connection cannot see a private repository, " +
-    "and when the repository was renamed or deleted. Check it under Settings, Repositories. " +
-    "Then save a GitHub token under Settings, GitHub, or install the GitHub App on the repository, and run again."
+    `${label} could not be cloned because this organization's GitHub token cannot read the repository. ` +
+    "GitHub answers \"repository not found\" when the token has no access to a private repository " +
+    "(and also when the repository was renamed or deleted). " +
+    `Install the GitHub App on ${label}, or save a token that can read it under Settings, GitHub, then run again.`
   );
 }
 
