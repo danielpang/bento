@@ -74,3 +74,44 @@ test("an agent left by another CLI is found under its own command", async () => 
   assert.equal(await stopLeftoverAgent(onlyCodex, handle, [argv, ["codex"]]), "stopped");
   assert.equal(sandbox.running, false);
 });
+
+// Against the local Docker daemon and sandbox image, like the driver's own e2e test.
+test(
+  "a leftover agent in a real Docker sandbox is found by its command and stopped",
+  { skip: process.env.BENTO_DOCKER_E2E !== "1", timeout: 120_000 },
+  async () => {
+    const { DockerDriver, collectExec, createDockerClient } = await import("@bento/sandbox");
+    const { mkdtemp, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const path = await import("node:path");
+    const { randomUUID } = await import("node:crypto");
+    const directory = await mkdtemp(path.join(tmpdir(), "bento-leftover-test-"));
+    const driver = new DockerDriver(createDockerClient(), "none");
+    const sandbox = await driver.provision({
+      projectId: "leftover-test",
+      workspaceKey: `leftover-test-${randomUUID()}`,
+      hostWorkspacePath: directory,
+      network: "restricted",
+    });
+    try {
+      assert.equal(await stopLeftoverAgent(driver, sandbox, [["env"]], { stopMs: 10_000 }), "none", "an empty machine");
+
+      const finished = await collectExec(driver.exec(sandbox, ["env", "true"], { sessionKey: randomUUID() }));
+      assert.equal(finished.exitCode, 0);
+      assert.equal(
+        await stopLeftoverAgent(driver, sandbox, [["env"]], { stopMs: 10_000 }),
+        "none",
+        "an agent that already finished is not a leftover, which every Docker run once read as one",
+      );
+
+      for await (const chunk of driver.exec(sandbox, ["env", "sh", "-c", "echo up; sleep 300"], { sessionKey: randomUUID() })) {
+        if (chunk.kind === "stdout") break;
+      }
+      assert.equal(await stopLeftoverAgent(driver, sandbox, [["env"]], { stopMs: 10_000 }), "stopped");
+      assert.equal(await stopLeftoverAgent(driver, sandbox, [["env"]], { stopMs: 10_000 }), "none", "and it is gone");
+    } finally {
+      await driver.destroy(sandbox).catch(() => {});
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);

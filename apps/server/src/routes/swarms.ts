@@ -1431,7 +1431,14 @@ export function swarmRoutes(ctx: AppContext) {
       const now = new Date();
       const [started] = await db(c, ctx)
         .update(swarms)
-        .set({ status: "running", pausedReason: null, branchReleasedAt: null, updatedAt: now })
+        .set({
+          status: "running",
+          pausedReason: null,
+          branchReleasedAt: null,
+          // Resuming a usage limit pause overrides the reset: the failures so far count as handled.
+          ...(swarm.status === "paused" && swarm.pausedReason === "usage_limit" ? { pausedUntil: now } : {}),
+          updatedAt: now,
+        })
         .where(eq(swarms.id, swarm.id))
         .returning();
       deferAfterCommit(c, () => enqueueSwarmTick(ctx, swarm.id));

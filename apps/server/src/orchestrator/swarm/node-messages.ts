@@ -1,5 +1,7 @@
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
-import { swarmMessages, type Db } from "@bento/db";
+import { agentRuns, swarmMessages, type Db } from "@bento/db";
+import { unbilledReason } from "../../unbilled-reasons.js";
+import { isUsageLimitError } from "../usage-limit.js";
 
 /**
  * Messages people leave on one node, and how they reach an agent.
@@ -123,16 +125,27 @@ export async function confirmSwarmMessagesDelivered(db: Db, runId: string): Prom
  * agent on the leaf is handed them. Only a node's: a planner's unread
  * messages are put back by the coordinator, which reads how the run
  * ended to decide whether they wake another planner.
+ *
+ * A run that never reached its agent, whose sandbox failed (unbilled),
+ * or whose account hit a usage limit also gives back what it was
+ * handed: the next agent starts fresh and would never see it.
  */
 export async function requeueUndeliveredNodeMessages(db: Db, runId: string): Promise<void> {
+  const [run] = await db
+    .select({ status: agentRuns.status, error: agentRuns.error, agentStartedAt: agentRuns.agentStartedAt })
+    .from(agentRuns)
+    .where(eq(agentRuns.id, runId))
+    .limit(1);
+  const unheard =
+    !run?.agentStartedAt || (run.status === "failed" && (unbilledReason(run.error) !== null || isUsageLimitError(run.error)));
   await db
     .update(swarmMessages)
-    .set({ status: "queued", runId: null, sentAt: null })
+    .set({ status: "queued", runId: null, sentAt: null, deliveredAt: null })
     .where(
       and(
         eq(swarmMessages.runId, runId),
-        eq(swarmMessages.status, "sent"),
         sql`${swarmMessages.taskId} is not null`,
+        inArray(swarmMessages.status, unheard ? ["sent", "delivered"] : ["sent"]),
       ),
     );
 }
