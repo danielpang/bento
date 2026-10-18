@@ -134,6 +134,7 @@ const shapes = {
       description,
       nodeType: z.enum(["plan", "leaf"]).default("leaf"),
       weight: z.number().int().min(1).max(100).default(1),
+      replaces: uuidArg.nullish(),
     })
     .strip(),
   split_task: z
@@ -210,6 +211,7 @@ const TOOLS: Record<ToolName, ToolSpec> = {
           description: "leaf (work an agent does) or plan (a node to decompose).",
         },
         weight: { type: "integer", description: "Rough size, 1 to 100. Ordering only, never billing." },
+        replaces: str("The task this one replaces, usually one you cancelled. The new task is placed beside it and linked to it, and takes its parent when parentId is omitted."),
       },
       required: ["title"],
       additionalProperties: false,
@@ -255,11 +257,12 @@ const TOOLS: Record<ToolName, ToolSpec> = {
     },
   },
   cancel_task: {
-    description: "Withdraws a task and everything under it. Use it for work the plan no longer needs.",
+    description:
+      "Withdraws a task and everything under it. Use it for work the plan no longer needs. Give the reason: the person reads it on the task. If you add work in its place, pass this task as replaces on create_task.",
     roles: ["planner", "subplanner"],
     inputSchema: {
       type: "object",
-      properties: { taskId: str("The node to withdraw."), reason: str("Why, for the record.") },
+      properties: { taskId: str("The node to withdraw."), reason: str("Why, in a sentence the person reads on the task.") },
       required: ["taskId"],
       additionalProperties: false,
     },
@@ -597,6 +600,25 @@ async function nextPosition(ctx: AppContext, swarmId: string, parentId: string |
   return row?.next ?? 0;
 }
 
+/** The position right after a sibling, shifting the ones behind it down by one. */
+async function makeRoomAfter(
+  ctx: AppContext,
+  swarmId: string,
+  sibling: { parentId: string | null; position: number },
+): Promise<number> {
+  await ctx.db
+    .update(swarmTasks)
+    .set({ position: sql`${swarmTasks.position} + 1` })
+    .where(
+      and(
+        eq(swarmTasks.swarmId, swarmId),
+        sibling.parentId ? eq(swarmTasks.parentId, sibling.parentId) : sql`${swarmTasks.parentId} is null`,
+        sql`${swarmTasks.position} > ${sibling.position}`,
+      ),
+    );
+  return sibling.position + 1;
+}
+
 async function getTree(ctx: AppContext, caller: SwarmCaller): Promise<string> {
   const rows = await ctx.db
     .select()
@@ -631,6 +653,9 @@ async function getTree(ctx: AppContext, caller: SwarmCaller): Promise<string> {
     weight: task.weight,
     branch: task.branchName,
     hasReport: Boolean(task.report),
+    ...(typeof task.flags.cancelReason === "string" ? { cancelReason: task.flags.cancelReason } : {}),
+    ...(typeof task.flags.replaces === "string" ? { replaces: task.flags.replaces } : {}),
+    ...(typeof task.flags.replacedBy === "string" ? { replacedBy: task.flags.replacedBy } : {}),
     costUsd: Number(task.costMeasuredUsd) + Number(task.costEstimatedUsd) + Number(task.costAssumedUsd),
   }));
   return tree.length === 0
@@ -644,8 +669,9 @@ async function createTask(
   args: Args<"create_task">,
   events: BoardEvent[],
 ): Promise<string> {
-  let parentId: string | null = args.parentId ?? null;
-  let parentRelation = args.parentRelation ?? "contains";
+  const replaced = args.replaces ? await requireTask(ctx, caller, args.replaces) : null;
+  let parentId: string | null = args.parentId ?? (args.parentId === undefined ? replaced?.parentId ?? null : null);
+  let parentRelation = args.parentRelation ?? (replaced && parentId === replaced.parentId ? replaced.parentRelation : "contains");
   if (parentId) {
     const parent = await requireTask(ctx, caller, parentId);
     if (parent.status === "cancelled") {
@@ -673,11 +699,14 @@ async function createTask(
       swarmId: caller.swarmId,
       parentId,
       parentRelation,
-      position: await nextPosition(ctx, caller.swarmId, parentId),
+      position: replaced && replaced.parentId === parentId
+        ? await makeRoomAfter(ctx, caller.swarmId, replaced)
+        : await nextPosition(ctx, caller.swarmId, parentId),
       nodeType: args.nodeType,
       title: args.title,
       description: args.description,
       weight: args.weight,
+      ...(replaced ? { flags: { replaces: replaced.id } } : {}),
     })
     .returning();
   if (!created) throw new Error("task insert returned no row");
@@ -686,8 +715,22 @@ async function createTask(
     kind: "created",
     toStatus: created.status,
     runId: caller.runId,
+    ...(replaced ? { detail: { replaces: replaced.id, note: `Replaces "${replaced.title}"` } } : {}),
   });
   events.push(taskEvent(caller, created.id, created.status));
+  if (replaced) {
+    await ctx.db
+      .update(swarmTasks)
+      .set({ flags: sql`${swarmTasks.flags} || jsonb_build_object('replacedBy', ${created.id}::text)`, updatedAt: new Date() })
+      .where(eq(swarmTasks.id, replaced.id));
+    await ctx.db.insert(swarmTaskEvents).values({
+      taskId: replaced.id,
+      kind: "note",
+      runId: caller.runId,
+      detail: { replacedBy: created.id, note: `Replaced by "${created.title}"` },
+    });
+    events.push(taskEvent(caller, replaced.id));
+  }
   return `Created ${created.nodeType} node ${created.id}. It is ${created.status}; assign it when it is ready to be worked.`;
 }
 

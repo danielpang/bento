@@ -78,6 +78,8 @@ export function SwarmNodeDrawer({
   actionError,
   swarmStatus,
   startBlocker = null,
+  related = {},
+  onOpenTask,
 }: {
   task: SwarmTask;
   /** The rolled up figures for this node, from the shared model. */
@@ -160,6 +162,9 @@ export function SwarmNodeDrawer({
    * prerequisite, a paused swarm, no worker agent). See `leafStartBlocker`.
    */
   startBlocker?: string | null;
+  /** The task this one replaced, and the one that replaced it, by the planner's create_task. */
+  related?: { replaces?: RelatedTask; replacedBy?: RelatedTask };
+  onOpenTask?: (taskId: string) => void;
 }) {
   const panel = useDismissable<HTMLElement>(onClose);
   const [confirming, setConfirming] = useState(false);
@@ -208,7 +213,8 @@ export function SwarmNodeDrawer({
   const [messageText, setMessageText] = useState("");
   const [sending, setSending] = useState(false);
   const [messageNote, setMessageNote] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
-  const flags = Object.entries(task.flags).filter(([key]) => key !== "landingError");
+  const flags = Object.entries(task.flags).filter(([key]) => !HIDDEN_FLAGS.has(key));
+  const cancelNotice = <CancelNotice task={task} related={related} onOpenTask={onOpenTask} />;
   // The fetched list when there is one, and the plan row's otherwise.
   // A fetched empty list is an answer, not a missing one, so the
   // fallback is on the detail being absent rather than on it being
@@ -389,6 +395,7 @@ export function SwarmNodeDrawer({
             {longNote}
           </p>
         )}
+        {cancelNotice}
 
         <section className="section swarm-node-actions">
           <div className="feature-section-heading">
@@ -672,6 +679,7 @@ export function SwarmNodeDrawer({
           <Tabs.Content value="output" forceMount hidden={tab !== "output"} className="feature-pane swarm-node-pane swarm-output-pane">
             <section className="section">
               <span className="label">Worker logs</span>
+              {cancelNotice}
               {mergeQueueFailure && (
                 <div className="swarm-failure-detail" role="status">
                   <strong>{landingFailure}</strong>
@@ -861,6 +869,44 @@ export function SwarmNodeDrawer({
   );
 }
 
+interface RelatedTask {
+  id: string;
+  title: string;
+}
+
+const HIDDEN_FLAGS = new Set(["landingError", "cancelReason", "cancelledBy", "replaces", "replacedBy"]);
+
+/**
+ * Why a task was withdrawn and what took its place, said where a person
+ * looks first. The reason is the planner's own words, so it is text.
+ */
+export function CancelNotice({ task, related, onOpenTask }: {
+  task: SwarmTask;
+  related: { replaces?: RelatedTask; replacedBy?: RelatedTask };
+  onOpenTask?: (taskId: string) => void;
+}) {
+  const link = (other: RelatedTask) => onOpenTask
+    ? <button type="button" className="swarm-related-link" onClick={() => onOpenTask(other.id)}>{other.title}</button>
+    : <span>{other.title}</span>;
+  if (task.status === "cancelled") {
+    const reason = typeof task.flags.cancelReason === "string" ? task.flags.cancelReason : null;
+    const who = task.flags.cancelledBy === "planner" ? "The planner cancelled this task."
+      : task.flags.cancelledBy === "person" ? "This task was cancelled by hand."
+      : "This task was cancelled.";
+    return (
+      <div className="swarm-attention-note swarm-cancel-notice" role="status">
+        <strong>{who}</strong>
+        {reason ? <p>{reason}</p> : task.flags.cancelledBy === "planner" && <p>The planner gave no reason.</p>}
+        {related.replacedBy && <p>Replaced by {link(related.replacedBy)}.</p>}
+      </div>
+    );
+  }
+  if (related.replaces) {
+    return <p className="swarm-cost-note">Replaces {link(related.replaces)}, which was cancelled.</p>;
+  }
+  return null;
+}
+
 /** The provider an attempt ran on, for beta testers: an operator's detail, see sandbox-provider.ts. */
 function SandboxProviderNote({ provider }: { provider: string | null | undefined }) {
   const words = sandboxProviderWords(provider);
@@ -940,7 +986,9 @@ export function eventNote(event: SwarmTaskEvent): string {
             ? detail.landingFailed
             : typeof detail.rejection === "string"
               ? detail.rejection
-              : "";
+              : typeof detail.reason === "string"
+                ? detail.reason
+                : "";
   const firstLine = said.split("\n").find((line) => line.trim() !== "")?.trim() ?? "";
   return firstLine;
 }

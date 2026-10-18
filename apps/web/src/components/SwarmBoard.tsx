@@ -20,6 +20,7 @@ import type {
   SwarmDetail,
   SwarmNodeDetail,
   SwarmSummary,
+  SwarmTask,
 } from "../swarm/types.js";
 import {
   boardSearch,
@@ -67,6 +68,7 @@ export function SwarmBoard({
   surfaces,
   repositoriesMissing = false,
   onAddRepository,
+  agentProfiles,
 }: {
   projectId: string;
   /**
@@ -85,6 +87,8 @@ export function SwarmBoard({
   repositoriesMissing?: boolean;
   /** Opens Repositories, from the warning inside New swarm. */
   onAddRepository?: () => void;
+  /** The project's agents, so an edit in the Agents panel reaches the pickers here. */
+  agentProfiles?: unknown;
 }) {
   const storage = useMemo(() => browserStorage(), []);
   const [swarms, setSwarms] = useState<SwarmSummary[] | null>(null);
@@ -310,7 +314,7 @@ export function SwarmBoard({
         if (!cancelled) setAgents([]);
       });
     return () => { cancelled = true; };
-  }, [creating, editingSettings]);
+  }, [creating, editingSettings, agentProfiles]);
   /** Whether the reopen dialog is up for the swarm on screen. */
   const [reopening, setReopening] = useState(false);
   /** What this swarm produced for people to read, and the one that is open. */
@@ -492,6 +496,8 @@ export function SwarmBoard({
           actionError={taskActionError}
           swarmStatus={detail?.swarm.status}
           startBlocker={detail ? leafStartBlocker(task, detail.tasks, detail.swarm) : null}
+          related={relatedTasks(task, detail?.tasks ?? [])}
+          onOpenTask={(id) => { setTaskActionError(""); setTaskId(id); }}
           onClose={() => { setTaskActionError(""); setTaskId(null); }}
           // act reloads the detail, so the rings above the node move
           // as soon as the reconciler has rolled the finish up.
@@ -646,4 +652,18 @@ export function SwarmBoard({
       )}
     </div>
   );
+}
+
+/** The tasks a replacement links, by the ids the planner wrote on each. */
+export function relatedTasks(
+  task: SwarmTask,
+  tasks: SwarmTask[],
+): { replaces?: { id: string; title: string }; replacedBy?: { id: string; title: string } } {
+  const find = (id: unknown) => {
+    const other = typeof id === "string" ? tasks.find((candidate) => candidate.id === id) : undefined;
+    return other ? { id: other.id, title: other.title } : undefined;
+  };
+  const replaces = find(task.flags.replaces);
+  const replacedBy = find(task.flags.replacedBy);
+  return { ...(replaces ? { replaces } : {}), ...(replacedBy ? { replacedBy } : {}) };
 }

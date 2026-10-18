@@ -9507,6 +9507,29 @@ a.hours-person-name:hover {
   border-radius: 0 var(--radius) var(--radius) 0;
 }
 
+/* Why the planner withdrew a task, and what took its place. */
+.swarm-cancel-notice {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.swarm-cancel-notice strong { color: var(--text); font-weight: 600; }
+
+.swarm-cancel-notice p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.swarm-related-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--brand);
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.swarm-related-link:hover { text-decoration: underline; }
+
 .swarm-reassign {
   display: flex;
   align-items: center;
@@ -10125,7 +10148,8 @@ a.hours-person-name:hover {
 .swarm-node-pane > .section > .label,
 .swarm-node-body .swarm-worker-output-head > .label { font-family: var(--sans); font-size: 13px; font-weight: 600; color: var(--text); letter-spacing: 0; text-transform: none; }
 .swarm-node-pane > .section > .label::after { display: none; }
-.swarm-node-pane > .swarm-node-actions { padding: 16px; border: 1px solid var(--line-bright); border-radius: var(--radius-lg); background: var(--panel-raised); margin-bottom: 2px; }
+.swarm-node-pane > .swarm-node-actions,
+.swarm-node-pane > .swarm-node-actions:first-child { padding: 16px; border: 1px solid var(--line-bright); border-radius: var(--radius-lg); background: var(--panel-raised); margin-bottom: 2px; }
 .swarm-node-actions .feature-section-heading { align-items: flex-start; flex-direction: column; gap: 3px; }
 .swarm-node-actions .feature-section-heading > span { font-size: 12px; color: var(--text-dim); }
 .swarm-node-actions .action-grid { grid-template-columns: minmax(0, 1fr); }

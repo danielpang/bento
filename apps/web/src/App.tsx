@@ -1244,6 +1244,7 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
   const onSwarmBoard = swarming && projectId !== null && hasProjects;
   const actions: NavAction[] = onSwarmBoard
     ? [
+        { id: "agents", label: "Agents", onSelect: () => { setAgentsIntent(null); setPanel("agents"); } },
         ...(hasProjects ? [{ id: "repos", label: "Repositories", onSelect: () => setPanel("repos") }] : []),
       ]
     : [
@@ -1432,6 +1433,7 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
             surfaces={swarmSurfaces}
             repositoriesMissing={repoCount === 0}
             onAddRepository={() => setPanel("repos")}
+            agentProfiles={profiles}
           />
         </Suspense>
       ) : boardPending ? (

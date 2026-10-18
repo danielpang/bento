@@ -76,6 +76,14 @@ export async function cancelTaskTree(
    * because nothing may pull a branch out from under it; a person's
    * cancel asks first (`withdrawTaskLandings`) and refuses instead.
    */
+  if (cancelled.some((row) => row.id === input.task.id)) {
+    const record: Record<string, string> = { cancelledBy: input.runId ? "planner" : "person" };
+    if (input.reason?.trim()) record.cancelReason = input.reason.trim();
+    await tx
+      .update(swarmTasks)
+      .set({ flags: sql`${swarmTasks.flags} || ${JSON.stringify(record)}::jsonb` })
+      .where(eq(swarmTasks.id, input.task.id));
+  }
   if (cancelled.length > 0) {
     const rows = await tx
       .select({ id: swarmLandings.id, status: swarmLandings.status })
