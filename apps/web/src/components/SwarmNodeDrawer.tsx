@@ -986,7 +986,7 @@ export function eventNote(event: SwarmTaskEvent): string {
             ? detail.landingFailed
             : typeof detail.rejection === "string"
               ? detail.rejection
-              : typeof detail.reason === "string"
+              : event.toStatus === "cancelled" && typeof detail.reason === "string"
                 ? detail.reason
                 : "";
   const firstLine = said.split("\n").find((line) => line.trim() !== "")?.trim() ?? "";
