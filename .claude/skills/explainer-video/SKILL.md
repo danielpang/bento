@@ -1,6 +1,6 @@
 ---
 name: explainer-video
-description: Make a short animated explainer video about a Bento feature in the house style (hand drawn ink on cream paper and dark navy, a serif headline, a word by word caption with one orange word, and the two Bento mascots, the orange square and the blue rectangle from the logo). Renders a vertical 1080x1920 and a 16:9 1920x1080 MP4 with a soundtrack. Use when someone asks for an explainer, launch, promo, or social video, or an animation of how something in Bento works.
+description: Make a short animated explainer video about a Bento feature in the house style (hand drawn ink on cream paper, a serif headline, a word by word caption with one orange word, and the two Bento mascots, the orange square and the blue rectangle from the logo). Renders a vertical 1080x1920 and a 16:9 1920x1080 MP4 with a soundtrack. Use when someone asks for an explainer, launch, promo, or social video, or an animation of how something in Bento works.
 ---
 
 # Bento explainer videos
@@ -54,9 +54,10 @@ browser), ffmpeg, and Python with numpy and Pillow.
 
 Take these from the reference, do not reinvent them per video.
 
-- **Two palettes**, alternating between scenes to mark a change of
-  topic: `paper` (cream, dark ink) and `night` (navy with a faint grid,
-  light ink). Defined in `PAL`.
+- **Light background, always.** Every scene uses the `paper` palette
+  (cream, dark ink). The kit still has a navy `night` palette, but Bento
+  videos do not use it: a change of topic is marked by the cross fade and
+  the new headline, not by a background change.
 - **Hand drawn everything.** Shapes are built from point lists and drawn
   with `stroke` (two wobbly passes) and filled with `hatch` (short
   diagonal strokes). Lines boil: the random seed is re-rolled 8 times a
@@ -113,7 +114,7 @@ call. Copy `scenes/starter.js` to begin.
 
 ```js
 { d: 7.0,                       // seconds
-  theme: "paper" | "night",
+  theme: "paper",                // always paper; see The style
   head: ["two short", "lines"],  // [] for none
   cap: "words with one *highlight*",
   face: "dots",                  // corner mascots' expression; null hides them
@@ -146,8 +147,7 @@ stack), `machine` (a sandbox), `cabinet` (a big 3D box of work),
 
 ## Sound
 
-`audio.py` lays a soft plucked loop (96 bpm, C Am F G, an octave lower in
-night scenes) under the whole video and adds each scene's `sfx` cues.
+`audio.py` lays a soft plucked loop (96 bpm, C Am F G) under the whole video and adds each scene's `sfx` cues.
 Give every visible event a sound: pops for things appearing, thuds for
 landings and stamps, whooshes for things flying, noise bursts for cracks.
 The music is synthesized, so offer to swap in a licensed track if the

@@ -39,7 +39,7 @@ function outro(lt) {
 video({ scenes: [
   { d: 4.0, theme: "paper", head: ["Some work", "starts small."], cap: "a *card* on the board", face: "dots", art: intro,
     sfx: [[0.2, "clicks", 0.05, 1.6, 0.27], [1.6, "pop", 0.15, 79]] },
-  { d: 4.0, theme: "night", head: ["and then", "it ships"], cap: "tested and *landed*", face: "happy", art: payoff,
+  { d: 4.0, theme: "paper", head: ["and then", "it ships"], cap: "tested and *landed*", face: "happy", art: payoff,
     sfx: [[0.6, "chime", 0.06, [72, 76, 79, 84], 1.8], [1.2, "boing", 0.05, 0.5]] },
   { d: 4.0, theme: "paper", head: [], cap: "", face: null, art: outro, center: true,
     sfx: [[0.9, "chime", 0.06, [60, 64, 67, 72], 2.5]] },
