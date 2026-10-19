@@ -45,20 +45,32 @@ function jar(x, y, w, h, level, fade = 0) { // a context window: an open glass t
   stroke([[x - 12, y], [x + 8, y]], { w: 4, passes: 1 }); stroke([[x + w - 8, y], [x + w + 12, y]], { w: 4, passes: 1 });
 }
 
-// 1. one agent, one long chat: the same prompt, over and over
+// 1. one agent, one long chat: the same few prompts, typed over and over
+const PROMPTS = ["create a plan", "build this", "fix this", "write tests", "fix this", "build this", "fix this", "write tests"];
+function promptBubble(text, cx, cy, s = 1, tilt = 0) {
+  ctx.save(); ctx.translate(cx, cy); ctx.rotate(tilt); ctx.scale(s, s);
+  ctx.font = "600 34px Sans"; const w = ctx.measureText(text).width + 56, h = 58;
+  const p = roundPts(-w / 2, -h / 2, w, h, 18); fillPts(p, P.card); stroke(p, { closed: true, w: 2.6 });
+  fillPts([[-w / 2 + 22, h / 2 - 2], [-w / 2 + 12, h / 2 + 16], [-w / 2 + 40, h / 2 - 2]], P.card);
+  stroke([[-w / 2 + 22, h / 2], [-w / 2 + 12, h / 2 + 16], [-w / 2 + 40, h / 2]], { w: 2.6, passes: 1 });
+  ctx.fillStyle = P.ink; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(text, 0, 2);
+  ctx.restore();
+}
 function g1(lt) {
   ground(60, 960, 820);
-  const throws = [0, 1, 2, 3, 4, 5, 6, 7].map(i => 0.8 + i * 0.62);
+  const throws = PROMPTS.map((_, i) => 0.8 + i * 0.62);
   const n = throws.filter(t => lt > t + 0.5).length;
-  for (let i = 0; i < n; i++) paper(700 + (i % 2 ? 8 : -6), 760 - i * 16, 1.3);
-  throws.forEach(t => {
+  const slot = i => [690 + (i % 2 ? 14 : -14), 770 - i * 60, i % 2 ? 0.03 : -0.03];
+  for (let i = 0; i < n; i++) { const [x, y, r] = slot(i); promptBubble(PROMPTS[i], x, y, 1, r); }
+  throws.forEach((t, i) => {
     const k = clamp((lt - t) / 0.5); if (k <= 0 || k >= 1) return;
-    paper(lerp(330, 700, eInOut(k)), lerp(640, 760 - n * 16, eInOut(k)) - Math.sin(k * Math.PI) * 160, 1.3);
+    const [x, y, r] = slot(i), e = eInOut(k);
+    promptBubble(PROMPTS[i], lerp(340, x, e), lerp(700, y, e) - Math.sin(k * Math.PI) * 120, lerp(0.7, 1, e), r * e);
   });
   if (n >= 2) {
     const pop = 1 + 0.25 * (1 - clamp((lt - throws[n - 1] - 0.5) / 0.25));
-    ctx.save(); ctx.translate(720, 470); ctx.scale(pop, pop);
-    ctx.fillStyle = ORANGE; ctx.font = "400 130px Serif"; ctx.textAlign = "center"; ctx.fillText("×" + n, 0, 0); ctx.restore();
+    ctx.save(); ctx.translate(230, 500); ctx.scale(pop, pop);
+    ctx.fillStyle = ORANGE; ctx.font = "400 130px Serif"; ctx.textAlign = "center"; ctx.fillText("\u00d7" + n, 0, 0); ctx.restore();
   }
   const typing = lt > 0.4 && lt < 5.8;
   bento(250, 760, 1.15, { face: lt > 4.6 ? "sleepy" : "dots", arms: typing ? 0.2 + 0.35 * Math.abs(Math.sin(lt * 11)) : 0 });
@@ -211,7 +223,7 @@ function g8(lt) {
 }
 
 video({ scenes: [
-  { d: 6.5, theme: "paper", head: ["one agent,", "one long chat"], cap: "the same *prompt*, again and again", face: "sleepy", art: g1,
+  { d: 6.5, theme: "paper", head: ["one agent,", "one long chat"], cap: "the same *prompts* every time", face: "sleepy", art: g1,
     sfx: [...[0, 1, 2, 3, 4, 5, 6, 7].flatMap(i => [[0.8 + i * 0.62, "whoosh", 0.07, 0.4], [1.3 + i * 0.62, "pop", 0.08, 72 + i]]), [0.4, "typing", 0.03, 5.8, 0.09]] },
   { d: 6.5, theme: "paper", head: ["the context", "fills up"], cap: "until the agent *forgets* the start", face: "worried", art: g2,
     sfx: [[0.3, "typing", 0.025, 3.3, 0.1], [3.3, "noise", 0.2, 0.6, 0.15, 5], [3.3, "boing", 0.05, 0.4], [4.4, "pluck", 0.07, 55, 0.9]] },
