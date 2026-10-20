@@ -28,6 +28,9 @@ interface ToastApi {
 
 const ToastContext = createContext<ToastApi | null>(null);
 
+/** Where something can stand above the toasts and move up with them. */
+export const TOAST_DOCK_ABOVE_ID = "toasts-dock-above";
+
 /** Long enough to read a sentence, short enough not to linger. */
 const LIFETIME_MS = 6000;
 
@@ -82,6 +85,13 @@ export function ToastHost({ children }: { children: ReactNode }) {
         person just took, so a screen reader should finish what it is
         saying before reading one.
       */}
+      <div className="toasts-dock">
+        {/*
+          Above the stack, outside the live region: things that keep this
+          corner company (the board's mascots) and should rise as toasts
+          arrive rather than be covered by them.
+        */}
+        <div id={TOAST_DOCK_ABOVE_ID} className="toasts-dock-above" />
       <div className="toasts" role="status" aria-live="polite">
         {toasts.map((toast) => (
           <div key={toast.id} className="toast" data-tone={toast.tone}>
@@ -93,6 +103,7 @@ export function ToastHost({ children }: { children: ReactNode }) {
         ))}
         {/* Last, so it holds its place while transient toasts come and go. */}
         <StaleBuildToast />
+      </div>
       </div>
     </ToastContext.Provider>
   );

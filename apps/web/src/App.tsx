@@ -52,6 +52,7 @@ import { SignIn } from "./components/SignIn.js";
 import { NewFeatureDialog, NewProjectDialog, PromptDialog } from "./components/PromptDialog.js";
 import { ProjectPicker } from "./components/ProjectPicker.js";
 import { useToast } from "./components/Toasts.js";
+import { MASCOTS_REENABLE_NOTE } from "./board-mascots.js";
 import { identifyUser, resetUser, sessionIdentityChange } from "./posthog.js";
 import { desktop } from "./desktop.js";
 import { readProjectSelection, rememberProjectSelection } from "./project-selection.js";
@@ -656,6 +657,35 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
     }
   }, [onboardingStep]);
   const toast = useToast();
+  /**
+   * Whether the quiet board's mascots come out, from the person's own
+   * flag. Beta only, like the mascots. Starts hidden, and a failed read
+   * leaves them hidden: Settings, Account can still bring them back.
+   */
+  const [mascots, setMascots] = useState(false);
+  useEffect(() => {
+    if (!beta) return;
+    let cancelled = false;
+    void client
+      .getMascots()
+      .then((row) => {
+        if (!cancelled) setMascots(row.show);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [beta]);
+  const dismissMascots = useCallback(() => {
+    setMascots(false);
+    void client
+      .setMascots(false)
+      .then(() => toast.note(MASCOTS_REENABLE_NOTE))
+      .catch((err: unknown) => {
+        setMascots(true);
+        toast.fail(err);
+      });
+  }, [toast]);
   /**
    * Where focus goes once a deleted card has left the board, and which
    * card leaving is the signal to place it. Held until the refetch
@@ -1455,6 +1485,8 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
         selectedId={selectedId}
         onSelect={setSelectedId}
         onNewCard={() => setDialog("feature")}
+        mascots={mascots}
+        onDismissMascots={dismissMascots}
         onMove={(featureId, stageId) => {
           // Optimistic: the card lands in the lane it was dropped on,
           // and the refetch settles the truth. Waiting for the server

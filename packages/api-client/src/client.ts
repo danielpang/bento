@@ -1540,6 +1540,19 @@ export class BentoClient {
     });
   }
 
+  /** Whether the board's mascots come out for this person. Beta testers only. */
+  getMascots() {
+    return this.request<{ show: boolean }>("/api/account/mascots");
+  }
+
+  /** Off once dismissed on the board; on again from Settings, Account. */
+  setMascots(show: boolean) {
+    return this.request<{ show: boolean }>("/api/account/mascots", {
+      method: "PATCH",
+      body: JSON.stringify({ show }),
+    });
+  }
+
   createProfile(input: { name: string; cli: string; model: string; skill?: string }) {
     return this.request<AgentProfile>("/api/profiles", { method: "POST", body: JSON.stringify(input) });
   }

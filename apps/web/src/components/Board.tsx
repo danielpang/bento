@@ -5,6 +5,8 @@ import { useBetaTesters } from "../beta.js";
 import { LaneAgentMenu } from "./LaneAgentMenu.js";
 import { formatCardSpend } from "./spend-format.js";
 import { attentionLabel, readBoardFocus, workGroup, type BoardFocus, type WorkGroup } from "../board-focus.js";
+import { showBoardMascots } from "../board-mascots.js";
+import { BoardMascots } from "./BoardMascots.js";
 
 /** Read once: a page is not re-rendered when the setting changes. */
 const REDUCED_MOTION =
@@ -239,6 +241,13 @@ interface BoardProps {
   /** Board and Sessions are the two routes into this shared workspace. */
   view?: "board" | "list";
   sessions?: ProjectSession[];
+  /**
+   * Whether this person keeps the quiet board's mascots, from their
+   * account. False until it is known, so they never show and then vanish.
+   */
+  mascots?: boolean;
+  /** The mascots' circled x: put them away. */
+  onDismissMascots?: () => void;
 }
 
 /** A card whose work is over: finished or abandoned, either way not moving. */
@@ -383,6 +392,8 @@ export function Board({
   onFocusedReviewChange,
   view = "board",
   sessions = [],
+  mascots: keepMascots = false,
+  onDismissMascots = () => {},
 }: BoardProps) {
   /**
    * Groups are unfinished product, so the badge and the ring are only
@@ -559,6 +570,9 @@ export function Board({
      sends someone looking for a card that is simply filtered out. */
   const nothingFound = <p className="lane-empty">No matches</p>;
 
+  /* New, so behind the beta flag like the rest of what is drawn here. */
+  const mascots = showGroups && keepMascots && showBoardMascots({ cards: features.length, drawerOpen, narrowed: searching || activeFocus !== "all" });
+
   return (
     <>
     {showGroups && (
@@ -596,6 +610,7 @@ export function Board({
         {features.length === 0 && <div className="board-caught-up"><h2>Your next idea starts here</h2><p>Describe the work. Your agents can take it from there.</p><button className="btn btn-primary" onClick={onNewCard}>Add your first card</button></div>}
       </div>
     ) : (
+    <>
     <div
       className="board"
       ref={boardRef}
@@ -682,6 +697,8 @@ export function Board({
         {finished.map(card)}
       </Lane>
     </div>
+    {mascots && <BoardMascots onNewCard={onNewCard} onDismiss={onDismissMascots} />}
+    </>
     )}
     </>
   );

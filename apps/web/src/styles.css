@@ -906,6 +906,137 @@ select.input,
   overscroll-behavior-x: contain;
 }
 
+/*
+ * The two mascots of a quiet board (BoardMascots.tsx). They stand in the
+ * bottom left, in the toast dock above the stack, so a toast pushes them
+ * up rather than covering them, and the bottom bar stays clear below.
+ * Clicking them opens the new card dialog, and hovering shows a circled
+ * x that puts them away. While a card is dragged they let the pointer
+ * through, so a drop aimed at the lane under them lands. The characters
+ * keep the logo's own orange and blue in both themes, and the bubbles
+ * are paper and ink, as a comic's are.
+ */
+.board-mascots {
+  position: relative;
+  width: 220px;
+  margin: 0 0 30px 4px;
+  pointer-events: auto;
+  user-select: none;
+  animation: board-mascots-in 500ms ease-out 400ms both;
+}
+.board-mascots[data-dragging] { pointer-events: none; }
+
+.board-mascots-art {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: none;
+  border-radius: 12px;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+}
+.board-mascots-art:focus-visible { outline-offset: 4px; }
+.board-mascots-art:hover .board-mascots-bubble text { text-decoration: underline; text-decoration-thickness: 1.5px; text-underline-offset: 3px; }
+
+/* In the empty corner above the right bubble, out of the art's way. */
+.board-mascots-dismiss {
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms ease-out;
+}
+.board-mascots:hover .board-mascots-dismiss,
+.board-mascots-dismiss:focus-visible { opacity: 1; }
+.board-mascots-dismiss:focus-visible { outline-offset: 1px; }
+.board-mascots-dismiss svg { display: block; }
+.board-mascots-dismiss circle { fill: #f6f1e6; stroke: #2a1d15; stroke-width: 1.6; }
+.board-mascots-dismiss path { fill: none; stroke: #2a1d15; stroke-width: 2; stroke-linecap: round; }
+.board-mascots-dismiss:hover circle { fill: #fff; }
+/* A touch screen has no hover to reveal it with. */
+@media (hover: none) {
+  .board-mascots-dismiss { opacity: 1; }
+}
+
+/* With toasts below them, the toasts already clear the bottom bar. */
+.toasts-dock:has(.toast) .board-mascots { margin-bottom: 0; }
+
+.board-mascots svg { display: block; width: 100%; height: auto; overflow: visible; }
+
+/* Ink, hatching and paper as the videos draw them (mascot-sketch.ts). */
+.board-mascots-ink { fill: none; stroke: #2a1d15; stroke-linecap: round; stroke-linejoin: round; }
+.board-mascots-ground { fill: none; stroke: color-mix(in srgb, var(--text) 45%, transparent); stroke-width: 1.2; stroke-linecap: round; }
+.board-mascot-orange .board-mascot-fill { fill: #f97316; }
+.board-mascot-blue .board-mascot-fill { fill: #3e77e8; }
+.board-mascot-hatch { fill: none; stroke-width: 1; stroke-linecap: round; }
+.board-mascot-orange .board-mascot-hatch { stroke: rgb(180 82 15 / 45%); }
+.board-mascot-blue .board-mascot-hatch { stroke: rgb(31 79 176 / 45%); }
+/* The characters' outline follows the theme, light ink on the dark board
+   as the videos draw them on navy; the bubbles stay paper and dark ink. */
+.board-mascot .board-mascots-ink { stroke: var(--text); }
+.board-mascot-eyes { fill: #2a1d15; }
+.board-mascots-paper { fill: #f6f1e6; }
+.board-mascots-bubble text {
+  fill: #1f1b17;
+  font-family: var(--sans);
+  font-size: 17px;
+  font-weight: 650;
+  text-anchor: middle;
+}
+
+/*
+ * The boil. Each piece is drawn three times with different jitter and
+ * the frames take turns, eight a second, the rate the videos re-roll
+ * their lines. A frame is visible for the first third of the cycle;
+ * the delays offset the other two into the second and third thirds.
+ */
+.board-mascots-frame { visibility: hidden; animation: board-mascots-boil 375ms steps(1, end) infinite; }
+.board-mascots-frame[data-frame="1"] { animation-delay: -250ms; }
+.board-mascots-frame[data-frame="2"] { animation-delay: -125ms; }
+@keyframes board-mascots-boil { 0% { visibility: visible; } 33.333% { visibility: hidden; } }
+
+.board-mascot,
+.board-mascot-eyes,
+.board-mascots-bubble { transform-box: fill-box; }
+.board-mascot { transform-origin: 50% 100%; animation: board-mascot-bob 3.4s ease-in-out infinite; }
+.board-mascot-blue { animation-delay: -1.7s; }
+.board-mascot-eyes { transform-origin: center; animation: board-mascot-blink 5.2s infinite; }
+.board-mascot-blue .board-mascot-eyes { animation-delay: -2.3s; }
+.board-mascots-bubble-ask { transform-origin: 50% 100%; rotate: -2deg; animation: board-mascots-pop 420ms cubic-bezier(.3, 1.6, .5, 1) 900ms both; }
+.board-mascots-bubble-answer { transform-origin: 50% 100%; rotate: 2deg; animation: board-mascots-pop 420ms cubic-bezier(.3, 1.6, .5, 1) 1700ms both; }
+
+@keyframes board-mascots-in { from { opacity: 0; translate: 0 8px; } to { opacity: 1; translate: 0 0; } }
+@keyframes board-mascot-bob { 0%, 100% { translate: 0 0; } 50% { translate: 0 -3px; } }
+@keyframes board-mascot-blink { 0%, 94%, 100% { scale: 1 1; } 96% { scale: 1 .1; } }
+@keyframes board-mascots-pop { from { opacity: 0; scale: .6; } to { opacity: 1; scale: 1; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .board-mascots,
+  .board-mascot,
+  .board-mascot-eyes,
+  .board-mascots-bubble-ask,
+  .board-mascots-bubble-answer,
+  .board-mascots-frame { animation: none; }
+  .board-mascots-dismiss { transition: none; }
+  /* Still lines: the first frame only. */
+  .board-mascots-frame[data-frame="0"] { visibility: visible; }
+}
+
+/* A phone's board is one lane wide; the corner belongs to the cards. */
+@media (max-width: 760px) {
+  .board-mascots { display: none; }
+}
+
 .lane {
   /* Lanes share the row: a 7-column pipeline fits a 1440px screen at
      the 192px floor, and fewer lanes relax toward the 340px ceiling
@@ -6318,8 +6449,10 @@ button.lane-agent[data-saving] {
 }
 
 /* Transient messages, bottom left. The drawers live on the right, so a
-   message about what just failed in one does not sit on top of it. */
-.toasts {
+   message about what just failed in one does not sit on top of it. The
+   dock holds the stack and, above it, anything that should rise as
+   toasts arrive instead of being covered (the board's mascots). */
+.toasts-dock {
   position: fixed;
   left: 16px;
   bottom: 16px;
@@ -6328,8 +6461,17 @@ button.lane-agent[data-saving] {
   flex-direction: column;
   gap: 8px;
   max-width: min(420px, calc(100vw - 32px));
-  /* The stack itself catches nothing; each toast takes its own clicks,
-     so the board underneath stays workable while one is showing. */
+  /* The dock catches nothing; each toast takes its own clicks, so the
+     board underneath stays workable while one is showing. */
+  pointer-events: none;
+}
+
+.toasts-dock-above:empty { display: none; }
+
+.toasts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
   pointer-events: none;
 }
 

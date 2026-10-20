@@ -25,6 +25,12 @@ export const user = identity.table("user", {
    * it, so the column default is what a new account starts with.
    */
   onboardingWalkthrough: boolean("onboarding_walkthrough").notNull().default(true),
+  /**
+   * Whether the board's two mascots come out on a quiet board for this
+   * person. Dismissing them on the board turns this off; Settings,
+   * Account turns it back on. Ours, like the walkthrough flag.
+   */
+  boardMascots: boolean("board_mascots").notNull().default(true),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
