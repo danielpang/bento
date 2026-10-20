@@ -906,32 +906,24 @@ select.input,
   overscroll-behavior-x: contain;
 }
 
-/* Holds the board's place in the column, and gives the mascots a corner
-   to stand in. */
-.board-frame {
-  flex: 1;
-  display: flex;
-  min-height: 0;
-  min-width: 0;
-  position: relative;
-}
-
 /*
  * The two mascots of a quiet board (BoardMascots.tsx). They stand in the
- * bottom right of the last lane, which on a board this empty holds no
- * cards, and never take the pointer: a drop aimed at that lane lands.
- * The characters keep the logo's own orange and blue in both themes,
- * and the bubbles are paper and ink, as a comic's are.
+ * bottom left, in the toast dock above the stack, so a toast pushes them
+ * up rather than covering them, and the bottom bar stays clear below.
+ * They never take the pointer: a drop aimed at the lane under them
+ * lands. The characters keep the logo's own orange and blue in both
+ * themes, and the bubbles are paper and ink, as a comic's are.
  */
 .board-mascots {
-  position: absolute;
-  right: 36px;
-  bottom: 26px;
-  width: 300px;
+  width: 220px;
+  margin: 0 0 30px 4px;
   pointer-events: none;
   user-select: none;
   animation: board-mascots-in 500ms ease-out 400ms both;
 }
+
+/* With toasts below them, the toasts already clear the bottom bar. */
+.toasts-dock:has(.toast) .board-mascots { margin-bottom: 0; }
 
 .board-mascots svg { display: block; width: 100%; height: auto; overflow: visible; }
 
@@ -951,8 +943,8 @@ select.input,
 .board-mascots-bubble text {
   fill: #1f1b17;
   font-family: var(--sans);
-  font-size: 13.5px;
-  font-weight: 600;
+  font-size: 17px;
+  font-weight: 650;
   text-anchor: middle;
 }
 
@@ -6396,8 +6388,10 @@ button.lane-agent[data-saving] {
 }
 
 /* Transient messages, bottom left. The drawers live on the right, so a
-   message about what just failed in one does not sit on top of it. */
-.toasts {
+   message about what just failed in one does not sit on top of it. The
+   dock holds the stack and, above it, anything that should rise as
+   toasts arrive instead of being covered (the board's mascots). */
+.toasts-dock {
   position: fixed;
   left: 16px;
   bottom: 16px;
@@ -6406,8 +6400,17 @@ button.lane-agent[data-saving] {
   flex-direction: column;
   gap: 8px;
   max-width: min(420px, calc(100vw - 32px));
-  /* The stack itself catches nothing; each toast takes its own clicks,
-     so the board underneath stays workable while one is showing. */
+  /* The dock catches nothing; each toast takes its own clicks, so the
+     board underneath stays workable while one is showing. */
+  pointer-events: none;
+}
+
+.toasts-dock-above:empty { display: none; }
+
+.toasts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
   pointer-events: none;
 }
 

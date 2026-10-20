@@ -601,10 +601,7 @@ export function Board({
         {features.length === 0 && <div className="board-caught-up"><h2>Your next idea starts here</h2><p>Describe the work. Your agents can take it from there.</p><button className="btn btn-primary" onClick={onNewCard}>Add your first card</button></div>}
       </div>
     ) : (
-    /* The frame is the mascots' corner: positioned, so they can stand at
-       the bottom right of the board without the board itself becoming a
-       positioned box under every card it measures. */
-    <div className="board-frame">
+    <>
     <div
       className="board"
       ref={boardRef}
@@ -692,7 +689,7 @@ export function Board({
       </Lane>
     </div>
     {mascots && <BoardMascots />}
-    </div>
+    </>
     )}
     </>
   );

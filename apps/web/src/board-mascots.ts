@@ -3,9 +3,9 @@
  *
  * They are company for a quiet board, not decoration for a busy one, so
  * they show only while the board holds a handful of cards: past that,
- * the bottom of the last lane is where cards are, and the mascots would
- * sit on top of work. They also stay away while the drawer is open (it
- * covers the corner they stand in), while a search or a filter is
+ * the lanes fill down to where they stand, and the mascots would sit on
+ * top of work. They also stay away while the drawer is open (a card is
+ * being worked on, not asked about), while a search or a filter is
  * narrowing the board (an empty lane then means "no matches", not "no
  * work"), and in the list view, which has no lanes to stand beside.
  */

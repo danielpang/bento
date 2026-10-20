@@ -1,30 +1,43 @@
+import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
+import { TOAST_DOCK_ABOVE_ID } from "./Toasts.js";
+
 /**
  * The orange square and the blue rectangle from the Bento mark, standing
- * in the bottom right of a quiet board and asking what comes next.
+ * in the bottom left of a quiet board and asking what comes next.
  *
- * The same two characters as the explainer videos. Purely decorative:
- * hidden from assistive technology and from the pointer, so a drag that
- * crosses them still lands in the lane underneath. The bubbles are
- * drawn as paper with dark ink in both themes, the way a comic's are,
- * rather than following the panel colours.
+ * The same two characters as the explainer videos. They render into the
+ * toast dock, above the stack, so a toast pushes them up instead of
+ * landing on top of them; outside a toast host (a test) they render in
+ * place. Purely decorative: hidden from assistive technology and from
+ * the pointer, so a drag that crosses them still lands in the lane
+ * underneath. The bubbles are paper and ink in both themes, the way a
+ * comic's are, rather than following the panel colours.
  */
 export function BoardMascots() {
+  const [dock, setDock] = useState<HTMLElement | null>(null);
+  useEffect(() => setDock(document.getElementById(TOAST_DOCK_ABOVE_ID)), []);
+  const mascots = <Mascots />;
+  return dock ? createPortal(mascots, dock) : mascots;
+}
+
+function Mascots() {
   return (
     <div className="board-mascots" aria-hidden="true">
-      <svg viewBox="0 0 300 210" width="300" height="210" focusable="false">
-        <path className="board-mascots-ground" d="M18 199 Q90 196 150 199 T286 198" />
+      <svg viewBox="0 0 330 210" width="330" height="210" focusable="false">
+        <path className="board-mascots-ground" d="M18 199 Q90 196 150 199 T300 198" />
 
         <g className="board-mascots-bubble board-mascots-bubble-orange">
-          <rect x="4" y="8" width="176" height="40" rx="18" />
-          <path d="M74 46 L94 46 L90 94 Z" />
-          <path className="board-mascots-bubble-seam" d="M76 47 L92 47" />
-          <text x="92" y="33">What are we working on?</text>
+          <rect x="2" y="6" width="234" height="44" rx="20" />
+          <path d="M88 48 L108 48 L100 100 Z" />
+          <path className="board-mascots-bubble-seam" d="M90 49 L106 49" />
+          <text x="119" y="34">What are we working on?</text>
         </g>
         <g className="board-mascots-bubble board-mascots-bubble-blue">
-          <rect x="124" y="58" width="168" height="40" rx="18" />
-          <path d="M196 96 L216 96 L210 124 Z" />
-          <path className="board-mascots-bubble-seam" d="M198 97 L214 97" />
-          <text x="208" y="83">What should we build?</text>
+          <rect x="116" y="56" width="212" height="44" rx="20" />
+          <path d="M206 98 L224 98 L214 126 Z" />
+          <path className="board-mascots-bubble-seam" d="M208 99 L222 99" />
+          <text x="222" y="84">What should we build?</text>
         </g>
 
         <g className="board-mascot board-mascot-orange">
