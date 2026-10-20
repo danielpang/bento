@@ -5,6 +5,8 @@ import { useBetaTesters } from "../beta.js";
 import { LaneAgentMenu } from "./LaneAgentMenu.js";
 import { formatCardSpend } from "./spend-format.js";
 import { attentionLabel, readBoardFocus, workGroup, type BoardFocus, type WorkGroup } from "../board-focus.js";
+import { showBoardMascots } from "../board-mascots.js";
+import { BoardMascots } from "./BoardMascots.js";
 
 /** Read once: a page is not re-rendered when the setting changes. */
 const REDUCED_MOTION =
@@ -559,6 +561,9 @@ export function Board({
      sends someone looking for a card that is simply filtered out. */
   const nothingFound = <p className="lane-empty">No matches</p>;
 
+  /* New, so behind the beta flag like the rest of what is drawn here. */
+  const mascots = showGroups && showBoardMascots({ cards: features.length, drawerOpen, narrowed: searching || activeFocus !== "all" });
+
   return (
     <>
     {showGroups && (
@@ -596,6 +601,10 @@ export function Board({
         {features.length === 0 && <div className="board-caught-up"><h2>Your next idea starts here</h2><p>Describe the work. Your agents can take it from there.</p><button className="btn btn-primary" onClick={onNewCard}>Add your first card</button></div>}
       </div>
     ) : (
+    /* The frame is the mascots' corner: positioned, so they can stand at
+       the bottom right of the board without the board itself becoming a
+       positioned box under every card it measures. */
+    <div className="board-frame">
     <div
       className="board"
       ref={boardRef}
@@ -681,6 +690,8 @@ export function Board({
       >
         {finished.map(card)}
       </Lane>
+    </div>
+    {mascots && <BoardMascots />}
     </div>
     )}
     </>

@@ -906,6 +906,84 @@ select.input,
   overscroll-behavior-x: contain;
 }
 
+/* Holds the board's place in the column, and gives the mascots a corner
+   to stand in. */
+.board-frame {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+  position: relative;
+}
+
+/*
+ * The two mascots of a quiet board (BoardMascots.tsx). They stand in the
+ * bottom right of the last lane, which on a board this empty holds no
+ * cards, and never take the pointer: a drop aimed at that lane lands.
+ * The characters keep the logo's own orange and blue in both themes,
+ * and the bubbles are paper and ink, as a comic's are.
+ */
+.board-mascots {
+  position: absolute;
+  right: 36px;
+  bottom: 26px;
+  width: 300px;
+  pointer-events: none;
+  user-select: none;
+  animation: board-mascots-in 500ms ease-out 400ms both;
+}
+
+.board-mascots svg { display: block; width: 100%; height: auto; overflow: visible; }
+
+.board-mascots-ground { fill: none; stroke: var(--line-bright); stroke-width: 2; stroke-linecap: round; }
+
+.board-mascot-body,
+.board-mascot-limb { stroke: #2a1d15; stroke-width: 2.6; stroke-linejoin: round; }
+.board-mascot-orange :is(.board-mascot-body, .board-mascot-limb) { fill: #f97316; }
+.board-mascot-blue :is(.board-mascot-body, .board-mascot-limb) { fill: #3e77e8; }
+.board-mascot-eyes { fill: #2a1d15; }
+
+.board-mascots-bubble rect,
+.board-mascots-bubble path { fill: #f6f1e6; stroke: #2a1d15; stroke-width: 2.4; stroke-linejoin: round; }
+/* Paints over the rectangle's edge where the tail joins it, so bubble
+   and tail read as one outline. */
+.board-mascots-bubble .board-mascots-bubble-seam { stroke: #f6f1e6; stroke-width: 4; }
+.board-mascots-bubble text {
+  fill: #1f1b17;
+  font-family: var(--sans);
+  font-size: 13.5px;
+  font-weight: 600;
+  text-anchor: middle;
+}
+
+.board-mascot,
+.board-mascot-eyes,
+.board-mascots-bubble { transform-box: fill-box; }
+.board-mascot { transform-origin: 50% 100%; animation: board-mascot-bob 3.4s ease-in-out infinite; }
+.board-mascot-blue { animation-delay: -1.7s; }
+.board-mascot-eyes { transform-origin: center; animation: board-mascot-blink 5.2s infinite; }
+.board-mascot-blue .board-mascot-eyes { animation-delay: -2.3s; }
+.board-mascots-bubble-orange { transform-origin: 50% 100%; rotate: -2deg; animation: board-mascots-pop 420ms cubic-bezier(.3, 1.6, .5, 1) 900ms both; }
+.board-mascots-bubble-blue { transform-origin: 50% 100%; rotate: 2deg; animation: board-mascots-pop 420ms cubic-bezier(.3, 1.6, .5, 1) 1700ms both; }
+
+@keyframes board-mascots-in { from { opacity: 0; translate: 0 8px; } to { opacity: 1; translate: 0 0; } }
+@keyframes board-mascot-bob { 0%, 100% { translate: 0 0; } 50% { translate: 0 -3px; } }
+@keyframes board-mascot-blink { 0%, 94%, 100% { scale: 1 1; } 96% { scale: 1 .1; } }
+@keyframes board-mascots-pop { from { opacity: 0; scale: .6; } to { opacity: 1; scale: 1; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .board-mascots,
+  .board-mascot,
+  .board-mascot-eyes,
+  .board-mascots-bubble-orange,
+  .board-mascots-bubble-blue { animation: none; }
+}
+
+/* A phone's board is one lane wide; the corner belongs to the cards. */
+@media (max-width: 760px) {
+  .board-mascots { display: none; }
+}
+
 .lane {
   /* Lanes share the row: a 7-column pipeline fits a 1440px screen at
      the 192px floor, and fewer lanes relax toward the 340px ceiling
