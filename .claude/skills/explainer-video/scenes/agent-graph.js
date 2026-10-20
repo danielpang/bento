@@ -210,9 +210,7 @@ function g8(lt) {
   glyphSketch(500, 190, 190, K(lt, 0.2, 1.4, x => x));
   ctx.save(); ctx.fillStyle = P.ink; ctx.font = "400 150px Serif"; ctx.textAlign = "center";
   const a = K(lt, 0.9, 0.7); ctx.globalAlpha = a; ctx.fillText("Agent Graph", 500, 470 + (1 - a) * 20); ctx.restore();
-  ctx.save(); ctx.font = "700 46px Sans"; ctx.textAlign = "center"; ctx.globalAlpha = K(lt, 1.5, 0.6);
-  ctx.fillStyle = P.soft; ctx.fillText("write it once, run every stage", 500, 560); ctx.restore();
-  ctx.save(); ctx.globalAlpha = K(lt, 2.0, 0.6); ctx.font = "700 52px Sans"; ctx.textAlign = "center"; ctx.fillStyle = ORANGE; ctx.fillText("usebento.ai", 500, 660); ctx.restore();
+  ctx.save(); ctx.globalAlpha = K(lt, 1.6, 0.6); ctx.font = "700 52px Sans"; ctx.textAlign = "center"; ctx.fillStyle = ORANGE; ctx.fillText("usebento.ai", 500, 590); ctx.restore();
   ground(40, 960, 880, 23);
   for (let i = 0; i < 7; i++) {
     const x = 90 + i * 137, k = K(lt, 0.6 + i * 0.1, 0.5, eBack);
