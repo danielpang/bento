@@ -910,16 +910,62 @@ select.input,
  * The two mascots of a quiet board (BoardMascots.tsx). They stand in the
  * bottom left, in the toast dock above the stack, so a toast pushes them
  * up rather than covering them, and the bottom bar stays clear below.
- * They never take the pointer: a drop aimed at the lane under them
- * lands. The characters keep the logo's own orange and blue in both
- * themes, and the bubbles are paper and ink, as a comic's are.
+ * Clicking them opens the new card dialog, and hovering shows a circled
+ * x that puts them away. While a card is dragged they let the pointer
+ * through, so a drop aimed at the lane under them lands. The characters
+ * keep the logo's own orange and blue in both themes, and the bubbles
+ * are paper and ink, as a comic's are.
  */
 .board-mascots {
+  position: relative;
   width: 220px;
   margin: 0 0 30px 4px;
-  pointer-events: none;
+  pointer-events: auto;
   user-select: none;
   animation: board-mascots-in 500ms ease-out 400ms both;
+}
+.board-mascots[data-dragging] { pointer-events: none; }
+
+.board-mascots-art {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: none;
+  border-radius: 12px;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+}
+.board-mascots-art:focus-visible { outline-offset: 4px; }
+.board-mascots-art:hover .board-mascots-bubble text { text-decoration: underline; text-decoration-thickness: 1.5px; text-underline-offset: 3px; }
+
+/* In the empty corner above the right bubble, out of the art's way. */
+.board-mascots-dismiss {
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms ease-out;
+}
+.board-mascots:hover .board-mascots-dismiss,
+.board-mascots-dismiss:focus-visible { opacity: 1; }
+.board-mascots-dismiss:focus-visible { outline-offset: 1px; }
+.board-mascots-dismiss svg { display: block; }
+.board-mascots-dismiss circle { fill: #f6f1e6; stroke: #2a1d15; stroke-width: 1.6; }
+.board-mascots-dismiss path { fill: none; stroke: #2a1d15; stroke-width: 2; stroke-linecap: round; }
+.board-mascots-dismiss:hover circle { fill: #fff; }
+/* A touch screen has no hover to reveal it with. */
+@media (hover: none) {
+  .board-mascots-dismiss { opacity: 1; }
 }
 
 /* With toasts below them, the toasts already clear the bottom bar. */
@@ -981,6 +1027,7 @@ select.input,
   .board-mascots-bubble-ask,
   .board-mascots-bubble-answer,
   .board-mascots-frame { animation: none; }
+  .board-mascots-dismiss { transition: none; }
   /* Still lines: the first frame only. */
   .board-mascots-frame[data-frame="0"] { visibility: visible; }
 }

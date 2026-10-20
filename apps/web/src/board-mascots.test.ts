@@ -14,9 +14,13 @@ test("the mascots come out only on a quiet, unfiltered board with the drawer clo
   assert.equal(showBoardMascots({ cards: 1, drawerOpen: false, narrowed: true }), false);
 });
 
-test("the mascots are decoration: hidden from assistive technology, and they ask both questions", () => {
-  const html = renderToStaticMarkup(createElement(BoardMascots));
-  assert.match(html, /^<div class="board-mascots" aria-hidden="true">/);
+test("the mascots are two buttons: one adds a card, one puts them away, and they ask both questions", () => {
+  const html = renderToStaticMarkup(createElement(BoardMascots, { onNewCard: () => {}, onDismiss: () => {} }));
+  assert.match(html, /^<div class="board-mascots">/);
+  assert.match(html, /<button type="button" class="board-mascots-art"[^>]*aria-label="New card"/);
+  assert.match(html, /<button type="button" class="board-mascots-dismiss"[^>]*aria-label="Hide the mascots"/);
+  // The drawing itself is not read out; the buttons' labels say what they do.
+  assert.equal(html.match(/<svg[^>]*aria-hidden="true"/g)?.length, 2);
   assert.match(html, /What are we working on\?/);
   assert.match(html, /What should we build\?/);
 });

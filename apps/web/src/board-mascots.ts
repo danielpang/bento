@@ -11,6 +11,9 @@
  */
 export const MASCOT_MAX_CARDS = 3;
 
+/** Where the mascots can be brought back from, said whenever they are put away. */
+export const MASCOTS_REENABLE_NOTE = "You can bring the mascots back any time from Settings, Account.";
+
 export function showBoardMascots({
   cards,
   drawerOpen,

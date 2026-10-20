@@ -10,6 +10,8 @@ import {
   signOut,
 } from "../auth-client.js";
 import { useToast } from "./Toasts.js";
+import { BetaOnly } from "../beta.js";
+import { MASCOT_MAX_CARDS } from "../board-mascots.js";
 
 /**
  * Whether a membership holds the owner role.
@@ -74,8 +76,8 @@ function ownedAccountMessage(names: string[]): string {
 }
 
 /**
- * The person's own account: the onboarding walkthrough switch, and the
- * way out.
+ * The person's own account: the onboarding walkthrough and mascot
+ * switches, and the way out.
  *
  * The two deletions are irreversible and neither is urgent, so they sit
  * on this tab rather than beside the controls people use daily, and
@@ -83,15 +85,24 @@ function ownedAccountMessage(names: string[]): string {
  * account is confirmed a second time by email; deleting an organization
  * takes its boards with it and happens at once, so it is the one that
  * has to be spelled out hardest. Local mode has no sign in and no
- * organizations, so there the tab is only the walkthrough switch.
+ * organizations, so there the tab is only the two switches.
  */
 export function AccountSettings({ client, mode }: { client: BentoClient; mode: "local" | "multi" }) {
-  // Local mode has one trusted user and no sign in, so the only thing
-  // on this tab there is the walkthrough switch. Split rather than
+  // Local mode has one trusted user and no sign in, so the only things
+  // on this tab there are the two switches. Split rather than
   // returned early below: the sign in and organization hooks there ask
   // /api/auth, which local mode does not mount, and a hook cannot be
   // skipped once called.
-  if (mode === "local") return <OnboardingCard client={client} />;
+  if (mode === "local") {
+    return (
+      <>
+        <OnboardingCard client={client} />
+        <BetaOnly>
+          <MascotsCard client={client} />
+        </BetaOnly>
+      </>
+    );
+  }
   return <MultiAccountSettings client={client} />;
 }
 
@@ -132,6 +143,9 @@ function MultiAccountSettings({ client }: { client: BentoClient }) {
       <p className="muted">Your sign in, and the door out. Both deletions below are permanent.</p>
 
       <OnboardingCard client={client} />
+      <BetaOnly>
+        <MascotsCard client={client} />
+      </BetaOnly>
 
       <section className="section settings-card">
         <h3 className="settings-title">Signed in as</h3>
@@ -284,6 +298,66 @@ function OnboardingCard({ client }: { client: BentoClient }) {
           </a>
         </div>
       )}
+    </section>
+  );
+}
+
+/**
+ * The way back to the board's mascots.
+ *
+ * Their circled x on the board turns the person's flag off so they stay
+ * away on every device. This turns it on again, and says what "always"
+ * still leaves out: a busy board, where they would stand on the cards.
+ */
+function MascotsCard({ client }: { client: BentoClient }) {
+  const toast = useToast();
+  const [show, setShow] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void client
+      .getMascots()
+      .then((row) => {
+        if (!cancelled) setShow(row.show);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) toast.fail(err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [client, toast]);
+
+  async function change(next: boolean) {
+    setBusy(true);
+    try {
+      const row = await client.setMascots(next);
+      setShow(row.show);
+    } catch (err) {
+      toast.fail(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="section settings-card">
+      <h3 className="settings-title">Board mascots</h3>
+      <p className="muted">
+        The orange square and the blue rectangle stand in the corner of a quiet board ({MASCOT_MAX_CARDS} cards
+        or fewer) and ask what to build next. Click them to add a card, or hover and press the x to put them
+        away.
+      </p>
+      <label className="gate-check">
+        <input
+          type="checkbox"
+          checked={show === true}
+          disabled={busy || show === null}
+          onChange={(e) => void change(e.target.checked)}
+        />
+        <span className="gate-check-text">Always show mascots</span>
+      </label>
     </section>
   );
 }

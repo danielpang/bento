@@ -435,6 +435,13 @@
       "when": 1791100900000,
       "tag": "0061_swarm_paused_until",
       "breakpoints": true
+    },
+    {
+      "idx": 62,
+      "version": "7",
+      "when": 1791100960000,
+      "tag": "0062_user_board_mascots",
+      "breakpoints": true
     }
   ]
 }

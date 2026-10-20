@@ -241,6 +241,13 @@ interface BoardProps {
   /** Board and Sessions are the two routes into this shared workspace. */
   view?: "board" | "list";
   sessions?: ProjectSession[];
+  /**
+   * Whether this person keeps the quiet board's mascots, from their
+   * account. False until it is known, so they never show and then vanish.
+   */
+  mascots?: boolean;
+  /** The mascots' circled x: put them away. */
+  onDismissMascots?: () => void;
 }
 
 /** A card whose work is over: finished or abandoned, either way not moving. */
@@ -385,6 +392,8 @@ export function Board({
   onFocusedReviewChange,
   view = "board",
   sessions = [],
+  mascots: keepMascots = false,
+  onDismissMascots = () => {},
 }: BoardProps) {
   /**
    * Groups are unfinished product, so the badge and the ring are only
@@ -562,7 +571,7 @@ export function Board({
   const nothingFound = <p className="lane-empty">No matches</p>;
 
   /* New, so behind the beta flag like the rest of what is drawn here. */
-  const mascots = showGroups && showBoardMascots({ cards: features.length, drawerOpen, narrowed: searching || activeFocus !== "all" });
+  const mascots = showGroups && keepMascots && showBoardMascots({ cards: features.length, drawerOpen, narrowed: searching || activeFocus !== "all" });
 
   return (
     <>
@@ -688,7 +697,7 @@ export function Board({
         {finished.map(card)}
       </Lane>
     </div>
-    {mascots && <BoardMascots />}
+    {mascots && <BoardMascots onNewCard={onNewCard} onDismiss={onDismissMascots} />}
     </>
     )}
     </>
