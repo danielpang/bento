@@ -927,19 +927,19 @@ select.input,
 
 .board-mascots svg { display: block; width: 100%; height: auto; overflow: visible; }
 
-.board-mascots-ground { fill: none; stroke: var(--line-bright); stroke-width: 2; stroke-linecap: round; }
-
-.board-mascot-body,
-.board-mascot-limb { stroke: #2a1d15; stroke-width: 2.6; stroke-linejoin: round; }
-.board-mascot-orange :is(.board-mascot-body, .board-mascot-limb) { fill: #f97316; }
-.board-mascot-blue :is(.board-mascot-body, .board-mascot-limb) { fill: #3e77e8; }
+/* Ink, hatching and paper as the videos draw them (mascot-sketch.ts). */
+.board-mascots-ink { fill: none; stroke: #2a1d15; stroke-linecap: round; stroke-linejoin: round; }
+.board-mascots-ground { fill: none; stroke: color-mix(in srgb, var(--text) 45%, transparent); stroke-width: 1.2; stroke-linecap: round; }
+.board-mascot-orange .board-mascot-fill { fill: #f97316; }
+.board-mascot-blue .board-mascot-fill { fill: #3e77e8; }
+.board-mascot-hatch { fill: none; stroke-width: 1; stroke-linecap: round; }
+.board-mascot-orange .board-mascot-hatch { stroke: rgb(180 82 15 / 45%); }
+.board-mascot-blue .board-mascot-hatch { stroke: rgb(31 79 176 / 45%); }
+/* The characters' outline follows the theme, light ink on the dark board
+   as the videos draw them on navy; the bubbles stay paper and dark ink. */
+.board-mascot .board-mascots-ink { stroke: var(--text); }
 .board-mascot-eyes { fill: #2a1d15; }
-
-.board-mascots-bubble rect,
-.board-mascots-bubble path { fill: #f6f1e6; stroke: #2a1d15; stroke-width: 2.4; stroke-linejoin: round; }
-/* Paints over the rectangle's edge where the tail joins it, so bubble
-   and tail read as one outline. */
-.board-mascots-bubble .board-mascots-bubble-seam { stroke: #f6f1e6; stroke-width: 4; }
+.board-mascots-paper { fill: #f6f1e6; }
 .board-mascots-bubble text {
   fill: #1f1b17;
   font-family: var(--sans);
@@ -948,6 +948,17 @@ select.input,
   text-anchor: middle;
 }
 
+/*
+ * The boil. Each piece is drawn three times with different jitter and
+ * the frames take turns, eight a second, the rate the videos re-roll
+ * their lines. A frame is visible for the first third of the cycle;
+ * the delays offset the other two into the second and third thirds.
+ */
+.board-mascots-frame { visibility: hidden; animation: board-mascots-boil 375ms steps(1, end) infinite; }
+.board-mascots-frame[data-frame="1"] { animation-delay: -250ms; }
+.board-mascots-frame[data-frame="2"] { animation-delay: -125ms; }
+@keyframes board-mascots-boil { 0% { visibility: visible; } 33.333% { visibility: hidden; } }
+
 .board-mascot,
 .board-mascot-eyes,
 .board-mascots-bubble { transform-box: fill-box; }
@@ -955,8 +966,8 @@ select.input,
 .board-mascot-blue { animation-delay: -1.7s; }
 .board-mascot-eyes { transform-origin: center; animation: board-mascot-blink 5.2s infinite; }
 .board-mascot-blue .board-mascot-eyes { animation-delay: -2.3s; }
-.board-mascots-bubble-orange { transform-origin: 50% 100%; rotate: -2deg; animation: board-mascots-pop 420ms cubic-bezier(.3, 1.6, .5, 1) 900ms both; }
-.board-mascots-bubble-blue { transform-origin: 50% 100%; rotate: 2deg; animation: board-mascots-pop 420ms cubic-bezier(.3, 1.6, .5, 1) 1700ms both; }
+.board-mascots-bubble-ask { transform-origin: 50% 100%; rotate: -2deg; animation: board-mascots-pop 420ms cubic-bezier(.3, 1.6, .5, 1) 900ms both; }
+.board-mascots-bubble-answer { transform-origin: 50% 100%; rotate: 2deg; animation: board-mascots-pop 420ms cubic-bezier(.3, 1.6, .5, 1) 1700ms both; }
 
 @keyframes board-mascots-in { from { opacity: 0; translate: 0 8px; } to { opacity: 1; translate: 0 0; } }
 @keyframes board-mascot-bob { 0%, 100% { translate: 0 0; } 50% { translate: 0 -3px; } }
@@ -967,8 +978,11 @@ select.input,
   .board-mascots,
   .board-mascot,
   .board-mascot-eyes,
-  .board-mascots-bubble-orange,
-  .board-mascots-bubble-blue { animation: none; }
+  .board-mascots-bubble-ask,
+  .board-mascots-bubble-answer,
+  .board-mascots-frame { animation: none; }
+  /* Still lines: the first frame only. */
+  .board-mascots-frame[data-frame="0"] { visibility: visible; }
 }
 
 /* A phone's board is one lane wide; the corner belongs to the cards. */
