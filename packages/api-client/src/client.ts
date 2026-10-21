@@ -647,6 +647,8 @@ export class BentoClient {
        * phones home.
        */
       posthog?: { apiKey: string; host: string; environment: string };
+      /** Present when the hosted cloud module supplies admission. */
+      waitlist?: { mode: "open" | "waitlist" };
     }>("/api/health");
   }
 

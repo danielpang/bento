@@ -22,6 +22,7 @@ import {
   noticeMessage,
   passwordResetMessage,
   verificationMessage,
+  waitlistInvitationMessage,
   type Message,
 } from "./mail.js";
 
@@ -87,6 +88,15 @@ const samples: { name: string; message: Message }[] = [
       action: { label: "Upgrade to Business", url: `${APP_URL}/settings?tab=billing` },
       note: "You can also allow overage instead, so nothing stops and the difference is added to your next invoice.",
       footerNote: "You are receiving this because you are an owner or admin of this team on Bento.",
+      appUrl: APP_URL,
+    }),
+  },
+  {
+    name: "waitlist-invite",
+    message: waitlistInvitationMessage({
+      email: "ada@example.com",
+      signupUrl: `${APP_URL}/?signup=1&email=${encodeURIComponent("ada@example.com")}`,
+      expiresInDays: 7,
       appUrl: APP_URL,
     }),
   },

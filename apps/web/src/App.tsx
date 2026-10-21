@@ -49,6 +49,7 @@ import { CommandMenu } from "./components/CommandMenu.js";
 import { OutOfCompute } from "./components/OutOfCompute.js";
 import { LowDiskSpace } from "./components/LowDiskSpace.js";
 import { SignIn } from "./components/SignIn.js";
+import { readWaitlistInvite, stripWaitlistParams, type WaitlistMode } from "./waitlist-signin.js";
 import { NewFeatureDialog, NewProjectDialog, PromptDialog } from "./components/PromptDialog.js";
 import { ProjectPicker } from "./components/ProjectPicker.js";
 import { useToast } from "./components/Toasts.js";
@@ -230,6 +231,8 @@ function Console() {
   const { data: session, isPending } = useSession();
   const [mode, setMode] = useState<"local" | "multi" | "unreachable">("local");
   const [social, setSocial] = useState<{ github: boolean; google: boolean } | undefined>(undefined);
+  const [waitlistMode, setWaitlistMode] = useState<WaitlistMode | undefined>(undefined);
+  const [invite] = useState(() => readWaitlistInvite(window.location.search));
   const [checkedMode, setCheckedMode] = useState(false);
   const [retry, setRetry] = useState(0);
   /**
@@ -253,6 +256,12 @@ function Console() {
   useGitHubOutcome();
 
   useEffect(() => {
+    if (invite.signup || invite.email) {
+      window.history.replaceState(null, "", stripWaitlistParams(window.location.pathname + window.location.search));
+    }
+  }, [invite]);
+
+  useEffect(() => {
     // A dead server is not multi mode: sending someone to a sign-in
     // form that can never work misdiagnoses the outage as their fault.
     void client
@@ -260,6 +269,7 @@ function Console() {
       .then((h) => {
         setMode(h.mode === "multi" ? "multi" : "local");
         setSocial(h.social);
+        setWaitlistMode(h.waitlist?.mode);
       })
       .catch(() => setMode("unreachable"))
       .finally(() => setCheckedMode(true));
@@ -280,7 +290,17 @@ function Console() {
     );
   }
   // Local mode runs as a single user with no sign in.
-  if (mode === "multi" && !session) return <SignIn social={social} />;
+  if (mode === "multi" && !session) {
+    return (
+      <SignIn
+        social={social}
+        waitlistMode={waitlistMode}
+        invitedPrefill={invite.signup}
+        initialMode={invite.signup ? "up" : "in"}
+        initialEmail={invite.email}
+      />
+    );
+  }
   if (mode === "multi" && session) {
     return <FirstTeamGate userName={session.user.name ?? ""} />;
   }

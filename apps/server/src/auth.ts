@@ -3,6 +3,7 @@ import { APIError, createAuthMiddleware } from "better-auth/api";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { bearer, deviceAuthorization, organization } from "better-auth/plugins";
 import { and, asc, eq, isNull } from "drizzle-orm";
+import { hasPendingOrganizationInvitation, type AdmissionControl } from "./admission.js";
 import {
   account,
   deviceCode,
@@ -124,6 +125,12 @@ export interface AuthHooks {
   onUserSignedUp?: (user: { id: string; email: string; name: string; method: string; route: string }) => void;
   /** A sign in or sign up outcome from better-auth's after hook. Sign up successes come through onUserSignedUp. */
   onAuthEvent?: (event: AuthEvent) => void;
+  /**
+   * Hosted admission. When present, a new account is refused unless
+   * the address holds a live waitlist invite. Organization invitations
+   * are checked first, in this repository, because that table lives here.
+   */
+  admission?: AdmissionControl;
 }
 
 function buildAuth(env: Env, db: Db, mailer: Mailer, hooks: AuthHooks) {
@@ -204,6 +211,33 @@ function buildAuth(env: Env, db: Db, mailer: Mailer, hooks: AuthHooks) {
     databaseHooks: {
       user: {
         create: {
+          /**
+           * Runs only when better-auth is about to insert a user, so
+           * existing accounts keep signing in while signup is closed.
+           * Social callbacks that would mint a new identity go through
+           * here too; wrapping /sign-up/email would miss them.
+           */
+          async before(newUser) {
+            const email = typeof newUser.email === "string" ? newUser.email : "";
+            if (!email) return;
+            if (await hasPendingOrganizationInvitation(db, email)) return;
+            const admission = hooks.admission;
+            if (!admission) return;
+            let decision: Awaited<ReturnType<AdmissionControl["canCreateUser"]>>;
+            try {
+              decision = await admission.canCreateUser({ email });
+            } catch {
+              // A store outage must not open signup, and must not
+              // look like an ordinary "you are not invited" refusal.
+              throw new APIError("SERVICE_UNAVAILABLE", { message: "try again later" });
+            }
+            if (!decision.allowed) {
+              throw new APIError("FORBIDDEN", {
+                message: "Join the waitlist to create an account.",
+                code: "WAITLIST_REQUIRED",
+              });
+            }
+          },
           async after(newUser, ctx) {
             try {
               hooks.onUserSignedUp?.({
