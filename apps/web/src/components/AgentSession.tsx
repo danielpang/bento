@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as Menu from "@radix-ui/react-dropdown-menu";
 import { ThinkingOrb } from "thinking-orbs";
-import type { AgentProfile, AgentRun, BentoClient, ConversationBlock, Stage } from "@bento/api-client";
+import type { AgentProfile, AgentRun, BentoClient, ConversationBlock, RunQuestion, Stage } from "@bento/api-client";
 import {
   forgetsBetweenRuns,
   hasNoLiveTranscript,
@@ -14,8 +14,9 @@ import { linkifiedError } from "../error-text.js";
 import { useBetaTesters } from "../beta.js";
 import { sandboxProviderWords } from "../sandbox-provider.js";
 import type { LineQuote } from "./DiffReview.js";
-import { StopButton } from "./IconButtons.js";
-import { runLiveKind } from "./ui.js";
+import { InterruptButton, StopButton } from "./IconButtons.js";
+import { QuestionCard } from "./QuestionCard.js";
+import { INTERRUPTIBLE_TOOLS, runLiveKind } from "./ui.js";
 import { toolActivity, type ToolActivity } from "../tool-activity.js";
 import { ToolActivityGroup } from "./ToolActivityGroup.js";
 import { REDUCED_MOTION, orbStateFor } from "./AgentOrb.js";
@@ -239,6 +240,33 @@ export function AgentSession({
   const runActive = !!latestRun && !TERMINAL_RUN.has(latestRun.status);
   /** How the latest agent's tool treats a mid-task message, if at all. */
   const liveKind = latestAgent ? runLiveKind(latestAgent.cli, latestRun?.liveSession) : undefined;
+  /**
+   * Interrupting and answering the agent's questions are beta, and only
+   * for a run that went live on a tool that supports them (Claude Code).
+   */
+  const liveRun = showsSandbox && runActive && latestRun?.liveSession === true;
+  const canInterrupt = liveRun && Boolean(latestAgent && INTERRUPTIBLE_TOOLS.has(latestAgent.cli));
+  const [questions, setQuestions] = useState<RunQuestion[]>([]);
+  /** Bumped when the transcript says a question arrived or a turn ended, to fetch them again. */
+  const [questionsTick, setQuestionsTick] = useState(0);
+  useEffect(() => {
+    if (!liveRun || !latestRun) {
+      setQuestions([]);
+      return;
+    }
+    let current = true;
+    client
+      .listRunQuestions(latestRun.id)
+      .then((open) => {
+        if (current) setQuestions(open);
+      })
+      .catch(() => {
+        // The card stays as it was; the next tick asks again.
+      });
+    return () => {
+      current = false;
+    };
+  }, [client, liveRun, latestRun?.id, questionsTick]);
   /** Whether a new run can pick the conversation up where this left it. */
   const resumes = !latestAgent || !forgetsBetweenRuns(latestAgent.cli);
   const quietTool = Boolean(latestAgent && hasNoLiveTranscript(latestAgent.cli));
@@ -301,6 +329,14 @@ export function AgentSession({
         if (seq > 0 && seq <= lastSeq.current) return;
         if (seq > lastSeq.current) lastSeq.current = seq;
         onEvent?.(featureId, event);
+        // A question arrived (the transcript line names it), or a turn
+        // ended, which is when an interrupted question is withdrawn.
+        if (
+          event.type === "result" ||
+          (event.type === "message" && (event.raw as { bento?: unknown } | undefined)?.bento === "question")
+        ) {
+          setQuestionsTick((tick) => tick + 1);
+        }
         // The persisted line supersedes the fragments that previewed
         // it. Assistant lines and results only: a steer the user sends
         // mid turn says nothing about the message still being typed,
@@ -693,6 +729,17 @@ export function AgentSession({
       )}
       {latestRun && !finished && (
         <div className="composer-dock">
+          {questions.map((asked) => (
+            <QuestionCard
+              key={asked.id}
+              asked={asked}
+              agentName={latestAgent?.name ?? "The agent"}
+              onAnswer={async (choices) => {
+                await client.answerRunQuestion(latestRun.id, asked.id, choices);
+                setQuestions((prev) => prev.filter((q) => q.id !== asked.id));
+              }}
+            />
+          ))}
           {blocked && (
             <div className="setup-prompt setup-prompt-inline" role="status">
               <span>{blocked.message}</span>
@@ -732,6 +779,19 @@ export function AgentSession({
                 }
               }}
             />
+            {canInterrupt && (
+              <InterruptButton
+                disabled={busy}
+                onClick={() => {
+                  setBusy(true);
+                  setError("");
+                  void client
+                    .interruptRun(latestRun.id)
+                    .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
+                    .finally(() => setBusy(false));
+                }}
+              />
+            )}
             {runActive && (
               <StopButton
                 disabled={busy}

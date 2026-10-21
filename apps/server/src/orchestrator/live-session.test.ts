@@ -161,3 +161,137 @@ test("a message a protocol refuses is not delivered, so it goes back on the card
   assert.deepEqual(said, [], "nothing is shown as sent");
   assert.equal(channel.pending, 0);
 });
+
+/**
+ * Interrupts and questions. The wire here is Claude Code's real
+ * protocol, so the lines written to stdin are the ones the CLI reads.
+ */
+import { claudeCodeAdapter, type LiveAsk } from "@bento/agents";
+
+const claudeWire = () => openLiveWire(claudeCodeAdapter.live!, { prompt: "", model: "m", cwd: "/" }, { attach: false });
+const asked: LiveAsk = {
+  id: "req-9",
+  questions: [{ question: "Which?", multiSelect: false, options: [{ label: "A" }, { label: "B" }] }],
+  input: { questions: [{ question: "Which?", multiSelect: false, options: [{ label: "A" }, { label: "B" }] }] },
+};
+
+function drain(channel: LineChannel): string[] {
+  const lines: string[] = [];
+  while (channel.pending > 0) lines.push((channel as unknown as { queue: string[] }).queue.shift()!);
+  return lines;
+}
+
+test("an interrupt writes the control request, and the session waits for the next message after it", async () => {
+  const channel = new LineChannel();
+  const said: string[] = [];
+  const handle = attachLiveConversation({
+    runId: "r7",
+    wire: claudeWire(),
+    liveChannel: channel,
+    // An automatic stage: an ordinary turn's end would close stdin at once.
+    conversation: { ...conversation(0), holdAfterInterrupt: () => 1, interruptedNotice: () => "interrupted notice" },
+    mayEnd: async () => true,
+    sayAsUser: async () => {},
+    saySystem: async (text) => {
+      said.push(text);
+    },
+  });
+  assert.equal(handle.interrupt(), true);
+  assert.deepEqual(drain(channel).map((l) => (JSON.parse(l) as { request: unknown }).request), [{ subtype: "interrupt" }]);
+  await handle.onTurnFinished(false, true);
+  assert.equal(handle.waiting(), true, "held open for the person's next message");
+  assert.deepEqual(said, ["interrupted notice"]);
+  assert.equal(channel.ended, false);
+  await tick(1200);
+  assert.equal(channel.ended, true, "and closed once nobody wrote");
+
+  const plain = new LineChannel();
+  const noHold = attachLiveConversation({
+    runId: "r8",
+    wire: claudeWire(),
+    liveChannel: plain,
+    conversation: conversation(0),
+    mayEnd: async () => true,
+    sayAsUser: async () => {},
+    saySystem: async () => {},
+  });
+  await noHold.onTurnFinished(false, false);
+  assert.equal(plain.ended, true, "a failed turn that nobody interrupted ends the run, as before");
+});
+
+test("a tool that cannot interrupt says so, and Stop remains", () => {
+  const channel = new LineChannel();
+  const handle = attachLiveConversation({
+    runId: "r9",
+    wire,
+    liveChannel: channel,
+    conversation: conversation(0),
+    sayAsUser: async () => {},
+    saySystem: async () => {},
+  });
+  assert.equal(handle.interrupt(), false);
+  assert.equal(channel.pending, 0);
+});
+
+test("a question nobody can answer is declined at once, so the agent decides by itself", async () => {
+  const channel = new LineChannel();
+  const handle = attachLiveConversation({
+    runId: "r10",
+    wire: claudeWire(),
+    liveChannel: channel,
+    conversation: conversation(0),
+    sayAsUser: async () => {},
+    saySystem: async () => {},
+  });
+  await handle.ask([asked]);
+  const [reply] = drain(channel).map((l) => JSON.parse(l) as { response: { request_id: string; response: { behavior: string } } });
+  assert.equal(reply!.response.request_id, "req-9");
+  assert.equal(reply!.response.response.behavior, "deny");
+});
+
+test("a question a person can answer is stored and announced, and the answer goes in ahead of parked messages", async () => {
+  const channel = new LineChannel();
+  const recorded: LiveAsk[] = [];
+  const announced: string[] = [];
+  const shown: string[] = [];
+  let answered = [{ id: "row-1", ask: asked, answers: { "Which?": "B" } }];
+  const handle = attachLiveConversation({
+    runId: "r11",
+    wire: claudeWire(),
+    liveChannel: channel,
+    conversation: {
+      ...conversation(0),
+      claim: async () => [{ id: "m1", text: "also, use tabs" }],
+      questions: {
+        record: async (a) => {
+          recorded.push(a);
+          return "row-1";
+        },
+        claimAnswers: async () => {
+          const taken = answered;
+          answered = [];
+          return taken;
+        },
+        requeueAnswers: async () => {},
+        withdraw: async () => {},
+      },
+    },
+    sayAsUser: async (text) => {
+      shown.push(text);
+    },
+    saySystem: async () => {},
+    sayAsked: async (id) => {
+      announced.push(id);
+    },
+  });
+  await handle.ask([asked]);
+  assert.deepEqual(recorded.map((a) => a.id), ["req-9"]);
+  assert.deepEqual(announced, ["row-1"], "the transcript line names the stored question");
+  assert.equal(channel.pending, 0, "nothing is written until a person answers");
+
+  assert.equal(await handle.pump(), true);
+  const lines = drain(channel).map((l) => JSON.parse(l) as { type: string; response?: { response: { updatedInput: { answers: unknown } } } });
+  assert.deepEqual(lines.map((l) => l.type), ["control_response", "user"], "the answer first: the agent is blocked on it");
+  assert.deepEqual(lines[0]!.response!.response.updatedInput.answers, { "Which?": "B" });
+  assert.deepEqual(shown, ["Which? B", "also, use tabs"]);
+});

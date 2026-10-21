@@ -19,6 +19,12 @@ export interface BuildCommandInput {
   credentials?: Readonly<Record<string, string>>;
   /** A Bento-owned provider selected for this run. The API key stays in env. */
   customProvider?: CustomProviderSelection;
+  /**
+   * A person can answer the agent's questions on this run, so a tool
+   * that can ask (Claude Code's AskUserQuestion) is let to. Off for
+   * every run nobody can answer, where the tool stays disabled.
+   */
+  askUser?: boolean;
 }
 
 export interface CustomProviderSelection {
@@ -68,6 +74,12 @@ export interface LiveSession {
    * one-shot command as before.
    */
   beta?: boolean;
+  /**
+   * The tool can stop the turn in progress and keep the session open
+   * (LiveProtocol.interrupt), so a person can redirect it without
+   * ending the run.
+   */
+  interrupts?: boolean;
   /** argv for a session that reads user messages on stdin. */
   buildCommand(input: BuildCommandInput): string[];
   /** One stdin line delivering the opening prompt or a follow-up. */
@@ -111,9 +123,48 @@ export interface LiveProtocol {
    * end with the usage reported lines earlier, or a message assembled
    * from its fragments.
    */
-  read(line: string): { write: string[]; events?: AgentEvent[] };
+  read(line: string): {
+    write: string[];
+    events?: AgentEvent[];
+    /** Questions the process just asked; see LiveAsk. */
+    asks?: LiveAsk[];
+    /** Ids of questions the process withdrew (its turn was interrupted, or it gave up waiting). */
+    withdrawn?: string[];
+  };
   /** Messages accepted by `send` or `open` and not written yet. */
   readonly held: number;
+  /**
+   * Stops the turn in progress without ending the process, for a tool
+   * that can. The turn then ends with a result marked `interrupted`,
+   * and the session waits for the next message.
+   */
+  interrupt?(): string[];
+  /** The lines that answer a question this process asked (`read` reported it in `asks`). */
+  answer?(ask: LiveAsk, answers: Record<string, string>): string[];
+  /** The lines that tell the process nobody will answer, with the reason it is given instead. */
+  decline?(ask: LiveAsk, reason: string): string[];
+}
+
+/** One multiple choice question an agent put to a person. */
+export interface AskQuestion {
+  question: string;
+  /** A short label for the question, a few words at most. */
+  header?: string;
+  multiSelect: boolean;
+  options: { label: string; description?: string }[];
+}
+
+/**
+ * Questions the process is blocked on until somebody answers. `id` is
+ * the process's own request id, which the answer has to echo; `input`
+ * is the tool input as the process sent it, which the answer carries
+ * back. Both are stored, so an answer can be written by a process that
+ * reattached after the question was asked.
+ */
+export interface LiveAsk {
+  id: string;
+  questions: AskQuestion[];
+  input: unknown;
 }
 
 /**

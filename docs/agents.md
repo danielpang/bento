@@ -59,6 +59,10 @@ If the session is unavailable (sandbox recreated or CLI session lost), Bento sta
 
 **Stop** terminates the run immediately. Pending messages remain queued on the card.
 
+**Interrupt (Claude Code, beta):** the pause button beside Stop ends the agent's current turn without ending the session, as Escape does in a terminal. The agent then waits for your next message, and the run ends after the stage's idle window with nothing sent. Stop still ends the run at once.
+
+**Questions (Claude Code, beta):** in a card's stage run, Claude Code can ask you a question with its AskUserQuestion tool. The question appears above the composer with its options: pick one where the agent asked for one answer, or any number where it allows several, and type your own answer in the free text field when no option fits. The agent waits for the answer and continues with it. An interrupt withdraws a question that was still waiting, and so does the run ending. Runs nobody is watching (swarms, judges, rebases) do not offer the tool, and a question asked there is declined for the agent.
+
 ## Claude Code on a subscription
 
 Local mode only. Not supported on [usebento.ai](https://usebento.ai).

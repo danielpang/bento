@@ -1,5 +1,5 @@
 import { shouldHoldLiveSession } from "@bento/core";
-import type { LiveWire } from "@bento/agents";
+import type { LiveAsk, LiveWire } from "@bento/agents";
 import type { LineChannel } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
 import {
@@ -7,6 +7,7 @@ import {
   markMessagesSent,
   requeueMessages,
 } from "./messages.js";
+import { claimAnswers, recordQuestion, requeueAnswers, withdrawQuestions, type ClaimedAnswer } from "./questions.js";
 
 /**
  * Where a live session's messages come from and whether it waits for
@@ -43,11 +44,50 @@ export interface LiveConversation {
    * whatever folded up while the turn ran.
    */
   onWaiting?(): Promise<void>;
+  /**
+   * How long to keep the process open after a person interrupted its
+   * turn, in seconds: they stopped it to say something else, so the
+   * session waits for that message whatever the stage's gate would do
+   * after a finished turn. Absent or 0 ends the run as a failed turn
+   * would.
+   */
+  holdAfterInterrupt?(): number;
+  /** The transcript line saying the session is waiting after an interrupt. */
+  interruptedNotice?(idleSec: number): string;
+  /**
+   * Where the agent's questions go when a person can answer them. Absent
+   * means nobody can, and a question is declined at once so the agent
+   * decides by itself rather than waiting for the run limit.
+   */
+  questions?: {
+    /** Stores a question; the row's id, or null when it was already stored. */
+    record(ask: LiveAsk): Promise<string | null>;
+    /** Answers a person gave that the agent does not have yet, taken for writing. */
+    claimAnswers(): Promise<ClaimedAnswer[]>;
+    /** Answers whose write failed, back for the next pump. */
+    requeueAnswers(ids: string[]): Promise<void>;
+    /** Questions the agent withdrew, by its request id. */
+    withdraw(requestIds: string[]): Promise<void>;
+  };
 }
+
+/** What a question is told when nobody can answer it. */
+export const NOBODY_TO_ASK =
+  "Nobody can answer questions in this run. Make the most reasonable choice yourself, say which one you made and why, and carry on.";
 
 export interface LiveConversationHandle {
   deliver: (text: string) => Promise<boolean>;
-  onTurnFinished: (ok: boolean) => Promise<void>;
+  /** `interrupted` when a person stopped the turn (see LiveConversation.holdAfterInterrupt). */
+  onTurnFinished: (ok: boolean, interrupted?: boolean) => Promise<void>;
+  /**
+   * Stops the turn in progress without ending the session. False when
+   * the tool cannot, or this process no longer holds the conversation.
+   */
+  interrupt: () => boolean;
+  /** Questions the agent just asked, as the protocol read them off its output. */
+  ask: (asks: LiveAsk[]) => Promise<void>;
+  /** Questions the agent withdrew, by its request id. */
+  withdraw: (requestIds: string[]) => Promise<void>;
   dispose: () => void;
   /** True between turns while the process is held open for a message. */
   waiting: () => boolean;
@@ -100,6 +140,11 @@ export function attachLiveConversation(input: {
   mayEnd?: () => Promise<boolean>;
   sayAsUser: (text: string) => Promise<void>;
   saySystem: (text: string) => Promise<void>;
+  /**
+   * The transcript line saying the agent asked a question, carrying the
+   * question's id, which is how a watching console knows to show it.
+   */
+  sayAsked?: (questionId: string, ask: LiveAsk) => Promise<void>;
 }): LiveConversationHandle {
   const { wire, liveChannel, conversation } = input;
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -183,29 +228,79 @@ export function attachLiveConversation(input: {
     return false;
   };
 
-  const onTurnFinished = async (ok: boolean): Promise<void> => {
+  /**
+   * Writes answers a person gave into the agent, which is blocked on
+   * them mid turn, so this never waits for a turn to end. Each answer is
+   * shown in the transcript as the person's words. True when one went in.
+   */
+  const pumpAnswers = async (): Promise<boolean> => {
+    if (detached || !conversation.questions || !wire.answer) return false;
+    const claimed = await conversation.questions.claimAnswers();
+    if (claimed.length === 0) return false;
+    const failed: string[] = [];
+    for (const answer of claimed) {
+      const lines = wire.answer(answer.ask, answer.answers);
+      if (!lines.every((line) => liveChannel.write(line))) {
+        failed.push(answer.id);
+        continue;
+      }
+      await input.sayAsUser(
+        Object.entries(answer.answers)
+          .map(([question, chosen]) => `${question} ${chosen}`)
+          .join("\n"),
+      );
+    }
+    if (failed.length > 0) await conversation.questions.requeueAnswers(failed);
+    return failed.length < claimed.length;
+  };
+
+  /** Answers first: the agent is blocked on those; messages queue behind its turn. */
+  const pump = async (): Promise<boolean> => {
+    const answered = await pumpAnswers();
+    const sent = await pumpParked();
+    return answered || sent;
+  };
+
+  /** Keeps the process open for `idleSec` for a message, then closes stdin. */
+  const hold = async (idleSec: number, notice: string | null): Promise<void> => {
+    if (notice !== null) await input.saySystem(notice);
+    clearIdle();
+    idleTimer = setTimeout(() => {
+      idleTimer = null;
+      waiting = false;
+      endStdinIfOurs().catch((err: unknown) => {
+        console.warn(`could not end the held session of run ${input.runId}:`, err);
+      });
+    }, idleSec * 1000);
+    idleTimer.unref?.();
+    waiting = true;
+    await conversation.onWaiting?.();
+  };
+  const fits = (idleSec: number) => input.holdUntil === undefined || Date.now() + idleSec * 1000 <= input.holdUntil;
+
+  const onTurnFinished = async (ok: boolean, interrupted = false): Promise<void> => {
     if (detached) return;
     if (await pumpParked()) return;
 
+    // A person stopped the turn to say something else: wait for it,
+    // whatever the stage would do with an ordinary finished turn.
+    if (interrupted && quiet()) {
+      const idleSec = conversation.holdAfterInterrupt?.() ?? 0;
+      if (idleSec > 0 && fits(idleSec)) {
+        await hold(idleSec, conversation.interruptedNotice?.(idleSec) ?? null);
+        return;
+      }
+    }
+
     if (quiet()) {
       const idleSec = await conversation.holdFor(ok);
-      const fits = input.holdUntil === undefined || Date.now() + idleSec * 1000 <= input.holdUntil;
-      if (idleSec > 0 && fits) {
+      if (idleSec > 0 && fits(idleSec)) {
+        let notice: string | null = null;
         if (!announcedWait) {
           announcedWait = true;
-          await input.saySystem(conversation.waitingNotice(idleSec));
+          notice = conversation.waitingNotice(idleSec);
         }
-        clearIdle();
-        idleTimer = setTimeout(() => {
-          idleTimer = null;
-          waiting = false;
-          endStdinIfOurs().catch((err: unknown) => {
-            console.warn(`could not end the held session of run ${input.runId}:`, err);
-          });
-        }, idleSec * 1000);
-        idleTimer.unref?.();
-        waiting = true;
-        await conversation.onWaiting?.();
+        await hold(idleSec, notice);
         return;
       }
     }
@@ -214,15 +309,46 @@ export function attachLiveConversation(input: {
     await endStdinIfOurs();
   };
 
+  const interrupt = (): boolean => {
+    if (detached || !wire.interrupt || liveChannel.ended) return false;
+    clearIdle();
+    return wire.interrupt().every((line) => liveChannel.write(line));
+  };
+
+  /**
+   * Questions the agent asked. Stored for a person to answer when this
+   * conversation has someone who can, and declined at once when it does
+   * not, so the agent never waits on nobody.
+   */
+  const ask = async (asks: LiveAsk[]): Promise<void> => {
+    if (detached) return;
+    for (const asked of asks) {
+      if (conversation.questions && wire.answer) {
+        const id = await conversation.questions.record(asked);
+        if (id) await input.sayAsked?.(id, asked);
+        continue;
+      }
+      for (const line of wire.decline?.(asked, NOBODY_TO_ASK) ?? []) liveChannel.write(line);
+    }
+  };
+
+  const withdraw = async (requestIds: string[]): Promise<void> => {
+    if (detached || requestIds.length === 0) return;
+    await conversation.questions?.withdraw(requestIds);
+  };
+
   return {
     deliver,
     onTurnFinished,
+    interrupt,
+    ask,
+    withdraw,
     dispose() {
       if (detached) return;
       closeWhenQuiet();
     },
     waiting: () => waiting,
-    pump: pumpParked,
+    pump,
     detach() {
       detached = true;
       // The timer only, never the channel: ending stdin here would end
@@ -251,6 +377,16 @@ export function cardConversation(
       seconds === 1
         ? "The agent is waiting. Send a message to keep talking in this session. The run ends after 1 second of silence."
         : `The agent is waiting. Send a message to keep talking in this session. The run ends after ${seconds} seconds of silence.`,
+    // Every stage, manual or not: the person stopped the turn to redirect it.
+    holdAfterInterrupt: () => input.idleSec,
+    interruptedNotice: (seconds) =>
+      `Interrupted. The agent is waiting for your next message. The run ends after ${seconds === 1 ? "1 second" : `${seconds} seconds`} of silence.`,
+    questions: {
+      record: (ask) => recordQuestion(ctx.db, input.runId, ask),
+      claimAnswers: () => claimAnswers(ctx.db, input.runId),
+      requeueAnswers: (ids) => requeueAnswers(ctx.db, ids),
+      withdraw: (requestIds) => withdrawQuestions(ctx.db, input.runId, requestIds),
+    },
   };
 }
 

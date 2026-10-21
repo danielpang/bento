@@ -29,6 +29,11 @@ export interface LiveInput {
   /** False when the session just closed; callers fall back to queueing. */
   deliver(text: string): Promise<boolean>;
   /**
+   * Stops the turn in progress and keeps the session open for the next
+   * message. False when the tool cannot, or the session is gone.
+   */
+  interrupt?(): boolean;
+  /**
    * Whether the process is between turns, held open for the next
    * message. The swarm coordinator delivers a folded wake only then,
    * so a planner mid turn is told everything at once when it is done

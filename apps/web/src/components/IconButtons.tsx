@@ -19,6 +19,32 @@ export function StopButton({
   );
 }
 
+/**
+ * Stops the turn the agent is on and keeps the session open, so the
+ * next message redirects it. A pause mark, beside Stop's square, so the
+ * two read as "stop this" and "stop everything".
+ */
+export function InterruptButton({
+  disabled,
+  onClick,
+}: {
+  disabled: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className="btn composer-interrupt icon-button"
+      disabled={disabled}
+      title="Interrupt this turn. The agent waits for your next message."
+      aria-label="Interrupt this turn"
+      onClick={onClick}
+    >
+      <span className="pause-bars" aria-hidden="true" />
+    </button>
+  );
+}
+
 export function SignOutButton({ onClick }: { onClick: () => void }) {
   return (
     <button

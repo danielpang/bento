@@ -11,6 +11,8 @@ import { BUILD_HEADER } from "@bento/core";
 import type {
   AgentProfile,
   AgentRun,
+  QuestionChoice,
+  RunQuestion,
   AgentTool,
   CompletionRange,
   Feature,
@@ -1107,6 +1109,27 @@ export class BentoClient {
   /** Stops a running agent so a person can take over. */
   cancelRun(runId: string) {
     return this.request<AgentRun>(`/api/runs/${runId}/cancel`, { method: "POST" });
+  }
+
+  /**
+   * Stops the turn the agent is working on and keeps the run open for
+   * the next message. Beta; Claude Code live sessions only.
+   */
+  interruptRun(runId: string) {
+    return this.request<{ interrupted: true }>(`/api/runs/${runId}/interrupt`, { method: "POST" });
+  }
+
+  /** The agent's questions waiting on a person. Beta. */
+  listRunQuestions(runId: string) {
+    return this.request<RunQuestion[]>(`/api/runs/${runId}/questions`);
+  }
+
+  /** Answers one of the agent's questions; see QuestionChoice. Beta. */
+  answerRunQuestion(runId: string, questionId: string, answers: QuestionChoice[]) {
+    return this.request<{ answered: true; answers: Record<string, string> }>(
+      `/api/runs/${runId}/questions/${questionId}/answer`,
+      { method: "POST", body: JSON.stringify({ answers }) },
+    );
   }
 
   /** Everything that has happened to this feature, oldest first. */

@@ -131,6 +131,9 @@ export const BETA_LIVE_TOOLS: Record<string, "steer" | "queue" | undefined> = {
   opencode: "queue",
 };
 
+/** Tools whose live session can stop a turn and keep the run open (beta). */
+export const INTERRUPTIBLE_TOOLS: ReadonlySet<string> = new Set(["claude-code"]);
+
 /**
  * How a mid-task message is treated in this run. The run says whether
  * it went live (liveSession, recorded as its agent started); until it

@@ -20,6 +20,7 @@ import {
   pipelines,
   projects,
   runArtifacts,
+  runQuestions,
   runMigrations,
   sandboxes,
   swarmPlanSources,
@@ -854,6 +855,18 @@ test("every entity route refuses a foreign tenant", async () => {
     })
     .returning({ id: runArtifacts.id });
   assert.ok(artifact?.id, "the owner's artifact must exist for the artifact routes to be probed");
+  // Inserted directly because only a live agent asks questions; the
+  // answer route needs a real question id to aim at.
+  const [question] = await ctx.db
+    .insert(runQuestions)
+    .values({
+      runId: run.id,
+      requestId: "matrix-request",
+      questions: [{ question: "Which?", multiSelect: false, options: [{ label: "A" }, { label: "B" }] }],
+      input: {},
+    })
+    .returning({ id: runQuestions.id });
+  assert.ok(question?.id, "the owner's question must exist for the answer route to be probed");
 
   // Inserted directly: the matrix users have no organization, and the
   // MCP routes refuse org-less callers in multi mode outright. The row
@@ -1036,6 +1049,13 @@ test("every entity route refuses a foreign tenant", async () => {
     ["POST", `/api/runs/${run.id}/resume`, { body: JSON.stringify({ prompt: "hi" }) }],
     ["POST", `/api/runs/${run.id}/rollback`],
     ["POST", `/api/runs/${run.id}/cancel`],
+    ["POST", `/api/runs/${run.id}/interrupt`],
+    ["GET", `/api/runs/${run.id}/questions`],
+    [
+      "POST",
+      `/api/runs/${run.id}/questions/${question!.id}/answer`,
+      { body: JSON.stringify({ answers: [{ question: "Which?", selected: ["A"] }] }) },
+    ],
     ["GET", `/api/runs/${run.id}/transcript`],
     ["GET", `/api/runs/${swarm.plannerRunId}/transcript`],
     // The SSE stream: for a foreign tenant it must refuse before it

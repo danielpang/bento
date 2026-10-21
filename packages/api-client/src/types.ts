@@ -215,6 +215,31 @@ export interface AgentRun {
   liveSession?: boolean | null;
 }
 
+/** One multiple choice question an agent put to a person. */
+export interface AskedQuestion {
+  question: string;
+  /** A short label for the question. */
+  header?: string;
+  /** Whether more than one option may be chosen. */
+  multiSelect: boolean;
+  options: { label: string; description?: string }[];
+}
+
+/** Questions the agent is blocked on until a person answers them. */
+export interface RunQuestion {
+  id: string;
+  runId: string;
+  questions: AskedQuestion[];
+  createdAt: string;
+}
+
+/** A person's answer to one question: options picked, and free text beside or instead of them. */
+export interface QuestionChoice {
+  question: string;
+  selected: string[];
+  other?: string;
+}
+
 /**
  * Agent spend for one project. Cost is whatever the CLI printed;
  * `runsWithoutCost` is how many runs that figure silently omitted.

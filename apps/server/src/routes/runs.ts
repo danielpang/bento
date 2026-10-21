@@ -3,13 +3,15 @@ import { and, asc, desc, eq, gt, lt, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { z } from "zod";
-import type { AgentDelta } from "@bento/core";
-import { agentProfiles, agentRuns, features, projects, runEvents, sandboxes, stages } from "@bento/db";
+import type { AgentCli, AgentDelta } from "@bento/core";
+import { agentProfiles, agentRuns, features, projects, runEvents, runQuestions, sandboxes, stages } from "@bento/db";
 import type { AppContext } from "../context.js";
 import { deferAfterCommit, tenantDb as db } from "../middleware/tenant.js";
 import { actor } from "../middleware/actor.js";
 import { markCancelled } from "../orchestrator/run-executor.js";
-import { requestRunAbort } from "../orchestrator/run-ownership.js";
+import { nudgeRun, requestRunAbort, requestRunInterrupt } from "../orchestrator/run-ownership.js";
+import { answersFor, openQuestions, storeAnswer } from "../orchestrator/questions.js";
+import { getAdapter } from "@bento/agents";
 import { modalNetworkForProject } from "../orchestrator/sandbox-network.js";
 import { markSandboxAwake } from "../orchestrator/hibernate-sandbox.js";
 import { CARD_BUSY, NO_REPOSITORIES, projectHasRepositories, startRunIfIdle } from "../orchestrator/start-run.js";
@@ -18,7 +20,7 @@ import type { SandboxDriver } from "@bento/sandbox";
 import { driverForSandbox, SandboxDriverUnavailable } from "../orchestrator/sandbox-driver.js";
 import { canAccessProject, getAccessibleFeature, getAccessibleRun, getAccessibleRunOutput } from "../access.js";
 import { requireSwarms } from "../orchestrator/swarm/gate.js";
-import { runsForCaller } from "../feature-flags.js";
+import { getBetaTester, runsForCaller } from "../feature-flags.js";
 
 const createRun = z.object({
   featureId: z.string().uuid(),
@@ -150,6 +152,90 @@ export function runRoutes(ctx: AppContext) {
       const [visible] = await runsForCaller(ctx, c, updated);
       return c.json(visible);
     })
+    /**
+     * Stops the turn the agent is working on, without ending the run: the
+     * session stays open for the person's next message, which is what
+     * they stopped it to send. Only where the run went live on a tool
+     * that can (Claude Code); anything else answers 409 and Stop remains.
+     * Beta, so a non-tester learns nothing about the route.
+     */
+    .post("/:id/interrupt", async (c) => {
+      if (!(await getBetaTester(ctx, c))) return c.json({ error: "not found" }, 404);
+      const found = await getAccessibleRun(ctx, c, c.req.param("id"));
+      if (!found) return c.json({ error: "not found" }, 404);
+      const run = found.run;
+      if (run.status !== "running" || run.liveSession !== true) {
+        return c.json({ error: "Only a running live session can be interrupted." }, 409);
+      }
+      const [profile] = await db(c, ctx)
+        .select({ cli: agentProfiles.cli })
+        .from(agentProfiles)
+        .where(eq(agentProfiles.id, run.agentProfileId));
+      if (!profile || !interrupts(profile.cli)) {
+        return c.json({ error: "This agent cannot be interrupted. Stop ends the run instead." }, 409);
+      }
+      // Through whichever process holds the run; the turn's end, and the
+      // transcript line after it, are what the console then shows.
+      requestRunInterrupt(ctx, run.id);
+      return c.json({ interrupted: true });
+    })
+    /**
+     * The questions the run's agent is waiting on a person to answer.
+     * Empty once the run is no longer running: nothing would read them.
+     */
+    .get("/:id/questions", async (c) => {
+      if (!(await getBetaTester(ctx, c))) return c.json({ error: "not found" }, 404);
+      const found = await getAccessibleRun(ctx, c, c.req.param("id"));
+      if (!found) return c.json({ error: "not found" }, 404);
+      if (found.run.status !== "running") return c.json([]);
+      return c.json(await openQuestions(db(c, ctx), found.run.id));
+    })
+    /**
+     * Answers one of the agent's questions. The choice is checked against
+     * what was asked (only offered options, one answer for a single
+     * choice question, every question answered), stored, and handed to
+     * the process holding the run once the row is committed.
+     */
+    .post(
+      "/:id/questions/:questionId/answer",
+      zValidator(
+        "json",
+        z.object({
+          answers: z
+            .array(
+              z.object({
+                question: z.string().min(1).max(2000),
+                selected: z.array(z.string().max(500)).max(10),
+                other: z.string().max(2000).optional(),
+              }),
+            )
+            .min(1)
+            .max(10),
+        }),
+      ),
+      async (c) => {
+        if (!(await getBetaTester(ctx, c))) return c.json({ error: "not found" }, 404);
+        const found = await getAccessibleRun(ctx, c, c.req.param("id"));
+        if (!found) return c.json({ error: "not found" }, 404);
+        const [question] = await db(c, ctx)
+          .select()
+          .from(runQuestions)
+          .where(and(eq(runQuestions.id, c.req.param("questionId")), eq(runQuestions.runId, found.run.id)));
+        if (!question) return c.json({ error: "not found" }, 404);
+        if (question.status !== "pending" || found.run.status !== "running") {
+          return c.json({ error: "This question is no longer waiting for an answer." }, 409);
+        }
+        const body = c.req.valid("json");
+        const result = answersFor(question.questions, body.answers);
+        if ("error" in result) return c.json({ error: result.error }, 400);
+        if (!(await storeAnswer(db(c, ctx), question.id, result.answers, actor(c)))) {
+          return c.json({ error: "This question is no longer waiting for an answer." }, 409);
+        }
+        const runId = found.run.id;
+        deferAfterCommit(c, async () => nudgeRun(ctx, runId));
+        return c.json({ answered: true, answers: result.answers });
+      },
+    )
     /**
      * Undoes a run by restoring the sandbox to the snapshot taken before
      * it started. Only available where the driver supports snapshots,
@@ -566,4 +652,13 @@ export function boardEventRoutes(ctx: AppContext) {
       }
     });
   });
+}
+
+/** Whether this tool can stop a turn and keep its session (see LiveSession.interrupts). */
+function interrupts(cli: string): boolean {
+  try {
+    return getAdapter(cli as AgentCli).live?.interrupts === true;
+  } catch {
+    return false;
+  }
 }

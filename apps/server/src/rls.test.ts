@@ -31,6 +31,7 @@ const TENANT_TABLES = [
   "sandbox_usage_leases",
   "agent_runs",
   "run_events",
+  "run_questions",
   "run_artifacts",
   "pull_request_updates",
   "gate_checks",

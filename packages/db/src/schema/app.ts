@@ -855,6 +855,50 @@ export const featureMessages = pgTable(
 );
 
 /**
+ * A question an agent asked a person and is blocked on until it is
+ * answered: Claude Code's AskUserQuestion, a set of multiple choice
+ * questions. The process that holds the run writes the row when the
+ * question arrives; the answer route fills `answers` and nudges that
+ * process, which writes the answer into the agent and marks it
+ * delivered. The row is the message, so the answer survives a restart
+ * between the click and the write, and `requestId` plus `input` are
+ * all a reattached process needs to answer it.
+ */
+export const runQuestions = pgTable(
+  "run_questions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => agentRuns.id, { onDelete: "cascade" }),
+    /** Derived from the run on insert, for row-level security. Null in local mode. */
+    organizationId: text("organization_id").references(() => organization.id, { onDelete: "cascade" }),
+    /** The agent's own id for the request, which its answer must echo. */
+    requestId: text("request_id").notNull(),
+    questions: jsonb("questions").notNull().$type<
+      { question: string; header?: string; multiSelect: boolean; options: { label: string; description?: string }[] }[]
+    >(),
+    /** The tool input exactly as the agent sent it; the answer carries it back. */
+    input: jsonb("input").notNull(),
+    /**
+     * pending: waiting for a person. answered: a person chose, and the
+     * holder has not written it yet. delivered: the agent has it.
+     * withdrawn: the agent stopped waiting (interrupted, or its run ended).
+     */
+    status: text("status", { enum: ["pending", "answered", "delivered", "withdrawn"] })
+      .notNull()
+      .default("pending"),
+    /** Question text to the answer the agent reads, as AskUserQuestion takes them. */
+    answers: jsonb("answers").$type<Record<string, string>>(),
+    answeredBy: text("answered_by").references(() => user.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    answeredAt: timestamp("answered_at", { withTimezone: true }),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+  },
+  (t) => [uniqueIndex("run_questions_run_request_idx").on(t.runId, t.requestId), index("run_questions_status_idx").on(t.runId, t.status)],
+);
+
+/**
  * Files an agent produced for people to look at, captured from the
  * sandbox when its run ends: the stage write-up, design mockups,
  * diagrams, screenshots, HTML previews.

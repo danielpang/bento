@@ -393,6 +393,18 @@ export function nudgeRun(ctx: AppContext, runId: string): void {
 }
 
 /**
+ * Stops the turn a run's agent is working on, without ending the run:
+ * the session stays open for the next message. Tried on this process's
+ * own handle first, then published for whichever process holds the run.
+ * True when this process did it; false means it was handed on.
+ */
+export function requestRunInterrupt(ctx: AppContext, runId: string): boolean {
+  if (ctx.liveInputs.get(runId)?.interrupt?.()) return true;
+  ctx.bus.emitRunControl({ runId, action: "interrupt" });
+  return false;
+}
+
+/**
  * What a process does with a control addressed to a run. Registered
  * once per process; a control for a run this process does not hold is
  * somebody else's and is ignored, except a release, which is an
@@ -426,6 +438,9 @@ export function handleRunControl(ctx: AppContext, control: RunControl, deps: Run
     }
     case "close":
       ctx.liveInputs.get(control.runId)?.close?.();
+      return;
+    case "interrupt":
+      ctx.liveInputs.get(control.runId)?.interrupt?.();
       return;
     case "tick": {
       const live = ctx.liveInputs.get(control.runId);

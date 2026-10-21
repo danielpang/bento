@@ -108,7 +108,7 @@ export type BusWirePayload =
  * holder reads, so the wire carries ids and the database stays the
  * one source of what was said.
  */
-export type RunControlAction = "cancel" | "nudge" | "released" | "close" | "tick" | "queued";
+export type RunControlAction = "cancel" | "nudge" | "released" | "close" | "tick" | "queued" | "interrupt";
 
 export interface RunControl {
   runId: string;

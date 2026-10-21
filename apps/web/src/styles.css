@@ -10798,3 +10798,94 @@ a.swarm-plan-source-name:hover {
 .repo-entry-row .btn { flex: none; }
 .repo-entry-branch { font-family: var(--mono); font-size: 12px; }
 .repo-entry-remove { padding: 2px 8px; min-height: 0; font-size: 12px; }
+
+/* Interrupt sits beside Stop: the same size, the agent's colour rather
+   than the failure red, because the run carries on. */
+.composer-interrupt {
+  color: var(--text-dim);
+  border-color: var(--line-bright);
+  flex-shrink: 0;
+}
+.pause-bars {
+  display: inline-block;
+  width: 9px;
+  height: 10px;
+  border-left: 3px solid currentColor;
+  border-right: 3px solid currentColor;
+  box-sizing: border-box;
+}
+
+/* The agent's questions sit just above the composer, where the person
+   is already looking, and read as a form rather than a chat line. */
+.question-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 8px;
+  padding: 12px;
+  border: 1px solid var(--brand);
+  border-radius: var(--radius);
+  background: var(--panel-raised);
+  min-width: 0;
+}
+.question-card-lead {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+.question-card-question {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+.question-card-question legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  padding: 0;
+  margin-bottom: 2px;
+}
+.question-card-text {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.question-card-hint {
+  margin: 0;
+  font-size: 12px;
+}
+.question-card-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  cursor: pointer;
+  min-width: 0;
+}
+.question-card-option input {
+  margin-top: 3px;
+  flex-shrink: 0;
+}
+.question-card-option > span {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.question-card-description {
+  font-size: 12px;
+}
+.question-card-other {
+  width: 100%;
+  box-sizing: border-box;
+}
+.question-card-actions {
+  display: flex;
+  justify-content: flex-end;
+}

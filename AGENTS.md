@@ -552,11 +552,13 @@ Both are behind the beta testers flag (`isBetaRun` in
 
 ## A live session is a line per message or a protocol, and a reattach never decides again
 
-`LiveSession` has two shapes. Claude Code and pi read one JSON line per
-user message (`encodeMessage`). Codex (`codex app-server`) and opencode
+`LiveSession` has two shapes. pi reads one JSON line per user message
+(`encodeMessage`). Codex (`codex app-server`) and opencode
 (`opencode acp`) are JSON-RPC servers on stdio: a turn names a thread
 or session id the process handed out, and the process sends requests
-of its own that wait for an answer. Those adapters return a
+of its own that wait for an answer. Claude Code's messages are lines
+too, but its stream-json control protocol (interrupts, questions)
+needs replies, so it is a protocol as well. Those adapters return a
 `LiveProtocol` from `connect`, which sees every stdout line before it
 is parsed (`runAgent`'s `readLine`), writes the replies, and holds a
 message until its handshake answers (`held` counts toward the quiet
@@ -566,8 +568,9 @@ feeding. Every request from the process gets an answer, even "not
 implemented", because an unanswered one stalls the agent until the run
 limit. What each protocol relies on was verified against the real CLI
 and is written at the top of `codex-app-server.ts` and
-`opencode-acp.ts`; `live-cli.e2e.test.ts` drives both binaries against
-stand-in model servers (`BENTO_LIVE_CLI_E2E=1`, off by default).
+`opencode-acp.ts`, and `claude-code-live.ts`; `live-cli.e2e.test.ts`
+drives all three binaries against stand-in model servers
+(`BENTO_LIVE_CLI_E2E=1`, off by default).
 
 Codex's and opencode's live modes are `beta`, so `liveSessionFor`
 offers them only to a beta tester's run. Because that answer can
@@ -575,6 +578,37 @@ change, the run records it as the agent is exec'd
 (`agent_runs.live_session`), and a reattach reads the record instead of
 asking again: a one-shot process fed JSON, or a live one left waiting
 on a stdin nobody closes, is what deciding twice would cost.
+
+## An interrupt ends a turn, not a run, and an agent's question is a row
+
+Claude Code's interrupt (`LiveProtocol.interrupt`, a control request)
+ends the current turn with an error result and leaves the process up.
+The protocol marks that result `interrupted`, and the live
+conversation holds the session open for `holdAfterInterrupt` instead of
+reading the failed turn as the run's end, so the next message
+continues the same session. Silence past the hold fails the run as
+"Interrupted.". The interrupt route reaches the run the way every door
+does: the local handle if this process holds it, else a `run_control`
+"interrupt" on the bus (`requestRunInterrupt`). Only an adapter whose
+`live.interrupts` is set offers it, and only on a run recorded as live.
+
+A question (Claude Code's AskUserQuestion, behind
+`--permission-prompt-tool stdio`) arrives as a `can_use_tool` request
+the agent blocks on. It is recorded in `run_questions` (idempotent on
+the agent's request id, so a reattach does not ask twice), a person
+answers it through `POST /api/runs/:id/questions/:questionId/answer`,
+which checks the choice against what was asked (`answersFor`) and
+stores the exact text the agent will read, and the holder is nudged.
+Its `pump` claims answers before messages, in one UPDATE that marks
+them delivered, and puts them back if the write fails. An answer is
+built from the stored request id and tool input alone, so a server
+that adopted the run can answer a question its predecessor saw. The
+agent withdrawing a question (`control_cancel_request`) or the run's
+stream ending withdraws its rows. `askUser` turns the tool on only
+for a beta card stage run started fresh, because a person is there to
+answer; everywhere else the tool stays off, and a question that
+arrives anyway is declined with `NOBODY_TO_ASK` rather than left to
+stall the agent until the run limit.
 
 ## A run belongs to one process, by lease, and requests to it travel over the bus
 

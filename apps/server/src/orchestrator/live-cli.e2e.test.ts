@@ -5,7 +5,7 @@ import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentEvent } from "@bento/core";
-import { codexAdapter, openLiveWire, opencodeAdapter, runAgent, type AgentAdapter, type BuildCommandInput } from "@bento/agents";
+import { claudeCodeAdapter, codexAdapter, openLiveWire, opencodeAdapter, runAgent, type AgentAdapter, type BuildCommandInput } from "@bento/agents";
 import { LineChannel, LocalProcessDriver } from "@bento/sandbox";
 import { attachLiveConversation, type LiveConversation } from "./live-session.js";
 
@@ -22,9 +22,9 @@ import { attachLiveConversation, type LiveConversation } from "./live-session.js
  *
  *   BENTO_LIVE_CLI_E2E=1 node --test --import tsx src/orchestrator/live-cli.e2e.test.ts
  *
- * Verified with codex-cli 0.163.0 and opencode 1.19.3.
+ * Verified with codex-cli 0.163.0, opencode 1.19.3 and Claude Code 2.1.306.
  */
-const skip = process.env.BENTO_LIVE_CLI_E2E ? false : "set BENTO_LIVE_CLI_E2E=1 with codex and opencode on PATH";
+const skip = process.env.BENTO_LIVE_CLI_E2E ? false : "set BENTO_LIVE_CLI_E2E=1 with codex, opencode and claude on PATH";
 
 interface ModelLog {
   /** What each model call's user messages said, oldest first. */
@@ -226,6 +226,166 @@ test("opencode acp: a message mid-turn is queued into the turn, and the next run
     const lastCall = log.calls.at(-1)!;
     assert.ok(lastCall.some((text) => text.includes("USE_TOOL")) && lastCall.some((text) => text.includes("and now?")),
       "the resumed session carried the first run's conversation");
+  } finally {
+    server.close();
+  }
+});
+
+/**
+ * Claude Code: a question answered by a person, then an interrupt that
+ * keeps the session, through the same pieces a server run uses. Needs
+ * the real `claude` on PATH. IS_SANDBOX is what Bento's drivers set so
+ * skip-permissions runs as root in a sandbox.
+ */
+test("claude code: a question is answered through the store, and an interrupt keeps the session for the next message", { skip, timeout: 180_000 }, async () => {
+  const calls: { users: string[]; toolResult: string | null }[] = [];
+  const questions = [
+    { question: "Which database should we use?", header: "Database", multiSelect: false, options: [{ label: "Postgres", description: "Relational" }, { label: "SQLite", description: "Embedded" }] },
+    { question: "Which features should ship first?", header: "Features", multiSelect: true, options: [{ label: "Search", description: "Full text" }, { label: "Export", description: "CSV" }, { label: "Sharing", description: "Links" }] },
+  ];
+  const server = createServer(async (req, res) => {
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    const p = JSON.parse(body || "{}") as { stream?: boolean; model?: string; messages?: { role: string; content: unknown }[] };
+    if (req.method !== "POST" || !req.url?.startsWith("/v1/messages") || !p.stream) {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ id: "side", type: "message", role: "assistant", model: p.model, content: [{ type: "text", text: "ok" }], stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1 } }));
+      return;
+    }
+    const texts = (p.messages ?? []).filter((m) => m.role === "user").map((m) =>
+      typeof m.content === "string" ? m.content : (m.content as { type: string; text?: string }[]).map((c) => c.text ?? c.type).join(" "));
+    const last = [...(p.messages ?? [])].reverse().find((m) => m.role === "user" && Array.isArray(m.content));
+    const result = Array.isArray(last?.content)
+      ? (last!.content as { type: string; content?: unknown }[]).find((c) => c.type === "tool_result")
+      : undefined;
+    calls.push({ users: texts, toolResult: result ? JSON.stringify(result.content) : null });
+    const lastText = texts.at(-1) ?? "";
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    const ev = (type: string, data: Record<string, unknown>) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`);
+    ev("message_start", { message: { id: `m${calls.length}`, type: "message", role: "assistant", model: p.model, content: [], stop_reason: null, usage: { input_tokens: 10, output_tokens: 0 } } });
+    if (lastText.includes("SLOW")) await new Promise((r) => setTimeout(r, 6_000));
+    if (res.destroyed) return;
+    const asking = lastText.includes("ASK") && !result;
+    if (asking) {
+      ev("content_block_start", { index: 0, content_block: { type: "tool_use", id: `toolu_${calls.length}`, name: "AskUserQuestion", input: {} } });
+      ev("content_block_delta", { index: 0, delta: { type: "input_json_delta", partial_json: JSON.stringify({ questions }) } });
+      ev("content_block_stop", { index: 0 });
+      ev("message_delta", { delta: { stop_reason: "tool_use", stop_sequence: null }, usage: { output_tokens: 5 } });
+    } else {
+      const text = result ? `Thanks. Tool said: ${JSON.stringify(result.content).slice(0, 200)}` : `Reply to: ${lastText.slice(-80)}`;
+      ev("content_block_start", { index: 0, content_block: { type: "text", text: "" } });
+      ev("content_block_delta", { index: 0, delta: { type: "text_delta", text } });
+      ev("content_block_stop", { index: 0 });
+      ev("message_delta", { delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 5 } });
+    }
+    ev("message_stop", {});
+    res.end();
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  try {
+    const cwd = mkdtempSync(join(tmpdir(), "bento-claude-live-"));
+    const env = {
+      HOME: cwd,
+      ANTHROPIC_BASE_URL: base,
+      ANTHROPIC_API_KEY: "sk-e2e",
+      CLAUDE_CONFIG_DIR: join(cwd, ".claude"),
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+      IS_SANDBOX: "1",
+    };
+    const input = { prompt: "ASK about the stack", model: "claude-sonnet-5", cwd, askUser: true };
+    const live = claudeCodeAdapter.live!;
+    const driver = new LocalProcessDriver();
+    const handle = await driver.provision({ workspaceKey: "e2e", hostWorkspacePath: cwd } as never);
+    const channel = new LineChannel();
+    const wire = openLiveWire(live, input, { attach: false });
+    for (const line of wire.open(input.prompt)) channel.write(line);
+
+    // An in-memory stand-in for the run_questions rows.
+    const stored: { id: string; ask: import("@bento/agents").LiveAsk }[] = [];
+    let answered: { id: string; ask: import("@bento/agents").LiveAsk; answers: Record<string, string> }[] = [];
+    const transcript: string[] = [];
+    const session = attachLiveConversation({
+      runId: "e2e-claude",
+      wire,
+      liveChannel: channel,
+      conversation: {
+        ...closingConversation(),
+        holdAfterInterrupt: () => 30,
+        interruptedNotice: () => "Interrupted.",
+        questions: {
+          record: async (ask) => {
+            stored.push({ id: `row-${stored.length + 1}`, ask });
+            return `row-${stored.length}`;
+          },
+          claimAnswers: async () => {
+            const taken = answered;
+            answered = [];
+            return taken;
+          },
+          requeueAnswers: async () => {},
+          withdraw: async () => {},
+        },
+      },
+      mayEnd: async () => true,
+      sayAsUser: async (text) => {
+        transcript.push(`user: ${text}`);
+      },
+      saySystem: async (text) => {
+        transcript.push(`system: ${text}`);
+      },
+    });
+
+    let results = 0;
+    let interruptedSeen = false;
+    const run = runAgent({
+      adapter: claudeCodeAdapter,
+      argv: live.buildCommand(input),
+      exec: () => driver.exec(handle, live.buildCommand(input), { cwd, env, stdin: channel, timeoutMs: 120_000 }),
+      readLine: (line) => {
+        const { write, events, asks, withdrawn } = wire.read(line);
+        for (const reply of write) channel.write(reply);
+        if (asks?.length) void session.ask(asks);
+        if (withdrawn?.length) void session.withdraw(withdrawn);
+        return events;
+      },
+      onEvent: async (event) => {
+        if (event.type !== "result") return;
+        results += 1;
+        if (event.interrupted) interruptedSeen = true;
+        if (results === 1) {
+          // The question's turn is over; start a slow one to interrupt.
+          assert.equal(await session.deliver("SLOW work, please"), true);
+          return;
+        }
+        await session.onTurnFinished(event.ok, event.interrupted === true);
+      },
+    });
+
+    // The question arrives; a person picks one database and two features.
+    while (stored.length === 0) await new Promise((r) => setTimeout(r, 50));
+    assert.deepEqual(stored[0]!.ask.questions.map((q) => q.multiSelect), [false, true]);
+    answered = [{ id: stored[0]!.id, ask: stored[0]!.ask, answers: { "Which database should we use?": "Postgres", "Which features should ship first?": "Search, Export" } }];
+    assert.equal(await session.pump(), true, "the answer went into the waiting agent");
+
+    // The slow turn starts; interrupt it.
+    while (!calls.some((c) => c.users.at(-1)?.includes("SLOW"))) await new Promise((r) => setTimeout(r, 50));
+    assert.equal(session.interrupt(), true);
+    while (!interruptedSeen) await new Promise((r) => setTimeout(r, 50));
+    assert.equal(session.waiting(), true, "held open after the interrupt");
+    assert.equal(await session.deliver("Actually, just summarise."), true);
+
+    const result = await run;
+    assert.equal(result.exitCode, 0, "closing stdin after the last turn ended the process cleanly");
+    assert.equal(result.outcome.ok, true, result.outcome.error);
+
+    const answeredCall = calls.find((c) => c.toolResult?.includes("Postgres"));
+    assert.ok(answeredCall, "the model read the person's answer");
+    assert.match(answeredCall!.toolResult!, /Search, Export/, "both features, as one multiple choice answer");
+    const lastCall = calls.at(-1)!;
+    assert.ok(lastCall.users.some((t) => t.includes("Actually, just summarise.")), "the message after the interrupt reached the same session");
+    assert.ok(lastCall.users.some((t) => t.includes("ASK about the stack")), "with the whole conversation before it");
+    assert.ok(transcript.includes("system: Interrupted."));
   } finally {
     server.close();
   }
