@@ -644,6 +644,16 @@ export const agentRuns = pgTable(
   ownerId: text("owner_id"),
   ownerHeartbeatAt: timestamp("owner_heartbeat_at", { withTimezone: true }),
   cliSessionId: text("cli_session_id"),
+  /**
+   * Whether the agent was started as a live session (a process held
+   * open on stdin) or as a one-shot command. Written as the agent is
+   * exec'd, and read by a server reattaching after a restart, which has
+   * to speak to the process the way its first life started it: whether
+   * a tool runs live can depend on the beta flag, and a flag that
+   * changed in between must not change how a running process is read.
+   * Null on runs from before the column, which decide as they always did.
+   */
+  liveSession: boolean("live_session"),
   sandboxExecution: jsonb("sandbox_execution").$type<{
     provider: "docker" | "sprite" | "modal" | "local-process";
     id: string;

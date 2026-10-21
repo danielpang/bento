@@ -15,7 +15,7 @@ import { useBetaTesters } from "../beta.js";
 import { sandboxProviderWords } from "../sandbox-provider.js";
 import type { LineQuote } from "./DiffReview.js";
 import { StopButton } from "./IconButtons.js";
-import { LIVE_TOOLS } from "./ui.js";
+import { runLiveKind } from "./ui.js";
 import { toolActivity, type ToolActivity } from "../tool-activity.js";
 import { ToolActivityGroup } from "./ToolActivityGroup.js";
 import { REDUCED_MOTION, orbStateFor } from "./AgentOrb.js";
@@ -238,7 +238,7 @@ export function AgentSession({
   const latestAgent = profiles.find((p) => p.id === latestRun?.agentProfileId);
   const runActive = !!latestRun && !TERMINAL_RUN.has(latestRun.status);
   /** How the latest agent's tool treats a mid-task message, if at all. */
-  const liveKind = latestAgent ? LIVE_TOOLS[latestAgent.cli] : undefined;
+  const liveKind = latestAgent ? runLiveKind(latestAgent.cli, latestRun?.liveSession) : undefined;
   /** Whether a new run can pick the conversation up where this left it. */
   const resumes = !latestAgent || !forgetsBetweenRuns(latestAgent.cli);
   const quietTool = Boolean(latestAgent && hasNoLiveTranscript(latestAgent.cli));

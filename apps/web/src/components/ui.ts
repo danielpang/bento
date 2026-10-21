@@ -120,6 +120,28 @@ export const LIVE_TOOLS: Record<string, "steer" | "queue" | undefined> = {
   "claude-code": "queue",
 };
 
+/**
+ * Tools whose live session is a beta feature: Codex steers the running
+ * turn, opencode queues behind the current step. A beta tester's run
+ * of these holds a live session; everyone else's takes messages
+ * between runs, as before.
+ */
+export const BETA_LIVE_TOOLS: Record<string, "steer" | "queue" | undefined> = {
+  codex: "steer",
+  opencode: "queue",
+};
+
+/**
+ * How a mid-task message is treated in this run. The run says whether
+ * it went live (liveSession, recorded as its agent started); until it
+ * has, and for runs from before that record, the tool decides.
+ */
+export function runLiveKind(cli: string, liveSession: boolean | null | undefined): "steer" | "queue" | undefined {
+  if (liveSession === false) return undefined;
+  if (liveSession === true) return LIVE_TOOLS[cli] ?? BETA_LIVE_TOOLS[cli];
+  return LIVE_TOOLS[cli];
+}
+
 /** Tools whose upstream interface is explicitly unstable. */
 export const PREVIEW_TOOLS: Record<string, true | undefined> = { dsh: true };
 
@@ -140,11 +162,12 @@ export interface ToolCapability {
   detail: string;
 }
 
-export function toolCapabilities(cli: string, model?: string): ToolCapability[] {
+export function toolCapabilities(cli: string, model?: string, beta = false): ToolCapability[] {
+  const live = LIVE_TOOLS[cli] ?? (beta ? BETA_LIVE_TOOLS[cli] : undefined);
   const messaging: ToolCapability =
-    LIVE_TOOLS[cli] === "steer"
+    live === "steer"
       ? { icon: "steer", label: "Steer mid-run", detail: "Messages steer it while it works." }
-      : LIVE_TOOLS[cli] === "queue"
+      : live === "queue"
         ? {
             icon: "queue",
             label: "Queues mid-run",

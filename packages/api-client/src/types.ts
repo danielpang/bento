@@ -208,6 +208,11 @@ export interface AgentRun {
    * the run provisions, when provisioning failed, and on older runs.
    */
   sandboxProvider?: string | null;
+  /**
+   * Whether the run's agent was started as a live session, so a message
+   * reaches it mid-run. Null until the agent starts, and on older runs.
+   */
+  liveSession?: boolean | null;
 }
 
 /**

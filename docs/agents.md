@@ -6,9 +6,9 @@ Each stage runs one agent: harness, model, and skill. Tools differ in authentica
 | --- | --- | --- | --- | --- |
 | Claude Code | `claude-sonnet-5` | `ANTHROPIC_API_KEY` or subscription token | Queued in same session | Yes |
 | pi | `anthropic/claude-sonnet-5` | Provider key for selected model | Steering after current tool call | Yes |
-| Codex CLI | `gpt-5-codex`, `openai/gpt-5-mini`, or `vercel/moonshotai/kimi-k3` | `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, or `AI_GATEWAY_API_KEY` | Between runs (session resume) | No |
+| Codex CLI | `gpt-5-codex`, `openai/gpt-5-mini`, or `vercel/moonshotai/kimi-k3` | `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, or `AI_GATEWAY_API_KEY` | Steering mid-turn (beta); otherwise between runs | No |
 | Cursor CLI | `claude-sonnet-5`, `composer-2.5`, `grok-4.6` | `CURSOR_API_KEY` | Between runs (session resume) | No |
-| opencode | `anthropic/claude-sonnet-5` | Provider key for selected model | Between runs (session resume) | No |
+| opencode | `anthropic/claude-sonnet-5` | Provider key for selected model | Queued in same session (beta); otherwise between runs | No |
 | Poolside (pool) | `poolside/laguna-s-2.1` | `POOLSIDE_API_KEY` | Between runs (new run, no session id) | No |
 | DeepSeek Harness (dsh, preview) | `deepseek-v4-pro` | `DEEPSEEK_API_KEY` | Between runs (new run, no session id) | No |
 | Antigravity CLI | `gemini-3.1-pro-high` | `GEMINI_API_KEY` | Between runs (conversation resume) | No |
@@ -50,7 +50,9 @@ The card composer accepts input during runs. Behavior by tool:
 
 - **pi:** message delivered after the current tool call (steering). Manual stages keep the session open after a turn.
 - **Claude Code:** message queued for the next step in the same session. Manual stages keep the session open.
-- **Codex, Cursor, opencode, Antigravity, Muse Code, fx:** message delivered when the current run ends; next run resumes the session.
+- **Codex (beta):** message steers the running turn: Codex cuts the model call in flight and the next one carries the message. Manual stages keep the session open after a turn.
+- **opencode (beta):** message queued for the next step in the same session. Manual stages keep the session open.
+- **Cursor, Antigravity, Muse Code, fx, and Codex and opencode outside the beta:** message delivered when the current run ends; next run resumes the session.
 - **pool, dsh:** message delivered when the current run ends; next run starts fresh with stage prompt and compacted transcript.
 
 If the session is unavailable (sandbox recreated or CLI session lost), Bento starts a new run with the same instructions and compacted transcript.
@@ -110,6 +112,8 @@ Bare OpenAI ids (`gpt-5-codex`) use `OPENAI_API_KEY`. When OpenRouter is the sel
 
 Codex 0.153 ignores `OPENAI_API_KEY` for its built in provider. Bento hands the saved OpenAI key over as `CODEX_API_KEY`. `OPENAI_BASE_URL` is still honored for other OpenAI compatible gateways, as `-c openai_base_url=...`. Does not report cost.
 
+For beta testers, Codex runs as `codex app-server`, its JSON-RPC server on stdin and stdout, so a message reaches it mid-turn. The app server reads no API key from the environment for its built in provider, so a saved OpenAI key is given a provider of its own that reads `CODEX_API_KEY` (named `bento-openai`); the key stays in the environment and is never written to a file. A profile whose extra arguments include anything other than config overrides (`-c`, `--enable`, `--disable`) keeps `codex exec`, because the app server refuses exec's flags.
+
 ### Cursor CLI
 
 Bare model ids per Cursor plan. Single `CURSOR_API_KEY`. Unlisted model ids may be entered manually. Headless mode accepts no mid-run input. Does not report cost.
@@ -117,6 +121,8 @@ Bare model ids per Cursor plan. Single `CURSOR_API_KEY`. Unlisted model ids may 
 ### opencode
 
 `provider/id` format including `openrouter/` and `vercel/`. Same provider keys as pi. Does not report cost.
+
+For beta testers, opencode runs as `opencode acp`, its Agent Client Protocol server on stdin and stdout, so a message sent mid-turn reaches the same session. `opencode acp` takes no model flag, so Bento selects the model over the protocol. Permission requests are answered with the option that allows, as `opencode run --auto` does. A profile with extra arguments keeps `opencode run`, because `opencode acp` takes none of its flags.
 
 ### Poolside (pool)
 

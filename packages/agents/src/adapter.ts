@@ -44,6 +44,15 @@ export interface CustomProviderSelection {
  * current tool call); "queue" waits for the current turn to finish
  * (Claude Code processes stdin messages sequentially). Tools without
  * this capability fall back to queue-and-resume between runs.
+ *
+ * A tool speaks one of two shapes, and declares exactly one of
+ * `encodeMessage` and `connect`. Claude Code and pi read one JSON line
+ * per user message and need nothing back, so `encodeMessage` is the
+ * whole protocol. Codex (`codex app-server`) and opencode (`opencode
+ * acp`) are JSON-RPC servers on stdio: a message names a thread or
+ * session id the process handed out earlier, and the process sends
+ * requests of its own that must be answered. Those need state that
+ * lives as long as the process does, which is what `connect` returns.
  */
 export interface LiveSession {
   delivery: "steer" | "queue";
@@ -53,10 +62,58 @@ export interface LiveSession {
    * one-shot behaviors (SLOW, FAIL) stay available to tests.
    */
   appliesTo?(input: BuildCommandInput): boolean;
+  /**
+   * Live mode on this tool is still a beta feature: the orchestrator
+   * offers it only to beta testers' runs, and every other run takes the
+   * one-shot command as before.
+   */
+  beta?: boolean;
   /** argv for a session that reads user messages on stdin. */
   buildCommand(input: BuildCommandInput): string[];
   /** One stdin line delivering the opening prompt or a follow-up. */
-  encodeMessage(text: string, kind: "initial" | "followUp"): string;
+  encodeMessage?(text: string, kind: "initial" | "followUp"): string;
+  /**
+   * A conversation with one process, for tools whose live mode is a
+   * protocol rather than a line per message. `attach` is true when the
+   * process is already running (a server reattaching after a restart),
+   * so the protocol must not repeat its handshake and takes the
+   * session id from `input.resumeSessionId`.
+   */
+  connect?(input: BuildCommandInput, how: { attach: boolean }): LiveProtocol;
+}
+
+/**
+ * One live process's side of a stdio protocol.
+ *
+ * Every method returns the stdin lines to write, so the protocol never
+ * holds the channel itself: the executor writes them, and a channel
+ * that has closed refuses them the same way it refuses any other line.
+ */
+export interface LiveProtocol {
+  /**
+   * The first lines: the handshake, then the opening prompt when there
+   * is one. The prompt may be held until the handshake answers (a
+   * thread id the first turn has to name), and goes out from `read`.
+   */
+  open(prompt: string | null): string[];
+  /**
+   * A message from a person. Lines to write now; a message that cannot
+   * go out yet is held and released by `read`, and counts in `held`.
+   * Null when this process will never take it (its handshake failed),
+   * so the caller puts the message back for the next run.
+   */
+  send(text: string): string[] | null;
+  /**
+   * Every stdout line, before it is parsed. `write` answers the process
+   * (a response to its request, a held message now that it can go).
+   * `events`, when present, replace what parseEvent would make of the
+   * line, for the facts only a protocol with memory can state: a turn's
+   * end with the usage reported lines earlier, or a message assembled
+   * from its fragments.
+   */
+  read(line: string): { write: string[]; events?: AgentEvent[] };
+  /** Messages accepted by `send` or `open` and not written yet. */
+  readonly held: number;
 }
 
 /**

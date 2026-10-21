@@ -1,5 +1,5 @@
 import { shouldHoldLiveSession } from "@bento/core";
-import type { LiveSession } from "@bento/agents";
+import type { LiveWire } from "@bento/agents";
 import type { LineChannel } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
 import {
@@ -79,7 +79,8 @@ export interface LiveConversationHandle {
  */
 export function attachLiveConversation(input: {
   runId: string;
-  live: LiveSession;
+  /** The process's side of the protocol: what to write for a message. */
+  wire: LiveWire;
   liveChannel: LineChannel;
   conversation: LiveConversation;
   /**
@@ -100,7 +101,7 @@ export function attachLiveConversation(input: {
   sayAsUser: (text: string) => Promise<void>;
   saySystem: (text: string) => Promise<void>;
 }): LiveConversationHandle {
-  const { live, liveChannel, conversation } = input;
+  const { wire, liveChannel, conversation } = input;
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
   let announcedWait = false;
   let waiting = false;
@@ -112,9 +113,29 @@ export function attachLiveConversation(input: {
     idleTimer = null;
   };
 
+  /**
+   * Nothing is waiting to reach the process: no line the channel has
+   * not handed over, and no message the protocol is holding until its
+   * handshake answers (a thread id the message has to name).
+   */
+  const quiet = () => liveChannel.pending === 0 && wire.held === 0;
+
+  /**
+   * A message into the process. False when it did not go in, so the
+   * caller can put it back: the channel closed, or the protocol says
+   * this process will never take it. Held counts as in: it goes out
+   * when the handshake answers.
+   */
+  const write = (text: string): boolean => {
+    const lines = wire.send(text);
+    if (lines === null) return false;
+    for (const line of lines) if (!liveChannel.write(line)) return false;
+    return !liveChannel.ended;
+  };
+
   const closeWhenQuiet = () => {
     clearIdle();
-    if (liveChannel.pending === 0) liveChannel.end();
+    if (quiet()) liveChannel.end();
   };
 
   /**
@@ -124,7 +145,7 @@ export function attachLiveConversation(input: {
    * run; dispose does not, because by then the stream has ended.
    */
   const endStdinIfOurs = async (): Promise<void> => {
-    if (liveChannel.pending !== 0) return;
+    if (!quiet()) return;
     if (input.mayEnd && !(await input.mayEnd())) return;
     liveChannel.end();
   };
@@ -134,7 +155,7 @@ export function attachLiveConversation(input: {
   const deliver = async (text: string): Promise<boolean> => {
     if (detached) return false;
     clearIdle();
-    const accepted = liveChannel.write(live.encodeMessage(text, "followUp"));
+    const accepted = write(text);
     if (accepted) await input.sayAsUser(text);
     return accepted;
   };
@@ -152,7 +173,7 @@ export function attachLiveConversation(input: {
     if (claimed.length === 0) return false;
     clearIdle();
     const joined = claimed.map((m) => m.text).join("\n");
-    const accepted = liveChannel.write(live.encodeMessage(joined, "followUp"));
+    const accepted = write(joined);
     if (accepted) {
       await conversation.markSent(claimed.map((m) => m.id));
       await input.sayAsUser(joined);
@@ -166,7 +187,7 @@ export function attachLiveConversation(input: {
     if (detached) return;
     if (await pumpParked()) return;
 
-    if (liveChannel.pending === 0) {
+    if (quiet()) {
       const idleSec = await conversation.holdFor(ok);
       const fits = input.holdUntil === undefined || Date.now() + idleSec * 1000 <= input.holdUntil;
       if (idleSec > 0 && fits) {

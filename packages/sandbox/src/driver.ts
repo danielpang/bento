@@ -302,6 +302,11 @@ export class LineChannel implements AsyncIterable<string> {
     return this.queue.length;
   }
 
+  /** Whether end() was called, after which every write is refused. */
+  get ended(): boolean {
+    return this.closed;
+  }
+
   async *[Symbol.asyncIterator](): AsyncIterator<string> {
     while (true) {
       while (this.queue.length > 0) yield this.queue.shift()!;

@@ -19,9 +19,12 @@ import {
   getAdapter,
   runAgent,
   isSandboxHomePath,
+  openLiveWire,
   writeFileCommand,
   type AgentAdapter,
+  type BuildCommandInput,
   type LiveSession,
+  type LiveWire,
   type McpFile,
   type CustomProviderSelection,
 } from "@bento/agents";
@@ -702,7 +705,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     await saySystem("Dependency setup needs attention. Starting the agent with the error details so it can diagnose and repair the environment.");
   }
 
-  const { argv, live, liveChannel, workdir, toolEnv, files } = await buildRunCommand(ctx, {
+  const { argv, live, liveChannel, wire, workdir, toolEnv, files } = await buildRunCommand(ctx, {
     driver,
     subject,
     adapter,
@@ -794,11 +797,11 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
    * after its first turn. Only a run somebody can talk to is registered
    * for delivery.
    */
-  if (live && liveChannel) {
+  if (live && liveChannel && wire) {
     const conversation = await liveConversationFor(ctx, subject);
     const liveHold = attachLiveConversation({
       runId,
-      live,
+      wire,
       liveChannel,
       conversation: conversation ?? headlessConversation(),
       holdUntil: Date.now() + ctx.env.BENTO_RUN_TIMEOUT_MIN * 60_000 - HOLD_MARGIN_MS,
@@ -894,7 +897,9 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
    */
   const [stillOurs] = await ctx.db
     .update(agentRuns)
-    .set({ status: "running", agentStartedAt: new Date() })
+    // Whether it goes live is recorded with the start, for a reattach
+    // to speak to the process the same way (see liveSessionFor).
+    .set({ status: "running", agentStartedAt: new Date(), liveSession: live !== null })
     .where(and(eq(agentRuns.id, runId), eq(agentRuns.status, "starting")))
     .returning({ id: agentRuns.id });
   if (!stillOurs) {
@@ -923,6 +928,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       // Straight to the bus, no row: the transcript gets the finished
       // message; open streams get the typing.
       onDelta: (delta) => ctx.bus.emitRunDelta(runId, delta),
+      ...(wire && liveChannel ? { readLine: (line: string) => readLiveLine(ctx, runId, wire, liveChannel, line) } : {}),
       onEvent: async (event, cursor) => {
         // A draining process only consumes: its successor has the run.
         // So does one whose run another server adopted.
@@ -1662,6 +1668,8 @@ async function buildRunCommand(
   argv: string[];
   live: LiveSession | null;
   liveChannel: LineChannel | null;
+  /** The live process's side of its protocol; null for a one-shot command. */
+  wire: LiveWire | null;
   workdir: string;
   /** Environment this tool takes instead of flags, per run. */
   toolEnv: Record<string, string>;
@@ -1736,27 +1744,74 @@ async function buildRunCommand(
     ...(input.credentials ? { credentials: input.credentials } : {}),
     ...(input.customProvider ? { customProvider: input.customProvider } : {}),
   };
-  /**
-   * Live mode: the tool holds a conversation over stdin, so a message
-   * sent while it works reaches the process instead of waiting for the
-   * run to end. Needs both halves: an adapter that speaks it and a
-   * driver that can attach stdin.
-   */
-  const live =
-    adapter.live && driver.supportsStdin && (adapter.live.appliesTo?.(commandInput) ?? true)
-      ? adapter.live
-      : null;
+  const live = await liveSessionFor(ctx, { adapter, driver, subject, commandInput, attach: !input.sendInitialPrompt });
   const liveChannel = live ? new LineChannel() : null;
-  if (input.sendInitialPrompt && live && liveChannel) liveChannel.write(live.encodeMessage(prompt, "initial"));
+  /**
+   * The process's side of the conversation. A reattach opens it without
+   * the handshake, which the process already had in its first life, and
+   * without the prompt, which it already consumed.
+   */
+  const wire = live ? openLiveWire(live, commandInput, { attach: !input.sendInitialPrompt }) : null;
+  if (wire && liveChannel) {
+    for (const line of wire.open(input.sendInitialPrompt ? prompt : null)) liveChannel.write(line);
+  }
   const argv = live ? live.buildCommand(commandInput) : adapter.buildCommand(commandInput);
   return {
     argv,
     live,
     liveChannel,
+    wire,
     workdir,
     toolEnv: adapter.env?.(commandInput) ?? {},
     files: adapter.files?.(commandInput) ?? [],
   };
+}
+
+/**
+ * Whether this run's agent holds a live session over stdin, so a
+ * message sent while it works reaches the process instead of waiting
+ * for the run to end. Needs both halves: an adapter that speaks it and
+ * a driver that can attach stdin. A tool whose live mode is still beta
+ * goes live only for a beta tester's run (isBetaRun: the member who
+ * started it, or the project's owner for a run nobody started).
+ *
+ * A reattach does not decide again. It speaks to the process its first
+ * life started, which the run row recorded as the agent was exec'd: a
+ * flag flipped in between must not have a one-shot process fed JSON,
+ * or a live one left waiting on a stdin nobody will ever close. A row
+ * from before that record went live only on a tool that was not beta.
+ */
+export async function liveSessionFor(
+  ctx: AppContext,
+  input: {
+    adapter: AgentAdapter;
+    driver: SandboxDriver;
+    subject: RunSubject;
+    commandInput: BuildCommandInput;
+    attach: boolean;
+  },
+): Promise<LiveSession | null> {
+  const { adapter, driver, subject, commandInput } = input;
+  const { run } = subject;
+  if (input.attach && typeof run.liveSession === "boolean") return run.liveSession ? adapter.live ?? null : null;
+  const offered =
+    adapter.live && driver.supportsStdin && (adapter.live.appliesTo?.(commandInput) ?? true) ? adapter.live : null;
+  if (!offered?.beta) return offered;
+  if (input.attach) return null;
+  return (await isBetaRun(ctx, { actingUserId: run.startedBy, projectOwnerId: subject.project.ownerId })) ? offered : null;
+}
+
+/**
+ * One stdout line of a live process, shown to its protocol before it is
+ * parsed. What the protocol answers goes straight back on stdin, unless
+ * this process no longer speaks for the run (draining, or another
+ * server adopted it): the owner's own connection answers then, and a
+ * second answer to one request would be a reply to nothing.
+ */
+function readLiveLine(ctx: AppContext, runId: string, wire: LiveWire, channel: LineChannel, line: string) {
+  const { write, events } = wire.read(line);
+  if (!yielded(ctx, runId)) for (const reply of write) channel.write(reply);
+  return events;
 }
 
 /** What this run's role is told to do, before any follow-up message. */
@@ -3323,7 +3378,7 @@ async function resumeInterruptedRun(
   const grantServers = adapter.mcp ? await runGrantServerIds(ctx, run.id) : [];
   const mcpArgs = grantServers.length > 0 ? adapter.mcp?.extraArgs?.() ?? [] : [];
 
-  const { argv, live, liveChannel, workdir } = await buildRunCommand(ctx, {
+  const { argv, live, liveChannel, wire, workdir } = await buildRunCommand(ctx, {
     driver,
     subject,
     adapter,
@@ -3438,11 +3493,11 @@ async function resumeInterruptedRun(
   let liveSession: LiveConversationHandle | null = null;
   // The same conversation the first life had, for the reason the first
   // run attaches one: it is what ends the process.
-  if (live && liveChannel) {
+  if (live && liveChannel && wire) {
     const conversation = await liveConversationFor(ctx, subject);
     liveSession = attachLiveConversation({
       runId: run.id,
-      live,
+      wire,
       liveChannel,
       conversation: conversation ?? headlessConversation(),
       holdUntil: Date.now() + timeoutMs - HOLD_MARGIN_MS,
@@ -3538,6 +3593,7 @@ async function resumeInterruptedRun(
       exec: () => taggedSandboxExec(stream),
       initialEvents: durableEvents,
       onDelta: (delta) => ctx.bus.emitRunDelta(run.id, delta),
+      ...(wire && liveChannel ? { readLine: (line: string) => readLiveLine(ctx, run.id, wire, liveChannel, line) } : {}),
       onEvent: async (event, cursor) => {
         // A draining process only consumes: its successor has the run.
         // So does one whose run another server adopted.

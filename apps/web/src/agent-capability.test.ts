@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { toolCapabilities, toolCapability } from "./components/ui.js";
+import { runLiveKind, toolCapabilities, toolCapability } from "./components/ui.js";
 
 test("DeepSeek Harness capabilities admit its quiet cold-run behavior", () => {
   const copy = toolCapability("dsh");
@@ -73,4 +73,20 @@ test("Claude Code on an Ollama model says its cost is not reported, and why", ()
   assert.match(chips[1]!.label, /Ollama/);
   assert.match(toolCapability("claude-code", "ollama/glm-5.1"), /would price them as Claude models/);
   assert.equal(toolCapabilities("claude-code", "claude-sonnet-5")[1]!.icon, "cost");
+});
+
+test("codex and opencode hold a live session for beta testers only", () => {
+  assert.equal(toolCapabilities("codex")[0]!.icon, "between-runs");
+  assert.equal(toolCapabilities("codex", undefined, true)[0]!.icon, "steer");
+  assert.equal(toolCapabilities("opencode")[0]!.icon, "between-runs");
+  assert.equal(toolCapabilities("opencode", undefined, true)[0]!.icon, "queue");
+  assert.equal(toolCapabilities("cursor", undefined, true)[0]!.icon, "between-runs", "the flag adds nothing to a tool without a live mode");
+});
+
+test("a run's own record says whether a message reaches it mid-run", () => {
+  assert.equal(runLiveKind("codex", true), "steer", "a beta tester's codex run went live");
+  assert.equal(runLiveKind("codex", false), undefined, "a codex exec run takes messages between runs");
+  assert.equal(runLiveKind("codex", null), undefined, "not started yet: the tool's default");
+  assert.equal(runLiveKind("claude-code", null), "queue", "an older run of a tool that was always live");
+  assert.equal(runLiveKind("claude-code", false), undefined);
 });

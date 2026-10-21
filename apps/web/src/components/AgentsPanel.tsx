@@ -718,9 +718,11 @@ export function AgentsPanel({
  * rather than three lines of prose nobody finished.
  */
 function CapabilityChips({ cli, model }: { cli: string; model?: string }) {
+  // Codex and opencode hold a live session for beta testers only.
+  const beta = useBetaTesters();
   return (
     <div className="cap-chips">
-      {toolCapabilities(cli, model).map((capability) => (
+      {toolCapabilities(cli, model, beta).map((capability) => (
         <span key={capability.icon} className="chip chip-soft cap-chip" title={capability.detail}>
           <CapabilityIcon icon={capability.icon} />
           {capability.label}

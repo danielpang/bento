@@ -1,4 +1,4 @@
-import type { AgentEvent, RunOutcome } from "@bento/core";
+import type { AgentDelta, AgentEvent, RunOutcome } from "@bento/core";
 import { hasOllamaCredentials, isOllamaModel, ollamaModelId, ollamaServerUrl } from "@bento/core";
 import {
   providerKeyFor,
@@ -6,6 +6,7 @@ import {
   type BuildCommandInput,
   type RecoveredMessage,
 } from "./adapter.js";
+import { opencodeAcpProtocol, parseAcpDelta } from "./opencode-acp.js";
 
 interface OpencodePart {
   type?: string;
@@ -144,6 +145,31 @@ export const opencodeAdapter: AgentAdapter = {
   },
 
   /**
+   * `opencode acp`, its Agent Client Protocol server on stdio (see
+   * opencode-acp.ts for what was verified and how). A message sent
+   * mid-turn is queued by opencode and read at its next model call.
+   * Beta, so every other run keeps `opencode run`.
+   */
+  live: {
+    delivery: "queue",
+    beta: true,
+    /**
+     * Not with profile arguments: they were written for `opencode run`
+     * (`--agent`, `--variant`), and `opencode acp` takes none of them.
+     */
+    appliesTo: (input) => !input.extraArgs?.length,
+    buildCommand(input: BuildCommandInput): string[] {
+      // The model is chosen over the protocol: `opencode acp` has no -m.
+      return ["opencode", "acp", "--print-logs", "--cwd", input.cwd];
+    },
+    connect: (input, how) => opencodeAcpProtocol(input, how),
+  },
+
+  parseDelta(line: string): Pick<AgentDelta, "channel" | "text"> | null {
+    return parseAcpDelta(line);
+  },
+
+  /**
    * `opencode export` prints the session as one JSON document, read
    * from the same storage the TUI's session list uses. Verified
    * against opencode 1.18: messages carry info.role and info.id
@@ -167,18 +193,28 @@ export const opencodeAdapter: AgentAdapter = {
       const recovered: RecoveredMessage[] = [];
       for (const message of parsed.messages ?? []) {
         if (message.info?.role !== "assistant") continue;
-        for (const part of message.parts ?? []) {
-          if (part.type !== "text" || !part.text) continue;
+        const texts = (message.parts ?? []).filter((part) => part.type === "text" && part.text);
+        for (const part of texts) {
           // Rebuilt in the live stream's own line shape, so everything
           // downstream (rendering, persistedIds, a later recovery)
           // treats it exactly like a message that arrived on time.
           recovered.push({
-            text: part.text,
+            text: part.text!,
             raw: {
               type: "text",
               recovered: true,
               part: {
-                id: part.id,
+                /**
+                 * A message with one text part is named by its message
+                 * id alone. A live session (ACP) never learns part ids,
+                 * so its transcript holds only the message id, and a
+                 * part id here would make every such message look
+                 * missing and be recovered again. One part means the
+                 * message id is exact: if it was persisted, so was this.
+                 * A message of several parts keeps each part's id, so
+                 * the one that arrived during the gap is still found.
+                 */
+                ...(texts.length > 1 ? { id: part.id } : {}),
                 messageID: part.messageID ?? message.info.id,
                 type: "text",
                 text: part.text,

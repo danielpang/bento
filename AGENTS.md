@@ -550,6 +550,32 @@ whether they wake another planner.
 Both are behind the beta testers flag (`isBetaRun` in
 `swarmLiveConversation`), because a held planner is a held machine.
 
+## A live session is a line per message or a protocol, and a reattach never decides again
+
+`LiveSession` has two shapes. Claude Code and pi read one JSON line per
+user message (`encodeMessage`). Codex (`codex app-server`) and opencode
+(`opencode acp`) are JSON-RPC servers on stdio: a turn names a thread
+or session id the process handed out, and the process sends requests
+of its own that wait for an answer. Those adapters return a
+`LiveProtocol` from `connect`, which sees every stdout line before it
+is parsed (`runAgent`'s `readLine`), writes the replies, and holds a
+message until its handshake answers (`held` counts toward the quiet
+check before stdin closes). The executor and the live conversation
+only ever see `openLiveWire`, so neither knows which shape it is
+feeding. Every request from the process gets an answer, even "not
+implemented", because an unanswered one stalls the agent until the run
+limit. What each protocol relies on was verified against the real CLI
+and is written at the top of `codex-app-server.ts` and
+`opencode-acp.ts`; `live-cli.e2e.test.ts` drives both binaries against
+stand-in model servers (`BENTO_LIVE_CLI_E2E=1`, off by default).
+
+Codex's and opencode's live modes are `beta`, so `liveSessionFor`
+offers them only to a beta tester's run. Because that answer can
+change, the run records it as the agent is exec'd
+(`agent_runs.live_session`), and a reattach reads the record instead of
+asking again: a one-shot process fed JSON, or a live one left waiting
+on a stdin nobody closes, is what deciding twice would cost.
+
 ## A run belongs to one process, by lease, and requests to it travel over the bus
 
 A run's agent stream, abort handle and stdin live in exactly one
