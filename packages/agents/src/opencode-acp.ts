@@ -102,7 +102,7 @@ export function opencodeAcpProtocol(input: BuildCommandInput, how: { attach: boo
 
     interrupt() {
       // Nothing to cancel without a session and a prompt still running.
-      if (!sessionId || outstanding === 0) return [];
+      if (!sessionId || outstanding === 0) return null;
       interrupting = true;
       return [rpc.notify("session/cancel", { sessionId })];
     },

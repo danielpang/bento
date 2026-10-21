@@ -978,6 +978,72 @@ test("a live session stays open after a turn so a later message needs no second 
 });
 
 /**
+ * Stop on a live agent that can be interrupted: the turn stops, the run
+ * does not. With nobody writing, the run closes as stopped (never
+ * failed, and the card stays where it is), and the next message
+ * continues from that run's session in a new run.
+ */
+test("an interrupted live run that hears nothing is stopped, not failed, and the next message carries on", { timeout: 120_000 }, async () => {
+  const previousIdle = ctx.env.BENTO_LIVE_IDLE_SEC;
+  ctx.env.BENTO_LIVE_IDLE_SEC = 3;
+  try {
+    const { project } = await setupProject("Live interrupt");
+    const feature = await createFeature(project.id, "Interrupt card");
+    const profile = await fakeProfile("interrupt-fake");
+    await app.request(`/api/features/${feature.id}/advance`, { method: "POST" });
+    const before = await json<{ currentStageId: string | null }>(await app.request(`/api/features/${feature.id}`));
+
+    const first = await json<{ id: string }>(
+      await app.request("/api/runs", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ featureId: feature.id, agentProfileId: profile.id, prompt: "LIVE INTERRUPTIBLE SLOW work" }),
+      }),
+    );
+
+    // Working: the slow turn has said something and has not ended.
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+      const current = await json<{ status: string }>(await app.request(`/api/runs/${first.id}`));
+      const transcript = await (await app.request(`/api/runs/${first.id}/transcript`)).text();
+      if (current.status === "running" && /Heard\./.test(transcript)) break;
+      if (TERMINAL_STATUSES.includes(current.status)) assert.fail(`the run ended (${current.status}) before it could be interrupted`);
+      await new Promise((r) => setTimeout(r, 100));
+    }
+
+    const stopped = await app.request(`/api/runs/${first.id}/interrupt`, { method: "POST" });
+    assert.equal(stopped.status, 200, await stopped.clone().text());
+
+    assert.equal(await waitForRun(first.id, 60_000), "cancelled", "stopped by a person and left: not a failure");
+    const run = await json<{ error: string | null; cliSessionId: string | null }>(await app.request(`/api/runs/${first.id}`));
+    assert.equal(run.error, null, "nothing failed");
+    assert.equal(run.cliSessionId, "fake-live-1", "the session the next message continues");
+    const transcript = await (await app.request(`/api/runs/${first.id}/transcript`)).text();
+    assert.match(transcript, /\[turn stopped\]/);
+    assert.match(transcript, /Interrupted\. The agent is waiting for your next message/);
+    assert.match(transcript, /Stopped\. Your next message continues the same session\./);
+    assert.doesNotMatch(transcript, /\[failed/);
+    const after = await json<{ currentStageId: string | null }>(await app.request(`/api/features/${feature.id}`));
+    assert.equal(after.currentStageId, before.currentStageId, "the card did not advance on a stopped run");
+
+    const sent = await json<{ queued: boolean }>(
+      await app.request(`/api/features/${feature.id}/message`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "carry on, differently" }),
+      }),
+    );
+    assert.equal(sent.queued, false, "the message started the next run rather than waiting");
+    const { runs } = await json<{ runs: { id: string; status: string }[] }>(await app.request(`/api/features/${feature.id}`));
+    assert.equal(runs.length, 2, "a new run for the next message");
+    const next = runs.find((r) => r.id !== first.id)!;
+    assert.equal(await waitForRun(next.id, 60_000), "succeeded");
+  } finally {
+    ctx.env.BENTO_LIVE_IDLE_SEC = previousIdle;
+  }
+});
+
+/**
  * Reads SSE frames off a streaming response, one at a time, through
  * the same parser the api-client ships. That is the point: the first
  * version of this helper hand-rolled its own parsing, so the wire

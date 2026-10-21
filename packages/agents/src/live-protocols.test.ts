@@ -362,15 +362,14 @@ test("codex: an interrupt names the running turn, and that turn's end is marked 
   const p = codex();
   const [, , start] = p.open("first");
   p.read(answer(start!, { thread: { id: "thr-1" } }));
-  assert.deepEqual(p.interrupt!(), [], "no turn has started: nothing to name");
   p.read(note("turn/started", { threadId: "thr-1", turn: { id: "t1", status: "inProgress" } }));
-  const [request] = p.interrupt!();
+  const [request] = p.interrupt!()!;
   assert.equal(json(request!).method, "turn/interrupt");
   assert.deepEqual(json(request!).params, { threadId: "thr-1", turnId: "t1" });
   assert.deepEqual(p.read(answer(request!, {})).events, [], "the answer itself says nothing; the turn's end does");
   const [end] = p.read(note("turn/completed", { threadId: "thr-1", turn: { id: "t1", status: "interrupted", error: null } })).events!;
   assert.deepEqual(end?.type === "result" ? [end.ok, end.interrupted, end.error, end.sessionId] : [], [false, true, "Interrupted.", "thr-1"]);
-  assert.deepEqual(p.interrupt!(), [], "the turn is over");
+  assert.equal(p.interrupt!(), null, "the turn is over: nothing to name");
 
   // The next turn is an ordinary one again.
   p.read(note("turn/started", { threadId: "thr-1", turn: { id: "t2", status: "inProgress" } }));
@@ -378,12 +377,30 @@ test("codex: an interrupt names the running turn, and that turn's end is marked 
   assert.deepEqual(next?.type === "result" ? [next.ok, next.interrupted] : [], [true, undefined]);
 });
 
+test("codex: an interrupt asked for before the turn starts is sent as turn/started names it", () => {
+  const p = codex();
+  const [, , start] = p.open("first");
+  assert.deepEqual(p.interrupt!(), [], "the prompt is held for the thread: accepted, nothing to write yet");
+  p.read(answer(start!, { thread: { id: "thr-1" } }));
+  const started = p.read(note("turn/started", { threadId: "thr-1", turn: { id: "t1", status: "inProgress" } }));
+  assert.deepEqual(started.write.map((l) => [json(l).method, json(l).params]), [["turn/interrupt", { threadId: "thr-1", turnId: "t1" }]]);
+  assert.equal(started.events, undefined, "the line is still the parser's");
+  const [end] = p.read(note("turn/completed", { threadId: "thr-1", turn: { id: "t1", status: "interrupted", error: null } })).events!;
+  assert.equal(end?.type === "result" && end.interrupted, true);
+});
+
+test("codex: a turn this process never saw start cannot be named", () => {
+  const p = codex({ resumeSessionId: "thr-1" }, true);
+  p.open(null);
+  assert.equal(p.interrupt!(), null, "a reattach mid-turn: the server decides what Stop does then");
+});
+
 test("codex: an interrupt that arrives after the turn ended is refused, and ends nothing", () => {
   const p = codex();
   const [, , start] = p.open("first");
   p.read(answer(start!, { thread: { id: "thr-1" } }));
   p.read(note("turn/started", { threadId: "thr-1", turn: { id: "t1", status: "inProgress" } }));
-  const [request] = p.interrupt!();
+  const [request] = p.interrupt!()!;
   const [done] = p.read(note("turn/completed", { threadId: "thr-1", turn: { id: "t1", status: "completed", error: null } })).events!;
   assert.deepEqual(done?.type === "result" ? [done.ok, done.interrupted] : [], [true, undefined], "it finished on its own terms");
   assert.deepEqual(p.read(refuse(request!, "no active turn to interrupt")).events, [], "no failure, as Codex's real answer here");
@@ -392,13 +409,13 @@ test("codex: an interrupt that arrives after the turn ended is refused, and ends
 
 test("opencode: an interrupt cancels the running prompt, and the cancelled turn is marked interrupted", () => {
   const p = opencode();
-  assert.deepEqual(p.interrupt!(), [], "no session yet");
+  assert.equal(p.interrupt!(), null, "no session yet");
   const [prompt] = readyOpencode(p);
-  const [cancel] = p.interrupt!();
+  const [cancel] = p.interrupt!()!;
   assert.deepEqual(json(cancel!), { jsonrpc: "2.0", method: "session/cancel", params: { sessionId: "ses_1" } }, "a notification: no answer comes");
   const [end] = p.read(answer(prompt!, { stopReason: "cancelled", usage: { inputTokens: 0, outputTokens: 0 } }, true)).events!;
   assert.deepEqual(end?.type === "result" ? [end.ok, end.interrupted, end.error] : [], [false, true, "Interrupted."]);
-  assert.deepEqual(p.interrupt!(), [], "nothing is running now");
+  assert.equal(p.interrupt!(), null, "nothing is running now");
 
   const [again] = p.send("after the cancel")!;
   const [next] = p.read(answer(again!, { stopReason: "end_turn" }, true)).events!;

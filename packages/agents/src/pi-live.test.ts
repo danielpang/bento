@@ -113,17 +113,25 @@ test("pi: the extension asks through ctx.ui.input and turns each reply into the 
   assert.match((await run(undefined, false)).text, /Nobody is available/);
 });
 
-test("pi: an interrupt is an abort, sent only while a turn runs", () => {
+test("pi: an interrupt is an abort while a turn runs, and waits for agent_start when one is starting", () => {
   const w = wire();
   w.open("Do the task");
-  assert.deepEqual(w.interrupt!(), [], "no agent_start yet: nothing to abort");
-  assert.deepEqual(w.read(JSON.stringify({ type: "agent_start" })), { write: [] }, "left to the parser");
-  assert.deepEqual(w.interrupt!().map(json), [{ type: "abort" }]);
+  assert.deepEqual(w.interrupt!(), [], "prompted, not started: accepted, nothing to write yet");
+  assert.deepEqual(w.read(JSON.stringify({ type: "agent_start" })).write.map(json), [{ type: "abort" }], "sent as the turn starts");
   w.read(JSON.stringify({ type: "agent_end", messages: [] }));
-  assert.deepEqual(w.interrupt!(), [], "the turn is over: an abort now would end nothing");
+  assert.equal(w.interrupt!(), null, "the turn is over: an abort now would end nothing");
+
+  w.send("next task");
+  w.read(JSON.stringify({ type: "agent_start" }));
+  assert.deepEqual(w.interrupt!()!.map(json), [{ type: "abort" }]);
+  w.read(JSON.stringify({ type: "agent_end", messages: [] }));
   // A message that only mentions the event is not the event.
   w.read(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: '{"type":"agent_start"}' }] } }));
-  assert.deepEqual(w.interrupt!(), []);
+  assert.equal(w.interrupt!(), null);
+
+  const reattached = wire();
+  reattached.open(null);
+  assert.equal(reattached.interrupt!(), null, "a turn that started before this process attached cannot be named");
 });
 
 test("pi: a turn an abort stopped ends interrupted, and any other turn as before", () => {

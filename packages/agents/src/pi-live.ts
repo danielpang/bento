@@ -44,15 +44,23 @@ import type { AskQuestion, LiveAsk, LiveProtocol } from "./adapter.js";
 export function piLiveProtocol(): LiveProtocol {
   // Whether a turn is running (agent_start seen), which is when an abort ends something.
   let running = false;
+  // A prompt written with no turn running, whose agent_start has not arrived,
+  // and an abort asked for in that gap, sent when it does.
+  let starting = false;
+  let deferredAbort = false;
   const line = (message: unknown) => JSON.stringify(message);
+  const prompt = (message: Record<string, unknown>) => {
+    if (!running) starting = true;
+    return line({ type: "prompt", ...message });
+  };
   const respond = (id: string, value: unknown) => line({ type: "extension_ui_response", id, value: JSON.stringify(value) });
 
   return {
     held: 0,
-    open: (prompt) => (prompt === null ? [] : [line({ type: "prompt", message: prompt })]),
+    open: (text) => (text === null ? [] : [prompt({ message: text })]),
     // steer rather than followUp: reaching the agent while it works is
     // the point of the live session. Idle, it is an ordinary prompt.
-    send: (text) => [line({ type: "prompt", message: text, streamingBehavior: "steer" })],
+    send: (text) => [prompt({ message: text, streamingBehavior: "steer" })],
 
     answer(ask, answers) {
       return [respond(ask.id, { answers })];
@@ -63,16 +71,29 @@ export function piLiveProtocol(): LiveProtocol {
     },
 
     interrupt() {
-      // A reattach mid-turn has not seen its agent_start: nothing to name.
-      return running ? [line({ type: "abort" })] : [];
+      if (running) return [line({ type: "abort" })];
+      // Prompted and not started yet: sent once agent_start arrives.
+      if (starting) {
+        deferredAbort = true;
+        return [];
+      }
+      // Nothing running, or a turn that started before this process attached.
+      return null;
     },
 
     read(raw) {
       // A cheap look before parsing, since every streamed token is a line.
       if (raw.includes('"agent_start"') || raw.includes('"agent_end"')) {
         const type = topLevelType(raw);
-        if (type === "agent_start") running = true;
-        if (type === "agent_end") running = false;
+        if (type === "agent_start") {
+          running = true;
+          starting = false;
+          if (deferredAbort) {
+            deferredAbort = false;
+            return { write: [line({ type: "abort" })] };
+          }
+        }
+        if (type === "agent_end") running = starting = deferredAbort = false;
         // Left to the adapter's parser, which reads the turn's end.
         return { write: [] };
       }

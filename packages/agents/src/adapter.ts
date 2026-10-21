@@ -140,8 +140,13 @@ export interface LiveProtocol {
    * Stops the turn in progress without ending the process, for a tool
    * that can. The turn then ends with a result marked `interrupted`,
    * and the session waits for the next message.
+   *
+   * The lines to write now. Empty when a turn was asked for and has not
+   * announced itself yet: the protocol sends the interrupt from `read`
+   * as it does. Null when there is no turn this process can name (none
+   * running, or one that started before this process attached).
    */
-  interrupt?(): string[];
+  interrupt?(): string[] | null;
   /** The lines that answer a question this process asked (`read` reported it in `asks`). */
   answer?(ask: LiveAsk, answers: Record<string, string>): string[];
   /** The lines that tell the process nobody will answer, with the reason it is given instead. */

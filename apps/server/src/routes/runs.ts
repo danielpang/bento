@@ -359,6 +359,7 @@ export function runRoutes(ctx: AppContext) {
           ok?: boolean;
           error?: string;
           costUsd?: number;
+          interrupted?: boolean;
         };
         if (ev.type === "message") {
           // The profile's name, not the wire role: "Product Designer>"
@@ -370,7 +371,13 @@ export function runRoutes(ctx: AppContext) {
         } else if (ev.type === "init") {
           lines.push(`[session started]`);
         } else if (ev.type === "result") {
-          lines.push(ev.ok ? `[done${ev.costUsd !== undefined ? ` cost $${ev.costUsd}` : ""}]` : `[failed: ${ev.error ?? "no reason reported; see the lines above"}]`);
+          lines.push(
+            ev.ok
+              ? `[done${ev.costUsd !== undefined ? ` cost $${ev.costUsd}` : ""}]`
+              : ev.interrupted
+                ? "[turn stopped]"
+                : `[failed: ${ev.error ?? "no reason reported; see the lines above"}]`,
+          );
         }
       }
       return c.text(lines.join("\n"));

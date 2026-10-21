@@ -3,16 +3,17 @@ import type { AgentEvent } from "@bento/core";
 /**
  * What the composer's one Stop button does.
  *
- * On an agent that can be interrupted, Stop first stops the turn the
- * agent is working on, which keeps the session for the person's next
- * message; once the agent is waiting (its turn ended, by itself or by an
- * interrupt), Stop ends the run. Everywhere else Stop ends the run, as
- * it always did. So a second press after an interrupt is the way out.
+ * On an agent that can be interrupted, Stop only ever stops the turn the
+ * agent is working on: the run stays open, and the agent waits for the
+ * person's next message. With no turn running (the agent is already
+ * waiting) there is nothing to stop, so the button rests. Everywhere
+ * else Stop ends the run, as it always did.
  */
-export type StopAction = "interrupt" | "end";
+export type StopAction = "interrupt" | "end" | "none";
 
 export function stopAction(canInterrupt: boolean, events: readonly AgentEvent[]): StopAction {
-  return canInterrupt && turnRunning(events) ? "interrupt" : "end";
+  if (!canInterrupt) return "end";
+  return turnRunning(events) ? "interrupt" : "none";
 }
 
 /**

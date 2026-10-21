@@ -84,6 +84,12 @@ export interface LiveConversationHandle {
    * the tool cannot, or this process no longer holds the conversation.
    */
   interrupt: () => boolean;
+  /**
+   * The same, saying why nothing was sent: "waiting" (no turn to stop),
+   * "unnamed" (a turn the protocol cannot name, one that started before
+   * this process attached), "closed" (no tool, no stdin, or not ours).
+   */
+  tryInterrupt: () => "sent" | "waiting" | "unnamed" | "closed";
   /** Questions the agent just asked, as the protocol read them off its output. */
   ask: (asks: LiveAsk[]) => Promise<void>;
   /** Questions the agent withdrew, by its request id. */
@@ -327,15 +333,17 @@ export function attachLiveConversation(input: {
     await endStdinIfOurs();
   };
 
-  const interrupt = (): boolean => {
-    if (detached || !wire.interrupt || liveChannel.ended) return false;
-    // No lines: nothing is running that the protocol can name (Codex
-    // needs the turn's id, opencode an outstanding prompt).
+  const tryInterrupt = (): "sent" | "waiting" | "unnamed" | "closed" => {
+    if (detached || !wire.interrupt || liveChannel.ended) return "closed";
+    // Held open between turns: nothing is working. Interrupting here
+    // would also clear the hold's timer with no turn end to come.
+    if (waiting) return "waiting";
     const lines = wire.interrupt();
-    if (lines.length === 0) return false;
+    if (lines === null) return "unnamed";
     clearIdle();
-    return lines.every((line) => liveChannel.write(line));
+    return lines.every((line) => liveChannel.write(line)) ? "sent" : "closed";
   };
+  const interrupt = (): boolean => tryInterrupt() === "sent";
 
   /**
    * Questions the agent asked. Stored for a person to answer when this
@@ -371,6 +379,7 @@ export function attachLiveConversation(input: {
     deliver,
     onTurnFinished,
     interrupt,
+    tryInterrupt,
     ask,
     withdraw,
     dispose() {
@@ -410,7 +419,7 @@ export function cardConversation(
     // Every stage, manual or not: the person stopped the turn to redirect it.
     holdAfterInterrupt: () => input.idleSec,
     interruptedNotice: (seconds) =>
-      `Interrupted. The agent is waiting for your next message. Stop again ends the run, and it ends by itself after ${seconds === 1 ? "1 second" : `${seconds} seconds`} of silence.`,
+      `Interrupted. The agent is waiting for your next message. With nothing sent for ${seconds === 1 ? "1 second" : `${seconds} seconds`}, the run stops here, and your next message continues the same session.`,
     questions: {
       record: (ask) => recordQuestion(ctx.db, input.runId, ask),
       claimAnswers: () => claimAnswers(ctx.db, input.runId),

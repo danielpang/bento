@@ -17,8 +17,9 @@ test("a turn runs from a person's message until its result", () => {
   assert.equal(turnRunning([prompt, said, interrupted, notice, next, said]), true, "the next message started a turn");
 });
 
-test("one Stop: interrupt while an interruptible agent works, end the run otherwise", () => {
+test("one Stop: it interrupts a working interruptible agent, rests while it waits, and ends other runs", () => {
   assert.equal(stopAction(true, [prompt, said]), "interrupt");
-  assert.equal(stopAction(true, [prompt, said, interrupted, notice]), "end", "a second press ends the run");
+  assert.equal(stopAction(true, [prompt, said, interrupted, notice]), "none", "never ends the run: nothing to stop while it waits");
+  assert.equal(stopAction(true, [prompt, said, interrupted, notice, next]), "interrupt", "the next message is a turn to stop again");
   assert.equal(stopAction(false, [prompt, said]), "end", "an agent that cannot be interrupted is stopped, as before");
 });

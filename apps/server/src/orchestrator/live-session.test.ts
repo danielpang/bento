@@ -334,3 +334,38 @@ test("a turn that ends withdraws what the agent asked in it, since it waits on n
   await handle.onTurnFinished(true);
   assert.equal(withdrawn.length, 2, "nothing asked since, nothing withdrawn");
 });
+
+test("an interrupt says why nothing was sent, and never clears a hold it cannot end", async () => {
+  // A protocol that can name no turn: one that started before this process attached.
+  const unnamed: LiveProtocol = { held: 0, open: () => [], send: (text) => [text], read: () => ({ write: [] }), interrupt: () => null };
+  const channel = new LineChannel();
+  const handle = attachLiveConversation({
+    runId: "r13",
+    wire: unnamed,
+    liveChannel: channel,
+    conversation: conversation(1),
+    mayEnd: async () => true,
+    sayAsUser: async () => {},
+    saySystem: async () => {},
+  });
+  assert.equal(handle.tryInterrupt(), "unnamed", "the executor stops the run then, so the work does not carry on");
+  assert.equal(handle.interrupt(), false);
+
+  await handle.onTurnFinished(true);
+  assert.equal(handle.waiting(), true);
+  assert.equal(handle.tryInterrupt(), "waiting", "held between turns: nothing is working");
+  await tick(1200);
+  assert.equal(channel.ended, true, "the hold still ran out: the interrupt did not clear its timer");
+  assert.equal(handle.tryInterrupt(), "closed");
+
+  const claude = new LineChannel();
+  const sent = attachLiveConversation({
+    runId: "r14",
+    wire: claudeWire(),
+    liveChannel: claude,
+    conversation: conversation(0),
+    sayAsUser: async () => {},
+    saySystem: async () => {},
+  });
+  assert.equal(sent.tryInterrupt(), "sent");
+});

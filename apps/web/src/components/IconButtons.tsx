@@ -1,7 +1,7 @@
 /**
- * The composer's one Stop. On an agent that can be interrupted it first
- * stops the turn and keeps the session, so the label says which press
- * this is (see stop-action.ts); otherwise it ends the run.
+ * The composer's one Stop. On an agent that can be interrupted it stops
+ * the turn and keeps the run (see stop-action.ts); otherwise it ends the
+ * run. The label says which.
  */
 export function StopButton({
   disabled,

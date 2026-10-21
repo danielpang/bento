@@ -24,6 +24,8 @@ import { REDUCED_MOTION, orbStateFor } from "./AgentOrb.js";
 import { SendMark, growComposer } from "./ChatComposer.js";
 
 const TERMINAL_RUN = new Set(["succeeded", "failed", "cancelled"]);
+/** How long Stop rests after an interrupt whose turn end never arrived. */
+const INTERRUPT_SETTLE_MS = 15_000;
 
 /**
  * How close to the end still counts as reading the newest line, in
@@ -256,14 +258,17 @@ export function AgentSession({
   const liveRun = runActive && latestRun?.liveSession === true;
   const canInterrupt = liveRun && Boolean(latestAgent && INTERRUPTIBLE_TOOLS.has(latestAgent.cli));
   /**
-   * An interrupt sent and its turn not yet ended. Stop pressed again
-   * meanwhile ends the run: the person wants it stopped, and an
-   * interrupt that could not land (a turn this server never saw start)
-   * must not leave Stop doing nothing.
+   * An interrupt sent and its turn not yet ended: Stop rests until the
+   * turn's end arrives (or, should it never, a little while later).
    */
   const [interruptPending, setInterruptPending] = useState(false);
+  useEffect(() => {
+    if (!interruptPending) return;
+    const timer = setTimeout(() => setInterruptPending(false), INTERRUPT_SETTLE_MS);
+    return () => clearTimeout(timer);
+  }, [interruptPending]);
   // The events are the latest run's only while no earlier run is open.
-  const stopDoes = interruptPending ? "end" : stopAction(canInterrupt && !viewedRunId, events);
+  const stopDoes = interruptPending ? "none" : stopAction(canInterrupt && !viewedRunId, events);
   const [questions, setQuestions] = useState<RunQuestion[]>([]);
   /** Bumped when the transcript says a question arrived or a turn ended, to fetch them again. */
   const [questionsTick, setQuestionsTick] = useState(0);
@@ -801,8 +806,16 @@ export function AgentSession({
             />
             {runActive && (
               <StopButton
-                disabled={busy}
-                label={stopDoes === "interrupt" ? "Stop this turn. The agent waits for your next message." : "Stop the agent"}
+                disabled={busy || stopDoes === "none"}
+                label={
+                  stopDoes === "end"
+                    ? "Stop the agent"
+                    : stopDoes === "interrupt"
+                      ? "Stop this turn. The agent waits for your next message."
+                      : interruptPending
+                        ? "Stopping this turn."
+                        : "The agent is waiting for your next message."
+                }
                 onClick={() => {
                   setBusy(true);
                   setError("");

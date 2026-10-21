@@ -77,7 +77,7 @@ test("claude: any other tool that asks is allowed, as skip-permissions allows it
 
 test("claude: an interrupt is a control request, and the turn it cut short ends marked interrupted", () => {
   const w = wire();
-  const [request] = w.interrupt!();
+  const [request] = w.interrupt!()!;
   assert.deepEqual((json(request!) as { request: unknown }).request, { subtype: "interrupt" });
   assert.equal(json(request!).type, "control_request");
   // The CLI's own answer to the interrupt: nothing to say.

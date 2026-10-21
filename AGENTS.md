@@ -596,15 +596,23 @@ since an abort with nothing running ends nothing). Each
 protocol marks the turn's end `interrupted`, and the live
 conversation holds the session open for `holdAfterInterrupt` instead of
 reading the failed turn as the run's end, so the next message
-continues the same session. Silence past the hold fails the run as
-"Interrupted.". The interrupt route reaches the run the way every door
+continues the same session. The interrupt route reaches the run the way every door
 does: the local handle if this process holds it, else a `run_control`
 "interrupt" on the bus (`requestRunInterrupt`). Only an adapter whose
 `live.interrupts` is set offers it, and only on a run recorded as live.
-The console has no separate interrupt button: on such a run Stop
-interrupts while a turn runs and ends the run once the agent is
-waiting, or when pressed again before the interrupted turn ended
-(`stop-action.ts`).
+The console has no separate interrupt button, and on such a run Stop
+never ends the run: it interrupts while a turn runs and rests while the
+agent waits (`stop-action.ts`). A protocol answers an interrupt with
+lines to write now, an empty list when a turn was asked for and has
+not announced itself yet (it sends the interrupt from `read` as the
+turn starts), or null when it can name no turn. Only that last case,
+a turn that started before this process attached, stops the run
+instead (`interruptOrStop`), because the work would otherwise carry on
+with no way to stop it. An interrupted run that then hears nothing for
+the idle window closes as cancelled, not failed
+(`STOPPED_AFTER_INTERRUPT_MESSAGE`): the person stopped the work, so the
+card neither fails nor advances, and the next message continues the
+recorded session in a new run.
 A protocol with nothing it can name (no turn seen starting, no prompt
 outstanding) returns no lines, and the interrupt reports false. A turn
 that was interrupted and then followed by another does not fail the

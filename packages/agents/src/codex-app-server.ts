@@ -64,6 +64,10 @@ export function codexAppServerProtocol(
   // The running turn, which an interrupt must name, and whether one was asked for.
   let activeTurn: string | undefined;
   let interrupting = false;
+  // A turn/start sent with no turn running, whose turn/started has not arrived,
+  // and an interrupt asked for in that gap, sent when it does.
+  let turnRequested = false;
+  let deferredInterrupt = false;
 
   const threadParams = {
     cwd: input.cwd,
@@ -71,8 +75,10 @@ export function codexAppServerProtocol(
     approvalPolicy: "never",
     sandbox: "danger-full-access",
   };
-  const turn = (text: string) =>
-    rpc.request("turn", "turn/start", { threadId, input: [{ type: "text", text, text_elements: [] }] });
+  const turn = (text: string) => {
+    if (!activeTurn) turnRequested = true;
+    return rpc.request("turn", "turn/start", { threadId, input: [{ type: "text", text, text_elements: [] }] });
+  };
   const release = () => held.splice(0).map(turn);
 
   return {
@@ -152,12 +158,19 @@ export function codexAppServerProtocol(
       if (message.method === "turn/started") {
         const id = (message.params as { turn?: { id?: unknown } } | undefined)?.turn?.id;
         if (typeof id === "string") activeTurn = id;
+        turnRequested = false;
+        if (deferredInterrupt && threadId && activeTurn) {
+          deferredInterrupt = false;
+          return { write: [rpc.request("interrupt", "turn/interrupt", { threadId, turnId: activeTurn })] };
+        }
         return { write: [] };
       }
       if (message.method === "turn/completed") {
         const result = turnResult(message.params, threadId);
         const turnId = (message.params as { turn?: { id?: unknown } }).turn?.id;
         if (turnId === activeTurn) activeTurn = undefined;
+        turnRequested = false;
+        deferredInterrupt = false;
         if (interrupting) {
           interrupting = false;
           const status = (message.params as { turn?: { status?: unknown } }).turn?.status;
@@ -178,10 +191,18 @@ export function codexAppServerProtocol(
     },
 
     interrupt() {
-      // A turn this process never saw start (a reattach mid-turn) cannot be named.
-      if (!threadId || !activeTurn) return [];
-      interrupting = true;
-      return [rpc.request("interrupt", "turn/interrupt", { threadId, turnId: activeTurn })];
+      if (threadId && activeTurn) {
+        interrupting = true;
+        return [rpc.request("interrupt", "turn/interrupt", { threadId, turnId: activeTurn })];
+      }
+      // Asked for and not started yet: sent once turn/started names it.
+      if (turnRequested || held.length > 0) {
+        interrupting = true;
+        deferredInterrupt = true;
+        return [];
+      }
+      // Nothing running, or a turn that started before this process attached.
+      return null;
     },
 
     answer(ask, answers) {

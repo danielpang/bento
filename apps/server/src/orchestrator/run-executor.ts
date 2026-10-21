@@ -819,7 +819,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       ctx.liveInputs.set(runId, {
         delivery: live.delivery,
         deliver: liveHold.deliver,
-        interrupt: liveHold.interrupt,
+        interrupt: interruptOrStop(ctx, runId, liveHold),
         waiting: liveHold.waiting,
         close: liveHold.dispose,
         // How a nudge from another server's message route reaches
@@ -883,6 +883,9 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   if (!announcesLaunchOnFirstEvent(adapter)) reportAgentUp();
   let agentReported = false;
   let sessionRecorded = false;
+  // Whether the last turn was one a person interrupted: a run that then
+  // ends with nobody writing is stopped, not failed (see settleAgentResult).
+  let lastTurnInterrupted = false;
   /**
    * Running means the agent process is about to be in the sandbox.
    *
@@ -959,6 +962,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
         }
         await appendRunEvent(ctx, runId, withDockerCursor(withTrustedCost(profile.cli, profile.model, event), cursor));
         if (event.type === "result") {
+          lastTurnInterrupted = event.interrupted === true;
           // A completed turn confirms every message this run was
           // carrying; only then are new arrivals fed in.
           await confirmDelivered(ctx.db, runId);
@@ -1020,6 +1024,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     argv,
     result,
     emitBoard,
+    endedInterrupted: lastTurnInterrupted,
   });
 }
 
@@ -1037,6 +1042,8 @@ interface RunSettlement {
   argv: string[];
   result: { outcome: RunOutcome; exitCode: number };
   emitBoard: (status: string) => void;
+  /** The last turn was one a person interrupted, and nothing came after it. */
+  endedInterrupted: boolean;
 }
 
 /**
@@ -1192,6 +1199,38 @@ export function mergeAgentExecEnv(
   return { ...toolEnv, ...agentEnv, ...authEnv, ...identityEnv };
 }
 
+/** What the transcript says when an interrupted run closes with nobody having written. */
+export const STOPPED_AFTER_INTERRUPT_MESSAGE =
+  "Stopped. Your next message continues the same session.";
+
+/**
+ * What Stop does on a live run: interrupt the turn, never end the run.
+ * The one exception is a turn the protocol cannot name (a Codex or pi
+ * turn that started before this process attached to the run): the
+ * work would carry on with no way to stop it, so the run is stopped
+ * instead, keeping its session for the next message. An agent already
+ * waiting has nothing to stop.
+ */
+function interruptOrStop(ctx: AppContext, runId: string, session: LiveConversationHandle): () => boolean {
+  return () => {
+    const tried = session.tryInterrupt();
+    if (tried !== "unnamed") return tried !== "closed";
+    void (async () => {
+      await appendRunEvent(ctx, runId, {
+        type: "message",
+        role: "system",
+        text: "This turn started before the server reconnected to the agent, so it could not be interrupted. The run was stopped instead. Your next message continues the same session.",
+      });
+      requestRunAbort(ctx, runId);
+      await markCancelled(ctx, runId);
+    })().catch((err: unknown) => {
+      console.warn(`could not stop run ${runId} after an interrupt that could not land:`, err);
+      ctx.analytics?.captureException(err, null, null, { run_id: runId, source: "run_interrupt" });
+    });
+    return true;
+  };
+}
+
 /**
  * Everything that happens after the agent process ends: naming the
  * failure, publishing branches, and writing the terminal state. Shared
@@ -1206,6 +1245,20 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
   const saySystem = (text: string) =>
     appendRunEvent(ctx, runId, { type: "message", role: "system", text });
   const { exitCode } = result;
+  /**
+   * A card's run whose last turn a person interrupted, and which then
+   * ended cleanly because nobody wrote within the idle window: stopped,
+   * not failed. The person stopped the work on purpose, so the card
+   * neither fails nor advances; the session id was recorded as the CLI
+   * announced it, so the next message continues the same session, and
+   * the sandbox is kept for it as after any run.
+   */
+  if (settlement.endedInterrupted && exitCode === 0 && subject.kind === "pipeline") {
+    await saySystem(STOPPED_AFTER_INTERRUPT_MESSAGE);
+    await markCancelled(ctx, runId);
+    emitBoard("cancelled");
+    return;
+  }
   // Claude Code prices an Ollama model as a Claude one, so that figure is
   // not recorded. See trustedCostUsd.
   const { costUsd: reportedCost, ...reportedOutcome } = result.outcome;
@@ -3554,6 +3607,7 @@ async function resumeInterruptedRun(
     appendRunEvent(ctx, run.id, { type: "message", role: "system", text });
 
   let liveSession: LiveConversationHandle | null = null;
+  let lastTurnInterrupted = false;
   // The same conversation the first life had, for the reason the first
   // run attaches one: it is what ends the process.
   if (live && liveChannel && wire) {
@@ -3573,7 +3627,7 @@ async function resumeInterruptedRun(
       ctx.liveInputs.set(run.id, {
         delivery: live.delivery,
         deliver: liveSession.deliver,
-        interrupt: liveSession.interrupt,
+        interrupt: interruptOrStop(ctx, run.id, liveSession),
         waiting: liveSession.waiting,
         close: liveSession.dispose,
         pump: liveSession.pump,
@@ -3669,6 +3723,7 @@ async function resumeInterruptedRun(
         if (recovery && persisted && isPersisted(recovery, persisted, event)) return;
         await appendRunEvent(ctx, run.id, withDockerCursor(withTrustedCost(profile.cli, profile.model, event), cursor));
         if (event.type === "result") {
+          lastTurnInterrupted = event.interrupted === true;
           await confirmDelivered(ctx.db, run.id);
           if (subject.kind === "swarm") await confirmSwarmMessagesDelivered(ctx.db, run.id);
           await onTurnFinished(event.ok, event.interrupted === true);
@@ -3722,6 +3777,7 @@ async function resumeInterruptedRun(
     argv,
     result,
     emitBoard,
+    endedInterrupted: lastTurnInterrupted,
   });
 }
 
