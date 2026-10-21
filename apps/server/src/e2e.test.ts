@@ -1015,8 +1015,9 @@ test("an interrupted live run that hears nothing is stopped, not failed, and the
     assert.equal(stopped.status, 200, await stopped.clone().text());
 
     assert.equal(await waitForRun(first.id, 60_000), "cancelled", "stopped by a person and left: not a failure");
-    const run = await json<{ error: string | null; cliSessionId: string | null }>(await app.request(`/api/runs/${first.id}`));
+    const run = await json<{ error: string | null; cliSessionId: string | null; costUsd: string | null }>(await app.request(`/api/runs/${first.id}`));
     assert.equal(run.error, null, "nothing failed");
+    assert.equal(Number(run.costUsd), 0.02, "the work before the interrupt is recorded like any finished run's");
     assert.equal(run.cliSessionId, "fake-live-1", "the session the next message continues");
     const transcript = await (await app.request(`/api/runs/${first.id}/transcript`)).text();
     assert.match(transcript, /\[turn stopped\]/);

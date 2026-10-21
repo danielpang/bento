@@ -121,7 +121,11 @@ export const fakeAdapter: AgentAdapter = {
       interrupt: () => [FAKE_INTERRUPT],
       read(line) {
         if (!line.includes('"subtype":"interrupted"')) return { write: [] };
-        return { write: [], events: [{ type: "result", ok: false, interrupted: true, error: "Interrupted.", sessionId: "fake-live-1" }] };
+        const cost = (JSON.parse(line) as { total_cost_usd?: number }).total_cost_usd;
+        return {
+          write: [],
+          events: [{ type: "result", ok: false, interrupted: true, error: "Interrupted.", sessionId: "fake-live-1", ...(cost !== undefined ? { costUsd: cost } : {}) }],
+        };
       },
     }),
   },
@@ -202,7 +206,7 @@ out({ type: "system", subtype: "init", session_id: "fake-live-1", model: ${JSON.
 require("readline").createInterface({ input: process.stdin })
   .on("line", (line) => {
     if (line === ${JSON.stringify(FAKE_INTERRUPT)}) {
-      if (turn) { clearTimeout(turn); turn = null; result({ subtype: "interrupted", is_error: true }); }
+      if (turn) { clearTimeout(turn); turn = null; result({ subtype: "interrupted", is_error: true, total_cost_usd: 0.02 }); }
       return;
     }
     out({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Heard." }] } });

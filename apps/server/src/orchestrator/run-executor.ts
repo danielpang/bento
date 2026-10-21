@@ -1247,23 +1247,21 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
   /**
    * A card's run whose last turn a person interrupted, and which then
    * ended cleanly because nobody wrote within the idle window: stopped,
-   * not failed. The person stopped the work on purpose, so the card
-   * neither fails nor advances; the session id was recorded as the CLI
-   * announced it, so the next message continues the same session, and
-   * the sandbox is kept for it as after any run.
+   * not failed. Everything a finished run does still happens (its cost
+   * and tokens are recorded, its artifacts captured, its branch
+   * published), because the turns before the interrupt did real work.
+   * Only the ending differs: the person stopped the work on purpose, so
+   * the card neither fails nor advances. The session id was recorded as
+   * the CLI announced it, so the next message continues the same
+   * session, and the sandbox is kept for it as after any run.
    */
-  if (settlement.endedInterrupted && exitCode === 0 && subject.kind === "pipeline") {
-    await saySystem(STOPPED_AFTER_INTERRUPT_MESSAGE);
-    await markCancelled(ctx, runId);
-    emitBoard("cancelled");
-    return;
-  }
+  const stopped = settlement.endedInterrupted && exitCode === 0 && subject.kind === "pipeline";
   // Claude Code prices an Ollama model as a Claude one, so that figure is
   // not recorded. See trustedCostUsd.
   const { costUsd: reportedCost, ...reportedOutcome } = result.outcome;
   const cost = trustedCostUsd(profile.cli, profile.model, reportedCost);
   const outcome: RunOutcome = cost === undefined ? reportedOutcome : { ...reportedOutcome, costUsd: cost };
-  if (!outcome.ok) {
+  if (!outcome.ok && !stopped) {
     /**
      * A resume against a conversation the sandbox no longer holds
      * (recreated machine, cleared CLI state) fails instantly, and the
@@ -1592,6 +1590,14 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
   // Publication notes are part of the run transcript. Persist and emit
   // all of them before announcing the terminal state, otherwise an SSE
   // client closes on run_done and misses the final notes.
+  if (stopped) {
+    await saySystem(STOPPED_AFTER_INTERRUPT_MESSAGE);
+    await finishRun(ctx, runId, outcome, exitCode, { stopped: true });
+    emitBoard("cancelled");
+    // Not settled: the gate would read a finished run as the stage's
+    // work being done, and the person stopped it before that.
+    return;
+  }
   await finishRun(ctx, runId, outcome, exitCode);
   emitBoard("succeeded");
 
@@ -2411,12 +2417,19 @@ async function finishRun(
     error?: string;
   },
   exitCode: number | null,
+  /**
+   * A run a person interrupted and then left: closed as cancelled, with
+   * no error, but billed and recorded like any run that finished,
+   * because the agent did the work it reported before the interrupt.
+   */
+  { stopped = false }: { stopped?: boolean } = {},
 ): Promise<void> {
   // Ending runs belongs to the successor once shutdown starts, and to
   // the adopter once a run was adopted; see the yield checks in the
   // executor loops.
   if (yielded(ctx, runId)) return;
-  const unbilled = outcome.ok ? null : unbilledReason(outcome.error);
+  const status = stopped ? "cancelled" : outcome.ok ? "succeeded" : "failed";
+  const unbilled = outcome.ok || stopped ? null : unbilledReason(outcome.error);
   /**
    * What this run cost, and how well that is known, worked out before
    * the run is closed and written in the same statement that closes it.
@@ -2449,7 +2462,7 @@ async function finishRun(
   const [closed] = await ctx.db
     .update(agentRuns)
     .set({
-      status: outcome.ok ? "succeeded" : "failed",
+      status,
       endedAt: new Date(),
       billable: unbilled === null,
       exitCode,
@@ -2481,7 +2494,8 @@ async function finishRun(
           }
         : {}),
       numTurns: outcome.numTurns ?? null,
-      error: outcome.error ?? null,
+      // No error on a stop: clients render run.error as a failure reason.
+      error: stopped ? null : (outcome.error ?? null),
     })
     .where(and(eq(agentRuns.id, runId), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)))
     .returning({ id: agentRuns.id, swarmId: agentRuns.swarmId, swarmTaskId: agentRuns.swarmTaskId });
@@ -2501,7 +2515,7 @@ async function finishRun(
   // The run is over, so its gateway token is too. Behind the CAS, so it
   // fires exactly once; a failure here never fails the close.
   await revokeRunGrant(ctx, runId);
-  await announceRunFinished(ctx, runId, outcome.ok ? "succeeded" : "failed", unbilled === null);
+  await announceRunFinished(ctx, runId, status, unbilled === null);
 
   /**
    * The reason goes into the transcript, because the transcript is the
@@ -2518,7 +2532,7 @@ async function finishRun(
    * results left the card reading "no reason reported" while the
    * enriched reason sat in a column nothing rendered.
    */
-  if (!outcome.ok && outcome.error) {
+  if (!outcome.ok && !stopped && outcome.error) {
     const [reported] = await ctx.db
       .select({ payload: runEvents.payload })
       .from(runEvents)
@@ -2551,7 +2565,7 @@ async function finishRun(
   }
 
   // Wakes every open stream for this run so none of them has to poll.
-  ctx.bus.emitRunDone(runId, outcome.ok ? "succeeded" : "failed");
+  ctx.bus.emitRunDone(runId, status);
 
   // Messages the run took but never confirmed go back first, so the
   // delivery below hands them to the next run instead of losing them.
@@ -2560,7 +2574,8 @@ async function finishRun(
   if (closed.swarmId) await requeueUndeliveredNodeMessages(ctx.db, runId);
   await deliverQueuedMessage(ctx, runId);
 
-  await queueRunFinishedSlack(ctx, runId);
+  // A stop is the person's own doing, and a cancel posts nothing either.
+  if (!stopped) await queueRunFinishedSlack(ctx, runId);
 }
 
 /**
