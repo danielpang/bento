@@ -418,7 +418,8 @@ export function cardConversation(
         : `The agent is waiting. Send a message to keep talking in this session. The run ends after ${seconds} seconds of silence.`,
     // Every stage, manual or not: the person stopped the turn to redirect it.
     holdAfterInterrupt: () => input.idleSec,
-    interruptedNotice: () => "Stopped. Waiting for your next message.",
+    interruptedNotice: (seconds) =>
+      `If no follow up message is sent after ${seconds}s the agent run will end. Sending a follow up message will restart the stage.`,
     questions: {
       record: (ask) => recordQuestion(ctx.db, input.runId, ask),
       claimAnswers: () => claimAnswers(ctx.db, input.runId),

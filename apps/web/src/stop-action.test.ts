@@ -7,7 +7,7 @@ const prompt: AgentEvent = { type: "message", role: "user", text: "Do the task" 
 const said: AgentEvent = { type: "message", role: "assistant", text: "Working on it" };
 const tool: AgentEvent = { type: "tool", name: "bash", phase: "start" };
 const interrupted: AgentEvent = { type: "result", ok: false, interrupted: true, error: "Interrupted." };
-const notice: AgentEvent = { type: "message", role: "system", text: "Stopped. Waiting for your next message." };
+const notice: AgentEvent = { type: "message", role: "system", text: "If no follow up message is sent after 90s the agent run will end. Sending a follow up message will restart the stage." };
 const next: AgentEvent = { type: "message", role: "user", text: "Do this instead" };
 
 test("a turn runs from a person's message until its result", () => {
