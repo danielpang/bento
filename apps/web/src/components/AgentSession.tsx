@@ -241,10 +241,10 @@ export function AgentSession({
   /** How the latest agent's tool treats a mid-task message, if at all. */
   const liveKind = latestAgent ? runLiveKind(latestAgent.cli, latestRun?.liveSession) : undefined;
   /**
-   * Interrupting and answering the agent's questions are beta, and only
-   * for a run that went live on a tool that supports them (Claude Code).
+   * Interrupting and answering the agent's questions, only for a run
+   * that went live on a tool that supports them.
    */
-  const liveRun = showsSandbox && runActive && latestRun?.liveSession === true;
+  const liveRun = runActive && latestRun?.liveSession === true;
   const canInterrupt = liveRun && Boolean(latestAgent && INTERRUPTIBLE_TOOLS.has(latestAgent.cli));
   const [questions, setQuestions] = useState<RunQuestion[]>([]);
   /** Bumped when the transcript says a question arrived or a turn ended, to fetch them again. */

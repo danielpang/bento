@@ -111,27 +111,24 @@ export function criterionName(type: string): string {
 
 /**
  * Tools that hold a live stdin conversation, and what a mid-task
- * message means there. Mirrors the adapters' live capability: pi
- * steers the working agent; Claude Code queues behind the current
- * turn. Anything absent takes messages between runs.
+ * message means there. Mirrors the adapters' live capability: pi and
+ * Codex steer the working agent; Claude Code and opencode queue behind
+ * the current turn. Anything absent takes messages between runs.
  */
 export const LIVE_TOOLS: Record<string, "steer" | "queue" | undefined> = {
   pi: "steer",
   "claude-code": "queue",
-};
-
-/**
- * Tools whose live session is a beta feature: Codex steers the running
- * turn, opencode queues behind the current step. A beta tester's run
- * of these holds a live session; everyone else's takes messages
- * between runs, as before.
- */
-export const BETA_LIVE_TOOLS: Record<string, "steer" | "queue" | undefined> = {
   codex: "steer",
   opencode: "queue",
 };
 
-/** Tools whose live session can stop a turn and keep the run open (beta). */
+/**
+ * Tools whose live mode arrived with the run's liveSession record, so a
+ * run without it (from before the record) ran one-shot.
+ */
+const LIVE_SINCE_RECORD: ReadonlySet<string> = new Set(["codex", "opencode"]);
+
+/** Tools whose live session can stop a turn and keep the run open. */
 export const INTERRUPTIBLE_TOOLS: ReadonlySet<string> = new Set(["claude-code", "codex", "opencode"]);
 
 /**
@@ -141,8 +138,8 @@ export const INTERRUPTIBLE_TOOLS: ReadonlySet<string> = new Set(["claude-code", 
  */
 export function runLiveKind(cli: string, liveSession: boolean | null | undefined): "steer" | "queue" | undefined {
   if (liveSession === false) return undefined;
-  if (liveSession === true) return LIVE_TOOLS[cli] ?? BETA_LIVE_TOOLS[cli];
-  return LIVE_TOOLS[cli];
+  if (liveSession === true) return LIVE_TOOLS[cli];
+  return LIVE_SINCE_RECORD.has(cli) ? undefined : LIVE_TOOLS[cli];
 }
 
 /** Tools whose upstream interface is explicitly unstable. */
@@ -165,8 +162,8 @@ export interface ToolCapability {
   detail: string;
 }
 
-export function toolCapabilities(cli: string, model?: string, beta = false): ToolCapability[] {
-  const live = LIVE_TOOLS[cli] ?? (beta ? BETA_LIVE_TOOLS[cli] : undefined);
+export function toolCapabilities(cli: string, model?: string): ToolCapability[] {
+  const live = LIVE_TOOLS[cli];
   const messaging: ToolCapability =
     live === "steer"
       ? { icon: "steer", label: "Steer mid-run", detail: "Messages steer it while it works." }

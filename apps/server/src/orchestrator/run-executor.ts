@@ -1751,20 +1751,14 @@ async function buildRunCommand(
     ...(input.credentials ? { credentials: input.credentials } : {}),
     ...(input.customProvider ? { customProvider: input.customProvider } : {}),
   };
-  const live = await liveSessionFor(ctx, { adapter, driver, subject, commandInput, attach: !input.sendInitialPrompt });
+  const live = liveSessionFor({ adapter, driver, subject, commandInput, attach: !input.sendInitialPrompt });
   /**
    * The agent may ask a person a question only where one can answer: a
-   * card's own stage work, live, for a beta tester. Everywhere else
-   * (judges, rebases, swarms) the tool stays disabled, as it always was.
-   * Decided on a fresh start only; a reattach never re-executes argv.
+   * card's own stage work, live. Everywhere else (judges, rebases,
+   * swarms) the tool stays disabled, as it always was. Decided on a
+   * fresh start only; a reattach never re-executes argv.
    */
-  if (
-    live &&
-    input.sendInitialPrompt &&
-    subject.kind === "pipeline" &&
-    run.role === "stage" &&
-    (await isBetaRun(ctx, { actingUserId: run.startedBy, projectOwnerId: subject.project.ownerId }))
-  ) {
+  if (live && input.sendInitialPrompt && subject.kind === "pipeline" && run.role === "stage") {
     commandInput.askUser = true;
   }
   const liveChannel = live ? new LineChannel() : null;
@@ -1793,34 +1787,29 @@ async function buildRunCommand(
  * Whether this run's agent holds a live session over stdin, so a
  * message sent while it works reaches the process instead of waiting
  * for the run to end. Needs both halves: an adapter that speaks it and
- * a driver that can attach stdin. A tool whose live mode is still beta
- * goes live only for a beta tester's run (isBetaRun: the member who
- * started it, or the project's owner for a run nobody started).
+ * a driver that can attach stdin.
  *
  * A reattach does not decide again. It speaks to the process its first
  * life started, which the run row recorded as the agent was exec'd: a
- * flag flipped in between must not have a one-shot process fed JSON,
- * or a live one left waiting on a stdin nobody will ever close. A row
- * from before that record went live only on a tool that was not beta.
+ * deploy in between must not have a one-shot process fed JSON, or a
+ * live one left waiting on a stdin nobody will ever close. A row from
+ * before that record went live only on a tool whose live mode is older
+ * than it (not `liveSinceRecord`).
  */
-export async function liveSessionFor(
-  ctx: AppContext,
-  input: {
-    adapter: AgentAdapter;
-    driver: SandboxDriver;
-    subject: RunSubject;
-    commandInput: BuildCommandInput;
-    attach: boolean;
-  },
-): Promise<LiveSession | null> {
+export function liveSessionFor(input: {
+  adapter: AgentAdapter;
+  driver: SandboxDriver;
+  subject: RunSubject;
+  commandInput: BuildCommandInput;
+  attach: boolean;
+}): LiveSession | null {
   const { adapter, driver, subject, commandInput } = input;
   const { run } = subject;
   if (input.attach && typeof run.liveSession === "boolean") return run.liveSession ? adapter.live ?? null : null;
   const offered =
     adapter.live && driver.supportsStdin && (adapter.live.appliesTo?.(commandInput) ?? true) ? adapter.live : null;
-  if (!offered?.beta) return offered;
-  if (input.attach) return null;
-  return (await isBetaRun(ctx, { actingUserId: run.startedBy, projectOwnerId: subject.project.ownerId })) ? offered : null;
+  if (input.attach && offered?.liveSinceRecord) return null;
+  return offered;
 }
 
 /**

@@ -138,12 +138,12 @@ export const codexAdapter: AgentAdapter = {
 
   /**
    * `codex app-server`: a mid-task message steers the running turn (see
-   * codex-app-server.ts for what was verified and how). Beta, so every
-   * other run keeps `codex exec`.
+   * codex-app-server.ts for what was verified and how). A run that
+   * cannot hold one (see appliesTo) keeps `codex exec`.
    */
   live: {
     delivery: "steer",
-    beta: true,
+    liveSinceRecord: true,
     interrupts: true,
     /**
      * Only when every profile argument is a config override. The
@@ -178,8 +178,8 @@ export const codexAdapter: AgentAdapter = {
       }
       /**
        * Where a person can answer, request_user_input works outside Plan
-       * mode too. The feature is Codex's "under development" one, which
-       * is why the console offers it only behind the beta flag.
+       * mode too. The feature is Codex's "under development" one, so it
+       * is on only for those runs.
        */
       if (input.askUser) cmd.push("--enable", "default_mode_request_user_input");
       if (input.extraArgs?.length) cmd.push(...input.extraArgs);

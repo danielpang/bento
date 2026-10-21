@@ -649,9 +649,10 @@ export const agentRuns = pgTable(
    * open on stdin) or as a one-shot command. Written as the agent is
    * exec'd, and read by a server reattaching after a restart, which has
    * to speak to the process the way its first life started it: whether
-   * a tool runs live can depend on the beta flag, and a flag that
-   * changed in between must not change how a running process is read.
-   * Null on runs from before the column, which decide as they always did.
+   * a run goes live depends on the tool, the driver and the profile's
+   * arguments, and a deploy in between must not change how a running
+   * process is read. Null on runs from before the column, which ran
+   * live only on a tool that was live then (not `liveSinceRecord`).
    */
   liveSession: boolean("live_session"),
   sandboxExecution: jsonb("sandbox_execution").$type<{

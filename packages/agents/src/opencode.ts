@@ -148,11 +148,11 @@ export const opencodeAdapter: AgentAdapter = {
    * `opencode acp`, its Agent Client Protocol server on stdio (see
    * opencode-acp.ts for what was verified and how). A message sent
    * mid-turn is queued by opencode and read at its next model call.
-   * Beta, so every other run keeps `opencode run`.
+   * A run that cannot hold one (see appliesTo) keeps `opencode run`.
    */
   live: {
     delivery: "queue",
-    beta: true,
+    liveSinceRecord: true,
     interrupts: true,
     /**
      * Not with profile arguments: they were written for `opencode run`

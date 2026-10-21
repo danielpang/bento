@@ -71,11 +71,12 @@ export interface LiveSession {
    */
   appliesTo?(input: BuildCommandInput): boolean;
   /**
-   * Live mode on this tool is still a beta feature: the orchestrator
-   * offers it only to beta testers' runs, and every other run takes the
-   * one-shot command as before.
+   * Live mode on this tool arrived with `agent_runs.live_session`, the
+   * record a reattach reads. A run whose row has no record (one from
+   * before that column) ran the one-shot command, so a reattach to it
+   * must not go live.
    */
-  beta?: boolean;
+  liveSinceRecord?: boolean;
   /**
    * The tool can stop the turn in progress and keep the session open
    * (LiveProtocol.interrupt), so a person can redirect it without

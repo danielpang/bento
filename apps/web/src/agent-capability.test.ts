@@ -75,18 +75,16 @@ test("Claude Code on an Ollama model says its cost is not reported, and why", ()
   assert.equal(toolCapabilities("claude-code", "claude-sonnet-5")[1]!.icon, "cost");
 });
 
-test("codex and opencode hold a live session for beta testers only", () => {
-  assert.equal(toolCapabilities("codex")[0]!.icon, "between-runs");
-  assert.equal(toolCapabilities("codex", undefined, true)[0]!.icon, "steer");
-  assert.equal(toolCapabilities("opencode")[0]!.icon, "between-runs");
-  assert.equal(toolCapabilities("opencode", undefined, true)[0]!.icon, "queue");
-  assert.equal(toolCapabilities("cursor", undefined, true)[0]!.icon, "between-runs", "the flag adds nothing to a tool without a live mode");
+test("codex and opencode hold a live session", () => {
+  assert.equal(toolCapabilities("codex")[0]!.icon, "steer");
+  assert.equal(toolCapabilities("opencode")[0]!.icon, "queue");
+  assert.equal(toolCapabilities("cursor")[0]!.icon, "between-runs");
 });
 
 test("a run's own record says whether a message reaches it mid-run", () => {
-  assert.equal(runLiveKind("codex", true), "steer", "a beta tester's codex run went live");
+  assert.equal(runLiveKind("codex", true), "steer", "a codex run that went live");
   assert.equal(runLiveKind("codex", false), undefined, "a codex exec run takes messages between runs");
-  assert.equal(runLiveKind("codex", null), undefined, "not started yet: the tool's default");
+  assert.equal(runLiveKind("codex", null), undefined, "no record: a codex run from before live mode, which was one-shot");
   assert.equal(runLiveKind("claude-code", null), "queue", "an older run of a tool that was always live");
   assert.equal(runLiveKind("claude-code", false), undefined);
 });

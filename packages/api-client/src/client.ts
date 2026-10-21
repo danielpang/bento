@@ -1113,18 +1113,18 @@ export class BentoClient {
 
   /**
    * Stops the turn the agent is working on and keeps the run open for
-   * the next message. Beta; Claude Code live sessions only.
+   * the next message. Claude Code, Codex and opencode live sessions only.
    */
   interruptRun(runId: string) {
     return this.request<{ interrupted: true }>(`/api/runs/${runId}/interrupt`, { method: "POST" });
   }
 
-  /** The agent's questions waiting on a person. Beta. */
+  /** The agent's questions waiting on a person. */
   listRunQuestions(runId: string) {
     return this.request<RunQuestion[]>(`/api/runs/${runId}/questions`);
   }
 
-  /** Answers one of the agent's questions; see QuestionChoice. Beta. */
+  /** Answers one of the agent's questions; see QuestionChoice. */
   answerRunQuestion(runId: string, questionId: string, answers: QuestionChoice[]) {
     return this.request<{ answered: true; answers: Record<string, string> }>(
       `/api/runs/${runId}/questions/${questionId}/answer`,

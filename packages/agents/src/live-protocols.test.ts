@@ -180,7 +180,7 @@ test("codex: the live command is app-server with the model, and a saved key reac
   assert.ok(!shared.some((a) => a.includes("bento-openai")), "no saved key: the built-in provider and its login");
   assert.equal(live.appliesTo!({ ...input, extraArgs: ["-c", 'model_reasoning_effort="high"'] }), true);
   assert.equal(live.appliesTo!({ ...input, extraArgs: ["--search"] }), false, "an exec-only flag keeps codex exec");
-  assert.equal(live.beta, true);
+  assert.equal(live.liveSinceRecord, true, "a codex run from before the live_session record was codex exec");
   assert.equal(live.delivery, "steer");
 });
 

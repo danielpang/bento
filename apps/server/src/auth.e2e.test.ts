@@ -1202,6 +1202,7 @@ test("every entity route refuses a foreign tenant", async () => {
   // budget to spend.
   const swarmAfter = await asOwner(`/api/swarms/${swarm.id}`);
   assert.equal(swarmAfter.status, 200, "the intruder must not have deleted the owner's swarm");
+
   const swarmBody = (await swarmAfter.json()) as { swarm: { title: string; maxWorkers: number; status: string } };
   assert.equal(swarmBody.swarm.title, "Mine", "nor renamed it");
   assert.equal(swarmBody.swarm.maxWorkers, 4, "nor raised how many agents it may run at once");
@@ -1220,6 +1221,14 @@ test("every entity route refuses a foreign tenant", async () => {
     .where(eq(swarms.id, swarm.id));
   assert.equal(settingsAfter?.completionCommand, null, "the intruder must not have set a command on the owner's swarm");
   ctx.featureFlags = flagsBefore;
+
+  // The question routes refuse only by tenant: with the beta flag off
+  // again, the owner still reaches them, and the intruder's answer
+  // never landed.
+  const ownQuestions = await asOwner(`/api/runs/${run.id}/questions`);
+  assert.equal(ownQuestions.status, 200, "the run's own organization can read its questions, beta or not");
+  const [asked] = await ctx.db.select().from(runQuestions).where(eq(runQuestions.id, question!.id));
+  assert.equal(asked!.status, "pending", "the intruder's answer must not have been stored");
 
   // The MCP server row survived, under its own name. Read through
   // ctx.db because the org-less owner cannot use the routes either.

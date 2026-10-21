@@ -572,12 +572,14 @@ and is written at the top of `codex-app-server.ts` and
 drives all three binaries against stand-in model servers
 (`BENTO_LIVE_CLI_E2E=1`, off by default).
 
-Codex's and opencode's live modes are `beta`, so `liveSessionFor`
-offers them only to a beta tester's run. Because that answer can
-change, the run records it as the agent is exec'd
-(`agent_runs.live_session`), and a reattach reads the record instead of
-asking again: a one-shot process fed JSON, or a live one left waiting
-on a stdin nobody closes, is what deciding twice would cost.
+Whether a run goes live depends on the tool, the driver and the
+profile's arguments, and a deploy can change the answer, so the run
+records it as the agent is exec'd (`agent_runs.live_session`), and a
+reattach reads the record instead of asking again: a one-shot process
+fed JSON, or a live one left waiting on a stdin nobody closes, is what
+deciding twice would cost. A run from before the record went live only
+on a tool that was live then; Codex and opencode, whose live modes came
+with it, say so with `liveSinceRecord`.
 
 ## An interrupt ends a turn, not a run, and an agent's question is a row
 
@@ -622,7 +624,7 @@ agent withdrawing a question (`control_cancel_request`,
 `serverRequest/resolved`), the end of the turn it was asked in (pi
 resolves an aborted dialog and says nothing), or the run's stream
 ending withdraws its rows, each after any insert still in flight. `askUser` turns the tool on only
-for a beta card stage run started fresh, because a person is there to
+for a card stage run started fresh, because a person is there to
 answer; everywhere else the tool stays off, and a question that
 arrives anyway is declined with `NOBODY_TO_ASK` rather than left to
 stall the agent until the run limit.

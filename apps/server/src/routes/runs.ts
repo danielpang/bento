@@ -20,7 +20,7 @@ import type { SandboxDriver } from "@bento/sandbox";
 import { driverForSandbox, SandboxDriverUnavailable } from "../orchestrator/sandbox-driver.js";
 import { canAccessProject, getAccessibleFeature, getAccessibleRun, getAccessibleRunOutput } from "../access.js";
 import { requireSwarms } from "../orchestrator/swarm/gate.js";
-import { getBetaTester, runsForCaller } from "../feature-flags.js";
+import { runsForCaller } from "../feature-flags.js";
 
 const createRun = z.object({
   featureId: z.string().uuid(),
@@ -156,11 +156,10 @@ export function runRoutes(ctx: AppContext) {
      * Stops the turn the agent is working on, without ending the run: the
      * session stays open for the person's next message, which is what
      * they stopped it to send. Only where the run went live on a tool
-     * that can (Claude Code); anything else answers 409 and Stop remains.
-     * Beta, so a non-tester learns nothing about the route.
+     * that can (Claude Code, Codex, opencode); anything else answers 409
+     * and Stop remains.
      */
     .post("/:id/interrupt", async (c) => {
-      if (!(await getBetaTester(ctx, c))) return c.json({ error: "not found" }, 404);
       const found = await getAccessibleRun(ctx, c, c.req.param("id"));
       if (!found) return c.json({ error: "not found" }, 404);
       const run = found.run;
@@ -184,7 +183,6 @@ export function runRoutes(ctx: AppContext) {
      * Empty once the run is no longer running: nothing would read them.
      */
     .get("/:id/questions", async (c) => {
-      if (!(await getBetaTester(ctx, c))) return c.json({ error: "not found" }, 404);
       const found = await getAccessibleRun(ctx, c, c.req.param("id"));
       if (!found) return c.json({ error: "not found" }, 404);
       if (found.run.status !== "running") return c.json([]);
@@ -214,8 +212,7 @@ export function runRoutes(ctx: AppContext) {
         }),
       ),
       async (c) => {
-        if (!(await getBetaTester(ctx, c))) return c.json({ error: "not found" }, 404);
-        const found = await getAccessibleRun(ctx, c, c.req.param("id"));
+          const found = await getAccessibleRun(ctx, c, c.req.param("id"));
         if (!found) return c.json({ error: "not found" }, 404);
         const [question] = await db(c, ctx)
           .select()
