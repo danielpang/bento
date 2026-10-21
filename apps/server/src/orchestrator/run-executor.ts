@@ -1200,8 +1200,7 @@ export function mergeAgentExecEnv(
 }
 
 /** What the transcript says when an interrupted run closes with nobody having written. */
-export const STOPPED_AFTER_INTERRUPT_MESSAGE =
-  "Stopped. Your next message continues the same session.";
+export const STOPPED_AFTER_INTERRUPT_MESSAGE = "Session paused. Your next message will resume it.";
 
 /**
  * What Stop does on a live run: interrupt the turn, never end the run.
@@ -1219,7 +1218,7 @@ function interruptOrStop(ctx: AppContext, runId: string, session: LiveConversati
       await appendRunEvent(ctx, runId, {
         type: "message",
         role: "system",
-        text: "This turn started before the server reconnected to the agent, so it could not be interrupted. The run was stopped instead. Your next message continues the same session.",
+        text: "Couldn't interrupt this turn, so the run was stopped. Your next message will resume the session.",
       });
       requestRunAbort(ctx, runId);
       await markCancelled(ctx, runId);

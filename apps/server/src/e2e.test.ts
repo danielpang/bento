@@ -1020,8 +1020,8 @@ test("an interrupted live run that hears nothing is stopped, not failed, and the
     assert.equal(run.cliSessionId, "fake-live-1", "the session the next message continues");
     const transcript = await (await app.request(`/api/runs/${first.id}/transcript`)).text();
     assert.match(transcript, /\[turn stopped\]/);
-    assert.match(transcript, /Interrupted\. The agent is waiting for your next message/);
-    assert.match(transcript, /Stopped\. Your next message continues the same session\./);
+    assert.match(transcript, /Stopped\. Waiting for your next message\./);
+    assert.match(transcript, /Session paused\. Your next message will resume it\./);
     assert.doesNotMatch(transcript, /\[failed/);
     const after = await json<{ currentStageId: string | null }>(await app.request(`/api/features/${feature.id}`));
     assert.equal(after.currentStageId, before.currentStageId, "the card did not advance on a stopped run");
