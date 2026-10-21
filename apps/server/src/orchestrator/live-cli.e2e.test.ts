@@ -590,7 +590,13 @@ test("pi rpc: Bento's ask_user extension is answered through the store, one choi
  * the session is held open after the interrupted turn, and the message
  * sent then is answered in the same session before the run ends.
  */
-async function interruptedRun(adapter: AgentAdapter, input: BuildCommandInput, env: Record<string, string>, log: ModelLog) {
+async function interruptedRun(
+  adapter: AgentAdapter,
+  input: BuildCommandInput,
+  env: Record<string, string>,
+  log: ModelLog,
+  { early = false }: { early?: boolean } = {},
+) {
   const live = adapter.live!;
   assert.equal(live.interrupts, true);
   const driver = new LocalProcessDriver();
@@ -626,10 +632,12 @@ async function interruptedRun(adapter: AgentAdapter, input: BuildCommandInput, e
       await session.onTurnFinished(event.ok, event.interrupted === true);
     },
   });
-  // The slow first call is under way; the protocol may still need the turn's id.
-  while (log.calls.length === 0) await new Promise((r) => setTimeout(r, 50));
+  // Early: Stop pressed while the process is still coming up. Otherwise
+  // the slow first call is under way; the protocol may still need the turn's id.
+  if (early) assert.equal(session.interrupt(), true, "a stop during startup is accepted");
+  else while (log.calls.length === 0) await new Promise((r) => setTimeout(r, 50));
   const deadline = Date.now() + 5_000;
-  while (!session.interrupt()) {
+  while (!early && !session.interrupt()) {
     assert.ok(Date.now() < deadline, "the running turn could be interrupted");
     await new Promise((r) => setTimeout(r, 100));
   }
@@ -700,6 +708,38 @@ test("opencode acp: an interrupt cancels the prompt, and the next message contin
     const last = log.calls.at(-1)!;
     assert.ok(last.some((t) => t.includes("SLOW work")) && last.some((t) => t.includes("AFTER the interrupt")),
       "the message after the interrupt reached the same session, with the cancelled prompt before it");
+    assert.deepEqual(said, ["Interrupted."]);
+  } finally {
+    server.close();
+  }
+});
+
+test("opencode acp: a stop while the process starts cancels the first prompt as it goes out", { skip, timeout: 180_000 }, async () => {
+  const log: ModelLog = { calls: [] };
+  const { server, url } = await standInModel("chat", log, 8_000);
+  try {
+    const cwd = mkdtempSync(join(tmpdir(), "bento-opencode-interrupt-"));
+    const home = join(cwd, ".oc-home");
+    mkdirSync(join(home, ".config", "opencode"), { recursive: true });
+    writeFileSync(join(home, ".config", "opencode", "opencode.json"), JSON.stringify({
+      $schema: "https://opencode.ai/config.json", autoupdate: false, share: "disabled",
+      provider: { fake: { npm: "@ai-sdk/openai-compatible", name: "fake", options: { baseURL: url, apiKey: "k" }, models: { m: { name: "m" } } } },
+    }));
+    const env = {
+      HOME: home,
+      XDG_CONFIG_HOME: join(home, ".config"),
+      XDG_DATA_HOME: join(home, ".local", "share"),
+      XDG_CACHE_HOME: join(home, ".cache"),
+      XDG_STATE_HOME: join(home, ".local", "state"),
+    };
+    const { result, results, said } = await interruptedRun(opencodeAdapter, { prompt: "SLOW work, please", model: "fake/m", cwd }, env, log, { early: true });
+    assert.equal(result.exitCode, 0, "closing stdin after the last turn ended the process cleanly");
+    assert.equal(result.outcome.ok, true, result.outcome.error);
+    assert.equal(results.length, 2);
+    const last = log.calls.at(-1)!;
+    assert.equal(log.calls.length, 1, "the model never worked on the stopped prompt");
+    assert.ok(last.some((t) => t.includes("SLOW work")) && last.some((t) => t.includes("AFTER the interrupt")),
+      "the stopped prompt stays in the session, and the next message continues it");
     assert.deepEqual(said, ["Interrupted."]);
   } finally {
     server.close();

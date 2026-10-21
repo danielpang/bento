@@ -30,7 +30,11 @@ import { METHOD_NOT_FOUND, readRpcLine, RpcCalls, type RpcLine } from "./live-wi
  * - End of input ends the process with exit code 0.
  * - `session/cancel` (a notification) ends the running prompt at once
  *   with `stopReason` "cancelled". The process stays up, and the next
- *   prompt continues the session with everything before it.
+ *   prompt continues the session with everything before it. A cancel
+ *   right behind a prompt that has not started fails that prompt with
+ *   "Internal error: Internal service failure" instead; the prompt is
+ *   still in the session, the model never saw it alone, and the next
+ *   prompt continues from it.
  */
 export function opencodeAcpProtocol(input: BuildCommandInput, how: { attach: boolean }): LiveProtocol {
   const rpc = new RpcCalls<"initialize" | "session" | "model" | "prompt">(true);
@@ -45,13 +49,29 @@ export function opencodeAcpProtocol(input: BuildCommandInput, how: { attach: boo
   // Whether Bento asked for the running prompt to stop, and whether it did.
   let interrupting = false;
   let cancelled = false;
+  /**
+   * A stop asked for while the prompt waited on the handshake: "held"
+   * until the prompt goes out, then "sent" with the cancel right behind
+   * it until that turn ends. opencode 1.19.3 answers a prompt cancelled
+   * before it started with an internal error rather than "cancelled",
+   * and that error is the stop it was asked for.
+   */
+  let deferredCancel: "held" | "sent" | null = null;
   let draft: { messageId: string | undefined; role: "assistant" | "system"; text: string } | null = null;
 
   const prompt = (text: string) => {
     outstanding += 1;
     return rpc.request("prompt", "session/prompt", { sessionId, prompt: [{ type: "text", text }] });
   };
-  const release = () => held.splice(0).map(prompt);
+  const release = () => {
+    const lines = held.splice(0).map(prompt);
+    if (deferredCancel === "held" && lines.length > 0) {
+      deferredCancel = "sent";
+      interrupting = true;
+      lines.push(rpc.notify("session/cancel", { sessionId }));
+    }
+    return lines;
+  };
 
   /** The message being assembled, as a transcript event, and a fresh start. */
   const flush = (): AgentEvent[] => {
@@ -101,10 +121,19 @@ export function opencodeAcpProtocol(input: BuildCommandInput, how: { attach: boo
     },
 
     interrupt() {
-      // Nothing to cancel without a session and a prompt still running.
-      if (!sessionId || outstanding === 0) return null;
-      interrupting = true;
-      return [rpc.notify("session/cancel", { sessionId })];
+      if (sessionId && outstanding > 0) {
+        interrupting = true;
+        return [rpc.notify("session/cancel", { sessionId })];
+      }
+      // A prompt still waiting on the handshake is cancelled as it goes
+      // out, so the person's stop is not lost to the few seconds the
+      // process takes to come up.
+      if (held.length > 0 && !failed) {
+        deferredCancel = "held";
+        return [];
+      }
+      // Nothing to cancel: no session, or no prompt running.
+      return null;
     },
 
     read(line) {
@@ -147,7 +176,9 @@ export function opencodeAcpProtocol(input: BuildCommandInput, how: { attach: boo
             outstanding = Math.max(0, outstanding - 1);
             const events = flush();
             const result = message.result as { stopReason?: unknown; usage?: { inputTokens?: unknown; outputTokens?: unknown } } | undefined;
-            if (message.error) {
+            if (message.error && deferredCancel === "sent") {
+              cancelled = true;
+            } else if (message.error) {
               stop = `opencode failed the turn: ${said}`;
             } else {
               if (interrupting && result?.stopReason === "cancelled") cancelled = true;
@@ -169,6 +200,7 @@ export function opencodeAcpProtocol(input: BuildCommandInput, how: { attach: boo
             }
             interrupting = false;
             cancelled = false;
+            deferredCancel = null;
             if (turnUsage) {
               end.inputTokens = turnUsage.input;
               end.outputTokens = turnUsage.output;
@@ -183,32 +215,36 @@ export function opencodeAcpProtocol(input: BuildCommandInput, how: { attach: boo
 
       if (message.method !== "session/update") return { write: [], events: [] };
       const update = (message.params as { update?: AcpUpdate } | undefined)?.update;
-      switch (update?.sessionUpdate) {
-        case "agent_message_chunk":
-        case "agent_thought_chunk": {
-          const role = update.sessionUpdate === "agent_message_chunk" ? "assistant" : "system";
-          const text = update.content?.type === "text" && typeof update.content.text === "string" ? update.content.text : "";
-          const events = draft && (draft.messageId !== update.messageId || draft.role !== role) ? flush() : [];
-          draft ??= { messageId: update.messageId, role, text: "" };
-          draft.text += text;
-          return { write: [], events };
-        }
-        case "tool_call":
-          return {
-            write: [],
-            events: [...flush(), { type: "tool", name: toolName(update), phase: "start", detail: update.status, raw: message.params }],
-          };
-        case "tool_call_update":
-          if (update.status !== "completed" && update.status !== "failed") return { write: [], events: [] };
-          return {
-            write: [],
-            events: [...flush(), { type: "tool", name: toolName(update), phase: "end", detail: update.status, raw: message.params }],
-          };
-        default:
-          return { write: [], events: [] };
-      }
+      return readUpdate(update, message.params);
     },
   };
+
+  function readUpdate(update: AcpUpdate | undefined, raw: unknown): { write: string[]; events: AgentEvent[] } {
+    switch (update?.sessionUpdate) {
+      case "agent_message_chunk":
+      case "agent_thought_chunk": {
+        const role = update.sessionUpdate === "agent_message_chunk" ? "assistant" : "system";
+        const text = update.content?.type === "text" && typeof update.content.text === "string" ? update.content.text : "";
+        const events = draft && (draft.messageId !== update.messageId || draft.role !== role) ? flush() : [];
+        draft ??= { messageId: update.messageId, role, text: "" };
+        draft.text += text;
+        return { write: [], events };
+      }
+      case "tool_call":
+        return {
+          write: [],
+          events: [...flush(), { type: "tool", name: toolName(update), phase: "start", detail: update.status, raw }],
+        };
+      case "tool_call_update":
+        if (update.status !== "completed" && update.status !== "failed") return { write: [], events: [] };
+        return {
+          write: [],
+          events: [...flush(), { type: "tool", name: toolName(update), phase: "end", detail: update.status, raw }],
+        };
+      default:
+        return { write: [], events: [] };
+    }
+  }
 }
 
 interface AcpUpdate {

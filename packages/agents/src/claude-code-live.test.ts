@@ -94,6 +94,20 @@ test("claude: a turn that finished before the interrupt reached it is read as it
   assert.deepEqual(w.read(resultLine({ is_error: false, subtype: "success", result: "done" })), { write: [] });
 });
 
+test("claude: only the interrupt's own ending is an interrupted turn", () => {
+  const w = wire();
+  w.interrupt!();
+  // A turn that failed for its own reason as the interrupt arrived.
+  assert.deepEqual(w.read(resultLine({ is_error: true, subtype: "error_max_turns" })), { write: [] }, "left to the adapter: a real failure");
+
+  // An interrupt the CLI refused cut nothing short, so the next turn's
+  // failure is the turn's own.
+  const [request] = w.interrupt!()!;
+  const refused = { type: "control_response", response: { subtype: "error", request_id: json(request!).request_id, error: "no turn running" } };
+  assert.deepEqual(w.read(JSON.stringify(refused)), { write: [], events: [] });
+  assert.deepEqual(w.read(resultLine({ is_error: true, subtype: "error_during_execution" })), { write: [] });
+});
+
 test("claude: a question withdrawn by the CLI is reported by its request id", () => {
   const w = wire();
   assert.deepEqual(w.read(JSON.stringify({ type: "control_cancel_request", request_id: "req-1" })).withdrawn, ["req-1"]);

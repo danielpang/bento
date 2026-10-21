@@ -426,6 +426,25 @@ test("opencode: an interrupt cancels the running prompt, and the cancelled turn 
     "a cancel Bento did not ask for is still opencode giving up");
 });
 
+test("opencode: a stop asked for during the handshake cancels the prompt as it goes out", () => {
+  const p = opencode();
+  const [init] = p.open("Do the task");
+  assert.deepEqual(p.interrupt!(), [], "the prompt is held for the session: accepted, nothing to write yet");
+  const [session] = p.read(answer(init!, { protocolVersion: 1 }, true)).write;
+  const [model] = p.read(answer(session!, { sessionId: "ses_1", configOptions: [] }, true)).write;
+  const [prompt, cancel] = p.read(answer(model!, { configOptions: [] }, true)).write;
+  assert.equal(json(prompt!).method, "session/prompt");
+  assert.deepEqual(json(cancel!), { jsonrpc: "2.0", method: "session/cancel", params: { sessionId: "ses_1" } });
+  // opencode 1.19.3's answer to a prompt cancelled before it started.
+  const [end] = p.read(JSON.stringify({ jsonrpc: "2.0", id: json(prompt!).id, error: { code: -32603, message: "Internal error: Internal service failure" } })).events!;
+  assert.deepEqual(end?.type === "result" ? [end.ok, end.interrupted, end.error] : [], [false, true, "Interrupted."]);
+
+  const [next] = p.send("next")!;
+  assert.equal(json(next!).method, "session/prompt", "the next prompt is not cancelled again");
+  const [failed] = p.read(JSON.stringify({ jsonrpc: "2.0", id: json(next!).id, error: { code: -32603, message: "Internal error: boom" } })).events!;
+  assert.deepEqual(failed?.type === "result" ? [failed.ok, failed.interrupted] : [], [false, undefined], "an error nobody asked for is still a failure");
+});
+
 test("codex and opencode declare interrupts", () => {
   assert.equal(codexAdapter.live!.interrupts, true);
   assert.equal(opencodeAdapter.live!.interrupts, true);

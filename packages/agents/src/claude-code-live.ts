@@ -29,7 +29,8 @@ import type { AskQuestion, LiveAsk, LiveProtocol } from "./adapter.js";
  * reattached can answer a question its predecessor saw asked.
  */
 export function claudeCodeLiveProtocol(): LiveProtocol {
-  let interrupting = false;
+  // The interrupt Bento sent and the CLI has not refused, until a turn ends.
+  let interrupting: string | null = null;
   let next = 0;
   const prefix = `bento-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
   const line = (message: unknown) => JSON.stringify(message);
@@ -42,8 +43,8 @@ export function claudeCodeLiveProtocol(): LiveProtocol {
     send: (text) => [encodeClaudeMessage(text)],
 
     interrupt() {
-      interrupting = true;
-      return [line({ type: "control_request", request_id: `${prefix}-${++next}`, request: { subtype: "interrupt" } })];
+      interrupting = `${prefix}-${++next}`;
+      return [line({ type: "control_request", request_id: interrupting, request: { subtype: "interrupt" } })];
     },
 
     answer(ask, answers) {
@@ -97,10 +98,21 @@ export function claudeCodeLiveProtocol(): LiveProtocol {
         case "control_cancel_request":
           return typeof parsed.request_id === "string" ? { write: [], events: [], withdrawn: [parsed.request_id] } : { write: [], events: [] };
         case "control_response":
-          // The answer to our interrupt; the turn's end says the rest.
+          // The answer to our interrupt. A refusal means no turn was cut
+          // short, so the next turn's end is read as it was; otherwise
+          // the turn's end says the rest.
+          if (parsed.response?.subtype === "error" && parsed.response.request_id === interrupting) interrupting = null;
           return { write: [], events: [] };
         case "result": {
-          interrupting = false;
+          interrupting = null;
+          /**
+           * Only the interrupt's own ending is an interrupted turn. A turn
+           * that finished first (is_error false), or failed for its own
+           * reason (a turn limit, an API error) as the interrupt arrived,
+           * is read as the adapter always reads it, so a real failure is
+           * never reported as the person's stop.
+           */
+          if (parsed.is_error === false || parsed.subtype !== "error_during_execution") return { write: [] };
           const ended: AgentEvent = {
             type: "result",
             ok: false,
@@ -110,9 +122,7 @@ export function claudeCodeLiveProtocol(): LiveProtocol {
           };
           if (typeof parsed.session_id === "string") ended.sessionId = parsed.session_id;
           if (typeof parsed.total_cost_usd === "number") ended.costUsd = parsed.total_cost_usd;
-          // A turn that finished before the interrupt reached it ended on
-          // its own terms, and is read as the adapter always reads it.
-          return parsed.is_error === false ? { write: [] } : { write: [], events: [ended] };
+          return { write: [], events: [ended] };
         }
         default:
           return { write: [] };
@@ -130,6 +140,8 @@ interface ClaudeControlLine {
   type?: string;
   request_id?: unknown;
   request?: { subtype?: unknown; tool_name?: unknown; input?: unknown };
+  response?: { subtype?: unknown; request_id?: unknown };
+  subtype?: unknown;
   is_error?: boolean;
   session_id?: unknown;
   total_cost_usd?: unknown;
