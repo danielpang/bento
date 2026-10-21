@@ -552,13 +552,17 @@ Both are behind the beta testers flag (`isBetaRun` in
 
 ## A live session is a line per message or a protocol, and a reattach never decides again
 
-`LiveSession` has two shapes. pi reads one JSON line per user message
-(`encodeMessage`). Codex (`codex app-server`) and opencode
-(`opencode acp`) are JSON-RPC servers on stdio: a turn names a thread
-or session id the process handed out, and the process sends requests
-of its own that wait for an answer. Claude Code's messages are lines
-too, but its stream-json control protocol (interrupts, questions)
-needs replies, so it is a protocol as well. Those adapters return a
+`LiveSession` has two shapes. A tool that reads one JSON line per user
+message and answers nothing declares `encodeMessage` (the fake agent
+does). Codex (`codex app-server`) and opencode (`opencode acp`) are
+JSON-RPC servers on stdio: a turn names a thread or session id the
+process handed out, and the process sends requests of its own that
+wait for an answer. Claude Code's and pi's messages are lines too, but
+Claude Code's control protocol and pi's extension dialogs need
+replies, so they are protocols as well. pi sends every message after
+the first as a `prompt` with `streamingBehavior: "steer"`, which steers
+a running turn and starts one on an idle agent; a bare `steer` to an
+idle pi is queued and starts nothing. Those adapters return a
 `LiveProtocol` from `connect`, which sees every stdout line before it
 is parsed (`runAgent`'s `readLine`), writes the replies, and holds a
 message until its handshake answers (`held` counts toward the quiet
@@ -586,7 +590,9 @@ with it, say so with `liveSinceRecord`.
 An interrupt (`LiveProtocol.interrupt`) ends the current turn and
 leaves the process up: Claude Code's is a control request, Codex's
 `turn/interrupt` (naming the running turn, whose id arrives in
-`turn/started`), opencode's a `session/cancel` notification. Each
+`turn/started`), opencode's a `session/cancel` notification, pi's the
+`abort` command (sent only between `agent_start` and `agent_end`,
+since an abort with nothing running ends nothing). Each
 protocol marks the turn's end `interrupted`, and the live
 conversation holds the session open for `holdAfterInterrupt` instead of
 reading the failed turn as the run's end, so the next message

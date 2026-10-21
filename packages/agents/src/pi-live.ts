@@ -4,8 +4,13 @@ import type { AskQuestion, LiveAsk, LiveProtocol } from "./adapter.js";
  * pi's live session: `pi --mode rpc`, JSON commands on stdin and the
  * event stream on stdout.
  *
- * Messages are one line each, as they always were: the prompt is a
- * `prompt` command and a mid-task message a `steer`. On top of that,
+ * Messages are one line each: the first is a `prompt`, and every later
+ * one a `prompt` with `streamingBehavior: "steer"`, which joins the
+ * running turn (delivered after its tool calls, before the next model
+ * call) and starts a turn when none is running. A bare `steer` (or
+ * `follow_up`) sent to an idle agent is only queued, answered "success"
+ * and started on nothing until the next prompt, which left a session
+ * held open after its turn waiting until the run limit. On top of that,
  * pi's extension UI sub-protocol, each part verified against pi 0.70.1
  * and 0.73.1 driven over stdio against a stand-in Chat Completions API:
  *
@@ -29,17 +34,25 @@ import type { AskQuestion, LiveAsk, LiveProtocol } from "./adapter.js";
  *   extension the project brought, also blocks until answered, so it is
  *   cancelled rather than left to stall the agent until the run limit.
  *   Fire-and-forget methods (`notify`, `setStatus`, ...) need nothing.
+ * - An interrupt is the `abort` command. It ends the running turn with
+ *   `agent_end`, whose last assistant message stopped with stopReason
+ *   "aborted" (which the adapter's parser marks interrupted), and the
+ *   process stays up: the next prompt continues the session. An abort
+ *   with nothing running is answered "success" and ends nothing, so it
+ *   is sent only between `agent_start` and `agent_end`.
  */
 export function piLiveProtocol(): LiveProtocol {
+  // Whether a turn is running (agent_start seen), which is when an abort ends something.
+  let running = false;
   const line = (message: unknown) => JSON.stringify(message);
   const respond = (id: string, value: unknown) => line({ type: "extension_ui_response", id, value: JSON.stringify(value) });
 
   return {
     held: 0,
     open: (prompt) => (prompt === null ? [] : [line({ type: "prompt", message: prompt })]),
-    // steer rather than follow_up for mid-task messages: reaching the
-    // agent while it works is the point of the live session.
-    send: (text) => [line({ type: "steer", message: text })],
+    // steer rather than followUp: reaching the agent while it works is
+    // the point of the live session. Idle, it is an ordinary prompt.
+    send: (text) => [line({ type: "prompt", message: text, streamingBehavior: "steer" })],
 
     answer(ask, answers) {
       return [respond(ask.id, { answers })];
@@ -49,8 +62,20 @@ export function piLiveProtocol(): LiveProtocol {
       return [respond(ask.id, { declined: reason })];
     },
 
+    interrupt() {
+      // A reattach mid-turn has not seen its agent_start: nothing to name.
+      return running ? [line({ type: "abort" })] : [];
+    },
+
     read(raw) {
       // A cheap look before parsing, since every streamed token is a line.
+      if (raw.includes('"agent_start"') || raw.includes('"agent_end"')) {
+        const type = topLevelType(raw);
+        if (type === "agent_start") running = true;
+        if (type === "agent_end") running = false;
+        // Left to the adapter's parser, which reads the turn's end.
+        return { write: [] };
+      }
       if (!raw.includes('"extension_ui_request"')) return { write: [] };
       let parsed: PiDialogLine;
       try {
@@ -68,6 +93,15 @@ export function piLiveProtocol(): LiveProtocol {
       return { write: [line({ type: "extension_ui_response", id: parsed.id, cancelled: true })], events: [] };
     },
   };
+}
+
+/** A line's own type, so text that merely mentions one is not taken for it. */
+function topLevelType(raw: string): unknown {
+  try {
+    return (JSON.parse(raw.trim()) as { type?: unknown }).type;
+  } catch {
+    return undefined;
+  }
 }
 
 /** The dialog methods that block until answered. */

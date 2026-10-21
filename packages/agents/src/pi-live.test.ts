@@ -23,11 +23,13 @@ const questions = [
 ];
 const dialog = (fields: Record<string, unknown>) => JSON.stringify({ type: "extension_ui_request", id: "ui-1", ...fields });
 
-test("pi: the prompt is a prompt command and a later message a steer", () => {
+test("pi: the first message is a prompt, and every later one a prompt that steers a running turn", () => {
   const w = wire();
   assert.deepEqual(w.open("Do the task").map(json), [{ type: "prompt", message: "Do the task" }]);
   assert.deepEqual(w.open(null), [], "a reattach writes nothing first");
-  assert.deepEqual(w.send("this way")?.map(json), [{ type: "steer", message: "this way" }]);
+  // pi 0.70.1 and 0.73.1 steer a running turn with this, and start a turn
+  // with it when idle; a bare steer to an idle agent starts nothing.
+  assert.deepEqual(w.send("this way")?.map(json), [{ type: "prompt", message: "this way", streamingBehavior: "steer" }]);
 });
 
 test("pi: Bento's dialog becomes an ask, and the answer goes back as JSON the extension reads", () => {
@@ -109,4 +111,41 @@ test("pi: the extension asks through ctx.ui.input and turns each reply into the 
   assert.equal((await run(JSON.stringify({ declined: "Nobody is here." }))).text, "Nobody is here.");
   assert.equal((await run(undefined)).text, "The question was withdrawn before anyone answered.");
   assert.match((await run(undefined, false)).text, /Nobody is available/);
+});
+
+test("pi: an interrupt is an abort, sent only while a turn runs", () => {
+  const w = wire();
+  w.open("Do the task");
+  assert.deepEqual(w.interrupt!(), [], "no agent_start yet: nothing to abort");
+  assert.deepEqual(w.read(JSON.stringify({ type: "agent_start" })), { write: [] }, "left to the parser");
+  assert.deepEqual(w.interrupt!().map(json), [{ type: "abort" }]);
+  w.read(JSON.stringify({ type: "agent_end", messages: [] }));
+  assert.deepEqual(w.interrupt!(), [], "the turn is over: an abort now would end nothing");
+  // A message that only mentions the event is not the event.
+  w.read(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: '{"type":"agent_start"}' }] } }));
+  assert.deepEqual(w.interrupt!(), []);
+});
+
+test("pi: a turn an abort stopped ends interrupted, and any other turn as before", () => {
+  // agent_end as pi 0.73.1 printed it after an abort mid model call.
+  const aborted = piAdapter.parseEvent(JSON.stringify({
+    type: "agent_end",
+    messages: [
+      { role: "user", content: [{ type: "text", text: "SLOW first" }] },
+      { role: "assistant", content: [{ type: "text", text: "Working on it" }], stopReason: "aborted", errorMessage: "Request was aborted", usage: { cost: { total: 0.01 } } },
+    ],
+  }));
+  assert.deepEqual(aborted?.type === "result" ? [aborted.ok, aborted.interrupted, aborted.error, aborted.costUsd] : [], [false, true, "Interrupted.", 0.01]);
+  const failed = piAdapter.parseEvent(JSON.stringify({ type: "agent_end", messages: [{ role: "assistant", content: [], stopReason: "error", errorMessage: "rate limited" }] }));
+  assert.deepEqual(failed?.type === "result" ? [failed.ok, failed.interrupted, failed.error] : [], [false, undefined, "rate limited"]);
+  const done = piAdapter.parseEvent(JSON.stringify({ type: "agent_end", messages: [{ role: "assistant", content: [], stopReason: "stop" }] }));
+  assert.deepEqual(done?.type === "result" ? [done.ok, done.interrupted] : [], [true, undefined]);
+  assert.equal(piAdapter.live!.interrupts, true);
+});
+
+test("pi: a run whose interrupted turn was followed by another succeeds", () => {
+  const interrupted = { type: "result" as const, ok: false, interrupted: true, error: "Interrupted." };
+  const next = { type: "result" as const, ok: true };
+  assert.equal(piAdapter.extractOutcome([{ type: "init", sessionId: "s" }, interrupted, next], 0).ok, true);
+  assert.equal(piAdapter.extractOutcome([{ type: "init", sessionId: "s" }, interrupted], 0).ok, false, "unless nothing came after it");
 });

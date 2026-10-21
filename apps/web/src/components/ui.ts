@@ -129,7 +129,7 @@ export const LIVE_TOOLS: Record<string, "steer" | "queue" | undefined> = {
 const LIVE_SINCE_RECORD: ReadonlySet<string> = new Set(["codex", "opencode"]);
 
 /** Tools whose live session can stop a turn and keep the run open. */
-export const INTERRUPTIBLE_TOOLS: ReadonlySet<string> = new Set(["claude-code", "codex", "opencode"]);
+export const INTERRUPTIBLE_TOOLS: ReadonlySet<string> = new Set(["claude-code", "codex", "opencode", "pi"]);
 
 /**
  * How a mid-task message is treated in this run. The run says whether

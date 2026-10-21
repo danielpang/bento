@@ -705,3 +705,41 @@ test("opencode acp: an interrupt cancels the prompt, and the next message contin
     server.close();
   }
 });
+
+test("pi rpc: an interrupt aborts the turn, and the next message continues the session", { skip, timeout: 180_000 }, async () => {
+  const log: ModelLog = { calls: [] };
+  const { server, url } = await standInModel("chat", log, 8_000);
+  try {
+    const cwd = mkdtempSync(join(tmpdir(), "bento-pi-interrupt-"));
+    mkdirSync(join(cwd, ".pi", "agent"), { recursive: true });
+    writeFileSync(join(cwd, ".pi", "agent", "models.json"), JSON.stringify({ providers: { fake: { baseUrl: url, api: "openai-completions", apiKey: "k", models: [{ id: "m" }] } } }));
+    const { result, results, said } = await interruptedRun(piAdapter, { prompt: "SLOW work, please", model: "fake/m", cwd }, { HOME: cwd }, log);
+    assert.equal(result.exitCode, 0, "closing stdin after the last turn ended the process cleanly");
+    assert.equal(result.outcome.ok, true, result.outcome.error);
+    assert.equal(results.length, 2);
+    const last = log.calls.at(-1)!;
+    assert.ok(last.some((t) => t.includes("SLOW work")) && last.some((t) => t.includes("AFTER the interrupt")),
+      "the message after the interrupt reached the same session, with the aborted request before it");
+    assert.deepEqual(said, ["Interrupted."]);
+  } finally {
+    server.close();
+  }
+});
+
+test("pi rpc: a message mid-turn steers the running turn", { skip, timeout: 180_000 }, async () => {
+  const log: ModelLog = { calls: [] };
+  const { server, url } = await standInModel("chat", log, 3_000);
+  try {
+    const cwd = mkdtempSync(join(tmpdir(), "bento-pi-live-"));
+    mkdirSync(join(cwd, ".pi", "agent"), { recursive: true });
+    writeFileSync(join(cwd, ".pi", "agent", "models.json"), JSON.stringify({ providers: { fake: { baseUrl: url, api: "openai-completions", apiKey: "k", models: [{ id: "m" }] } } }));
+    const { result } = await liveRun(piAdapter, { prompt: "work on it", model: "fake/m", cwd }, { HOME: cwd }, log, "STEER: also say hello");
+    assert.equal(result.exitCode, 0, "closing stdin ended the process cleanly");
+    assert.equal(result.outcome.ok, true, result.outcome.error);
+    assert.equal(result.events.filter((e) => e.type === "result").length, 1, "the steer joined the running turn rather than starting another");
+    const said = result.events.filter((e) => e.type === "message" && e.role === "assistant").map((e) => (e as { text: string }).text);
+    assert.ok(said.some((text) => text.includes("STEER")), `the model heard the steer within the turn: ${said.join(" | ")}`);
+  } finally {
+    server.close();
+  }
+});

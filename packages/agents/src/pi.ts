@@ -76,6 +76,7 @@ export const piAdapter: AgentAdapter = {
    */
   live: {
     delivery: "steer",
+    interrupts: true,
     buildCommand(input: BuildCommandInput): string[] {
       const argv = ["pi", "--mode", "rpc", ...piModelArgs(input.model)];
       if (input.resumeSessionId) argv.push("--session", input.resumeSessionId);
@@ -161,6 +162,11 @@ export const piAdapter: AgentAdapter = {
         const messages = parsed.messages ?? [];
         const assistants = messages.filter((m) => m.role === "assistant");
         const costUsd = assistants.reduce((total, m) => total + (m.usage?.cost?.total ?? 0), 0);
+        // An abort, which only a live session's interrupt sends: the
+        // turn stopped for a person, and the session goes on.
+        if (assistants.at(-1)?.stopReason === "aborted") {
+          return { type: "result", ok: false, interrupted: true, error: "Interrupted.", costUsd, numTurns: assistants.length, raw: parsed };
+        }
         // A message that stopped on an error is how pi reports failure.
         const failed = assistants.find((m) => m.errorMessage);
         return {
@@ -214,6 +220,8 @@ interface PiMessage {
   content?: ({ type?: string; text?: string } | unknown)[];
   usage?: PiUsage;
   errorMessage?: string;
+  /** Why the model call ended; "aborted" when an abort command stopped it. */
+  stopReason?: string;
 }
 
 interface PiLine {
