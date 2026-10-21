@@ -659,12 +659,11 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
   const toast = useToast();
   /**
    * Whether the quiet board's mascots come out, from the person's own
-   * flag. Beta only, like the mascots. Starts hidden, and a failed read
-   * leaves them hidden: Settings, Account can still bring them back.
+   * flag. Starts hidden, and a failed read leaves them hidden:
+   * Settings, Account can still bring them back.
    */
   const [mascots, setMascots] = useState(false);
   useEffect(() => {
-    if (!beta) return;
     let cancelled = false;
     void client
       .getMascots()
@@ -675,7 +674,7 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
     return () => {
       cancelled = true;
     };
-  }, [beta]);
+  }, []);
   const dismissMascots = useCallback(() => {
     setMascots(false);
     void client
@@ -1274,6 +1273,7 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
   const onSwarmBoard = swarming && projectId !== null && hasProjects;
   const actions: NavAction[] = onSwarmBoard
     ? [
+        { id: "agents", label: "Agents", onSelect: () => { setAgentsIntent(null); setPanel("agents"); } },
         ...(hasProjects ? [{ id: "repos", label: "Repositories", onSelect: () => setPanel("repos") }] : []),
       ]
     : [
@@ -1462,6 +1462,7 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
             surfaces={swarmSurfaces}
             repositoriesMissing={repoCount === 0}
             onAddRepository={() => setPanel("repos")}
+            agentProfiles={profiles}
           />
         </Suspense>
       ) : boardPending ? (

@@ -46,3 +46,11 @@ test("a planner's reject reads as the planner sending it back, with its reason",
   // A retry a person pressed carries no reason and is still a plain retry.
   assert.equal(eventWords(event({ kind: "status_changed", toStatus: "assigned", detail: { retry: 1 } })), "Queued for worker");
 });
+
+test("a cancel's reason is its note, and the coordinator's reason codes never are", () => {
+  const cancelled = event({ kind: "status_changed", toStatus: "cancelled", runId: "p1", detail: { reason: "The API it targets was removed." } });
+  assert.equal(eventNote(cancelled), "The API it targets was removed.");
+  assert.equal(eventNote(event({ kind: "note", detail: { reason: "sandbox", restart: 1, of: 3 } })), "");
+  assert.equal(eventNote(event({ kind: "status_changed", toStatus: "assigned", detail: { reason: "usage_limit" } })), "");
+  assert.equal(eventNote(event({ kind: "attention_raised", detail: { reason: "plan_hours" } })), "");
+});

@@ -4,7 +4,6 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { user } from "@bento/db";
 import type { AppContext } from "../context.js";
-import { getBetaTester } from "../feature-flags.js";
 import { actor } from "../middleware/actor.js";
 import { tenantDb as db } from "../middleware/tenant.js";
 
@@ -41,12 +40,8 @@ export function accountRoutes(ctx: AppContext) {
       if (!row) return c.json({ error: "not found" }, 404);
       return c.json({ walkthrough: row.walkthrough });
     })
-    /**
-     * Whether the board's mascots come out. The mascots are on the beta
-     * flag, so a person off it is told this route is not there.
-     */
+    /** Whether the board's mascots come out. */
     .get("/mascots", async (c) => {
-      if (!(await getBetaTester(ctx, c))) return c.json({ error: "not found" }, 404);
       const [row] = await db(c, ctx)
         .select({ show: user.boardMascots })
         .from(user)
@@ -56,7 +51,6 @@ export function accountRoutes(ctx: AppContext) {
     })
     /** Off when they are dismissed on the board; on again from Settings, Account. */
     .patch("/mascots", zValidator("json", patchMascots), async (c) => {
-      if (!(await getBetaTester(ctx, c))) return c.json({ error: "not found" }, 404);
       const { show } = c.req.valid("json");
       const [row] = await db(c, ctx)
         .update(user)

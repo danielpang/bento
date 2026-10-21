@@ -3203,7 +3203,7 @@ test("the onboarding walkthrough is on for a new account until it is skipped", a
   assert.equal((await app.request("/api/account/onboarding")).status, 401);
 });
 
-test("the board mascots are on for a beta tester until dismissed, and hidden from everyone else", async () => {
+test("the board mascots are on for everyone until dismissed", async () => {
   const signup = await jsonPost("/api/auth/sign-up/email", {
     email: "mascots@bento.test",
     password: "correct-horse-battery",
@@ -3218,29 +3218,12 @@ test("the board mascots are on for a beta tester until dismissed, and hidden fro
       body: JSON.stringify({ show }),
     });
 
-  assert.equal((await read()).status, 404, "off the beta flag, the route is not there");
-  assert.equal((await write(false)).status, 404);
-
-  const previous = ctx.featureFlags;
-  ctx.featureFlags = new FeatureFlags(
-    {
-      async evaluateFlags(_id, opts) {
-        return { isEnabled: () => opts?.personProperties?.email === "mascots@bento.test" };
-      },
-      async shutdown() {},
-    },
-    false,
-  );
-  try {
-    const show = async () => ((await (await read()).json()) as { show: boolean }).show;
-    assert.equal(await show(), true, "a new account starts with the mascots on");
-    assert.equal((await write(false)).status, 200);
-    assert.equal(await show(), false, "dismissing them is remembered");
-    assert.equal((await write(true)).status, 200);
-    assert.equal(await show(), true, "Settings, Account brings them back");
-  } finally {
-    ctx.featureFlags = previous;
-  }
+  const show = async () => ((await (await read()).json()) as { show: boolean }).show;
+  assert.equal(await show(), true, "a new account starts with the mascots on, beta or not");
+  assert.equal((await write(false)).status, 200);
+  assert.equal(await show(), false, "dismissing them is remembered");
+  assert.equal((await write(true)).status, 200);
+  assert.equal(await show(), true, "Settings, Account brings them back");
   assert.equal((await app.request("/api/account/mascots")).status, 401);
 });
 
