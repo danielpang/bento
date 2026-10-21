@@ -40,13 +40,20 @@ import { METHOD_NOT_FOUND, readRpcLine, RpcCalls, type RpcLine } from "./live-wi
  *   question nobody can answer is answered with the reason instead.
  *   `serverRequest/resolved` follows every request that stops waiting,
  *   answered or not.
+ * - `turn/interrupt` names the thread and the running turn (its id
+ *   arrives in `turn/started`) and ends it with `turn/completed` status
+ *   "interrupted". The process stays up, and the next `turn/start`
+ *   continues the thread: the model reads Codex's own `<turn_aborted>`
+ *   note before the new message. An interrupt that arrives after the
+ *   turn ended is refused ("no active turn to interrupt"), which ends
+ *   nothing.
  */
 export function codexAppServerProtocol(
   input: BuildCommandInput,
   how: { attach: boolean },
   options: { model: string },
 ): LiveProtocol {
-  const rpc = new RpcCalls<"initialize" | "thread" | "turn">(false);
+  const rpc = new RpcCalls<"initialize" | "thread" | "turn" | "interrupt">(false);
   const resuming = input.resumeSessionId;
   let threadId: string | undefined = how.attach ? resuming : undefined;
   // A reattached process whose thread id was never recorded cannot be
@@ -54,6 +61,9 @@ export function codexAppServerProtocol(
   let failed = how.attach && !threadId;
   const held: string[] = [];
   const usage = new Map<string, { input: number; output: number }>();
+  // The running turn, which an interrupt must name, and whether one was asked for.
+  let activeTurn: string | undefined;
+  let interrupting = false;
 
   const threadParams = {
     cwd: input.cwd,
@@ -102,6 +112,11 @@ export function codexAppServerProtocol(
       if (message.kind === "response") {
         const tag = rpc.settle(message.id);
         if (!tag) return { write: [], events: [] };
+        if (tag === "interrupt") {
+          // Refused only when the turn had already ended on its own.
+          if (message.error) interrupting = false;
+          return { write: [], events: [] };
+        }
         if (message.error) {
           // A turn that would not start fails that turn. A handshake that
           // failed fails the process: nothing can be addressed without it.
@@ -134,9 +149,23 @@ export function codexAppServerProtocol(
         }
         return { write: [], events: [] };
       }
+      if (message.method === "turn/started") {
+        const id = (message.params as { turn?: { id?: unknown } } | undefined)?.turn?.id;
+        if (typeof id === "string") activeTurn = id;
+        return { write: [] };
+      }
       if (message.method === "turn/completed") {
         const result = turnResult(message.params, threadId);
         const turnId = (message.params as { turn?: { id?: unknown } }).turn?.id;
+        if (turnId === activeTurn) activeTurn = undefined;
+        if (interrupting) {
+          interrupting = false;
+          const status = (message.params as { turn?: { status?: unknown } }).turn?.status;
+          if (status === "interrupted") {
+            result.interrupted = true;
+            result.error = "Interrupted.";
+          }
+        }
         const counted = typeof turnId === "string" ? usage.get(turnId) : undefined;
         if (typeof turnId === "string") usage.delete(turnId);
         if (counted) {
@@ -146,6 +175,13 @@ export function codexAppServerProtocol(
         return { write: [], events: [result] };
       }
       return { write: [] };
+    },
+
+    interrupt() {
+      // A turn this process never saw start (a reattach mid-turn) cannot be named.
+      if (!threadId || !activeTurn) return [];
+      interrupting = true;
+      return [rpc.request("interrupt", "turn/interrupt", { threadId, turnId: activeTurn })];
     },
 
     answer(ask, answers) {
@@ -222,9 +258,9 @@ function byQuestionId(ask: LiveAsk, text: (question: string) => string): Record<
 }
 
 /**
- * What a turn's end says. Interrupted counts as a failure: Bento only
- * interrupts by ending the process, so an interruption it did not ask
- * for is Codex giving up.
+ * What a turn's end says. Interrupted counts as a failure; the protocol
+ * marks it `interrupted` when Bento asked for it, and otherwise it is
+ * Codex giving up.
  */
 function turnResult(params: unknown, threadId: string | undefined): Extract<AgentEvent, { type: "result" }> {
   const turn = (params as { turn?: { status?: unknown; error?: { message?: unknown } | null } } | undefined)?.turn;

@@ -144,6 +144,7 @@ export const codexAdapter: AgentAdapter = {
   live: {
     delivery: "steer",
     beta: true,
+    interrupts: true,
     /**
      * Only when every profile argument is a config override. The
      * profile's extra args were written for `codex exec`, and an exec

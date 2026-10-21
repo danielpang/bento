@@ -581,9 +581,11 @@ on a stdin nobody closes, is what deciding twice would cost.
 
 ## An interrupt ends a turn, not a run, and an agent's question is a row
 
-Claude Code's interrupt (`LiveProtocol.interrupt`, a control request)
-ends the current turn with an error result and leaves the process up.
-The protocol marks that result `interrupted`, and the live
+An interrupt (`LiveProtocol.interrupt`) ends the current turn and
+leaves the process up: Claude Code's is a control request, Codex's
+`turn/interrupt` (naming the running turn, whose id arrives in
+`turn/started`), opencode's a `session/cancel` notification. Each
+protocol marks the turn's end `interrupted`, and the live
 conversation holds the session open for `holdAfterInterrupt` instead of
 reading the failed turn as the run's end, so the next message
 continues the same session. Silence past the hold fails the run as
@@ -591,6 +593,11 @@ continues the same session. Silence past the hold fails the run as
 does: the local handle if this process holds it, else a `run_control`
 "interrupt" on the bus (`requestRunInterrupt`). Only an adapter whose
 `live.interrupts` is set offers it, and only on a run recorded as live.
+A protocol with nothing it can name (no turn seen starting, no prompt
+outstanding) returns no lines, and the interrupt reports false. A turn
+that was interrupted and then followed by another does not fail the
+run: an adapter's `extractOutcome` must not count it (opencode's
+counted any failed turn, and did until the real CLI e2e said so).
 
 A question arrives as a request the agent blocks on, which each
 protocol turns into a `LiveAsk`: Claude Code's AskUserQuestion (behind

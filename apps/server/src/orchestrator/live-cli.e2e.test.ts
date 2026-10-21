@@ -583,3 +583,125 @@ test("pi rpc: Bento's ask_user extension is answered through the store, one choi
     server.close();
   }
 });
+
+/**
+ * One live run that a person interrupts: the first model call is slow,
+ * the interrupt goes through the live conversation as the route's would,
+ * the session is held open after the interrupted turn, and the message
+ * sent then is answered in the same session before the run ends.
+ */
+async function interruptedRun(adapter: AgentAdapter, input: BuildCommandInput, env: Record<string, string>, log: ModelLog) {
+  const live = adapter.live!;
+  assert.equal(live.interrupts, true);
+  const driver = new LocalProcessDriver();
+  const handle = await driver.provision({ workspaceKey: "e2e", hostWorkspacePath: input.cwd } as never);
+  const channel = new LineChannel();
+  const wire = openLiveWire(live, input, { attach: false });
+  for (const line of wire.open(input.prompt)) channel.write(line);
+  const said: string[] = [];
+  const session = attachLiveConversation({
+    runId: "e2e-interrupt",
+    wire,
+    liveChannel: channel,
+    conversation: { ...closingConversation(), holdAfterInterrupt: () => 30, interruptedNotice: () => "Interrupted." },
+    mayEnd: async () => true,
+    sayAsUser: async () => {},
+    saySystem: async (text) => {
+      said.push(text);
+    },
+  });
+  const results: AgentEvent[] = [];
+  const run = runAgent({
+    adapter,
+    argv: live.buildCommand(input),
+    exec: () => driver.exec(handle, live.buildCommand(input), { cwd: input.cwd, env, stdin: channel, timeoutMs: 120_000 }),
+    readLine: (line) => {
+      const read = wire.read(line);
+      for (const reply of read.write) channel.write(reply);
+      return read.events;
+    },
+    onEvent: async (event) => {
+      if (event.type !== "result") return;
+      results.push(event);
+      await session.onTurnFinished(event.ok, event.interrupted === true);
+    },
+  });
+  // The slow first call is under way; the protocol may still need the turn's id.
+  while (log.calls.length === 0) await new Promise((r) => setTimeout(r, 50));
+  const deadline = Date.now() + 5_000;
+  while (!session.interrupt()) {
+    assert.ok(Date.now() < deadline, "the running turn could be interrupted");
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  while (results.length === 0) await new Promise((r) => setTimeout(r, 50));
+  const [stopped] = results;
+  assert.deepEqual(stopped?.type === "result" ? [stopped.ok, stopped.interrupted, stopped.error] : [], [false, true, "Interrupted."]);
+  assert.equal(session.waiting(), true, "held open after the interrupt, not ended");
+  assert.equal(await session.deliver("AFTER the interrupt"), true);
+  const result = await run;
+  session.dispose();
+  return { result, results, said };
+}
+
+test("codex app-server: an interrupt stops the turn, and the next message continues the thread", { skip, timeout: 180_000 }, async () => {
+  const log: ModelLog = { calls: [] };
+  const { server, url } = await standInModel("responses", log, 8_000);
+  try {
+    const cwd = mkdtempSync(join(tmpdir(), "bento-codex-interrupt-"));
+    const home = join(cwd, ".codex-home");
+    mkdirSync(home);
+    const extraArgs = [
+      "-c", 'model_provider="fake"',
+      "-c", 'model_providers.fake.name="fake"',
+      "-c", `model_providers.fake.base_url="${url}"`,
+      "-c", 'model_providers.fake.wire_api="responses"',
+      "-c", 'model_providers.fake.env_key="FAKE_KEY"',
+    ];
+    const { result, results, said } = await interruptedRun(
+      codexAdapter,
+      { prompt: "SLOW work, please", model: "gpt-5-codex", cwd, extraArgs },
+      { CODEX_HOME: home, FAKE_KEY: "k" },
+      log,
+    );
+    assert.equal(result.exitCode, 0, "closing stdin after the last turn ended the process cleanly");
+    assert.equal(result.outcome.ok, true, result.outcome.error);
+    assert.equal(results.length, 2);
+    const last = log.calls.at(-1)!;
+    assert.ok(last.some((t) => t.includes("SLOW work")) && last.some((t) => t.includes("AFTER the interrupt")),
+      "the message after the interrupt reached the same thread, with the interrupted request before it");
+    assert.deepEqual(said, ["Interrupted."]);
+  } finally {
+    server.close();
+  }
+});
+
+test("opencode acp: an interrupt cancels the prompt, and the next message continues the session", { skip, timeout: 180_000 }, async () => {
+  const log: ModelLog = { calls: [] };
+  const { server, url } = await standInModel("chat", log, 8_000);
+  try {
+    const cwd = mkdtempSync(join(tmpdir(), "bento-opencode-interrupt-"));
+    const home = join(cwd, ".oc-home");
+    mkdirSync(join(home, ".config", "opencode"), { recursive: true });
+    writeFileSync(join(home, ".config", "opencode", "opencode.json"), JSON.stringify({
+      $schema: "https://opencode.ai/config.json", autoupdate: false, share: "disabled",
+      provider: { fake: { npm: "@ai-sdk/openai-compatible", name: "fake", options: { baseURL: url, apiKey: "k" }, models: { m: { name: "m" } } } },
+    }));
+    const env = {
+      HOME: home,
+      XDG_CONFIG_HOME: join(home, ".config"),
+      XDG_DATA_HOME: join(home, ".local", "share"),
+      XDG_CACHE_HOME: join(home, ".cache"),
+      XDG_STATE_HOME: join(home, ".local", "state"),
+    };
+    const { result, results, said } = await interruptedRun(opencodeAdapter, { prompt: "SLOW work, please", model: "fake/m", cwd }, env, log);
+    assert.equal(result.exitCode, 0, "closing stdin after the last turn ended the process cleanly");
+    assert.equal(result.outcome.ok, true, result.outcome.error);
+    assert.equal(results.length, 2);
+    const last = log.calls.at(-1)!;
+    assert.ok(last.some((t) => t.includes("SLOW work")) && last.some((t) => t.includes("AFTER the interrupt")),
+      "the message after the interrupt reached the same session, with the cancelled prompt before it");
+    assert.deepEqual(said, ["Interrupted."]);
+  } finally {
+    server.close();
+  }
+});

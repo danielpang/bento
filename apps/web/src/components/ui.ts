@@ -132,7 +132,7 @@ export const BETA_LIVE_TOOLS: Record<string, "steer" | "queue" | undefined> = {
 };
 
 /** Tools whose live session can stop a turn and keep the run open (beta). */
-export const INTERRUPTIBLE_TOOLS: ReadonlySet<string> = new Set(["claude-code"]);
+export const INTERRUPTIBLE_TOOLS: ReadonlySet<string> = new Set(["claude-code", "codex", "opencode"]);
 
 /**
  * How a mid-task message is treated in this run. The run says whether

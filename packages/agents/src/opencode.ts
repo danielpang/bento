@@ -153,6 +153,7 @@ export const opencodeAdapter: AgentAdapter = {
   live: {
     delivery: "queue",
     beta: true,
+    interrupts: true,
     /**
      * Not with profile arguments: they were written for `opencode run`
      * (`--agent`, `--variant`), and `opencode acp` takes none of them.
@@ -278,7 +279,12 @@ export const opencodeAdapter: AgentAdapter = {
   },
 
   extractOutcome(events: AgentEvent[], exitCode: number): RunOutcome {
-    const failure = events.find((e) => e.type === "result" && !e.ok);
+    // A turn a person interrupted is not the run failing, once another
+    // turn came after it; the last one still decides.
+    const failure = events.find(
+      (e, index) =>
+        e.type === "result" && !e.ok && !(e.interrupted && events.slice(index + 1).some((later) => later.type === "result")),
+    );
     const init = events.find((e) => e.type === "init");
     const sessionId = init?.type === "init" ? init.sessionId : undefined;
 

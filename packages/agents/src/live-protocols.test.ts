@@ -357,3 +357,69 @@ async function* chunks(lines: string[], exitCode: number): AsyncIterable<ExecChu
   for (const data of lines) yield { kind: "stdout", data };
   yield { kind: "exit", exitCode };
 }
+
+test("codex: an interrupt names the running turn, and that turn's end is marked interrupted", () => {
+  const p = codex();
+  const [, , start] = p.open("first");
+  p.read(answer(start!, { thread: { id: "thr-1" } }));
+  assert.deepEqual(p.interrupt!(), [], "no turn has started: nothing to name");
+  p.read(note("turn/started", { threadId: "thr-1", turn: { id: "t1", status: "inProgress" } }));
+  const [request] = p.interrupt!();
+  assert.equal(json(request!).method, "turn/interrupt");
+  assert.deepEqual(json(request!).params, { threadId: "thr-1", turnId: "t1" });
+  assert.deepEqual(p.read(answer(request!, {})).events, [], "the answer itself says nothing; the turn's end does");
+  const [end] = p.read(note("turn/completed", { threadId: "thr-1", turn: { id: "t1", status: "interrupted", error: null } })).events!;
+  assert.deepEqual(end?.type === "result" ? [end.ok, end.interrupted, end.error, end.sessionId] : [], [false, true, "Interrupted.", "thr-1"]);
+  assert.deepEqual(p.interrupt!(), [], "the turn is over");
+
+  // The next turn is an ordinary one again.
+  p.read(note("turn/started", { threadId: "thr-1", turn: { id: "t2", status: "inProgress" } }));
+  const [next] = p.read(note("turn/completed", { threadId: "thr-1", turn: { id: "t2", status: "completed", error: null } })).events!;
+  assert.deepEqual(next?.type === "result" ? [next.ok, next.interrupted] : [], [true, undefined]);
+});
+
+test("codex: an interrupt that arrives after the turn ended is refused, and ends nothing", () => {
+  const p = codex();
+  const [, , start] = p.open("first");
+  p.read(answer(start!, { thread: { id: "thr-1" } }));
+  p.read(note("turn/started", { threadId: "thr-1", turn: { id: "t1", status: "inProgress" } }));
+  const [request] = p.interrupt!();
+  const [done] = p.read(note("turn/completed", { threadId: "thr-1", turn: { id: "t1", status: "completed", error: null } })).events!;
+  assert.deepEqual(done?.type === "result" ? [done.ok, done.interrupted] : [], [true, undefined], "it finished on its own terms");
+  assert.deepEqual(p.read(refuse(request!, "no active turn to interrupt")).events, [], "no failure, as Codex's real answer here");
+  assert.equal(p.send("next")!.length, 1, "the process is still usable");
+});
+
+test("opencode: an interrupt cancels the running prompt, and the cancelled turn is marked interrupted", () => {
+  const p = opencode();
+  assert.deepEqual(p.interrupt!(), [], "no session yet");
+  const [prompt] = readyOpencode(p);
+  const [cancel] = p.interrupt!();
+  assert.deepEqual(json(cancel!), { jsonrpc: "2.0", method: "session/cancel", params: { sessionId: "ses_1" } }, "a notification: no answer comes");
+  const [end] = p.read(answer(prompt!, { stopReason: "cancelled", usage: { inputTokens: 0, outputTokens: 0 } }, true)).events!;
+  assert.deepEqual(end?.type === "result" ? [end.ok, end.interrupted, end.error] : [], [false, true, "Interrupted."]);
+  assert.deepEqual(p.interrupt!(), [], "nothing is running now");
+
+  const [again] = p.send("after the cancel")!;
+  const [next] = p.read(answer(again!, { stopReason: "end_turn" }, true)).events!;
+  assert.deepEqual(next?.type === "result" ? [next.ok, next.interrupted] : [], [true, undefined]);
+  const [third] = p.send("and once more")!;
+  const [plain] = p.read(answer(third!, { stopReason: "cancelled" }, true)).events!;
+  assert.deepEqual(plain?.type === "result" ? [plain.ok, plain.interrupted, plain.error] : [], [false, undefined, "opencode cancelled the turn"],
+    "a cancel Bento did not ask for is still opencode giving up");
+});
+
+test("codex and opencode declare interrupts", () => {
+  assert.equal(codexAdapter.live!.interrupts, true);
+  assert.equal(opencodeAdapter.live!.interrupts, true);
+});
+
+test("opencode: a turn a person interrupted fails the run only if nothing came after it", () => {
+  const init: AgentEvent = { type: "init", sessionId: "ses_1" };
+  const interrupted: AgentEvent = { type: "result", ok: false, interrupted: true, error: "Interrupted.", sessionId: "ses_1" };
+  const done: AgentEvent = { type: "result", ok: true, sessionId: "ses_1" };
+  assert.deepEqual(opencodeAdapter.extractOutcome([init, interrupted, done], 0), { ok: true, sessionId: "ses_1" });
+  assert.deepEqual(opencodeAdapter.extractOutcome([init, interrupted], 0), { ok: false, error: "Interrupted.", sessionId: "ses_1" });
+  const failed: AgentEvent = { type: "result", ok: false, error: "opencode stopped: the model refused" };
+  assert.equal(opencodeAdapter.extractOutcome([init, failed, done], 0).ok, false, "any other failed turn still fails the run");
+});

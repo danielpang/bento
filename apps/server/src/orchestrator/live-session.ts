@@ -329,8 +329,12 @@ export function attachLiveConversation(input: {
 
   const interrupt = (): boolean => {
     if (detached || !wire.interrupt || liveChannel.ended) return false;
+    // No lines: nothing is running that the protocol can name (Codex
+    // needs the turn's id, opencode an outstanding prompt).
+    const lines = wire.interrupt();
+    if (lines.length === 0) return false;
     clearIdle();
-    return wire.interrupt().every((line) => liveChannel.write(line));
+    return lines.every((line) => liveChannel.write(line));
   };
 
   /**

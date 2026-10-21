@@ -28,6 +28,9 @@ import { METHOD_NOT_FOUND, readRpcLine, RpcCalls, type RpcLine } from "./live-wi
  *   with the option that allows, the way `opencode run --auto` does: the
  *   sandbox is the boundary.
  * - End of input ends the process with exit code 0.
+ * - `session/cancel` (a notification) ends the running prompt at once
+ *   with `stopReason` "cancelled". The process stays up, and the next
+ *   prompt continues the session with everything before it.
  */
 export function opencodeAcpProtocol(input: BuildCommandInput, how: { attach: boolean }): LiveProtocol {
   const rpc = new RpcCalls<"initialize" | "session" | "model" | "prompt">(true);
@@ -39,6 +42,9 @@ export function opencodeAcpProtocol(input: BuildCommandInput, how: { attach: boo
   let outstanding = 0;
   let turnUsage: { input: number; output: number } | null = null;
   let stop: string | null = null;
+  // Whether Bento asked for the running prompt to stop, and whether it did.
+  let interrupting = false;
+  let cancelled = false;
   let draft: { messageId: string | undefined; role: "assistant" | "system"; text: string } | null = null;
 
   const prompt = (text: string) => {
@@ -94,6 +100,13 @@ export function opencodeAcpProtocol(input: BuildCommandInput, how: { attach: boo
       return [prompt(text)];
     },
 
+    interrupt() {
+      // Nothing to cancel without a session and a prompt still running.
+      if (!sessionId || outstanding === 0) return [];
+      interrupting = true;
+      return [rpc.notify("session/cancel", { sessionId })];
+    },
+
     read(line) {
       const message = readRpcLine(line);
       if (!message) return { write: [] };
@@ -137,7 +150,8 @@ export function opencodeAcpProtocol(input: BuildCommandInput, how: { attach: boo
             if (message.error) {
               stop = `opencode failed the turn: ${said}`;
             } else {
-              if (result?.stopReason !== "end_turn" && !stop) stop = stopReasonError(result?.stopReason);
+              if (interrupting && result?.stopReason === "cancelled") cancelled = true;
+              else if (result?.stopReason !== "end_turn" && !stop) stop = stopReasonError(result?.stopReason);
               const used = result?.usage;
               if (used && (typeof used.inputTokens === "number" || typeof used.outputTokens === "number")) {
                 turnUsage ??= { input: 0, output: 0 };
@@ -146,9 +160,15 @@ export function opencodeAcpProtocol(input: BuildCommandInput, how: { attach: boo
               }
             }
             if (outstanding > 0) return { write: [], events };
-            const end: Extract<AgentEvent, { type: "result" }> = { type: "result", ok: stop === null, raw: message };
+            const end: Extract<AgentEvent, { type: "result" }> = { type: "result", ok: stop === null && !cancelled, raw: message };
             if (sessionId) end.sessionId = sessionId;
             if (stop) end.error = stop;
+            else if (cancelled) {
+              end.interrupted = true;
+              end.error = "Interrupted.";
+            }
+            interrupting = false;
+            cancelled = false;
             if (turnUsage) {
               end.inputTokens = turnUsage.input;
               end.outputTokens = turnUsage.output;
