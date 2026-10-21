@@ -23,3 +23,13 @@ test("one Stop: it interrupts a working interruptible agent, rests while it wait
   assert.equal(stopAction(true, [prompt, said, interrupted, notice, next]), "interrupt", "the next message is a turn to stop again");
   assert.equal(stopAction(false, [prompt, said]), "end", "an agent that cannot be interrupted is stopped, as before");
 });
+
+test("the server's word on the turn wins over the transcript", () => {
+  // A message sent mid turn: Claude Code ends the turn, then takes it as one more.
+  const queued: AgentEvent[] = [prompt, said, next, { type: "result", ok: true }];
+  assert.equal(turnRunning(queued), false, "the transcript reads the result as the end");
+  assert.equal(turnRunning(queued, "working"), true, "the server knows the next turn is under way");
+  assert.equal(stopAction(true, queued, "working"), "interrupt");
+  assert.equal(stopAction(true, [prompt, said], "waiting"), "none");
+  assert.equal(stopAction(false, [prompt, said], "waiting"), "end", "a run that cannot be interrupted is stopped, whatever the turn");
+});

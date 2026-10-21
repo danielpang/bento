@@ -113,21 +113,29 @@ export const fakeAdapter: AgentAdapter = {
       ].join("\n");
       return ["sh", "-c", script];
     },
-    connect: () => ({
-      held: 0,
-      // One line per message; the fake only counts lines.
-      open: (prompt) => (prompt === null ? [] : [fakeLine(prompt)]),
-      send: (text) => [fakeLine(text)],
-      interrupt: () => [FAKE_INTERRUPT],
-      read(line) {
-        if (!line.includes('"subtype":"interrupted"')) return { write: [] };
-        const cost = (JSON.parse(line) as { total_cost_usd?: number }).total_cost_usd;
-        return {
-          write: [],
-          events: [{ type: "result", ok: false, interrupted: true, error: "Interrupted.", sessionId: "fake-live-1", ...(cost !== undefined ? { costUsd: cost } : {}) }],
-        };
-      },
-    }),
+    connect: () => {
+      // The fake answers every line with a turn of its own.
+      let turns = 0;
+      return {
+        held: 0,
+        get working() {
+          return turns > 0;
+        },
+        // One line per message; the fake only counts lines.
+        open: (prompt) => (prompt === null ? [] : (turns++, [fakeLine(prompt)])),
+        send: (text) => (turns++, [fakeLine(text)]),
+        interrupt: () => [FAKE_INTERRUPT],
+        read(line) {
+          if (line.includes('"type":"result"')) turns = Math.max(0, turns - 1);
+          if (!line.includes('"subtype":"interrupted"')) return { write: [] };
+          const cost = (JSON.parse(line) as { total_cost_usd?: number }).total_cost_usd;
+          return {
+            write: [],
+            events: [{ type: "result", ok: false, interrupted: true, error: "Interrupted.", sessionId: "fake-live-1", ...(cost !== undefined ? { costUsd: cost } : {}) }],
+          };
+        },
+      };
+    },
   },
 
   parseEvent(line: string): AgentEvent | null {

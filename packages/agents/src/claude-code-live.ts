@@ -31,16 +31,31 @@ import type { AskQuestion, LiveAsk, LiveProtocol } from "./adapter.js";
 export function claudeCodeLiveProtocol(): LiveProtocol {
   // The interrupt Bento sent and the CLI has not refused, until a turn ends.
   let interrupting: string | null = null;
+  /**
+   * Messages written since the last turn began. The CLI opens every
+   * turn with a system init line and takes all the messages waiting at
+   * that moment into it (verified on the real CLI: two messages sent
+   * mid turn were one more turn, not two).
+   */
+  let waitingForTurn = 0;
   let next = 0;
   const prefix = `bento-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
   const line = (message: unknown) => JSON.stringify(message);
   const reply = (requestId: string, response: unknown) =>
     line({ type: "control_response", response: { subtype: "success", request_id: requestId, response } });
 
+  const message = (text: string) => {
+    waitingForTurn += 1;
+    return [encodeClaudeMessage(text)];
+  };
+
   return {
     held: 0,
-    open: (prompt) => (prompt === null ? [] : [encodeClaudeMessage(prompt)]),
-    send: (text) => [encodeClaudeMessage(text)],
+    get working() {
+      return waitingForTurn > 0;
+    },
+    open: (prompt) => (prompt === null ? [] : message(prompt)),
+    send: message,
 
     interrupt() {
       interrupting = `${prefix}-${++next}`;
@@ -64,6 +79,10 @@ export function claudeCodeLiveProtocol(): LiveProtocol {
        * end of a result line (it opens with "duration_api_ms"), and a
        * check on the prefix never saw the interrupted turn end.
        */
+      if (trimmed.includes('"subtype":"init"') && trimmed.includes('"type":"system"')) {
+        waitingForTurn = 0;
+        return { write: [] };
+      }
       if (!trimmed.includes('"type":"control_') && !(interrupting && trimmed.includes('"type":"result"'))) {
         return { write: [] };
       }

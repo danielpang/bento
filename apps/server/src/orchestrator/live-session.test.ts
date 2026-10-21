@@ -369,3 +369,36 @@ test("an interrupt says why nothing was sent, and never clears a hold it cannot 
   });
   assert.equal(sent.tryInterrupt(), "sent");
 });
+
+test("a message sent mid turn keeps the agent working past that turn's result, and its turn can be stopped", async () => {
+  const channel = new LineChannel();
+  const states: string[] = [];
+  const wire = claudeWire();
+  const handle = attachLiveConversation({
+    runId: "r15",
+    wire,
+    liveChannel: channel,
+    conversation: conversation(1),
+    mayEnd: async () => true,
+    sayAsUser: async () => {},
+    saySystem: async () => {},
+    onTurnState: (state) => states.push(state),
+  });
+  for (const line of wire.open("Do the task")) channel.write(line);
+  wire.read(JSON.stringify({ type: "system", subtype: "init" }));
+  assert.equal(await handle.deliver("and this"), true, "sent while the first turn runs");
+  // The first turn's result: Claude Code takes "and this" as a turn of its own next.
+  await handle.onTurnFinished(true);
+  assert.equal(handle.waiting(), false, "not waiting: another turn is due");
+  assert.equal(channel.ended, false);
+  wire.read(JSON.stringify({ type: "system", subtype: "init" }));
+  assert.equal(handle.tryInterrupt(), "sent", "the queued turn is a turn to stop");
+  drain(channel);
+  await handle.onTurnFinished(true);
+  assert.equal(handle.waiting(), true, "held once the queued turn ended");
+  assert.deepEqual(states, ["working", "waiting"], "announced once each way, from the attach on");
+
+  assert.equal(await handle.deliver("next"), true);
+  assert.deepEqual(states, ["working", "waiting", "working"]);
+  handle.dispose();
+});

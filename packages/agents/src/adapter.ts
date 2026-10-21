@@ -137,6 +137,16 @@ export interface LiveProtocol {
   /** Messages accepted by `send` or `open` and not written yet. */
   readonly held: number;
   /**
+   * Whether a turn is still due after the result just read, for a tool
+   * that queues a message sent mid turn into a turn of its own: Claude
+   * Code ends the running turn, then takes everything sent during it as
+   * one more. The live conversation neither holds nor closes the
+   * process while it is true, because another result is coming. Absent
+   * means a result ends the agent's work (a tool that steers a running
+   * turn, or one that answers every queued prompt with one result).
+   */
+  readonly working?: boolean;
+  /**
    * Stops the turn in progress without ending the process, for a tool
    * that can. The turn then ends with a result marked `interrupted`,
    * and the session waits for the next message.

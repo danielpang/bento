@@ -108,6 +108,23 @@ test("claude: only the interrupt's own ending is an interrupted turn", () => {
   assert.deepEqual(w.read(resultLine({ is_error: true, subtype: "error_during_execution" })), { write: [] });
 });
 
+test("claude: messages sent mid turn are one more turn, which is due until the CLI opens it", () => {
+  const w = wire();
+  const init = JSON.stringify({ type: "system", subtype: "init", session_id: "sess-1" });
+  w.open("Do the task");
+  assert.equal(w.working, true, "the prompt is a turn due");
+  assert.deepEqual(w.read(init), { write: [] }, "the init line is still the parser's");
+  assert.equal(w.working, false, "the turn took it");
+  w.send("also this");
+  w.send("and this");
+  w.read(resultLine({ is_error: false, subtype: "success" }));
+  assert.equal(w.working, true, "the first turn ended with two messages waiting for the next");
+  w.read(init);
+  assert.equal(w.working, false, "one turn takes both, as Claude Code 2.1.306 did");
+  w.read(resultLine({ is_error: false, subtype: "success" }));
+  assert.equal(w.working, false);
+});
+
 test("claude: a question withdrawn by the CLI is reported by its request id", () => {
   const w = wire();
   assert.deepEqual(w.read(JSON.stringify({ type: "control_cancel_request", request_id: "req-1" })).withdrawn, ["req-1"]);

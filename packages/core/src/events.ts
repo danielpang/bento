@@ -77,6 +77,14 @@ export interface AgentDelta {
   offset: number;
 }
 
+/**
+ * Whether a live run's agent is in a turn or waiting for a message,
+ * as the server holding the run sees it. Bus only, like a delta: the
+ * holder announces each change, and a viewer that knows nothing yet
+ * reads it off the transcript instead.
+ */
+export type TurnState = "working" | "waiting";
+
 export interface RunOutcome {
   ok: boolean;
   sessionId?: string;

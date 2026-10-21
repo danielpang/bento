@@ -811,6 +811,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       sayAsUser,
       saySystem,
       sayAsked: (questionId, asked) => sayAsked(ctx, runId, questionId, asked),
+      onTurnState: (state) => ctx.bus.emitRunTurn(runId, state),
     });
     // The message route (a card's, or a swarm's for a node) and the
     // swarm coordinator deliver through this handle; seq stays a
@@ -3636,6 +3637,7 @@ async function resumeInterruptedRun(
       sayAsUser,
       saySystem,
       sayAsked: (questionId, asked) => sayAsked(ctx, run.id, questionId, asked),
+      onTurnState: (state) => ctx.bus.emitRunTurn(run.id, state),
     });
     if (conversation) {
       ctx.liveInputs.set(run.id, {

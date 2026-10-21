@@ -3,7 +3,7 @@ import { and, asc, desc, eq, gt, lt, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { z } from "zod";
-import type { AgentCli, AgentDelta } from "@bento/core";
+import type { AgentCli, AgentDelta, TurnState } from "@bento/core";
 import { agentProfiles, agentRuns, features, projects, runEvents, runQuestions, sandboxes, stages } from "@bento/db";
 import type { AppContext } from "../context.js";
 import { deferAfterCommit, tenantDb as db } from "../middleware/tenant.js";
@@ -447,7 +447,7 @@ export function runRoutes(ctx: AppContext) {
          * delayed agent output by up to a second even though the event
          * was already in hand.
          */
-        const queue: ({ seq: number; event: unknown } | { delta: AgentDelta })[] = [];
+        const queue: ({ seq: number; event: unknown } | { delta: AgentDelta } | { turn: TurnState })[] = [];
         let finished: string | null = null;
         let wake: (() => void) | null = null;
         const nudge = () => {
@@ -481,6 +481,13 @@ export function runRoutes(ctx: AppContext) {
           } else {
             queue.push({ delta });
           }
+          nudge();
+        });
+        // Whether the agent is in a turn, from the process holding the
+        // run; live only, like a delta, and in the same queue so it
+        // never overtakes the result that ended the turn.
+        const unsubscribeTurns = ctx.bus.onRunTurn(runId, (turn) => {
+          queue.push({ turn });
           nudge();
         });
         const unsubscribeDone = ctx.bus.onRunDone(runId, (status) => {
@@ -533,6 +540,9 @@ export function runRoutes(ctx: AppContext) {
             });
           }
 
+          const turn = ctx.bus.runTurn(runId);
+          if (turn) await stream.writeSSE({ event: "run_turn", data: JSON.stringify({ state: turn }) });
+
           // A run that already ended before we subscribed has no further
           // events coming, so check its status once rather than waiting.
           const [current] = await db(c, ctx)
@@ -549,6 +559,10 @@ export function runRoutes(ctx: AppContext) {
               const item = queue.shift()!;
               if ("delta" in item) {
                 await stream.writeSSE({ event: "run_delta", data: JSON.stringify(item.delta) });
+                continue;
+              }
+              if ("turn" in item) {
+                await stream.writeSSE({ event: "run_turn", data: JSON.stringify({ state: item.turn }) });
                 continue;
               }
               if (item.seq <= lastSeq) continue;
@@ -603,6 +617,7 @@ export function runRoutes(ctx: AppContext) {
         } finally {
           unsubscribeEvents();
           unsubscribeDeltas();
+          unsubscribeTurns();
           unsubscribeDone();
           unsubscribeResync();
         }

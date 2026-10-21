@@ -9,6 +9,7 @@ import {
   quietRunMessage,
   withProviderOutageAdvice,
   type AgentEvent,
+  type TurnState,
 } from "@bento/core";
 import { linkifiedError } from "../error-text.js";
 import { useBetaTesters } from "../beta.js";
@@ -268,7 +269,9 @@ export function AgentSession({
     return () => clearTimeout(timer);
   }, [interruptPending]);
   // The events are the latest run's only while no earlier run is open.
-  const stopDoes = interruptPending ? "none" : stopAction(canInterrupt && !viewedRunId, events);
+  /** Whether the agent is in a turn, as the server holding the run last said; null until it does. */
+  const [turn, setTurn] = useState<TurnState | null>(null);
+  const stopDoes = interruptPending ? "none" : stopAction(canInterrupt && !viewedRunId, events, turn);
   const [questions, setQuestions] = useState<RunQuestion[]>([]);
   /** Bumped when the transcript says a question arrived or a turn ended, to fetch them again. */
   const [questionsTick, setQuestionsTick] = useState(0);
@@ -341,6 +344,7 @@ export function AgentSession({
   useEffect(() => {
     setEvents([]);
     setInterruptPending(false);
+    setTurn(null);
     clearDraft();
     lastSeq.current = 0;
     if (!streamedRun) return;
@@ -408,6 +412,10 @@ export function AgentSession({
             setDraft(draftRef.current);
           });
         }
+      },
+      onTurn: (state) => {
+        setTurn(state);
+        if (state === "waiting") setInterruptPending(false);
       },
       onDone: () => {
         // A cancelled run ends with no result event, so this is the
@@ -726,7 +734,7 @@ export function AgentSession({
           appears here.
         </p>
       )}
-      {runActive && !viewedRunId && hasMessages && !quietTool && (!liveRun || turnRunning(events)) && (
+      {runActive && !viewedRunId && hasMessages && !quietTool && (!liveRun || turnRunning(events, turn)) && (
         <div className="working-row" role="status">
           <ThinkingOrb state={orbStateFor(activity.tool)} size={20} paused={REDUCED_MOTION} aria-label="Agent working" />
           <span className="muted">

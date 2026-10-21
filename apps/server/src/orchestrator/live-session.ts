@@ -1,4 +1,4 @@
-import { shouldHoldLiveSession } from "@bento/core";
+import { shouldHoldLiveSession, type TurnState } from "@bento/core";
 import type { LiveAsk, LiveWire } from "@bento/agents";
 import type { LineChannel } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
@@ -151,11 +151,26 @@ export function attachLiveConversation(input: {
    * question's id, which is how a watching console knows to show it.
    */
   sayAsked?: (questionId: string, ask: LiveAsk) => Promise<void>;
+  /**
+   * Each change between the agent working on a turn and waiting for a
+   * message, starting with "working" as the conversation attaches. The
+   * executor puts it on the bus, which is how the console's Stop knows
+   * whether there is a turn to stop without reading it off the
+   * transcript.
+   */
+  onTurnState?: (state: TurnState) => void;
 }): LiveConversationHandle {
   const { wire, liveChannel, conversation } = input;
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
   let announcedWait = false;
   let waiting = false;
+  let detached = false;
+  let announced: TurnState | null = null;
+  const announce = (state: TurnState) => {
+    if (detached || announced === state) return;
+    announced = state;
+    input.onTurnState?.(state);
+  };
 
   const clearIdle = () => {
     waiting = false;
@@ -201,13 +216,14 @@ export function attachLiveConversation(input: {
     liveChannel.end();
   };
 
-  let detached = false;
-
   const deliver = async (text: string): Promise<boolean> => {
     if (detached) return false;
     clearIdle();
     const accepted = write(text);
-    if (accepted) await input.sayAsUser(text);
+    if (accepted) {
+      announce("working");
+      await input.sayAsUser(text);
+    }
     return accepted;
   };
 
@@ -226,6 +242,7 @@ export function attachLiveConversation(input: {
     const joined = claimed.map((m) => m.text).join("\n");
     const accepted = write(joined);
     if (accepted) {
+      announce("working");
       await conversation.markSent(claimed.map((m) => m.id));
       await input.sayAsUser(joined);
       return true;
@@ -280,6 +297,7 @@ export function attachLiveConversation(input: {
     }, idleSec * 1000);
     idleTimer.unref?.();
     waiting = true;
+    announce("waiting");
     await conversation.onWaiting?.();
   };
   const fits = (idleSec: number) => input.holdUntil === undefined || Date.now() + idleSec * 1000 <= input.holdUntil;
@@ -305,6 +323,10 @@ export function attachLiveConversation(input: {
     if (detached) return;
     await withdrawAsked();
     if (await pumpParked()) return;
+    // Another turn is due (Claude Code takes what was sent mid turn as a
+    // turn of its own): its result decides, so the agent is not "waiting"
+    // while it works and its turn can still be stopped.
+    if (wire.working) return;
 
     // A person stopped the turn to say something else: wait for it,
     // whatever the stage would do with an ordinary finished turn.
@@ -374,6 +396,8 @@ export function attachLiveConversation(input: {
     await recording;
     await conversation.questions?.withdraw(requestIds);
   };
+
+  announce("working");
 
   return {
     deliver,

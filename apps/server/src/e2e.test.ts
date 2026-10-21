@@ -1011,10 +1011,22 @@ test("an interrupted live run that hears nothing is stopped, not failed, and the
       await new Promise((r) => setTimeout(r, 100));
     }
 
+    // What the console's Stop reads: the turn state on the run's stream.
+    const stream = await app.request(`/api/runs/${first.id}/events`);
+    const frames = sseFrames(stream.body!);
+    const turns: string[] = [];
+    const reading = (async () => {
+      for (let frame = await frames.next(); frame && frame.event !== "done"; frame = await frames.next()) {
+        if (frame.event === "run_turn") turns.push((JSON.parse(frame.data) as { state: string }).state);
+      }
+    })();
+
     const stopped = await app.request(`/api/runs/${first.id}/interrupt`, { method: "POST" });
     assert.equal(stopped.status, 200, await stopped.clone().text());
 
     assert.equal(await waitForRun(first.id, 60_000), "cancelled", "stopped by a person and left: not a failure");
+    await reading;
+    assert.deepEqual(turns, ["working", "waiting"], "working as the stream opened, waiting once the interrupted turn ended");
     const run = await json<{ error: string | null; cliSessionId: string | null; costUsd: string | null }>(await app.request(`/api/runs/${first.id}`));
     assert.equal(run.error, null, "nothing failed");
     assert.equal(Number(run.costUsd), 0.02, "the work before the interrupt is recorded like any finished run's");
