@@ -10911,5 +10911,124 @@ a.swarm-plan-source-name:hover {
 }
 .question-card-actions {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+}
+.question-card-spacer {
+  flex: 1;
+}
+.question-card-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.question-card-count {
+  flex-shrink: 0;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.question-card-steps {
+  display: flex;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.question-card-steps li {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.question-card-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 160px;
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.question-card-step:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+.question-card-step.is-done {
+  color: var(--text);
+}
+.question-card-step.is-current {
+  border-color: var(--brand);
+  color: var(--text);
+}
+.question-card-step-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.question-card-tick {
+  color: var(--brand);
+}
+.question-card-body {
+  min-width: 0;
+  animation: question-card-in-forward 180ms ease-out;
+}
+.question-card-body[data-direction="back"] {
+  animation-name: question-card-in-back;
+}
+@keyframes question-card-in-forward {
+  from {
+    opacity: 0;
+    transform: translateX(16px);
+  }
+}
+@keyframes question-card-in-back {
+  from {
+    opacity: 0;
+    transform: translateX(-16px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .question-card-body {
+    animation: none;
+  }
+}
+.question-card-option.is-picked {
+  border-color: var(--brand);
+}
+.question-card-review {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.question-card-review li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.question-card-review-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.question-card-review-question {
+  font-size: 12px;
+}
+.question-card-change {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  font-size: 12px;
 }
