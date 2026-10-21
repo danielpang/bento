@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { and, eq, inArray, isNull, lt, ne, notInArray, or, sql, type SQL } from "drizzle-orm";
 import { agentRuns } from "@bento/db";
-import type { AppContext, RunOwnership } from "../context.js";
+import type { AppContext, InterruptOutcome, RunOwnership } from "../context.js";
 import type { RunControl } from "../events.js";
 
 /**
@@ -394,14 +394,16 @@ export function nudgeRun(ctx: AppContext, runId: string): void {
 
 /**
  * Stops the turn a run's agent is working on, without ending the run:
- * the session stays open for the next message. Tried on this process's
- * own handle first, then published for whichever process holds the run.
- * True when this process did it; false means it was handed on.
+ * the session stays open for the next message. Done on this process's
+ * own handle when it holds the run, which says what happened; otherwise
+ * published for whichever process does ("requested"), whose answer is
+ * the turn state it announces next.
  */
-export function requestRunInterrupt(ctx: AppContext, runId: string): boolean {
-  if (ctx.liveInputs.get(runId)?.interrupt?.()) return true;
+export function requestRunInterrupt(ctx: AppContext, runId: string): InterruptOutcome | "requested" {
+  const local = ctx.liveInputs.get(runId);
+  if (local) return local.interrupt?.() ?? "closed";
   ctx.bus.emitRunControl({ runId, action: "interrupt" });
-  return false;
+  return "requested";
 }
 
 /**

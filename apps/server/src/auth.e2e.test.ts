@@ -1230,6 +1230,14 @@ test("every entity route refuses a foreign tenant", async () => {
   const [asked] = await ctx.db.select().from(runQuestions).where(eq(runQuestions.id, question!.id));
   assert.equal(asked!.status, "pending", "the intruder's answer must not have been stored");
 
+  // Interrupt is a stage's: a judge or a rebase is ended by Stop, not
+  // paused. Refused for the owner too, on a judge that is live and running.
+  const [before] = await ctx.db.select({ status: agentRuns.status, role: agentRuns.role }).from(agentRuns).where(eq(agentRuns.id, run.id));
+  await ctx.db.update(agentRuns).set({ status: "running", liveSession: true, role: "judge" }).where(eq(agentRuns.id, run.id));
+  const judgeInterrupt = await asOwner(`/api/runs/${run.id}/interrupt`, { method: "POST" });
+  assert.equal(judgeInterrupt.status, 409, "a judge run is not interrupted");
+  await ctx.db.update(agentRuns).set({ status: before!.status, liveSession: null, role: before!.role }).where(eq(agentRuns.id, run.id));
+
   // The MCP server row survived, under its own name. Read through
   // ctx.db because the org-less owner cannot use the routes either.
   const [mcpAfter] = await ctx.db

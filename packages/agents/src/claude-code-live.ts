@@ -1,5 +1,6 @@
 import type { AgentEvent } from "@bento/core";
-import type { AskQuestion, LiveAsk, LiveProtocol } from "./adapter.js";
+import type { LiveAsk, LiveProtocol } from "./adapter.js";
+import { readAskQuestions } from "./ask-questions.js";
 
 /**
  * Claude Code's live session: stream-json on stdin and stdout.
@@ -106,7 +107,7 @@ export function claudeCodeLiveProtocol(): LiveProtocol {
             };
           }
           if (request.tool_name === "AskUserQuestion") {
-            const questions = readQuestions(request.input);
+            const questions = readAskQuestions(request.input);
             if (questions.length > 0) return { write: [], events: [], asks: [{ id, questions, input: request.input }] };
             return { write: [reply(id, { behavior: "deny", message: "The question could not be shown to anyone." })], events: [] };
           }
@@ -164,24 +165,4 @@ interface ClaudeControlLine {
   is_error?: boolean;
   session_id?: unknown;
   total_cost_usd?: unknown;
-}
-
-/** The questions an AskUserQuestion call carries, keeping only well formed ones. */
-function readQuestions(input: unknown): AskQuestion[] {
-  const list = (input as { questions?: unknown } | undefined)?.questions;
-  if (!Array.isArray(list)) return [];
-  const questions: AskQuestion[] = [];
-  for (const item of list) {
-    const q = item as { question?: unknown; header?: unknown; multiSelect?: unknown; options?: unknown };
-    if (typeof q.question !== "string" || !q.question || !Array.isArray(q.options)) continue;
-    const options = q.options
-      .map((o) => o as { label?: unknown; description?: unknown })
-      .filter((o): o is { label: string; description?: unknown } => typeof o.label === "string" && o.label !== "")
-      .map((o) => (typeof o.description === "string" ? { label: o.label, description: o.description } : { label: o.label }));
-    if (options.length === 0) continue;
-    const question: AskQuestion = { question: q.question, multiSelect: q.multiSelect === true, options };
-    if (typeof q.header === "string" && q.header) question.header = q.header;
-    questions.push(question);
-  }
-  return questions;
 }

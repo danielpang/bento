@@ -1115,10 +1115,16 @@ export class BentoClient {
 
   /**
    * Stops the turn the agent is working on and keeps the run open for
-   * the next message. Claude Code, Codex and opencode live sessions only.
+   * the next message. A card's live session on an agent that can.
+   * `interrupted` is false when there was nothing to stop: the agent was
+   * already waiting ("waiting"), or the session was closing ("closed").
+   * "requested" went to another server, whose turn state follows.
    */
   interruptRun(runId: string) {
-    return this.request<{ interrupted: true }>(`/api/runs/${runId}/interrupt`, { method: "POST" });
+    return this.request<{ interrupted: boolean; outcome: "sent" | "stopped" | "waiting" | "closed" | "requested" }>(
+      `/api/runs/${runId}/interrupt`,
+      { method: "POST" },
+    );
   }
 
   /** The agent's questions waiting on a person. */

@@ -1023,6 +1023,16 @@ test("an interrupted live run that hears nothing is stopped, not failed, and the
 
     const stopped = await app.request(`/api/runs/${first.id}/interrupt`, { method: "POST" });
     assert.equal(stopped.status, 200, await stopped.clone().text());
+    assert.deepEqual(await stopped.json(), { interrupted: true, outcome: "sent" });
+
+    // Waiting for the person now: a second Stop has nothing to stop, and says so.
+    const waitUntil = Date.now() + 30_000;
+    while (!/If no follow up message is sent/.test(await (await app.request(`/api/runs/${first.id}/transcript`)).text())) {
+      assert.ok(Date.now() < waitUntil, "the interrupted turn ended");
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    const again = await app.request(`/api/runs/${first.id}/interrupt`, { method: "POST" });
+    assert.deepEqual(await again.json(), { interrupted: false, outcome: "waiting" });
 
     assert.equal(await waitForRun(first.id, 60_000), "cancelled", "stopped by a person and left: not a failure");
     await reading;

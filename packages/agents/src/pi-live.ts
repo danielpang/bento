@@ -1,4 +1,5 @@
 import type { AskQuestion, LiveAsk, LiveProtocol } from "./adapter.js";
+import { readAskQuestions } from "./ask-questions.js";
 
 /**
  * pi's live session: `pi --mode rpc`, JSON commands on stdin and the
@@ -148,27 +149,11 @@ interface PiDialogLine {
 /** The questions in the extension's placeholder, keeping only well formed ones. */
 function readQuestions(placeholder: unknown): AskQuestion[] {
   if (typeof placeholder !== "string") return [];
-  let list: unknown;
   try {
-    list = (JSON.parse(placeholder) as { questions?: unknown }).questions;
+    return readAskQuestions(JSON.parse(placeholder));
   } catch {
     return [];
   }
-  if (!Array.isArray(list)) return [];
-  const questions: AskQuestion[] = [];
-  for (const item of list) {
-    const q = item as { question?: unknown; header?: unknown; multiSelect?: unknown; options?: unknown };
-    if (typeof q.question !== "string" || !q.question || !Array.isArray(q.options)) continue;
-    const options = q.options
-      .map((o) => o as { label?: unknown; description?: unknown })
-      .filter((o): o is { label: string; description?: unknown } => typeof o.label === "string" && o.label !== "")
-      .map((o) => (typeof o.description === "string" && o.description ? { label: o.label, description: o.description } : { label: o.label }));
-    if (options.length === 0) continue;
-    const question: AskQuestion = { question: q.question, multiSelect: q.multiSelect === true, options };
-    if (typeof q.header === "string" && q.header) question.header = q.header;
-    questions.push(question);
-  }
-  return questions;
 }
 
 /**

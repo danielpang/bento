@@ -94,6 +94,12 @@ export interface LiveConversationHandle {
   ask: (asks: LiveAsk[]) => Promise<void>;
   /** Questions the agent withdrew, by its request id. */
   withdraw: (requestIds: string[]) => Promise<void>;
+  /**
+   * Settles once every question the agent asked so far is stored (or
+   * failed to be), so whatever withdraws questions after the stream
+   * ends sees all of them rather than racing an insert.
+   */
+  recorded: () => Promise<void>;
   dispose: () => void;
   /** True between turns while the process is held open for a message. */
   waiting: () => boolean;
@@ -406,6 +412,7 @@ export function attachLiveConversation(input: {
     tryInterrupt,
     ask,
     withdraw,
+    recorded: () => recording,
     dispose() {
       if (detached) return;
       closeWhenQuiet();

@@ -402,3 +402,37 @@ test("a message sent mid turn keeps the agent working past that turn's result, a
   assert.deepEqual(states, ["working", "waiting", "working"]);
   handle.dispose();
 });
+
+test("what closes the run's questions can wait for the ones still being stored", async () => {
+  let release!: () => void;
+  const stored: string[] = [];
+  const handle = attachLiveConversation({
+    runId: "r16",
+    wire: claudeWire(),
+    liveChannel: new LineChannel(),
+    conversation: {
+      ...conversation(0),
+      questions: {
+        record: async (a) => {
+          await new Promise<void>((r) => (release = r));
+          stored.push(a.id);
+          return "row-1";
+        },
+        claimAnswers: async () => [],
+        requeueAnswers: async () => {},
+        withdraw: async () => {},
+      },
+    },
+    sayAsUser: async () => {},
+    saySystem: async () => {},
+  });
+  // Asked just before the stream ended: the executor does not await the insert.
+  void handle.ask([asked]);
+  let settled = false;
+  const waited = handle.recorded().then(() => (settled = true));
+  await tick(20);
+  assert.equal(settled, false, "the insert is still in flight");
+  release();
+  await waited;
+  assert.deepEqual(stored, ["req-9"], "stored before anything withdraws the run's questions");
+});

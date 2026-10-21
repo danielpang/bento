@@ -166,6 +166,12 @@ export function runRoutes(ctx: AppContext) {
       if (run.status !== "running" || run.liveSession !== true) {
         return c.json({ error: "Only a running live session can be interrupted." }, 409);
       }
+      // A stage's agent waits for the person after an interrupt. A judge
+      // or a rebase is the board's own work, which a stop should end
+      // rather than leave half done and then publish.
+      if (run.role !== "stage") {
+        return c.json({ error: "Only a stage's agent can be interrupted. Stop ends this run instead." }, 409);
+      }
       const [profile] = await db(c, ctx)
         .select({ cli: agentProfiles.cli })
         .from(agentProfiles)
@@ -173,10 +179,11 @@ export function runRoutes(ctx: AppContext) {
       if (!profile || !interrupts(profile.cli)) {
         return c.json({ error: "This agent cannot be interrupted. Stop ends the run instead." }, 409);
       }
-      // Through whichever process holds the run; the turn's end, and the
-      // transcript line after it, are what the console then shows.
-      requestRunInterrupt(ctx, run.id);
-      return c.json({ interrupted: true });
+      // Through whichever process holds the run. Held here, the answer
+      // is what happened; held elsewhere, it is "requested", and the
+      // turn state that process announces next is the rest.
+      const outcome = requestRunInterrupt(ctx, run.id);
+      return c.json({ interrupted: outcome === "sent" || outcome === "stopped" || outcome === "requested", outcome });
     })
     /**
      * The questions the run's agent is waiting on a person to answer.

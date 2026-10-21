@@ -257,7 +257,8 @@ export function AgentSession({
    * that went live on a tool that supports them.
    */
   const liveRun = runActive && latestRun?.liveSession === true;
-  const canInterrupt = liveRun && Boolean(latestAgent && INTERRUPTIBLE_TOOLS.has(latestAgent.cli));
+  const canInterrupt =
+    liveRun && (latestRun.role ?? "stage") === "stage" && Boolean(latestAgent && INTERRUPTIBLE_TOOLS.has(latestAgent.cli));
   /**
    * An interrupt sent and its turn not yet ended: Stop rests until the
    * turn's end arrives (or, should it never, a little while later).
@@ -831,6 +832,10 @@ export function AgentSession({
                     setInterruptPending(true);
                     void client
                       .interruptRun(latestRun.id)
+                      .then(({ interrupted }) => {
+                        // Nothing was running to stop: no turn end is coming.
+                        if (!interrupted) setInterruptPending(false);
+                      })
                       .catch((err: unknown) => {
                         setInterruptPending(false);
                         setError(err instanceof Error ? err.message : String(err));

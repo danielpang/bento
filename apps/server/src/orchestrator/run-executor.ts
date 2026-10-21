@@ -59,7 +59,7 @@ import {
   SANDBOX_STOPPED_MESSAGE,
 } from "@bento/sandbox";
 import { captureJobErrors } from "../analytics.js";
-import type { AppContext } from "../context.js";
+import type { AppContext, InterruptOutcome } from "../context.js";
 import {
   SANDBOX_GONE_AGENT_PREFIX,
   SANDBOX_STOPPED_AGENT_PREFIX,
@@ -820,7 +820,11 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       ctx.liveInputs.set(runId, {
         delivery: live.delivery,
         deliver: liveHold.deliver,
-        interrupt: interruptOrStop(ctx, runId, liveHold),
+        // A card's stage run only, as the interrupt route allows: its
+        // conversation is the one that waits after an interrupt. A
+        // swarm's interrupted turn would end as a failure handed to the
+        // planner, and a judge or rebase should end, not pause.
+        ...(interruptible(subject) ? { interrupt: interruptOrStop(ctx, runId, liveHold) } : {}),
         waiting: liveHold.waiting,
         close: liveHold.dispose,
         // How a nudge from another server's message route reaches
@@ -982,7 +986,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     ctx.liveInputs.delete(runId);
     liveSession?.dispose();
     endStdinUnlessDisowned(ctx, runId, liveChannel);
-    closeQuestions(ctx, runId);
+    await closeQuestions(ctx, runId, liveSession);
     // A draining process does not end runs: the agent is still working
     // in the sandbox and the next boot reattaches to it. Whatever threw
     // here is this process's shutdown seen from inside the loop. A run
@@ -1004,7 +1008,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   ctx.liveInputs.delete(runId);
   liveSession?.dispose();
   endStdinUnlessDisowned(ctx, runId, liveChannel);
-  closeQuestions(ctx, runId);
+  await closeQuestions(ctx, runId, liveSession);
 
   if (yielded(ctx, runId)) return;
   if (controller.signal.aborted) {
@@ -1203,6 +1207,11 @@ export function mergeAgentExecEnv(
 /** What the transcript says when an interrupted run closes with nobody having written. */
 export const STOPPED_AFTER_INTERRUPT_MESSAGE = "Session paused. Your next message will resume it.";
 
+/** Whether Stop may interrupt this run's turn: a card's stage run. */
+function interruptible(subject: RunSubject): boolean {
+  return subject.kind === "pipeline" && subject.run.role === "stage";
+}
+
 /**
  * What Stop does on a live run: interrupt the turn, never end the run.
  * The one exception is a turn the protocol cannot name (a Codex or pi
@@ -1211,10 +1220,10 @@ export const STOPPED_AFTER_INTERRUPT_MESSAGE = "Session paused. Your next messag
  * instead, keeping its session for the next message. An agent already
  * waiting has nothing to stop.
  */
-function interruptOrStop(ctx: AppContext, runId: string, session: LiveConversationHandle): () => boolean {
+function interruptOrStop(ctx: AppContext, runId: string, session: LiveConversationHandle): () => InterruptOutcome {
   return () => {
     const tried = session.tryInterrupt();
-    if (tried !== "unnamed") return tried !== "closed";
+    if (tried !== "unnamed") return tried;
     void (async () => {
       await appendRunEvent(ctx, runId, {
         type: "message",
@@ -1227,7 +1236,7 @@ function interruptOrStop(ctx: AppContext, runId: string, session: LiveConversati
       console.warn(`could not stop run ${runId} after an interrupt that could not land:`, err);
       ctx.analytics?.captureException(err, null, null, { run_id: runId, source: "run_interrupt" });
     });
-    return true;
+    return "stopped";
   };
 }
 
@@ -1911,12 +1920,15 @@ function readLiveLine(
 
 /**
  * The agent's stream ended, so nothing is waiting on its questions any
- * more: their cards go away. A process that no longer speaks for the run
+ * more: their cards go away. After any question still being stored, or
+ * a question asked just before the end would be inserted after this
+ * and wait on nobody. A process that no longer speaks for the run
  * leaves them to the one that does.
  */
-function closeQuestions(ctx: AppContext, runId: string): void {
+async function closeQuestions(ctx: AppContext, runId: string, session: LiveConversationHandle | null): Promise<void> {
+  await session?.recorded();
   if (yielded(ctx, runId)) return;
-  withdrawQuestions(ctx.db, runId).catch((err: unknown) => reportLiveQuestionError(ctx, runId, err));
+  await withdrawQuestions(ctx.db, runId).catch((err: unknown) => reportLiveQuestionError(ctx, runId, err));
 }
 
 function reportLiveQuestionError(ctx: AppContext, runId: string, err: unknown): void {
@@ -3643,7 +3655,7 @@ async function resumeInterruptedRun(
       ctx.liveInputs.set(run.id, {
         delivery: live.delivery,
         deliver: liveSession.deliver,
-        interrupt: interruptOrStop(ctx, run.id, liveSession),
+        ...(interruptible(subject) ? { interrupt: interruptOrStop(ctx, run.id, liveSession) } : {}),
         waiting: liveSession.waiting,
         close: liveSession.dispose,
         pump: liveSession.pump,
@@ -3753,7 +3765,7 @@ async function resumeInterruptedRun(
     ctx.liveInputs.delete(run.id);
     liveSession?.dispose();
     endStdinUnlessDisowned(ctx, run.id, liveChannel);
-    closeQuestions(ctx, run.id);
+    await closeQuestions(ctx, run.id, liveSession);
     // The next boot reattaches; this process just leaves quietly. A run
     // another server adopted is that server's to end.
     if (yielded(ctx, run.id)) return;
@@ -3772,7 +3784,7 @@ async function resumeInterruptedRun(
   ctx.liveInputs.delete(run.id);
   liveSession?.dispose();
   endStdinUnlessDisowned(ctx, run.id, liveChannel);
-  closeQuestions(ctx, run.id);
+  await closeQuestions(ctx, run.id, liveSession);
 
   if (yielded(ctx, run.id)) return;
   if (controller.signal.aborted) {

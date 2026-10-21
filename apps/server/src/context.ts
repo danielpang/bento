@@ -23,6 +23,14 @@ import type { DiskSpaceMonitor } from "./disk-space.js";
 
 export const LOCAL_USER_ID = "local-user";
 
+/**
+ * What an interrupt did: "sent" stopped the running turn (or will, as
+ * soon as the turn the agent is starting announces itself), "stopped"
+ * ended the run instead because the turn could not be named, "waiting"
+ * found no turn to stop, and "closed" found no session to stop it in.
+ */
+export type InterruptOutcome = "sent" | "stopped" | "waiting" | "closed";
+
 export interface LiveInput {
   /** How the tool treats a mid-task message; shown to the user. */
   delivery: "steer" | "queue";
@@ -30,9 +38,10 @@ export interface LiveInput {
   deliver(text: string): Promise<boolean>;
   /**
    * Stops the turn in progress and keeps the session open for the next
-   * message. False when the tool cannot, or the session is gone.
+   * message, and says what happened (see InterruptOutcome). Absent where
+   * a run cannot be interrupted at all.
    */
-  interrupt?(): boolean;
+  interrupt?(): InterruptOutcome;
   /**
    * Whether the process is between turns, held open for the next
    * message. The swarm coordinator delivers a folded wake only then,
