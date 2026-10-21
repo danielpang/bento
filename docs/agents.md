@@ -59,7 +59,7 @@ If the session is unavailable (sandbox recreated or CLI session lost), Bento sta
 
 **Stop** terminates the run immediately. Pending messages remain queued on the card.
 
-**Interrupt (Claude Code, Codex, opencode and pi):** the pause button beside Stop ends the agent's current turn without ending the session, as Escape does in a terminal. The agent then waits for your next message, and the run ends after the stage's idle window with nothing sent. Stop still ends the run at once. Other tools have Stop only: Cursor's headless mode, which Bento runs, takes no input once started, so the next message resumes its chat in a new run.
+**Stop interrupts first (Claude Code, Codex, opencode and pi):** while the agent is working, Stop ends its current turn without ending the session, as Escape does in a terminal. The agent then waits for your next message, which continues the same session. Pressing Stop again, while it waits, ends the run, and so does the stage's idle window passing with nothing sent. For other tools, Stop ends the run at once: Cursor's headless mode, which Bento runs, takes no input once started, so the next message resumes its chat in a new run.
 
 **Questions (Claude Code, Codex and pi):** in a card's stage run, the agent can ask you a question. It appears above the composer with its options, one question at a time: pick one where the agent asked for one answer, or any number where it allows several, and type your own answer in the free text field when no option fits. Tapping an option of a one answer question moves on to the next question by itself; otherwise use Next. Back, or a question's chip at the top, returns to an earlier answer to change it. With several questions, the last step reviews every answer before you send them. The agent waits for the answers and continues with them. A question goes away once the agent stops waiting for it: an interrupt, the end of its turn, or the end of the run. Runs nobody is watching (swarms, judges, rebases) do not offer the tool, and a question asked there is declined for the agent.
 
@@ -109,7 +109,7 @@ Ollama recommends a context window of at least 64k tokens for coding agents. A s
 
 ### Claude Code
 
-Bare model ids (`claude-sonnet-5`, `claude-opus-5`). Reports cost. Mid-run interruption: **Stop**, and the pause button that ends only the current turn (see [Talking to a working agent](#talking-to-a-working-agent)).
+Bare model ids (`claude-sonnet-5`, `claude-opus-5`). Reports cost. Mid-run interruption: **Stop** ends the current turn first, and a second press ends the run (see [Talking to a working agent](#talking-to-a-working-agent)).
 
 ### pi
 

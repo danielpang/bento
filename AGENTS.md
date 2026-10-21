@@ -601,6 +601,10 @@ continues the same session. Silence past the hold fails the run as
 does: the local handle if this process holds it, else a `run_control`
 "interrupt" on the bus (`requestRunInterrupt`). Only an adapter whose
 `live.interrupts` is set offers it, and only on a run recorded as live.
+The console has no separate interrupt button: on such a run Stop
+interrupts while a turn runs and ends the run once the agent is
+waiting, or when pressed again before the interrupted turn ended
+(`stop-action.ts`).
 A protocol with nothing it can name (no turn seen starting, no prompt
 outstanding) returns no lines, and the interrupt reports false. A turn
 that was interrupted and then followed by another does not fail the

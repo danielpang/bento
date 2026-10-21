@@ -1,46 +1,27 @@
+/**
+ * The composer's one Stop. On an agent that can be interrupted it first
+ * stops the turn and keeps the session, so the label says which press
+ * this is (see stop-action.ts); otherwise it ends the run.
+ */
 export function StopButton({
   disabled,
   onClick,
+  label = "Stop the agent",
 }: {
   disabled: boolean;
   onClick: () => void;
+  label?: string;
 }) {
   return (
     <button
       type="button"
       className="btn composer-stop icon-button"
       disabled={disabled}
-      title="Stop the agent"
-      aria-label="Stop the agent"
+      title={label}
+      aria-label={label}
       onClick={onClick}
     >
       <span className="stop-square" aria-hidden="true" />
-    </button>
-  );
-}
-
-/**
- * Stops the turn the agent is on and keeps the session open, so the
- * next message redirects it. A pause mark, beside Stop's square, so the
- * two read as "stop this" and "stop everything".
- */
-export function InterruptButton({
-  disabled,
-  onClick,
-}: {
-  disabled: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      className="btn composer-interrupt icon-button"
-      disabled={disabled}
-      title="Interrupt this turn. The agent waits for your next message."
-      aria-label="Interrupt this turn"
-      onClick={onClick}
-    >
-      <span className="pause-bars" aria-hidden="true" />
     </button>
   );
 }

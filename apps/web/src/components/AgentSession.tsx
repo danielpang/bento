@@ -14,7 +14,8 @@ import { linkifiedError } from "../error-text.js";
 import { useBetaTesters } from "../beta.js";
 import { sandboxProviderWords } from "../sandbox-provider.js";
 import type { LineQuote } from "./DiffReview.js";
-import { InterruptButton, StopButton } from "./IconButtons.js";
+import { StopButton } from "./IconButtons.js";
+import { stopAction, turnRunning } from "../stop-action.js";
 import { QuestionCard } from "./QuestionCard.js";
 import { INTERRUPTIBLE_TOOLS, runLiveKind } from "./ui.js";
 import { toolActivity, type ToolActivity } from "../tool-activity.js";
@@ -39,7 +40,15 @@ const AT_BOTTOM_SLACK = 120;
 export type ChatItem =
   | { key: string; kind: "message"; role: "assistant" | "user" | "system"; text: string; speaker: string }
   | { key: string; kind: "tools"; calls: ToolCall[] }
-  | { key: string; kind: "result"; ok: boolean; costUsd?: number | undefined; error?: string | undefined };
+  | {
+      key: string;
+      kind: "result";
+      ok: boolean;
+      costUsd?: number | undefined;
+      error?: string | undefined;
+      /** A turn a person stopped, which is not a failure: the session goes on. */
+      interrupted?: boolean | undefined;
+    };
 
 type ToolCall = ToolActivity;
 
@@ -246,6 +255,15 @@ export function AgentSession({
    */
   const liveRun = runActive && latestRun?.liveSession === true;
   const canInterrupt = liveRun && Boolean(latestAgent && INTERRUPTIBLE_TOOLS.has(latestAgent.cli));
+  /**
+   * An interrupt sent and its turn not yet ended. Stop pressed again
+   * meanwhile ends the run: the person wants it stopped, and an
+   * interrupt that could not land (a turn this server never saw start)
+   * must not leave Stop doing nothing.
+   */
+  const [interruptPending, setInterruptPending] = useState(false);
+  // The events are the latest run's only while no earlier run is open.
+  const stopDoes = interruptPending ? "end" : stopAction(canInterrupt && !viewedRunId, events);
   const [questions, setQuestions] = useState<RunQuestion[]>([]);
   /** Bumped when the transcript says a question arrived or a turn ended, to fetch them again. */
   const [questionsTick, setQuestionsTick] = useState(0);
@@ -317,6 +335,7 @@ export function AgentSession({
   const streamedRun = viewedRunId ? viewedRun : runActive ? latestRun : null;
   useEffect(() => {
     setEvents([]);
+    setInterruptPending(false);
     clearDraft();
     lastSeq.current = 0;
     if (!streamedRun) return;
@@ -337,6 +356,7 @@ export function AgentSession({
         ) {
           setQuestionsTick((tick) => tick + 1);
         }
+        if (event.type === "result") setInterruptPending(false);
         // The persisted line supersedes the fragments that previewed
         // it. Assistant lines and results only: a steer the user sends
         // mid turn says nothing about the message still being typed,
@@ -701,7 +721,7 @@ export function AgentSession({
           appears here.
         </p>
       )}
-      {runActive && !viewedRunId && hasMessages && !quietTool && (
+      {runActive && !viewedRunId && hasMessages && !quietTool && (!liveRun || turnRunning(events)) && (
         <div className="working-row" role="status">
           <ThinkingOrb state={orbStateFor(activity.tool)} size={20} paused={REDUCED_MOTION} aria-label="Agent working" />
           <span className="muted">
@@ -779,24 +799,24 @@ export function AgentSession({
                 }
               }}
             />
-            {canInterrupt && (
-              <InterruptButton
-                disabled={busy}
-                onClick={() => {
-                  setBusy(true);
-                  setError("");
-                  void client
-                    .interruptRun(latestRun.id)
-                    .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
-                    .finally(() => setBusy(false));
-                }}
-              />
-            )}
             {runActive && (
               <StopButton
                 disabled={busy}
+                label={stopDoes === "interrupt" ? "Stop this turn. The agent waits for your next message." : "Stop the agent"}
                 onClick={() => {
                   setBusy(true);
+                  setError("");
+                  if (stopDoes === "interrupt") {
+                    setInterruptPending(true);
+                    void client
+                      .interruptRun(latestRun.id)
+                      .catch((err: unknown) => {
+                        setInterruptPending(false);
+                        setError(err instanceof Error ? err.message : String(err));
+                      })
+                      .finally(() => setBusy(false));
+                    return;
+                  }
                   void client
                     .cancelRun(latestRun.id)
                     .then(() => onChanged())
@@ -883,6 +903,13 @@ export function ChatRow({ item, showDetail }: { item: ChatItem; showDetail: bool
   if (item.kind === "tools") {
     return <ToolActivityGroup calls={item.calls} showDetail={showDetail} />;
   }
+  if (item.interrupted) {
+    return (
+      <div className="chat-row chat-row-system">
+        <span className="chat-result" data-ok="interrupted">turn stopped</span>
+      </div>
+    );
+  }
   return (
     <div className="chat-row chat-row-system">
       <span className="chat-result" data-ok={item.ok}>
@@ -959,6 +986,7 @@ export function toChatItems(
       ok: event.ok,
       costUsd: event.costUsd,
       error: event.error,
+      interrupted: event.interrupted,
     });
     n += 1;
   }
@@ -1066,7 +1094,7 @@ export function withProviderOutageErrors(
   agent?: { cli: string; model: string } | undefined,
 ): ChatItem[] {
   return items.map((item) => {
-    if (item.kind !== "result" || item.ok || !item.error) return item;
+    if (item.kind !== "result" || item.ok || item.interrupted || !item.error) return item;
     return { ...item, error: withProviderOutageAdvice(item.error, agent) };
   });
 }

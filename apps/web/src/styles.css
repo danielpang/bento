@@ -2961,6 +2961,10 @@ a.pr-row:hover .pr-external {
   color: var(--succeeded);
   border-color: color-mix(in srgb, var(--succeeded) 40%, transparent);
 }
+/* A turn a person stopped: the session goes on, so it is not a failure. */
+.chat-result[data-ok="interrupted"] {
+  color: var(--text-dim);
+}
 .chat-result[data-ok="false"] {
   color: var(--failed);
   border-color: color-mix(in srgb, var(--failed) 40%, transparent);
@@ -10822,22 +10826,6 @@ a.swarm-plan-source-name:hover {
 .repo-entry-row .btn { flex: none; }
 .repo-entry-branch { font-family: var(--mono); font-size: 12px; }
 .repo-entry-remove { padding: 2px 8px; min-height: 0; font-size: 12px; }
-
-/* Interrupt sits beside Stop: the same size, the agent's colour rather
-   than the failure red, because the run carries on. */
-.composer-interrupt {
-  color: var(--text-dim);
-  border-color: var(--line-bright);
-  flex-shrink: 0;
-}
-.pause-bars {
-  display: inline-block;
-  width: 9px;
-  height: 10px;
-  border-left: 3px solid currentColor;
-  border-right: 3px solid currentColor;
-  box-sizing: border-box;
-}
 
 /* The agent's questions sit just above the composer, where the person
    is already looking, and read as a form rather than a chat line. */
