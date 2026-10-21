@@ -61,7 +61,12 @@ If the session is unavailable (sandbox recreated or CLI session lost), Bento sta
 
 **Interrupt (Claude Code, beta):** the pause button beside Stop ends the agent's current turn without ending the session, as Escape does in a terminal. The agent then waits for your next message, and the run ends after the stage's idle window with nothing sent. Stop still ends the run at once.
 
-**Questions (Claude Code, beta):** in a card's stage run, Claude Code can ask you a question with its AskUserQuestion tool. The question appears above the composer with its options: pick one where the agent asked for one answer, or any number where it allows several, and type your own answer in the free text field when no option fits. The agent waits for the answer and continues with it. An interrupt withdraws a question that was still waiting, and so does the run ending. Runs nobody is watching (swarms, judges, rebases) do not offer the tool, and a question asked there is declined for the agent.
+**Questions (Claude Code, Codex and pi, beta):** in a card's stage run, the agent can ask you a question. The question appears above the composer with its options: pick one where the agent asked for one answer, or any number where it allows several, and type your own answer in the free text field when no option fits. The agent waits for the answer and continues with it. A question goes away once the agent stops waiting for it: an interrupt, the end of its turn, or the end of the run. Runs nobody is watching (swarms, judges, rebases) do not offer the tool, and a question asked there is declined for the agent.
+
+- **Claude Code** asks with its own AskUserQuestion tool, single or multiple choice.
+- **Codex** asks with its `request_user_input` tool. Its questions are always single choice, with your own words as the alternative. Outside Plan mode the tool is one of Codex's features under development, which Bento turns on for these runs only.
+- **pi** has no question tool of its own, so Bento adds one, `ask_user`, as a pi extension, single or multiple choice.
+- **opencode** has a question tool, but its ACP server does not pass questions on, so opencode runs do not offer it.
 
 ## Claude Code on a subscription
 

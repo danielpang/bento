@@ -1,5 +1,6 @@
 import type { AgentDelta, AgentEvent, RunOutcome } from "@bento/core";
-import { lastResultEvent, providerKeyFor, type AgentAdapter, type BuildCommandInput } from "./adapter.js";
+import { lastResultEvent, providerKeyFor, type AgentAdapter, type BuildCommandInput, type McpFile } from "./adapter.js";
+import { PI_ASK_USER_ENV, PI_ASK_USER_EXTENSION, PI_ASK_USER_PATH, piLiveProtocol } from "./pi-live.js";
 
 /**
  * pi, the open source BYOK coding agent from earendil-works.
@@ -30,9 +31,11 @@ export const piAdapter: AgentAdapter = {
   configPaths: [".pi"],
 
   files(input: BuildCommandInput) {
+    const files: McpFile[] = [];
+    if (input.askUser) files.push({ path: PI_ASK_USER_PATH, content: PI_ASK_USER_EXTENSION });
     const provider = input.customProvider;
-    if (!provider) return [];
-    return [{
+    if (!provider) return files;
+    return [...files, {
       path: "~/.pi/agent/models.json",
       content: JSON.stringify({ providers: {
         [provider.slug]: {
@@ -44,6 +47,15 @@ export const piAdapter: AgentAdapter = {
         },
       } }),
     }];
+  },
+
+  /**
+   * The ask_user extension stays in the sandbox once written, and loads
+   * in every pi run there; it registers its tool only for a run that a
+   * person can answer.
+   */
+  env(input: BuildCommandInput): Record<string, string> {
+    return input.askUser ? { [PI_ASK_USER_ENV]: "1" } : {};
   },
 
   buildCommand(input: BuildCommandInput): string[] {
@@ -59,7 +71,8 @@ export const piAdapter: AgentAdapter = {
    * pi's RPC mode is built for exactly this: JSON commands on stdin,
    * the same event stream on stdout. A mid-task message is a steer,
    * pi's own word: delivered after the in-flight tool call, before the
-   * next model turn.
+   * next model turn. Where a person can answer, Bento's ask_user
+   * extension is there too (see pi-live.ts).
    */
   live: {
     delivery: "steer",
@@ -69,13 +82,7 @@ export const piAdapter: AgentAdapter = {
       if (input.extraArgs?.length) argv.push(...input.extraArgs);
       return argv;
     },
-    encodeMessage(text: string, kind: "initial" | "followUp"): string {
-      // steer rather than follow_up for mid-task messages: reaching
-      // the agent while it works is the point of the live session.
-      return kind === "initial"
-        ? JSON.stringify({ type: "prompt", message: text })
-        : JSON.stringify({ type: "steer", message: text });
-    },
+    connect: () => piLiveProtocol(),
   },
 
   /**

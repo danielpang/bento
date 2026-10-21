@@ -278,8 +278,26 @@ export function attachLiveConversation(input: {
   };
   const fits = (idleSec: number) => input.holdUntil === undefined || Date.now() + idleSec * 1000 <= input.holdUntil;
 
+  /**
+   * The questions asked in this process's life still open, and every
+   * insert of one still in flight. A turn that ended is waiting on none
+   * of them: Claude Code
+   * withdraws its own, but pi resolves a dialog its abort cut short and
+   * says nothing, so the end of the turn is what takes the card away.
+   */
+  const asked = new Set<string>();
+  let recording: Promise<void> = Promise.resolve();
+  const withdrawAsked = async (): Promise<void> => {
+    if (asked.size === 0) return;
+    const ids = [...asked];
+    asked.clear();
+    await recording;
+    await conversation.questions?.withdraw(ids);
+  };
+
   const onTurnFinished = async (ok: boolean, interrupted = false): Promise<void> => {
     if (detached) return;
+    await withdrawAsked();
     if (await pumpParked()) return;
 
     // A person stopped the turn to say something else: wait for it,
@@ -322,18 +340,26 @@ export function attachLiveConversation(input: {
    */
   const ask = async (asks: LiveAsk[]): Promise<void> => {
     if (detached) return;
-    for (const asked of asks) {
-      if (conversation.questions && wire.answer) {
-        const id = await conversation.questions.record(asked);
-        if (id) await input.sayAsked?.(id, asked);
-        continue;
+    if (conversation.questions && wire.answer) for (const one of asks) asked.add(one.id);
+    const done = (async () => {
+      for (const one of asks) {
+        if (conversation.questions && wire.answer) {
+          const id = await conversation.questions.record(one);
+          if (id) await input.sayAsked?.(id, one);
+          continue;
+        }
+        for (const line of wire.decline?.(one, NOBODY_TO_ASK) ?? []) liveChannel.write(line);
       }
-      for (const line of wire.decline?.(asked, NOBODY_TO_ASK) ?? []) liveChannel.write(line);
-    }
+    })();
+    recording = Promise.all([recording, done.catch(() => {})]).then(() => {});
+    await done;
   };
 
   const withdraw = async (requestIds: string[]): Promise<void> => {
     if (detached || requestIds.length === 0) return;
+    for (const id of requestIds) asked.delete(id);
+    // After any insert in flight, or the row would be written after its withdrawal.
+    await recording;
     await conversation.questions?.withdraw(requestIds);
   };
 

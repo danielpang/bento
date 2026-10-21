@@ -175,6 +175,12 @@ export const codexAdapter: AgentAdapter = {
       } else if (input.credentials?.OPENAI_BASE_URL) {
         cmd.push("-c", `openai_base_url=${tomlString(input.credentials.OPENAI_BASE_URL)}`);
       }
+      /**
+       * Where a person can answer, request_user_input works outside Plan
+       * mode too. The feature is Codex's "under development" one, which
+       * is why the console offers it only behind the beta flag.
+       */
+      if (input.askUser) cmd.push("--enable", "default_mode_request_user_input");
       if (input.extraArgs?.length) cmd.push(...input.extraArgs);
       return cmd;
     },

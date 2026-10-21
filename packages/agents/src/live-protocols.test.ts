@@ -96,6 +96,49 @@ test("codex: every request from the server is answered, because it waits for the
   assert.equal((unknown.error as { code: number }).code, -32601);
 });
 
+/** An item/tool/requestUserInput request as codex-cli 0.163.0 sent it with default_mode_request_user_input on. */
+const userInput = (id: number, questions: unknown[]) =>
+  JSON.stringify({ id, method: "item/tool/requestUserInput", params: { threadId: "thr-1", turnId: "t1", itemId: "call_1", questions, isBlocking: false, autoResolutionMs: null } });
+const dbQuestion = {
+  id: "db", header: "Database", question: "Which database should we use?", isOther: true, isSecret: false,
+  options: [{ label: "Postgres (Recommended)", description: "Relational" }, { label: "SQLite", description: "Embedded" }],
+};
+const shipQuestion = { id: "ship", header: "Ship", question: "What should ship first?", isOther: true, isSecret: false, options: null };
+
+test("codex: a question for the user becomes an ask, answered by question id", () => {
+  const p = codex();
+  const read = p.read(userInput(0, [dbQuestion, shipQuestion]));
+  assert.deepEqual(read.write, [], "nothing is answered for the person");
+  const ask = read.asks?.[0];
+  assert.ok(ask);
+  assert.equal(ask.id, "0", "the request id, kept with its JSON type");
+  assert.deepEqual(ask.questions, [
+    { question: "Which database should we use?", header: "Database", multiSelect: false, options: [{ label: "Postgres (Recommended)", description: "Relational" }, { label: "SQLite", description: "Embedded" }] },
+    { question: "What should ship first?", header: "Ship", multiSelect: false, options: [] },
+  ]);
+  const [reply] = p.answer!(ask, { "Which database should we use?": "SQLite", "What should ship first?": "Search, then export" });
+  assert.deepEqual(json(reply!), { id: 0, result: { answers: { db: { answers: ["SQLite"] }, ship: { answers: ["Search, then export"] } } } });
+  const [declined] = p.decline!(ask, "Nobody is here.");
+  assert.deepEqual(json(declined!).result, { answers: { db: { answers: ["Nobody is here."] }, ship: { answers: ["Nobody is here."] } } },
+    "an error reply reaches the model as no answers at all, so the reason is the answer");
+});
+
+test("codex: a question the server stops waiting for is withdrawn, and a secret one is never shown", () => {
+  const p = codex();
+  assert.deepEqual(p.read(note("serverRequest/resolved", { threadId: "thr-1", requestId: 0 })).withdrawn, ["0"]);
+  const secret = p.read(userInput(4, [{ ...dbQuestion, isSecret: true }]));
+  assert.equal(secret.asks, undefined);
+  assert.deepEqual(json(secret.write[0]!), { id: 4, result: { answers: {} } });
+});
+
+test("codex: the question tool is enabled outside Plan mode only where a person can answer", () => {
+  const live = codexAdapter.live!;
+  assert.ok(!live.buildCommand(input).includes("--enable"));
+  const argv = live.buildCommand({ ...input, askUser: true });
+  const at = argv.indexOf("--enable");
+  assert.deepEqual(argv.slice(at, at + 2), ["--enable", "default_mode_request_user_input"]);
+});
+
 test("codex: a resume names the thread, and a thread the sandbox lost reads as a lost conversation", () => {
   const p = codex({ resumeSessionId: "thr-old" });
   const lines = p.open("continue");

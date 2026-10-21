@@ -1,5 +1,5 @@
 import type { AgentDelta, AgentEvent } from "@bento/core";
-import type { BuildCommandInput, LiveProtocol } from "./adapter.js";
+import type { AskQuestion, BuildCommandInput, LiveAsk, LiveProtocol } from "./adapter.js";
 import { METHOD_NOT_FOUND, readRpcLine, RpcCalls, type RpcLine } from "./live-wire.js";
 
 /**
@@ -28,6 +28,18 @@ import { METHOD_NOT_FOUND, readRpcLine, RpcCalls, type RpcLine } from "./live-wi
  *   reason `codex exec` runs with --dangerously-bypass-approvals-and-sandbox.
  * - End of input ends the process with exit code 0, which is how Bento
  *   ends every live run.
+ * - A question for the user is the `request_user_input` tool, which
+ *   the model is always offered but which fails in Default mode ("is
+ *   unavailable in Default mode") unless the under-development feature
+ *   `default_mode_request_user_input` is enabled. With it, a call
+ *   arrives as an `item/tool/requestUserInput` request: questions with
+ *   an `id`, a header, two or three mutually exclusive options and
+ *   `isOther` (free text). The answer maps each id to
+ *   `{answers: [text]}`, and the model reads that JSON as the tool's
+ *   output. An error reply reaches the model as `{"answers":{}}`, so a
+ *   question nobody can answer is answered with the reason instead.
+ *   `serverRequest/resolved` follows every request that stops waiting,
+ *   answered or not.
  */
 export function codexAppServerProtocol(
   input: BuildCommandInput,
@@ -82,7 +94,11 @@ export function codexAppServerProtocol(
     read(line) {
       const message = readRpcLine(line);
       if (!message) return { write: [] };
-      if (message.kind === "request") return { write: [answer(rpc, message)], events: [] };
+      if (message.kind === "request") {
+        const asked = message.method === "item/tool/requestUserInput" ? readUserInputRequest(message) : null;
+        if (asked) return { write: [], events: [], asks: [asked] };
+        return { write: [answer(rpc, message)], events: [] };
+      }
       if (message.kind === "response") {
         const tag = rpc.settle(message.id);
         if (!tag) return { write: [], events: [] };
@@ -102,6 +118,10 @@ export function codexAppServerProtocol(
           return { write: release(), events: [{ type: "init", sessionId: id, model: options.model, raw: message }] };
         }
         return { write: [], events: [] };
+      }
+      if (message.method === "serverRequest/resolved") {
+        const id = (message.params as { requestId?: unknown } | undefined)?.requestId;
+        return typeof id === "string" || typeof id === "number" ? { write: [], events: [], withdrawn: [askId(id)] } : { write: [], events: [] };
       }
       if (message.method === "thread/tokenUsage/updated") {
         const params = message.params as { turnId?: unknown; tokenUsage?: { last?: { inputTokens?: unknown; outputTokens?: unknown } } };
@@ -127,7 +147,78 @@ export function codexAppServerProtocol(
       }
       return { write: [] };
     },
+
+    answer(ask, answers) {
+      return [rpc.reply(requestIdOf(ask), { answers: byQuestionId(ask, (q) => answers[q] ?? "") })];
+    },
+
+    decline(ask, reason) {
+      return [rpc.reply(requestIdOf(ask), { answers: byQuestionId(ask, () => reason) })];
+    },
   };
+}
+
+interface UserInputQuestion {
+  id?: unknown;
+  header?: unknown;
+  question?: unknown;
+  isSecret?: unknown;
+  options?: unknown;
+}
+
+/**
+ * A question for the user, or null to let `answer` reply as before. A
+ * secret question (a password, a token) is never shown: the console is
+ * not built to collect one, and its answer would sit in a row.
+ */
+function readUserInputRequest(request: Extract<RpcLine, { kind: "request" }>): LiveAsk | null {
+  const list = (request.params as { questions?: unknown } | undefined)?.questions;
+  if (!Array.isArray(list)) return null;
+  const questions: AskQuestion[] = [];
+  for (const item of list as UserInputQuestion[]) {
+    if (item.isSecret === true || typeof item.id !== "string" || typeof item.question !== "string" || !item.question) return null;
+    const options = (Array.isArray(item.options) ? item.options : [])
+      .map((o) => o as { label?: unknown; description?: unknown })
+      .filter((o): o is { label: string; description?: unknown } => typeof o.label === "string" && o.label !== "")
+      .map((o) => (typeof o.description === "string" && o.description ? { label: o.label, description: o.description } : { label: o.label }));
+    // Codex's options are mutually exclusive by its own schema, with free text always allowed.
+    const question: AskQuestion = { question: item.question, multiSelect: false, options };
+    if (typeof item.header === "string" && item.header) question.header = item.header;
+    questions.push(question);
+  }
+  if (questions.length === 0) return null;
+  return { id: askId(request.id), questions, input: request.params };
+}
+
+/**
+ * The request id, kept with its JSON type: Codex numbers its requests,
+ * and a reply must carry the id exactly as it came. Stored this way, a
+ * reattached process can still be answered from the row alone.
+ */
+function askId(id: string | number): string {
+  return JSON.stringify(id);
+}
+
+function requestIdOf(ask: LiveAsk): string | number {
+  try {
+    const id = JSON.parse(ask.id) as unknown;
+    if (typeof id === "string" || typeof id === "number") return id;
+  } catch {
+    // Not one of ours; sent back as it is.
+  }
+  return ask.id;
+}
+
+/** Codex's answer shape: each question's id to the one answer given, keyed from the question text. */
+function byQuestionId(ask: LiveAsk, text: (question: string) => string): Record<string, { answers: string[] }> {
+  const questions = ((ask.input as { questions?: unknown } | undefined)?.questions ?? []) as UserInputQuestion[];
+  const answers: Record<string, { answers: string[] }> = {};
+  for (const q of questions) {
+    if (typeof q.id !== "string" || typeof q.question !== "string") continue;
+    const said = text(q.question);
+    answers[q.id] = { answers: said ? [said] : [] };
+  }
+  return answers;
 }
 
 /**
@@ -163,8 +254,8 @@ function handshakeError(tag: string, message: Extract<RpcLine, { kind: "response
 }
 
 /**
- * The answer to each question the server asks. Nobody is at a keyboard
- * in a Bento run, so a question for the user gets no answers and an MCP
+ * The answer to each question the server asks. A question for the user
+ * that reaches here is malformed or secret, and gets no answers; an MCP
  * elicitation is declined, the way Muse runs with
  * --user-input-auto-resolve. Bento registers no client-side tools, so a
  * call to one fails. Anything else is refused as unknown rather than

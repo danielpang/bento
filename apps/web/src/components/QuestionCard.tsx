@@ -69,7 +69,9 @@ export function QuestionCard({
               {q.header && <span className="chip chip-soft">{q.header}</span>}
               <span className="question-card-text">{q.question}</span>
             </legend>
-            <p className="muted question-card-hint">{q.multiSelect ? "Choose any that apply." : "Choose one."}</p>
+            {q.options.length > 0 && (
+              <p className="muted question-card-hint">{q.multiSelect ? "Choose any that apply." : "Choose one."}</p>
+            )}
             {q.options.map((option) => (
               <label key={option.label} className="question-card-option">
                 <input
@@ -89,7 +91,7 @@ export function QuestionCard({
             <input
               className="input question-card-other"
               type="text"
-              placeholder={q.multiSelect ? "Something else (optional)" : "Or answer in your own words"}
+              placeholder={q.options.length === 0 ? "Your answer" : q.multiSelect ? "Something else (optional)" : "Or answer in your own words"}
               aria-label={`Your own answer to: ${q.question}`}
               value={other[q.question] ?? ""}
               onChange={(e) => type(q, e.target.value)}

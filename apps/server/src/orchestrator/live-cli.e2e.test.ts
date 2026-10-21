@@ -5,7 +5,17 @@ import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentEvent } from "@bento/core";
-import { claudeCodeAdapter, codexAdapter, openLiveWire, opencodeAdapter, runAgent, type AgentAdapter, type BuildCommandInput } from "@bento/agents";
+import {
+  claudeCodeAdapter,
+  codexAdapter,
+  openLiveWire,
+  opencodeAdapter,
+  piAdapter,
+  runAgent,
+  type AgentAdapter,
+  type BuildCommandInput,
+  type LiveAsk,
+} from "@bento/agents";
 import { LineChannel, LocalProcessDriver } from "@bento/sandbox";
 import { attachLiveConversation, type LiveConversation } from "./live-session.js";
 
@@ -22,9 +32,10 @@ import { attachLiveConversation, type LiveConversation } from "./live-session.js
  *
  *   BENTO_LIVE_CLI_E2E=1 node --test --import tsx src/orchestrator/live-cli.e2e.test.ts
  *
- * Verified with codex-cli 0.163.0, opencode 1.19.3 and Claude Code 2.1.306.
+ * Verified with codex-cli 0.163.0, opencode 1.19.3, Claude Code 2.1.306
+ * and pi 0.73.1.
  */
-const skip = process.env.BENTO_LIVE_CLI_E2E ? false : "set BENTO_LIVE_CLI_E2E=1 with codex, opencode and claude on PATH";
+const skip = process.env.BENTO_LIVE_CLI_E2E ? false : "set BENTO_LIVE_CLI_E2E=1 with codex, opencode, claude and pi on PATH";
 
 interface ModelLog {
   /** What each model call's user messages said, oldest first. */
@@ -386,6 +397,188 @@ test("claude code: a question is answered through the store, and an interrupt ke
     assert.ok(lastCall.users.some((t) => t.includes("Actually, just summarise.")), "the message after the interrupt reached the same session");
     assert.ok(lastCall.users.some((t) => t.includes("ASK about the stack")), "with the whole conversation before it");
     assert.ok(transcript.includes("system: Interrupted."));
+  } finally {
+    server.close();
+  }
+});
+
+/**
+ * One live run in which the agent asks a question: the ask is recorded in
+ * an in-memory stand-in for run_questions, `answers` is stored for it the
+ * way the answer route stores a person's, the pump writes it into the
+ * waiting agent, and the run ends when the turn does.
+ */
+async function askedRun(
+  adapter: AgentAdapter,
+  input: BuildCommandInput,
+  env: Record<string, string>,
+  answers: (ask: LiveAsk) => Record<string, string>,
+) {
+  const live = adapter.live!;
+  const driver = new LocalProcessDriver();
+  const handle = await driver.provision({ workspaceKey: "e2e", hostWorkspacePath: input.cwd } as never);
+  const channel = new LineChannel();
+  const wire = openLiveWire(live, input, { attach: false });
+  for (const line of wire.open(input.prompt)) channel.write(line);
+  const stored: { id: string; ask: LiveAsk }[] = [];
+  let answered: { id: string; ask: LiveAsk; answers: Record<string, string> }[] = [];
+  const withdrawn: string[] = [];
+  const session = attachLiveConversation({
+    runId: "e2e-ask",
+    wire,
+    liveChannel: channel,
+    conversation: {
+      ...closingConversation(),
+      questions: {
+        record: async (ask) => {
+          stored.push({ id: `row-${stored.length + 1}`, ask });
+          return `row-${stored.length}`;
+        },
+        claimAnswers: async () => {
+          const taken = answered;
+          answered = [];
+          return taken;
+        },
+        requeueAnswers: async () => {},
+        withdraw: async (ids) => {
+          withdrawn.push(...ids);
+        },
+      },
+    },
+    sayAsUser: async () => {},
+    saySystem: async () => {},
+  });
+  const run = runAgent({
+    adapter,
+    argv: live.buildCommand(input),
+    exec: () => driver.exec(handle, live.buildCommand(input), { cwd: input.cwd, env, stdin: channel, timeoutMs: 120_000 }),
+    readLine: (line) => {
+      const read = wire.read(line);
+      for (const reply of read.write) channel.write(reply);
+      if (read.asks?.length) void session.ask(read.asks);
+      if (read.withdrawn?.length) void session.withdraw(read.withdrawn);
+      return read.events;
+    },
+    onEvent: async (event) => {
+      if (event.type === "result") await session.onTurnFinished(event.ok);
+    },
+  });
+  while (stored.length === 0) await new Promise((r) => setTimeout(r, 50));
+  const ask = stored[0]!.ask;
+  answered = [{ id: stored[0]!.id, ask, answers: answers(ask) }];
+  assert.equal(await session.pump(), true, "the answer went into the waiting agent");
+  const result = await run;
+  session.dispose();
+  return { result, ask, withdrawn };
+}
+
+test("codex app-server: request_user_input is answered through the store", { skip, timeout: 180_000 }, async () => {
+  const toolOutputs: string[] = [];
+  const server = createServer(async (req, res) => {
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    const request = JSON.parse(body || "{}") as { input?: { type?: string; output?: unknown }[]; tools?: { name?: string }[] };
+    const output = (request.input ?? []).find((item) => item.type === "function_call_output");
+    if (output) toolOutputs.push(String(output.output));
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    const ev = (o: Record<string, unknown>) => res.write(`event: ${String(o.type)}\ndata: ${JSON.stringify(o)}\n\n`);
+    ev({ type: "response.created", response: { id: "r" } });
+    if (!output && (request.tools ?? []).some((t) => t.name === "request_user_input")) {
+      const questions = [
+        { id: "db", header: "Database", question: "Which database should we use?", options: [{ label: "Postgres (Recommended)", description: "Relational" }, { label: "SQLite", description: "Embedded" }] },
+        { id: "ship", header: "Ship", question: "What ships first?", options: [{ label: "Search", description: "Full text" }, { label: "Export", description: "CSV" }] },
+      ];
+      ev({ type: "response.output_item.done", output_index: 0, item: { type: "function_call", id: "fc_1", call_id: "call_1", name: "request_user_input", arguments: JSON.stringify({ questions }) } });
+    } else {
+      ev({ type: "response.output_item.done", output_index: 0, item: { type: "message", role: "assistant", id: "m", content: [{ type: "output_text", text: "Noted." }] } });
+    }
+    ev({ type: "response.completed", response: { id: "r", usage: { input_tokens: 10, input_tokens_details: null, output_tokens: 4, output_tokens_details: null, total_tokens: 14 } } });
+    res.end();
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  const url = `http://127.0.0.1:${(server.address() as { port: number }).port}/v1`;
+  try {
+    const cwd = mkdtempSync(join(tmpdir(), "bento-codex-ask-"));
+    const home = join(cwd, ".codex-home");
+    mkdirSync(home);
+    const extraArgs = [
+      "-c", 'model_provider="fake"',
+      "-c", 'model_providers.fake.name="fake"',
+      "-c", `model_providers.fake.base_url="${url}"`,
+      "-c", 'model_providers.fake.wire_api="responses"',
+      "-c", 'model_providers.fake.env_key="FAKE_KEY"',
+    ];
+    const { result, ask, withdrawn } = await askedRun(
+      codexAdapter,
+      { prompt: "Ask me about the stack", model: "gpt-5-codex", cwd, extraArgs, askUser: true },
+      { CODEX_HOME: home, FAKE_KEY: "k" },
+      () => ({ "Which database should we use?": "SQLite", "What ships first?": "Webhooks, in my own words" }),
+    );
+    assert.equal(result.exitCode, 0, "closing stdin ended the process cleanly");
+    assert.equal(result.outcome.ok, true, result.outcome.error);
+    assert.deepEqual(ask.questions.map((q) => [q.question, q.multiSelect, q.options.map((o) => o.label)]), [
+      ["Which database should we use?", false, ["Postgres (Recommended)", "SQLite"]],
+      ["What ships first?", false, ["Search", "Export"]],
+    ]);
+    assert.equal(toolOutputs.length, 1);
+    assert.deepEqual(JSON.parse(toolOutputs[0]!), { answers: { db: { answers: ["SQLite"] }, ship: { answers: ["Webhooks, in my own words"] } } },
+      "the model read each answer under its question's id");
+    assert.ok(withdrawn.includes(ask.id), "the server's resolved notice withdrew the row it had answered");
+  } finally {
+    server.close();
+  }
+});
+
+test("pi rpc: Bento's ask_user extension is answered through the store, one choice and several", { skip, timeout: 180_000 }, async () => {
+  const toolResults: string[] = [];
+  const server = createServer(async (req, res) => {
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    const request = JSON.parse(body || "{}") as { messages?: { role: string; content: unknown }[]; tools?: { function?: { name?: string } }[] };
+    const result = (request.messages ?? []).find((m) => m.role === "tool");
+    if (result) toolResults.push(typeof result.content === "string" ? result.content : JSON.stringify(result.content));
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    const chunk = (delta: unknown, finish: string | null = null) =>
+      res.write(`data: ${JSON.stringify({ id: "c", object: "chat.completion.chunk", created: 0, model: "m", choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`);
+    if (!result && (request.tools ?? []).some((t) => t.function?.name === "ask_user")) {
+      const questions = [
+        { question: "Which database should we use?", header: "Database", options: [{ label: "Postgres", description: "Relational" }, { label: "SQLite" }] },
+        { question: "Which features ship first?", multiSelect: true, options: [{ label: "Search" }, { label: "Export" }, { label: "Sharing" }] },
+      ];
+      chunk({ role: "assistant", tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name: "ask_user", arguments: JSON.stringify({ questions }) } }] });
+      chunk({}, "tool_calls");
+    } else {
+      chunk({ role: "assistant", content: "Noted." });
+      chunk({}, "stop");
+    }
+    res.write(`data: ${JSON.stringify({ id: "c", object: "chat.completion.chunk", created: 0, model: "m", choices: [], usage: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 } })}\n\n`);
+    res.write("data: [DONE]\n\n");
+    res.end();
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  const url = `http://127.0.0.1:${(server.address() as { port: number }).port}/v1`;
+  try {
+    const cwd = mkdtempSync(join(tmpdir(), "bento-pi-ask-"));
+    const input = { prompt: "Ask me about the stack", model: "fake/m", cwd, askUser: true };
+    // What the sandbox would hold: the files the adapter writes, plus a provider for the stand-in.
+    for (const file of piAdapter.files!(input)) {
+      const path = join(cwd, file.path.replace(/^~\//, ""));
+      mkdirSync(join(path, ".."), { recursive: true });
+      writeFileSync(path, file.content);
+    }
+    mkdirSync(join(cwd, ".pi", "agent"), { recursive: true });
+    writeFileSync(join(cwd, ".pi", "agent", "models.json"), JSON.stringify({ providers: { fake: { baseUrl: url, api: "openai-completions", apiKey: "k", models: [{ id: "m" }] } } }));
+    const { result, ask, withdrawn } = await askedRun(piAdapter, input, { HOME: cwd, ...piAdapter.env!(input) }, () => ({
+      "Which database should we use?": "SQLite",
+      "Which features ship first?": "Search, Export",
+    }));
+    assert.equal(result.exitCode, 0, "closing stdin ended the process cleanly");
+    assert.equal(result.outcome.ok, true, result.outcome.error);
+    assert.deepEqual(ask.questions.map((q) => q.multiSelect), [false, true]);
+    assert.equal(toolResults.length, 1);
+    assert.match(toolResults[0]!, /"Which database should we use\?"=\\?"SQLite/);
+    assert.match(toolResults[0]!, /Search, Export/, "both features, as one multiple choice answer");
+    assert.deepEqual(withdrawn, [ask.id], "the end of the turn withdrew what the agent had asked");
   } finally {
     server.close();
   }

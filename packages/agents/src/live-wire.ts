@@ -4,7 +4,7 @@ import type { BuildCommandInput, LiveProtocol, LiveSession } from "./adapter.js"
  * The live session of one process, whichever shape its tool speaks.
  *
  * The executor and the live conversation only ever talk to this. A tool
- * that reads one line per message (Claude Code, pi) is wrapped into the
+ * that reads one line per message and answers nothing is wrapped into the
  * same four methods a JSON-RPC protocol implements, so neither caller
  * has to know which kind of process it is feeding.
  */

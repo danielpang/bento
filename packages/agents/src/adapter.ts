@@ -52,13 +52,15 @@ export interface CustomProviderSelection {
  * this capability fall back to queue-and-resume between runs.
  *
  * A tool speaks one of two shapes, and declares exactly one of
- * `encodeMessage` and `connect`. Claude Code and pi read one JSON line
- * per user message and need nothing back, so `encodeMessage` is the
+ * `encodeMessage` and `connect`. A tool that reads one JSON line per
+ * user message and needs nothing back declares `encodeMessage`, the
  * whole protocol. Codex (`codex app-server`) and opencode (`opencode
  * acp`) are JSON-RPC servers on stdio: a message names a thread or
  * session id the process handed out earlier, and the process sends
- * requests of its own that must be answered. Those need state that
- * lives as long as the process does, which is what `connect` returns.
+ * requests of its own that must be answered. Claude Code and pi send
+ * lines as messages too, but ask questions that wait for an answer
+ * (Claude Code's control requests, pi's extension dialogs). Those need
+ * state or replies, which is what `connect` returns.
  */
 export interface LiveSession {
   delivery: "steer" | "queue";

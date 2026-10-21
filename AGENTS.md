@@ -592,9 +592,17 @@ does: the local handle if this process holds it, else a `run_control`
 "interrupt" on the bus (`requestRunInterrupt`). Only an adapter whose
 `live.interrupts` is set offers it, and only on a run recorded as live.
 
-A question (Claude Code's AskUserQuestion, behind
-`--permission-prompt-tool stdio`) arrives as a `can_use_tool` request
-the agent blocks on. It is recorded in `run_questions` (idempotent on
+A question arrives as a request the agent blocks on, which each
+protocol turns into a `LiveAsk`: Claude Code's AskUserQuestion (behind
+`--permission-prompt-tool stdio`) as a `can_use_tool` control request,
+Codex's `request_user_input` (behind the under-development
+`default_mode_request_user_input` feature outside Plan mode) as an
+`item/tool/requestUserInput` request, and pi's as an extension dialog
+from `ask_user`, a tool Bento ships as a pi extension because pi has
+none (`pi-live.ts`: written to pi's global extensions folder, since `-e`
+does not expand `~`, and registered only when the run sets
+`BENTO_PI_ASK_USER`). opencode has a question tool, but `opencode acp`
+drops `question.asked`, so it is not offered there. It is recorded in `run_questions` (idempotent on
 the agent's request id, so a reattach does not ask twice), a person
 answers it through `POST /api/runs/:id/questions/:questionId/answer`,
 which checks the choice against what was asked (`answersFor`) and
@@ -603,8 +611,10 @@ Its `pump` claims answers before messages, in one UPDATE that marks
 them delivered, and puts them back if the write fails. An answer is
 built from the stored request id and tool input alone, so a server
 that adopted the run can answer a question its predecessor saw. The
-agent withdrawing a question (`control_cancel_request`) or the run's
-stream ending withdraws its rows. `askUser` turns the tool on only
+agent withdrawing a question (`control_cancel_request`,
+`serverRequest/resolved`), the end of the turn it was asked in (pi
+resolves an aborted dialog and says nothing), or the run's stream
+ending withdraws its rows, each after any insert still in flight. `askUser` turns the tool on only
 for a beta card stage run started fresh, because a person is there to
 answer; everywhere else the tool stays off, and a question that
 arrives anyway is declined with `NOBODY_TO_ASK` rather than left to

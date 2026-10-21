@@ -295,3 +295,42 @@ test("a question a person can answer is stored and announced, and the answer goe
   assert.deepEqual(lines[0]!.response!.response.updatedInput.answers, { "Which?": "B" });
   assert.deepEqual(shown, ["Which? B", "also, use tabs"]);
 });
+
+test("a turn that ends withdraws what the agent asked in it, since it waits on nothing now", async () => {
+  const channel = new LineChannel();
+  const withdrawn: string[][] = [];
+  let release!: () => void;
+  const recordedLate = new Promise<void>((r) => (release = r));
+  const handle = attachLiveConversation({
+    runId: "r12",
+    wire: claudeWire(),
+    liveChannel: channel,
+    conversation: {
+      ...conversation(0),
+      questions: {
+        // A slow insert: the turn's end must not withdraw before the row exists.
+        record: async () => {
+          await recordedLate;
+          return "row-1";
+        },
+        claimAnswers: async () => [],
+        requeueAnswers: async () => {},
+        withdraw: async (ids) => {
+          withdrawn.push(ids);
+        },
+      },
+    },
+    sayAsUser: async () => {},
+    saySystem: async () => {},
+  });
+  const asking = handle.ask([asked, { ...asked, id: "req-10" }]);
+  const cancelled = handle.withdraw(["req-10"]);
+  const ending = handle.onTurnFinished(false);
+  await tick(20);
+  assert.deepEqual(withdrawn, [], "nothing is withdrawn while its row is still being written");
+  release();
+  await Promise.all([asking, cancelled, ending]);
+  assert.deepEqual(withdrawn, [["req-10"], ["req-9"]], "the turn's end withdrew the rest, once recorded");
+  await handle.onTurnFinished(true);
+  assert.equal(withdrawn.length, 2, "nothing asked since, nothing withdrawn");
+});
