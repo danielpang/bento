@@ -906,12 +906,17 @@ anything its sandbox can, so one prompt injection would exfiltrate the
 operator's key. Local mode uses the process environment because there is
 one trusted user and no tenant boundary.
 
-## New product features go behind the beta testers flag
+## Only large features go behind the beta testers flag
 
-Unfinished UI and new endpoints that are not ready for every signed-in
-user go behind `beta-testers`, a permanent PostHog flag. Add people by
-putting their email on that flag's release conditions. Local mode is
-always on.
+A large feature, one on the scale of Bento Swarm, goes behind
+`beta-testers`, a permanent PostHog flag, while it is unfinished.
+Everything else ships to every signed-in user: a new capability for an
+existing agent, a new control on an existing screen, an endpoint that
+serves one. Do not gate a change because it is new. When it is unclear
+whether a feature is large enough, ask rather than gate it by default.
+
+Add people by putting their email on that flag's release conditions.
+Local mode is always on. When a feature is gated:
 
 - Server: `ctx.featureFlags.isBetaTester(userId, { email })`. A beta
   endpoint that a non-tester must not learn about answers 404 via
