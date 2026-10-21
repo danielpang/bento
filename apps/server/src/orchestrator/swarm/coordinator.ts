@@ -16,7 +16,7 @@ import type { AppContext, LiveInput } from "../../context.js";
 import { driverForSandbox } from "../sandbox-driver.js";
 import type { BoardEvent } from "../../events.js";
 import { captureJobErrors } from "../../analytics.js";
-import { unbilledReason } from "../../unbilled-reasons.js";
+import { infraFailureReason } from "../../infra-failures.js";
 import { enqueueRun, INTERACTIVE_POLL_SECONDS } from "../queue.js";
 import { queueSwarmSandboxReap } from "../reap-sandbox.js";
 import { swarmHasActiveRun } from "./reopen.js";
@@ -383,15 +383,15 @@ async function limitWaitsSpent(tx: Tx, taskId: string, resolvers: boolean): Prom
  * A run that failed on its sandbox rather than its work: the machine
  * never ran the agent, or stopped under it.
  *
- * The unbilled-reason rules are the one list of those failures: they
- * exist so a person is not charged for a machine that failed them, and
- * that is the same question as whether the work deserves another try. Read here rather than copied, so a provider failure that
- * joins that list is restarted without this file learning its words.
+ * The infra failure rules are the one list of those failures. Read here
+ * rather than copied, so a provider failure that joins that list is
+ * restarted without this file learning its words. Billing does not read
+ * the list: a run is billed by the fault its failure path recorded.
  */
 function failedBeforeAgentStarted(run: { status: string; error: string | null }): boolean {
   if (run.status !== "failed") return false;
-  const reason = unbilledReason(run.error);
-  // A lost branch is unbilled (no agent ran) but not a sandbox blip:
+  const reason = infraFailureReason(run.error);
+  // A lost branch is an infra failure (no agent ran) but not a sandbox blip:
   // another start finds the same nothing, so it goes to the planner and
   // the person rather than round the restart loop.
   return reason !== null && reason.id !== "swarm-branch-lost";

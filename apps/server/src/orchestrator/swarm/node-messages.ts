@@ -1,6 +1,6 @@
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { agentRuns, swarmMessages, type Db } from "@bento/db";
-import { unbilledReason } from "../../unbilled-reasons.js";
+import { infraFailureReason } from "../../infra-failures.js";
 import { isUsageLimitError } from "../usage-limit.js";
 
 /**
@@ -126,7 +126,8 @@ export async function confirmSwarmMessagesDelivered(db: Db, runId: string): Prom
  * messages are put back by the coordinator, which reads how the run
  * ended to decide whether they wake another planner.
  *
- * A run that never reached its agent, whose sandbox failed (unbilled),
+ * A run that never reached its agent, whose sandbox failed (an infra
+ * failure),
  * or whose account hit a usage limit also gives back what it was
  * handed: the next agent starts fresh and would never see it.
  */
@@ -137,7 +138,7 @@ export async function requeueUndeliveredNodeMessages(db: Db, runId: string): Pro
     .where(eq(agentRuns.id, runId))
     .limit(1);
   const unheard =
-    !run?.agentStartedAt || (run.status === "failed" && (unbilledReason(run.error) !== null || isUsageLimitError(run.error)));
+    !run?.agentStartedAt || (run.status === "failed" && (infraFailureReason(run.error) !== null || isUsageLimitError(run.error)));
   await db
     .update(swarmMessages)
     .set({ status: "queued", runId: null, sentAt: null, deliveredAt: null })

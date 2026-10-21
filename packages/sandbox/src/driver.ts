@@ -93,9 +93,41 @@ export class ProvisionFailure extends Error {
   }
 }
 
+/**
+ * The ProvisionFailure behind an error, looking through the wrappers a
+ * driver puts around one (a Modal machine it could not clean up wraps
+ * the failure that made it give up).
+ */
+export function findProvisionFailure(err: unknown): ProvisionFailure | null {
+  for (let at: unknown = err, depth = 0; at instanceof Error && depth < 8; at = at.cause, depth += 1) {
+    if (at instanceof ProvisionFailure) return at;
+  }
+  return null;
+}
+
 /** Whose fault a provision failure was, or null for an error no driver tagged. */
 export function provisionBlame(err: unknown): ProvisionBlame | null {
-  return err instanceof ProvisionFailure ? err.blame : null;
+  return findProvisionFailure(err)?.blame ?? null;
+}
+
+/**
+ * git's words for a remote it could not reach at all. That is the
+ * machine's network, not the repository, so it is the provider's.
+ */
+export const GIT_UNREACHABLE = /Could not resolve host|Connection timed out|Failed to connect to|Network is unreachable/i;
+
+/**
+ * Whose fault a checkout script that exited is, from its exit code and
+ * what git wrote. The project's only when git itself refused (a
+ * repository that is not there, a credential it would not take, a
+ * branch that is missing, a remote that answered with an error) and the
+ * remote was reachable. A script with no exit code, or one that died
+ * without git saying why, is the machine's.
+ */
+export function checkoutScriptBlame(exitCode: number | null | undefined, stderr: string): ProvisionBlame {
+  if (exitCode === null || exitCode === undefined || exitCode < 0) return "provider";
+  if (GIT_UNREACHABLE.test(stderr)) return "provider";
+  return /^(?:fatal|error|remote):/im.test(stderr) ? "project" : "provider";
 }
 
 export interface ProvisionSpec {

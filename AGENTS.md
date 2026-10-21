@@ -183,7 +183,7 @@ transcript never names a provider: a fallback reads "Failed to
 provision sandbox, retrying.", and when every provider failed the run
 record says only "Sandbox failed to provision, we're investigating
 the issue. Please try again later." (`SANDBOX_UNAVAILABLE_MESSAGE`,
-which the unbilled-reason rules match). The providers, phases and
+which the infra failure rules match). The providers, phases and
 reasons go to the log and to error tracking on
 `SandboxProvisionError`. A failure that is the project's (git
 refused the checkout) is shown in git's words, because that is what
@@ -264,7 +264,7 @@ started the agent (`sandboxNeverStartedCommand`, which says whether
 the machine refused the start or was gone) apart from an agent that
 failed: it goes to error tracking as `sandbox_exec`, the run record
 opens with `SANDBOX_REFUSED_AGENT_PREFIX` or
-`SANDBOX_GONE_AGENT_PREFIX`, and the unbilled-reason rules match those
+`SANDBOX_GONE_AGENT_PREFIX`, and the infra failure rules match those
 openings. A refused upgrade whose session listing shows the command
 did start is a running process, and goes to the reattach ladder, never
 to "never started". A rejection out of `runAgent` is captured as
@@ -293,6 +293,41 @@ captured exception, because captureException reads only the message
 and a git fatal was filed as "exit code 128" with the reason in the
 server log alone.
 
+## A run is billed unless Bento or its sandbox failed it
+
+Agent hours are charged for every run except one that Bento or the
+sandbox failed. A failure of the agent, its harness, the model
+provider, GitHub, or the project's own settings is the work's and is
+billed, and so is the run limit. `agent_runs.billable` records the
+answer, and the hours sum, the team hours route, a swarm's agent
+time, and the billing hook (`onRunFinished`) all read that column.
+
+The answer comes from the failure, never from the words it left. The
+code that catches a failure knows what threw, and hands `finishRun`
+(or `failRunAsInterrupted`) a `RunFault` from
+`apps/server/src/orchestrator/run-fault.ts`: `"bento"` when this
+server failed (a restart under the run, a transcript write that threw,
+a driver it could not choose), `"sandbox"` when the machine did (a
+provider that could not make it, a stream that broke, a CLI it lost, a
+machine that stopped). A failure with no fault is billed, so a path
+nobody classified charges rather than waives. Do not decide billing by
+matching the run record's sentence: it is written for the person, and
+its tail is often the agent's own output.
+
+Provisioning carries its blame on the error. Every driver tags a
+checkout git refused (`ProvisionFailure` with blame `"project"`):
+the sprite through `spriteBlame`, Modal through `checkoutScriptBlame`
+in `packages/sandbox/src/driver.ts`, which says a script is the
+project's only when it exited and git itself refused a remote it could
+reach. `provisionFault` turns the provider loop's verdict into a
+fault. A refusal before any provider was asked (an unreachable clone
+URL, GitHub refusing the seed bundle) is the project's or GitHub's.
+
+The infra failure rules (`infra-failures.ts`) are a different
+question: whether a swarm run deserves another try without the planner
+hearing about it. A new row there changes what is restarted, never
+what is charged.
+
 ## A swarm worker starts from the ref its bundle has, and a machine that was never made is not a worker that stopped
 
 A worker on a clone driver is cut from the swarm's branch, which has
@@ -310,8 +345,8 @@ shape through real git. Do not hardcode either ref again.
 
 A run that failed before its agent started (no provider could make
 its machine, the exec socket dropped, the sandbox was gone) is the
-sandbox's failure and not the work's, and the unbilled-reason rules
-in `apps/server/src/unbilled-reasons.ts` are the one list of those
+sandbox's failure and not the work's, and the infra failure rules
+in `apps/server/src/infra-failures.ts` are the one list of those
 failures. The coordinator reads that list: a leaf or plan node whose
 run died that way goes back to "assigned" and the same tick starts
 another agent on it, up to `MAX_SANDBOX_RESTARTS` times, counted in
@@ -682,9 +717,9 @@ planner rather than a worker nobody is looking at.
 A server run whose handler hangs in its sandbox before the agent says
 anything is closed by `reapStalledRuns` in `run-executor.ts`, on the
 existing `runner.reap` schedule, after `STALLED_RUN_MIN` minutes with
-no transcript line. It closes them with `SANDBOX_STALLED_AGENT_PREFIX`,
-which is on the unbilled list, so the run is not billed and the
-coordinator restarts it like any run whose sandbox failed first. A
+no transcript line. It closes them as the sandbox's fault with
+`SANDBOX_STALLED_AGENT_PREFIX`, which is on the infra failure list, so
+the run is not billed and the coordinator restarts it like any run whose sandbox failed first. A
 handler that comes back after its run was closed stops at the compare
 and set that moves the run to running, just before the agent is
 exec'd. Nothing else ends it: pg-boss expires the
@@ -755,8 +790,8 @@ restart closes a run whose agent had started, and aborts whatever loop
 still holds it. A lookup that errors closes nothing. A new driver
 should implement `running` for the same reason. Either way the run
 record opens with `SANDBOX_STOPPED_AGENT_PREFIX`, which is on the
-unbilled list: the machine failed, not the agent, so the person is not
-charged and a swarm's coordinator starts the run again the way it does
+infra failure list, and is closed as the sandbox's fault: the machine
+failed, not the agent, so the person is not charged and a swarm's coordinator starts the run again the way it does
 after any sandbox failure.
 
 ## Modal stdin closes through the stream, never closeStdin()

@@ -2,8 +2,10 @@ import { createHash } from "node:crypto";
 import { WORKSPACE_ARTIFACT_DIR } from "@bento/core";
 import { AGENT_BINARIES, TOOLCHAIN_VERSION, agentToolchainScript } from "./agent-toolchain.js";
 import {
+  checkoutScriptBlame,
   execTimeoutMessage,
   collectExec,
+  ProvisionFailure,
   SandboxImageLost,
   type ExecChunk,
   type ExecOptions,
@@ -1044,9 +1046,7 @@ export class ModalDriver implements SandboxDriver {
             `cd ${shellQuote(dir)} && (git checkout ${shellQuote(branch)} || git checkout -b ${shellQuote(branch)} ${shellQuote(startRef)})`,
           ].join("\n");
           const result = await runShell(box, script, MODAL_REPO_PREPARE_TIMEOUT_MS);
-          if (result.exitCode !== 0) {
-            throw new Error(`could not prepare ${repo.name}: ${result.stderr.trim() || `exit ${result.exitCode}`}`);
-          }
+          if (result.exitCode !== 0) throw checkoutFailure(repo.name, result);
         } finally {
           await box.remove(bundlePath).catch(() => {});
           if (repo.startBundle) await box.remove(startPath).catch(() => {});
@@ -1063,9 +1063,7 @@ export class ModalDriver implements SandboxDriver {
           `cd ${shellQuote(dir)} && (git checkout ${shellQuote(branch)} || git checkout -b ${shellQuote(branch)})`,
         ].join("\n");
         const result = await runShell(box, script, MODAL_REPO_PREPARE_TIMEOUT_MS);
-        if (result.exitCode !== 0) {
-          throw new Error(`could not prepare ${repo.name}: ${result.stderr.trim() || `exit ${result.exitCode}`}`);
-        }
+        if (result.exitCode !== 0) throw checkoutFailure(repo.name, result);
       }
       await say(`Repository ${repo.name} is ready on branch ${branch}.`);
     }
@@ -1103,6 +1101,20 @@ export function persistedSandboxProvider(provider: SandboxHandle["provider"]): "
 
 function isAlreadyExists(err: unknown): boolean {
   return err instanceof Error && (err.name === "AlreadyExistsError" || /AlreadyExistsError/.test(err.message));
+}
+
+/**
+ * A checkout script that exited without making the checkout, tagged
+ * with whose fault it was. git refusing the project's repository, branch
+ * or credential is the project's, and asking another provider would get
+ * the same answer; anything else here is this machine's.
+ */
+function checkoutFailure(repoName: string, result: { stdout: string; stderr: string; exitCode: number }): ProvisionFailure {
+  const cause = Object.assign(
+    new Error(`could not prepare ${repoName}: ${result.stderr.trim() || `exit ${result.exitCode}`}`),
+    { stdout: result.stdout, stderr: result.stderr },
+  );
+  return new ProvisionFailure("modal", "checkout", checkoutScriptBlame(result.exitCode, result.stderr), cause);
 }
 
 async function runShell(

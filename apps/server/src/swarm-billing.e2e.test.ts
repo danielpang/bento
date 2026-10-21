@@ -20,7 +20,7 @@ import {
   swarms,
   type Db,
 } from "@bento/db";
-import { LocalProcessDriver, WorktreeManager } from "@bento/sandbox";
+import { LocalProcessDriver, ProvisionFailure, WorktreeManager } from "@bento/sandbox";
 import { singleDriver } from "./orchestrator/sandbox-driver.js";
 import { createApp } from "./app.js";
 import { DiskArtifactStore } from "./artifact-store.js";
@@ -434,6 +434,61 @@ test("a Sprite provider failure before the agent starts is neither charged nor a
   assert.equal(Number(uncharged!.spentMeasuredUsd), 0);
   assert.equal(Number(uncharged!.spentEstimatedUsd), 0);
   assert.equal(Number(uncharged!.spentAssumedUsd), 0);
+});
+
+test("a checkout git refused is the project's, so it is billed", async () => {
+  const created = await createSwarm();
+  const swarm = (await created.json()) as { id: string; plannerRunId: string };
+  const workingDrivers = ctx.drivers;
+  const failingDriver = new LocalProcessDriver();
+  failingDriver.provision = async () => {
+    const stderr = "remote: Repository not found.\nfatal: repository 'https://github.com/acme/app.git/' not found";
+    throw new ProvisionFailure(
+      "local-process",
+      "checkout",
+      "project",
+      Object.assign(new Error(`could not prepare app: ${stderr}`), { stderr }),
+    );
+  };
+  ctx.drivers = singleDriver(failingDriver);
+  try {
+    await executeRun(ctx, swarm.plannerRunId);
+  } finally {
+    ctx.drivers = workingDrivers;
+  }
+
+  const [run] = await db.select().from(agentRuns).where(eq(agentRuns.id, swarm.plannerRunId));
+  assert.equal(run!.status, "failed");
+  assert.match(run!.error ?? "", /Repository not found/, "the record says what git said");
+  assert.equal(run!.billable, true, "GitHub refusing the repository is not a sandbox failure");
+  assert.deepEqual(finished, [swarm.plannerRunId]);
+});
+
+test("a sandbox whose stream breaks under the agent is not billed", async () => {
+  const created = await createSwarm();
+  const swarm = (await created.json()) as { id: string; plannerRunId: string };
+  const workingDrivers = ctx.drivers;
+  const breakingDriver = new LocalProcessDriver();
+  const exec = breakingDriver.exec.bind(breakingDriver);
+  breakingDriver.exec = (handle, argv, opts) => {
+    // Only the agent's exec carries the run as its session key.
+    if (opts?.sessionKey !== swarm.plannerRunId) return exec(handle, argv, opts);
+    return (async function* () {
+      throw new Error("the exec socket closed");
+    })();
+  };
+  ctx.drivers = singleDriver(breakingDriver);
+  try {
+    await executeRun(ctx, swarm.plannerRunId);
+  } finally {
+    ctx.drivers = workingDrivers;
+  }
+
+  const [run] = await db.select().from(agentRuns).where(eq(agentRuns.id, swarm.plannerRunId));
+  assert.equal(run!.status, "failed");
+  assert.match(run!.error ?? "", /^exec failed: /);
+  assert.equal(run!.billable, false);
+  assert.deepEqual(finished, [], "the agent-hour meter is not told about a machine that failed");
 });
 
 /**

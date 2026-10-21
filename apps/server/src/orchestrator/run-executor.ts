@@ -64,8 +64,8 @@ import {
   RESTART_BEFORE_AGENT_PREFIX,
   PREVIOUS_AGENT_RUNNING_PREFIX,
   SWARM_BRANCH_LOST_MESSAGE,
-  unbilledReason,
-} from "../unbilled-reasons.js";
+} from "../infra-failures.js";
+import { isBillable, provisionFault, type RunFault } from "./run-fault.js";
 import { githubConnectionFor, reviewForBranch } from "../github.js";
 import { createRepositorySeed, publishFeatureBranches } from "./publish.js";
 import { applyPendingPullRequestUpdates } from "./pull-request-updates.js";
@@ -253,7 +253,14 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     driver = chosenDrivers.driver;
   } catch (err) {
     console.error(`sandbox provisioning failed for run ${runId}:`, err);
-    await finishRun(ctx, runId, { ok: false, error: `sandbox provisioning failed: ${describeSandboxError(err)}` }, null);
+    // Choosing a driver reads only this deployment's configuration and
+    // database, so its failure is Bento's.
+    await finishRun(
+      ctx,
+      runId,
+      { ok: false, error: `sandbox provisioning failed: ${describeSandboxError(err)}`, fault: "bento" },
+      null,
+    );
     emitBoard("failed");
     await subject.settle(ctx);
     return;
@@ -534,7 +541,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
      * The swarm's branch is gone with tasks landed on it, and nothing
      * was provisioned: a machine made now would hold a branch without
      * them. Its own sentence, in the transcript and on the record,
-     * which the unbilled rules read (no agent ran), and its own source
+     * which the coordinator's restart rules read, and its own source
      * in error tracking, because it is landed work lost, not a
      * provider having a bad minute.
      */
@@ -547,7 +554,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
         source: "swarm_branch_lost",
       });
       await saySystem(SWARM_BRANCH_LOST_MESSAGE);
-      await finishRun(ctx, runId, { ok: false, error: SWARM_BRANCH_LOST_MESSAGE }, null);
+      await finishRun(ctx, runId, { ok: false, error: SWARM_BRANCH_LOST_MESSAGE, fault: "sandbox" }, null);
       emitBoard("failed");
       await subject.settle(ctx);
       return;
@@ -558,8 +565,9 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
      * on: the project's own failure in the driver's words, or, when
      * the providers failed, one generic sentence that names none of
      * them. The "sandbox provisioning failed:" prefix stays on both,
-     * because the unbilled-reason rules and the swarm cost query read
-     * it.
+     * because the coordinator's restart rules read it. Whether the run
+     * is billed comes from the error itself (provisionFault), not from
+     * these words.
      */
     const reported = provisionFailureCause(err);
     const attempts = err instanceof SandboxProvisionError ? err.describeFailures() : [];
@@ -574,7 +582,12 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     });
     const shown =
       err instanceof SandboxProvisionError && err.blame === "provider" ? err.message : describeSandboxError(reported);
-    await finishRun(ctx, runId, { ok: false, error: `sandbox provisioning failed: ${shown}` }, null);
+    await finishRun(
+      ctx,
+      runId,
+      { ok: false, error: `sandbox provisioning failed: ${shown}`, fault: provisionFault(err) },
+      null,
+    );
     emitBoard("failed");
     await subject.settle(ctx);
     return;
@@ -773,6 +786,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       await finishRun(ctx, runId, {
         ok: false,
         error: `${PREVIOUS_AGENT_RUNNING_PREFIX}, so a second agent was not started beside it.`,
+        fault: "bento",
       }, null);
       emitBoard("failed");
       await subject.settle(ctx);
@@ -978,7 +992,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       return;
     }
     reportExecFailure(ctx, runId, subject, err);
-    await finishRun(ctx, runId, { ok: false, error: execFailureReason(ctx, err) }, null);
+    await finishRun(ctx, runId, { ok: false, error: execFailureReason(ctx, err), fault: execFailureFault(err) }, null);
     emitBoard("failed");
     await subject.settle(ctx);
     return;
@@ -1271,7 +1285,7 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
      * nothing in error tracking, because only provisioning failures
      * were captured. The driver's words go to the log and to error
      * tracking; the run record gets one sentence the person can act on,
-     * which the unbilled-reason rules read.
+     * which the coordinator's restart rules read.
      */
     const neverStarted = sandboxNeverStartedCommand(outcome.error ?? "");
     if (neverStarted) {
@@ -1294,6 +1308,7 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
             neverStarted === "gone"
               ? `${SANDBOX_GONE_AGENT_PREFIX}, so ${profile.cli} never ran. Run again to provision a new sandbox.`
               : `${SANDBOX_REFUSED_AGENT_PREFIX}, so ${profile.cli} never ran. Run again to try a new connection.`,
+          fault: "sandbox",
         },
         exitCode,
       );
@@ -1306,7 +1321,7 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
     // say the machine is down. A lookup that fails confirms nothing.
     if ((outcome.error ?? "").includes(SANDBOX_STOPPED_MESSAGE) && (await sandboxConfirmedDown(driver, handle))) {
       console.error(`the sandbox of run ${runId} stopped under its agent:`, outcome.error);
-      await finishRun(ctx, runId, { ...outcome, error: SANDBOX_STOPPED_RUN_ERROR }, exitCode);
+      await finishRun(ctx, runId, { ...outcome, error: SANDBOX_STOPPED_RUN_ERROR, fault: "sandbox" }, exitCode);
       emitBoard("failed");
       await subject.settle(ctx);
       return;
@@ -1352,6 +1367,9 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
           ? {
               ...outcome,
               error: `${argv[0] ?? profile.cli} is not installed in this sandbox, so the agent never started. Its install did not finish, and the next run installs it again. If it keeps failing, the sandbox cannot reach that CLI's installer.`,
+              // Provisioning installs the CLI, so a sandbox without it
+              // is the sandbox's failure, not the agent's.
+              fault: "sandbox" as const,
             }
           : providerAdvice !== (outcome.error ?? "")
             ? { ...outcome, error: providerAdvice }
@@ -1587,6 +1605,17 @@ function reportExecFailure(ctx: AppContext, runId: string, subject: RunSubject, 
     ...runOwnerProperties(subject.sandboxOwner),
     source,
   });
+}
+
+/**
+ * Whose fault a rejection out of runAgent is, read from what threw. The
+ * run limit is the work's and is billed. The driver's stream breaking
+ * (SandboxExecError) is the sandbox's, and anything else threw while this
+ * server recorded the run, which is Bento's.
+ */
+function execFailureFault(err: unknown): RunFault | undefined {
+  if (isExecTimeout(String(err))) return undefined;
+  return err instanceof SandboxExecError ? "sandbox" : "bento";
 }
 
 function execFailureReason(ctx: AppContext, err: unknown): string {
@@ -2239,6 +2268,8 @@ async function finishRun(
     outputTokens?: number;
     numTurns?: number;
     error?: string;
+    /** Set only by a path that knows Bento or the sandbox failed the run, which is then not billed. */
+    fault?: RunFault | undefined;
   },
   exitCode: number | null,
 ): Promise<void> {
@@ -2246,7 +2277,7 @@ async function finishRun(
   // the adopter once a run was adopted; see the yield checks in the
   // executor loops.
   if (yielded(ctx, runId)) return;
-  const unbilled = outcome.ok ? null : unbilledReason(outcome.error);
+  const unbilled = !isBillable(outcome);
   /**
    * What this run cost, and how well that is known, worked out before
    * the run is closed and written in the same statement that closes it.
@@ -2281,7 +2312,7 @@ async function finishRun(
     .set({
       status: outcome.ok ? "succeeded" : "failed",
       endedAt: new Date(),
-      billable: unbilled === null,
+      billable: !unbilled,
       exitCode,
       /**
        * Only when the agent actually said. Overwriting with null on a
@@ -2331,7 +2362,7 @@ async function finishRun(
   // The run is over, so its gateway token is too. Behind the CAS, so it
   // fires exactly once; a failure here never fails the close.
   await revokeRunGrant(ctx, runId);
-  await announceRunFinished(ctx, runId, outcome.ok ? "succeeded" : "failed", unbilled === null);
+  await announceRunFinished(ctx, runId, outcome.ok ? "succeeded" : "failed", !unbilled);
 
   /**
    * The reason goes into the transcript, because the transcript is the
@@ -2958,20 +2989,23 @@ async function agentNeverStarted(ctx: AppContext, run: typeof agentRuns.$inferSe
 async function failRunAsInterrupted(
   ctx: AppContext,
   run: typeof agentRuns.$inferSelect,
-  given?: { error: string; transcript: string },
+  given?: { error: string; transcript: string; fault: RunFault },
 ): Promise<void> {
+  // A restart is Bento's either way, so neither is billed. Only the one
+  // before the agent started is handed back as a sandbox blip, because
+  // nothing ran; one that ended a working agent is the planner's to judge.
   const how = given ?? ((await agentNeverStarted(ctx, run))
     ? {
-        // Nothing ran yet: the restart is Bento's, not the work's, and is
-        // neither billed nor handed to a planner as a failure.
         error: `${RESTART_BEFORE_AGENT_PREFIX}, so no agent ran.`,
         transcript: "Bento restarted before the agent started, so the run ended here. Nothing was changed. Try the run again.",
+        fault: "bento" as const,
       }
     : {
         error: "interrupted by a server restart",
         transcript: "Bento restarted while this run was working, so the run ended here. Send a message to pick up where it left off.",
+        fault: "bento" as const,
       });
-  const unbilled = unbilledReason(how.error) !== null;
+  const unbilled = !isBillable({ ok: false, fault: how.fault });
   const [closed] = await ctx.db
     .update(agentRuns)
     .set({
@@ -2992,10 +3026,8 @@ async function failRunAsInterrupted(
   // Behind the compare-and-set on purpose: only the path that actually
   // closed the run announces it. A resumed run is still working, and
   // its own finish announces later; announcing here for every orphan
-  // would have billed runs that never ended. The sandbox was awake for
-  // as long as the run said it was, and a restart is not a refund.
-  // Not billed when the reason is on the unbilled list: a run the
-  // reaper closed before its agent was launched ran nothing.
+  // would have billed runs that never ended. Every way here is Bento's
+  // or the sandbox's failure, so none of them is announced for billing.
   await announceRunFinished(ctx, run.id, "failed", !unbilled);
 
   await appendRunEvent(ctx, run.id, {
@@ -3093,7 +3125,8 @@ function isTextModeCli(cli: string): boolean {
  * The stall is measured from the run's last line, or from its start when
  * it has none, in the database's own clock.
  *
- * Closed as unbilled (SANDBOX_STALLED_AGENT_PREFIX is on the list), so
+ * Closed as the sandbox's failure, so it is not billed, and with
+ * SANDBOX_STALLED_AGENT_PREFIX, which is on the infra failure list, so
  * the coordinator also restarts a stalled leaf or planner the way it
  * restarts any run whose sandbox failed before the agent started.
  */
@@ -3129,7 +3162,7 @@ export async function reapStalledRuns(ctx: AppContext, stallMin: number = STALLE
     // and stops there. One that already spawned in this process is
     // aborted; its own close then loses the compare and set below.
     requestRunAbort(ctx, run.id);
-    await failRunAsInterrupted(ctx, run, { error: STALLED_RUN_ERROR, transcript: STALLED_RUN_TRANSCRIPT });
+    await failRunAsInterrupted(ctx, run, { error: STALLED_RUN_ERROR, transcript: STALLED_RUN_TRANSCRIPT, fault: "sandbox" });
     closed.push(run.id);
     ctx.analytics?.captureException(new Error(`run ${run.id} stalled before its agent started`), run.startedBy, run.organizationId, {
       run_id: run.id,
@@ -3210,7 +3243,7 @@ export async function reapRunsWithStoppedSandbox(
     if (up) continue;
     // Closed first, so the holder's loop, once the abort ends it, loses
     // the compare and set rather than recording a cancel.
-    await failRunAsInterrupted(ctx, run, { error: SANDBOX_STOPPED_RUN_ERROR, transcript: SANDBOX_STOPPED_RUN_TRANSCRIPT });
+    await failRunAsInterrupted(ctx, run, { error: SANDBOX_STOPPED_RUN_ERROR, transcript: SANDBOX_STOPPED_RUN_TRANSCRIPT, fault: "sandbox" });
     requestRunAbort(ctx, run.id);
     closed.push(run.id);
     ctx.analytics?.captureException(new Error(`run ${run.id} outlived its sandbox`), run.startedBy, run.organizationId, {
@@ -3570,7 +3603,7 @@ async function resumeInterruptedRun(
       return;
     }
     reportExecFailure(ctx, run.id, subject, err);
-    await finishRun(ctx, run.id, { ok: false, error: execFailureReason(ctx, err) }, null);
+    await finishRun(ctx, run.id, { ok: false, error: execFailureReason(ctx, err), fault: execFailureFault(err) }, null);
     emitBoard("failed");
     await subject.settle(ctx);
     return;

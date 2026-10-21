@@ -28,7 +28,7 @@ import { ensureLocalUser, type AppContext } from "../context.js";
 import { loadEnv } from "../env.js";
 import { EventBus } from "../events.js";
 import { SecretBox } from "../secrets.js";
-import { SWARM_BRANCH_LOST_MESSAGE, unbilledReason } from "../unbilled-reasons.js";
+import { SWARM_BRANCH_LOST_MESSAGE, infraFailureReason } from "../infra-failures.js";
 import { executeRun } from "./run-executor.js";
 import { singleDriver } from "./sandbox-driver.js";
 
@@ -235,7 +235,7 @@ async function systemLines(runId: string): Promise<string[]> {
 function assertRefused(row: Awaited<ReturnType<typeof runRow>>) {
   assert.equal(row.status, "failed");
   assert.equal(row.error, SWARM_BRANCH_LOST_MESSAGE);
-  assert.equal(unbilledReason(row.error)?.id, "swarm-branch-lost", "no agent ran, so it is not billed");
+  assert.equal(infraFailureReason(row.error)?.id, "swarm-branch-lost", "no agent ran, so it is not billed");
   assert.equal(provisioned, 0, "no machine was made on a branch without the landed work");
   assert.ok(
     captured.some((entry) => entry.properties.source === "swarm_branch_lost"),

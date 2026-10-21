@@ -20,6 +20,7 @@ import {
   type RepositoryImportOutcome,
   type SandboxDriver,
   type SandboxHandle,
+  GIT_UNREACHABLE,
   ProvisionFailure,
   type ProvisionBlame,
   type ProvisionPhase,
@@ -338,7 +339,7 @@ export function spriteBlame(phase: ProvisionPhase, err: unknown): ProvisionBlame
     return "provider";
   }
   const stderr = (err as Error & { stderr?: unknown }).stderr;
-  if (typeof stderr === "string" && /Could not resolve host|Connection timed out|Failed to connect to|Network is unreachable/i.test(stderr)) {
+  if (typeof stderr === "string" && GIT_UNREACHABLE.test(stderr)) {
     return "provider";
   }
   return "project";

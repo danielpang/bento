@@ -8,6 +8,7 @@ import {
   ModalProvisionLeak,
   canHibernate,
   ProvisionFailure,
+  findProvisionFailure,
   persistedSandboxProvider,
   provisionBlame,
   sandboxErrorKind,
@@ -470,9 +471,10 @@ export async function provisionWorkspace(
       const movingOn = next !== undefined && blame !== "project";
       await cleanupFailedAttempt(ctx, candidate, err, input.owner, workspaceKey, movingOn);
       const reason = provisionFailureCause(err);
+      const tagged = findProvisionFailure(err);
       const failure = {
         provider: candidate.provider,
-        ...(err instanceof ProvisionFailure ? { phase: err.phase, blame: err.blame } : {}),
+        ...(tagged ? { phase: tagged.phase, blame: tagged.blame } : {}),
         reason,
       };
       /**
@@ -510,7 +512,7 @@ export async function provisionWorkspace(
         provider: candidate.provider,
         next_provider: next.provider,
         error_kind: failedEvent.errorKind,
-        ...(err instanceof ProvisionFailure ? { phase: err.phase, blame: err.blame } : {}),
+        ...(tagged ? { phase: tagged.phase, blame: tagged.blame } : {}),
         ...provisionFailureContext(err),
         project_id: input.projectId,
         ...("featureId" in input.owner
@@ -617,7 +619,9 @@ export async function provisionWorkspace(
  */
 export function provisionFailureCause(err: unknown): unknown {
   if (err instanceof SandboxProvisionError) return provisionFailureCause(err.cause);
-  if (err instanceof ModalProvisionLeak || err instanceof ProvisionFailure) return err.cause ?? err;
+  if (err instanceof ModalProvisionLeak || err instanceof ProvisionFailure) {
+    return err.cause === undefined ? err : provisionFailureCause(err.cause);
+  }
   return err;
 }
 
