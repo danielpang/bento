@@ -10,7 +10,6 @@ import {
   signOut,
 } from "../auth-client.js";
 import { useToast } from "./Toasts.js";
-import { BetaOnly } from "../beta.js";
 import { MASCOT_MAX_CARDS } from "../board-mascots.js";
 
 /**
@@ -97,9 +96,7 @@ export function AccountSettings({ client, mode }: { client: BentoClient; mode: "
     return (
       <>
         <OnboardingCard client={client} />
-        <BetaOnly>
-          <MascotsCard client={client} />
-        </BetaOnly>
+        <MascotsCard client={client} />
       </>
     );
   }
@@ -143,9 +140,7 @@ function MultiAccountSettings({ client }: { client: BentoClient }) {
       <p className="muted">Your sign in, and the door out. Both deletions below are permanent.</p>
 
       <OnboardingCard client={client} />
-      <BetaOnly>
-        <MascotsCard client={client} />
-      </BetaOnly>
+      <MascotsCard client={client} />
 
       <section className="section settings-card">
         <h3 className="settings-title">Signed in as</h3>
