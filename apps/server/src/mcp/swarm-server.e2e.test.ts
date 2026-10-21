@@ -288,6 +288,29 @@ test("a role's tools are the only tools it has", async () => {
   }
 });
 
+test("a planner's cancel keeps its reason, and a replacement sits beside what it replaced", async () => {
+  const { swarmId, token } = await agentOn("planner");
+  const group = await makeTask(swarmId, { nodeType: "plan", title: "group" });
+  const first = await makeTask(swarmId, { parentId: group.id, title: "first", position: 0 });
+  const old = await makeTask(swarmId, { parentId: group.id, title: "old", position: 1 });
+  const last = await makeTask(swarmId, { parentId: group.id, title: "last", position: 2 });
+
+  const cancelled = await call(token, "cancel_task", { taskId: old.id, reason: "The API it targets was removed." });
+  assert.ok(!cancelled.isError, cancelled.text);
+  const withdrawn = (await task(old.id))!;
+  assert.equal(withdrawn.flags.cancelReason, "The API it targets was removed.");
+  assert.equal(withdrawn.flags.cancelledBy, "planner");
+
+  const created = await call(token, "create_task", { title: "new", replaces: old.id });
+  assert.ok(!created.isError, created.text);
+  const rows = await db.select().from(swarmTasks).where(eq(swarmTasks.parentId, group.id));
+  const replacement = rows.find((row) => row.title === "new")!;
+  assert.equal(replacement.flags.replaces, old.id);
+  assert.equal((await task(old.id))!.flags.replacedBy, replacement.id);
+  const order = rows.sort((a, b) => a.position - b.position).map((row) => row.id);
+  assert.deepEqual(order, [first.id, old.id, replacement.id, last.id], "the replacement comes right after the task it replaced");
+});
+
 test("a planner token for one swarm cannot read or change another", async () => {
   const a = await agentOn("planner");
   const b = await agentOn("planner");
