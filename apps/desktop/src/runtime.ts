@@ -4,6 +4,7 @@ import path from "node:path";
 import { ensureLocalPostgres, startServer, type RunningServer } from "@bento/server";
 import { createDockerClient } from "@bento/sandbox";
 import type { RuntimeCommand, RuntimeEvent } from "./contracts.js";
+import { ensureDockerRunning, realDockerStartDeps } from "./docker-start.js";
 import { parseBuildStep, sandboxProgressMessage } from "./sandbox-progress.js";
 
 const parent = process.parentPort;
@@ -17,11 +18,15 @@ let stopping = false;
 async function start(command: Extract<RuntimeCommand, { type: "start" }>): Promise<void> {
   const { settings } = command;
   await mkdir(settings.dataDir, { recursive: true });
+  // Docker sandboxes need Docker, and so does the managed database when
+  // no PostgreSQL URL was given: start OrbStack or Docker Desktop if it
+  // is installed and not running.
+  if (settings.sandbox === "docker" || !settings.databaseUrl) {
+    await ensureDockerRunning(realDockerStartDeps(), (message) => send({ type: "progress", message }), () => stopping);
+    if (stopping) return;
+  }
   if (settings.sandbox === "docker") {
     const docker = createDockerClient();
-    try { await docker.ping(); }
-    catch { throw new Error("Start Docker Desktop or OrbStack, then try again. Local agents use Docker sandboxes."); }
-    if (stopping) return;
     const images = await docker.listImages({ filters: { reference: [settings.sandboxImage] } });
     if (!images.length) {
       // One step installs every agent CLI and runs for minutes, so the
