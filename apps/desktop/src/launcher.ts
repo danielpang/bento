@@ -9,6 +9,7 @@ const actions: Record<DesktopMode, { id: string; label: string }> = {
   remote: { id: "connect", label: "Connect" },
 };
 let pressed: DesktopMode = "local";
+let runningLocal: DesktopStatus["local"];
 
 function renderIsolation() {
   element("isolation-note").hidden = element<HTMLSelectElement>("sandbox").value !== "local-process";
@@ -26,9 +27,30 @@ function renderStatus(status: DesktopStatus) {
   element("show-console").hidden = status.phase !== "ready";
   element("login").hidden = status.phase !== "login";
   element("user-code").textContent = status.userCode ?? "";
+  renderLocal(status.local);
 }
 
-function showError(error: unknown) { renderStatus({ phase: "error", message: error instanceof Error ? error.message.replace(/^Error invoking remote method '[^']+': Error: /, "") : String(error) }); }
+/**
+ * While local Bento runs, Advanced settings show what it runs with and
+ * cannot be changed: Start opens another window on it, it does not
+ * restart it. The beta box stays live, since Start applies it.
+ */
+function renderLocal(local: DesktopStatus["local"]) {
+  runningLocal = local;
+  const locked = Boolean(local);
+  if (local) {
+    field("data-dir").value = local.dataDir;
+    field("database-url").value = local.databaseUrl;
+    field("sandbox-image").value = local.sandboxImage;
+    element<HTMLSelectElement>("sandbox").value = local.sandbox;
+    renderIsolation();
+  }
+  for (const id of ["data-dir", "choose-directory", "database-url", "sandbox-image", "sandbox"]) {
+    element<HTMLInputElement>(id).disabled = locked;
+  }
+}
+
+function showError(error: unknown) { renderStatus({ phase: "error", message: error instanceof Error ? error.message.replace(/^Error invoking remote method '[^']+': Error: /, "") : String(error), ...(runningLocal ? { local: runningLocal } : {}) }); }
 
 async function start() {
   const settings = await bridge.settings();

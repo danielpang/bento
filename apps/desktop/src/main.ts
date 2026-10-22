@@ -51,8 +51,8 @@ const backgrounds = { light: "#f2f1ed", dark: "#0e0d0b", navy: "#0a0e16" };
 let appearance: keyof typeof backgrounds = nativeTheme.shouldUseDarkColors ? "dark" : "light";
 
 function publish(next: DesktopStatus) {
-  status = next;
-  if (launcher && !launcher.isDestroyed()) launcher.webContents.send("desktop:status", next);
+  status = withLocal(next);
+  if (launcher && !launcher.isDestroyed()) launcher.webContents.send("desktop:status", status);
 }
 
 async function boot() {
@@ -156,6 +156,15 @@ function consoleConnection(event: IpcMainInvokeEvent): Connection {
   return connection;
 }
 
+/** The status with the settings local Bento runs with, when it runs. */
+function withLocal(next: DesktopStatus): DesktopStatus {
+  const { local: _stale, ...rest } = next;
+  const running = connections.get("local")?.settings;
+  if (!running) return rest;
+  const { dataDir, databaseUrl, sandbox, sandboxImage } = running;
+  return { ...rest, local: { dataDir, databaseUrl, sandbox, sandboxImage } };
+}
+
 /** The connection a new window or a menu command means when none is in focus. */
 function recentConnection(): Connection | undefined {
   if (lastUsed && connections.get(lastUsed.key) === lastUsed) return lastUsed;
@@ -190,7 +199,7 @@ function installIpc() {
   }
   handle("launcher:settings", "launcher", () => store.settings);
   handle("launcher:appearance", "launcher", () => ({ theme: appearance, fullscreen: launcher!.isFullScreen() }));
-  handle("launcher:status", "launcher", () => status);
+  handle("launcher:status", "launcher", () => withLocal(status));
   handle("launcher:connect", "launcher", (_event, settings) => connect(validateSettings(settings)));
   handle("launcher:cancel", "launcher", async () => {
     cancelled?.abort();

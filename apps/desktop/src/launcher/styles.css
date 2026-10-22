@@ -29,6 +29,8 @@ input:not([type="radio"]):not([type="checkbox"]), select { display: block; width
 button { font: inherit; font-weight: 500; border: 1px solid transparent; border-radius: 6px; padding: 10px 15px; color: #fff; background: var(--accent); cursor: pointer; }
 button.secondary { background: var(--panel); border-color: var(--line); color: inherit; }
 button:disabled { opacity: .5; cursor: wait; }
+/* Advanced settings while local Bento runs: shown, not editable. */
+details :is(input, select, button):disabled { opacity: .55; cursor: not-allowed; }
 button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .status { margin: 20px 0 12px; line-height: 1.5; color: var(--muted); font-size: 13px; text-align: center; }
 .status.error, .warning { color: #aa3528; }
