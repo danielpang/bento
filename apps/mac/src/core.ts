@@ -131,6 +131,8 @@ export interface Model {
   readonly mode: Mode;
   /** Server address typed on the setup screen, for client and runner. */
   readonly serverEdit: TextEditState;
+  /** The setup screen's choice for a server: agents here (runner) or there (client). */
+  readonly agentsHere: boolean;
   readonly setupDone: boolean;
   readonly helperState: HelperState;
   /** Bearer token for a hosted server. Empty in local mode. */
@@ -277,6 +279,8 @@ export type Msg =
   | { readonly kind: "choose_client" }
   | { readonly kind: "choose_runner" }
   | { readonly kind: "choose_local" }
+  | { readonly kind: "set_agents_on_server" }
+  | { readonly kind: "set_agents_here" }
   | { readonly kind: "toggle_beta_opt_in" }
   | { readonly kind: "home_found"; readonly value: Uint8Array }
   | { readonly kind: "beta_pref_read"; readonly body: Uint8Array }
@@ -722,6 +726,7 @@ export function initialModel(): Model {
     baseUrl: new Uint8Array(0),
     mode: "local",
     serverEdit: seedEdit(asciiBytes("https://app.usebento.ai")),
+    agentsHere: false,
     setupDone: false,
     helperState: "idle",
     token: new Uint8Array(0),
@@ -1304,6 +1309,12 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
       }
       return model;
     }
+
+    case "set_agents_on_server":
+      return { ...model, agentsHere: false };
+
+    case "set_agents_here":
+      return { ...model, agentsHere: true };
 
     /**
      * The beta choice, on the first screen or in Settings. Remembered in
@@ -3936,6 +3947,11 @@ export function helperFailed(model: Model): boolean {
  */
 export function connected(model: Model): boolean {
   return model.setupDone && model.helperState === "ready";
+}
+
+/** The mirror of agentsHere, so the setup toggle reads as one choice of two. */
+export function agentsOnServer(model: Model): boolean {
+  return !model.agentsHere;
 }
 
 /** Settings offers the beta switch to an app running its own server. */

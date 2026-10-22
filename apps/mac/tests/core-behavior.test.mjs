@@ -502,3 +502,11 @@ test("settings turns beta off on a running local server and reads the switch bac
   assert.ok(result.commands.some((line) => line.includes("/api/account/beta/plain")));
   assert.equal(result.models.at(-1).betaOptIn, false);
 });
+
+test("the setup toggle picks where agents run, and the server address starts at the hosted one", () => {
+  const result = runCore([{ kind: "set_agents_here" }, { kind: "set_agents_on_server" }, { kind: "set_agents_here" }]);
+  const models = result.models;
+  assert.equal(models.at(-1).agentsHere, true);
+  assert.equal(models.at(-2).agentsHere, false);
+  assert.match(JSON.stringify(models.at(-1).serverEdit), /https:\/\/app\.usebento\.ai/);
+});

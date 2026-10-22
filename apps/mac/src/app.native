@@ -93,37 +93,61 @@
   <separator />
 
   <if test="{needsSetup}">
-    <!-- Same three choices the bento command offers. -->
-    <column grow="1" gap="14" padding="24" main="center">
+    <!-- Same three choices the bento command offers: two cards side by
+         side, centered, each with one compact action at its foot. -->
+    <column grow="1" gap="24" padding="24" main="center" cross="center">
       <text>How should this app run?</text>
-      <column gap="10" background="surface" radius="md" padding="14">
-        <text>Run locally</text>
-        <text foreground="text_muted" wrap="true">Your own database, board, and agents in containers. Nothing leaves this computer.</text>
-        <!-- Remembered between launches, and applied to the local server
-             each time it starts. Settings turns it off again. One box per
-             state, each keyed: a checkbox keeps its own tick once drawn,
-             so the remembered choice arriving after the first frame
-             would otherwise never show. -->
-        <if test="{betaOptIn}">
-          <checkbox key="beta-setup-on" checked="true" on-toggle="toggle_beta_opt_in" text="Try beta and experimental features" />
-        </if>
-        <else>
-          <checkbox key="beta-setup-off" checked="false" on-toggle="toggle_beta_opt_in" text="Try beta and experimental features" />
-        </else>
-        <text foreground="text_muted" wrap="true">Warning beta features can cause issues.</text>
-        <button variant="primary" on-press="choose_local">Start</button>
-      </column>
+      <row gap="20">
+        <card width="380" padding="20">
+          <column gap="12" grow="1">
+          <text>Run locally</text>
+          <text foreground="text_muted" wrap="true">Your own database, board, and agents in containers.</text>
+          <!-- Remembered between launches, and applied to the local server
+               each time it starts. Settings turns it off again. One box per
+               state, each keyed: a checkbox keeps its own tick once drawn,
+               so the remembered choice arriving after the first frame
+               would otherwise never show. -->
+          <if test="{betaOptIn}">
+            <checkbox key="beta-setup-on" checked="true" on-toggle="toggle_beta_opt_in" text="Try beta and experimental features" />
+          </if>
+          <else>
+            <checkbox key="beta-setup-off" checked="false" on-toggle="toggle_beta_opt_in" text="Try beta and experimental features" />
+          </else>
+          <text foreground="text_muted" wrap="true">Warning beta features can cause issues.</text>
+          <spacer grow="1" />
+          <row>
+            <spacer grow="1" />
+            <button variant="primary" on-press="choose_local">Start</button>
+          </row>
+          </column>
+        </card>
 
-      <column gap="10" background="surface" radius="md" padding="14">
-        <text>Use a server</text>
-        <text foreground="text_muted" wrap="true">Your team's board and history live on the server. Choose whether agents run there or here.</text>
-        <text-field text="{serverText}" placeholder="https://bento.example.com" on-input="server_edit" label="Server address" />
-        <row gap="8">
-          <button on-press="choose_client">Agents on the server</button>
-          <button on-press="choose_runner">Agents on this machine</button>
-        </row>
-        <text foreground="text_muted" wrap="true">Running agents here keeps your code and agent keys on this computer. Teammates still see the board, but nothing is pushed for you.</text>
-      </column>
+        <card width="380" padding="20">
+          <column gap="12" grow="1">
+          <text>Use a server</text>
+          <text foreground="text_muted" wrap="true">Your team's board and history live on the server. Choose whether agents run there or here.</text>
+          <text foreground="text_muted">Server address</text>
+          <text-field text="{serverText}" placeholder="https://app.usebento.ai" on-input="server_edit" label="Server address" />
+          <!-- A segmented choice rather than two buttons that each start
+               something: Connect below is the one action. -->
+          <tabs label="Where agents run">
+            <button selected="{agentsOnServer}" on-press="set_agents_on_server">Agents on the server</button>
+            <button selected="{agentsHere}" on-press="set_agents_here">Agents on this machine</button>
+          </tabs>
+          <spacer grow="1" />
+          <row>
+            <spacer grow="1" />
+            <!-- One action; the toggle above says which setup it starts. -->
+            <if test="{agentsHere}">
+              <button key="connect-runner" on-press="choose_runner">Connect</button>
+            </if>
+            <else>
+              <button key="connect-client" on-press="choose_client">Connect</button>
+            </else>
+          </row>
+          </column>
+        </card>
+      </row>
     </column>
   </if>
   <else>
