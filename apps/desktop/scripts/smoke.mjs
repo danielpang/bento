@@ -61,14 +61,14 @@ try {
   desktop.context().on("response", response => pending.delete(response.request()));
   desktop.context().on("requestfailed", request => pending.delete(request));
   const launcher = await desktop.firstWindow();
-  await launcher.getByRole("heading", { name: "Where do you want to work?" }).waitFor();
+  await launcher.getByRole("heading", { name: "How should this app run?" }).waitFor();
   await launcher.locator("summary").click();
   await launcher.locator("#data-dir").fill(path.join(temporary, "state"));
   await launcher.locator("#database-url").fill(databaseUrl.href);
   await launcher.locator("#sandbox").selectOption(process.env.BENTO_DESKTOP_SANDBOX ?? "local-process");
   await launcher.screenshot({ path: path.join(temporary, "connection.png") });
   const consolePromise = desktop.waitForEvent("window", { timeout: 60_000 });
-  await launcher.getByRole("button", { name: "Open Bento", exact: true }).click();
+  await launcher.getByRole("button", { name: "Start", exact: true }).click();
   page = await consolePromise;
   page.on("pageerror", error => errors.push(error.message));
   page.on("console", message => { if (message.type() === "error") console.error("Renderer:", message.text()); });

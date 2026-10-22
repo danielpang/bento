@@ -344,7 +344,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
 
   const customProviderError = customProvider && customProviderRunError(customProvider, profile.cli);
   if (customProvider && (
-    customProviderError || !(await isBetaRun(ctx, { actingUserId: run.startedBy, projectOwnerId: project.ownerId }))
+    customProviderError || !(await isBetaRun(ctx, { actingUserId: run.startedBy, projectOwnerId: project.ownerId, organizationId: project.organizationId }))
   )) {
     await finishRun(ctx, runId, {
       ok: false,

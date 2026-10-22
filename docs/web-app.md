@@ -266,7 +266,7 @@ Updates via SSE: `/api/board/:id/events`.
 
 **Search:** filtered in `Board.tsx` via `matchesQuery` (`apps/web/src/search.test.ts`). Punctuation-normalized matching.
 
-**Board and Sessions (beta):** Board shows the pipeline; Sessions is the grouped card list and conversation workspace. There is no separate Board/List toggle. Both share search and the remembered All cards, Needs you, and Running filters. Sessions retains the latest agent, run count, activity date, and reported cost, with recent conversations first within each group. Cards awaiting their first run appear under Up next. These controls use `beta-testers`, enabled in local mode.
+**Board and Sessions (beta):** Board shows the pipeline; Sessions is the grouped card list and conversation workspace. There is no separate Board/List toggle. Both share search and the remembered All cards, Needs you, and Running filters. Sessions retains the latest agent, run count, activity date, and reported cost, with recent conversations first within each group. Cards awaiting their first run appear under Up next. These controls are beta. In the desktop app, tick "Try beta and experimental features" under Advanced settings before Start. On a hosted server, a team owner or admin allows beta features in Settings, Team, and each member turns them on in Settings, Account.
 
 **Board focus (beta):** Needs you includes held cards and failed or stopped runs, excluding completed cards and cards with an active agent.
 

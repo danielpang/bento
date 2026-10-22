@@ -31,8 +31,8 @@ import { claimNodeMessages, requeueSwarmMessages } from "./node-messages.js";
  * - Every other role (judge, resolver, subplanner) is headless and
  *   closes stdin after its first turn.
  *
- * Behind the beta testers flag like every capability handed to an
- * agent, because a held planner is a held machine.
+ * Behind beta features like every capability handed to an agent,
+ * because a held planner is a held machine.
  */
 
 /** The leaves whose agents the planner is waiting on. */
@@ -128,7 +128,11 @@ export async function swarmLiveConversation(
 ): Promise<LiveConversation | null> {
   const { run, task } = subject;
   if (run.role !== "planner" && !(run.role === "worker" && task)) return null;
-  const beta = await isBetaRun(ctx, { actingUserId: run.startedBy, projectOwnerId: subject.project.ownerId });
+  const beta = await isBetaRun(ctx, {
+    actingUserId: run.startedBy,
+    projectOwnerId: subject.project.ownerId,
+    organizationId: subject.project.organizationId,
+  });
   if (!beta) return null;
   if (run.role === "planner") {
     return plannerConversation(ctx, { swarmId: subject.swarm.id, idleSec: ctx.env.BENTO_SWARM_PLANNER_HOLD_SEC });

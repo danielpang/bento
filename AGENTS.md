@@ -547,7 +547,7 @@ and back to queued when the run ends without one
 back by the coordinator instead, which reads how the run ended to decide
 whether they wake another planner.
 
-Both are behind the beta testers flag (`isBetaRun` in
+Both are behind beta features (`isBetaRun` in
 `swarmLiveConversation`), because a held planner is a held machine.
 
 ## A live session is a line per message or a protocol, and a reattach never decides again
@@ -943,38 +943,55 @@ anything its sandbox can, so one prompt injection would exfiltrate the
 operator's key. Local mode uses the process environment because there is
 one trusted user and no tenant boundary.
 
-## Only large features go behind the beta testers flag
+## Only large features go behind beta features
 
-A large feature, one on the scale of Bento Swarm, goes behind
-`beta-testers`, a permanent PostHog flag, while it is unfinished.
+A large feature, one on the scale of Bento Swarm, goes behind beta
+features while it is unfinished.
 Everything else ships to every signed-in user: a new capability for an
 existing agent, a new control on an existing screen, an endpoint that
 serves one. Do not gate a change because it is new. When it is unclear
 whether a feature is large enough, ask rather than gate it by default.
 
-Add people by putting their email on that flag's release conditions.
-Local mode is always on. When a feature is gated:
+What turns beta on depends on the mode, and nothing else turns it on;
+there is no PostHog flag. `hasBetaFeatures` in `feature-flags.ts` is the
+one place that decides:
 
-- Server: `ctx.featureFlags.isBetaTester(userId, { email })`. A beta
-  endpoint that a non-tester must not learn about answers 404 via
-  `getBetaTester`, the same convention as the access helpers.
+- Local Bento reads its startup flag, `BENTO_BETA_FEATURES`, which the
+  desktop app sets from the launcher's "Try beta and experimental
+  features" box. Nothing in the database counts, so it changes only by
+  restarting local Bento, and the launcher locks the box while it runs.
+- A hosted server needs two things: the team allows it
+  (`identity.organization.beta_features_allowed`, an owner or admin's
+  setting in Settings, Team) and the person turned it on
+  (`identity.user.beta_features`, Settings, Account). Both are off
+  until someone turns them on. The team asked about is the one the
+  work belongs to: the open team for a page, the project's team for a
+  run, the connection's team for an MCP call. Work in no team is never
+  beta.
+
+When a feature is gated:
+
+- Server: `hasBetaFeatures(ctx, userId, organizationId)`. A beta
+  endpoint that someone without beta must not learn about answers 404
+  via `getBetaTester` (which asks about the open team), the same
+  convention as the access helpers.
 - Console: wrap the UI in `<BetaOnly>` from `apps/web/src/beta.tsx`.
   `useBetaTesters()` is the boolean for lighter checks.
 - Orchestrator: a run has no session, and not always a person. The
   console and the API start one as somebody; the gate evaluator and the
   schedules start one as nobody. `isBetaRun` asks about the acting
   member when there is one and the project's owner when there is not,
-  so a team's auto-started stages behave like the runs it starts by
-  hand. A capability given to an agent belongs behind the same flag as
-  the console that shows what the agent did with it, until both are
+  in the project's team, so a team's auto-started stages behave like
+  the runs it starts by hand. A capability given to an agent belongs behind the same switch
+  as the console that shows what the agent did with it, until both are
   ready. The card tools on the MCP gateway (`create_card`,
   `set_pull_request`, `add_pull_request_comment`) are rolled out to
-  every run; only the board's group view of split cards is still on
-  the flag. The sandbox provider is not a product setting at all: every
+  every run; only the board's group view of split cards is still
+  beta. The sandbox provider is not a product setting at all: every
   project is on `auto`, beta or not, and nothing in the console or the
   API changes it.
 
-Do not mint a second flag for "show this to testers". This is that flag.
+Do not mint a flag for "show this to testers". This switch is that.
 
 ## Verify against something real before calling it done
 

@@ -9,6 +9,7 @@ import { tenantDb as db } from "../middleware/tenant.js";
 
 const patchOnboarding = z.object({ walkthrough: z.boolean() });
 const patchMascots = z.object({ show: z.boolean() });
+const patchBeta = z.object({ enabled: z.boolean() });
 
 /**
  * Preferences that belong to the person signed in, in both modes.
@@ -59,5 +60,21 @@ export function accountRoutes(ctx: AppContext) {
         .returning({ show: user.boardMascots });
       if (!row) return c.json({ error: "not found" }, 404);
       return c.json({ show: row.show });
+    })
+    /**
+     * This person's own beta switch on a hosted server. It counts only in
+     * a team that allows beta. Local Bento has no switch (its startup flag
+     * decides), so there is nothing here to change.
+     */
+    .patch("/beta", zValidator("json", patchBeta), async (c) => {
+      if (ctx.env.BENTO_MODE !== "multi") return c.json({ error: "not found" }, 404);
+      const { enabled } = c.req.valid("json");
+      const [row] = await db(c, ctx)
+        .update(user)
+        .set({ betaFeatures: enabled, updatedAt: new Date() })
+        .where(eq(user.id, actor(c)))
+        .returning({ enabled: user.betaFeatures });
+      if (!row) return c.json({ error: "not found" }, 404);
+      return c.json({ enabled: row.enabled });
     });
 }

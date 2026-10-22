@@ -53,9 +53,8 @@ try {
   await post("/api/auth/organization/set-active", { organizationId: organization.id }, token);
   desktop = await launch();
   let launcher = await desktop.firstWindow();
-  await launcher.locator('input[value="remote"]').check();
   await launcher.locator("#server-url").fill(origin);
-  await launcher.getByRole("button", { name: "Open Bento", exact: true }).click();
+  await launcher.getByRole("button", { name: "Connect", exact: true }).click();
   await launcher.locator("#user-code").waitFor({ state: "visible" });
   const code = (await launcher.locator("#user-code").innerText()).trim();
   assert.ok(code.length > 3);

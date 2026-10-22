@@ -11,6 +11,7 @@ import {
 } from "../auth-client.js";
 import { useToast } from "./Toasts.js";
 import { MASCOT_MAX_CARDS } from "../board-mascots.js";
+import { useSetBetaTesters } from "../beta.js";
 
 /**
  * Whether a membership holds the owner role.
@@ -75,8 +76,8 @@ function ownedAccountMessage(names: string[]): string {
 }
 
 /**
- * The person's own account: the onboarding walkthrough and mascot
- * switches, and the way out.
+ * The person's own account: the onboarding walkthrough, mascot and
+ * beta features switches, and the way out.
  *
  * The two deletions are irreversible and neither is urgent, so they sit
  * on this tab rather than beside the controls people use daily, and
@@ -84,7 +85,8 @@ function ownedAccountMessage(names: string[]): string {
  * account is confirmed a second time by email; deleting an organization
  * takes its boards with it and happens at once, so it is the one that
  * has to be spelled out hardest. Local mode has no sign in and no
- * organizations, so there the tab is only the two switches.
+ * organizations, so there the tab is only the two switches; beta is the
+ * desktop app's startup flag there.
  */
 export function AccountSettings({ client, mode }: { client: BentoClient; mode: "local" | "multi" }) {
   // Local mode has one trusted user and no sign in, so the only things
@@ -141,6 +143,7 @@ function MultiAccountSettings({ client }: { client: BentoClient }) {
 
       <OnboardingCard client={client} />
       <MascotsCard client={client} />
+      <BetaFeaturesCard client={client} />
 
       <section className="section settings-card">
         <h3 className="settings-title">Signed in as</h3>
@@ -353,6 +356,65 @@ function MascotsCard({ client }: { client: BentoClient }) {
         />
         <span className="gate-check-text">Always show mascots</span>
       </label>
+    </section>
+  );
+}
+
+/**
+ * The person's own switch for unfinished product, such as Bento Swarm,
+ * on a hosted server. It counts only in a team that allows beta, so it
+ * is disabled with a note when the open team does not. Local Bento has
+ * no card: the desktop app's startup flag decides there.
+ */
+function BetaFeaturesCard({ client }: { client: BentoClient }) {
+  const toast = useToast();
+  const setBetaTesters = useSetBetaTesters();
+  const [state, setState] = useState<{ enabled: boolean; allowed: boolean } | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void client
+      .flags()
+      .then((snapshot) => {
+        if (!cancelled) setState(snapshot.betaFeatures ?? null);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) toast.fail(err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [client, toast]);
+
+  async function change(next: boolean) {
+    setBusy(true);
+    try {
+      await client.setBetaFeatures(next);
+      const snapshot = await client.flags();
+      setState(snapshot.betaFeatures ?? null);
+      setBetaTesters(snapshot.betaTesters);
+    } catch (err) {
+      toast.fail(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="section settings-card">
+      <h3 className="settings-title">Beta features</h3>
+      <label className="gate-check">
+        <input
+          type="checkbox"
+          checked={state?.enabled === true}
+          disabled={busy || state === null || !state.allowed}
+          onChange={(e) => void change(e.target.checked)}
+        />
+        <span className="gate-check-text">Try beta and experimental features</span>
+      </label>
+      <p className="muted">Warning beta features can cause issues.</p>
+      {state && !state.allowed && <p className="muted">Ask a team owner or admin to allow beta features.</p>}
     </section>
   );
 }

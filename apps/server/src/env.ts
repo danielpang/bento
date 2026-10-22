@@ -214,6 +214,17 @@ const envSchema = z.object({
     .optional(),
 
   /**
+   * Beta features (Bento Swarm and the rest) for a local server. Local
+   * mode only: the desktop launcher's checkbox sets it, and it is read
+   * at startup, so changing it means restarting. Multi mode ignores it;
+   * there a team allows beta and each person turns it on.
+   */
+  BENTO_BETA_FEATURES: z
+    .enum(["true", "false"])
+    .transform((v) => v === "true")
+    .optional(),
+
+  /**
    * SMTP. Without SMTP_HOST, invitation mail is written to the log
    * instead of sent, and the link can be passed along by hand.
    */
@@ -258,15 +269,14 @@ const envSchema = z.object({
   AWS_REGION: z.string().optional(),
 
   /**
-   * PostHog: product analytics, error tracking, log export, and the
-   * beta-testers feature flag. All four read the same project token.
+   * PostHog: product analytics, error tracking, and log export. All
+   * three read the same project token.
    * The console also reads it from /api/health to capture browser
    * exceptions. Local mode never sends, even if a leftover key is in
    * the environment: a laptop is not a telemetry source. Multi mode
    * without a key also sends nothing, and the server says so once at
    * boot, because events silently missed are worse than a line of
-   * noise. New product that is not ready for every signed-in user is
-   * gated on `beta-testers`.
+   * noise.
    */
   POSTHOG_API_KEY: z.string().optional(),
   POSTHOG_HOST: z.string().default("https://us.i.posthog.com"),

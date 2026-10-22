@@ -2,17 +2,18 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from "
 import type { BentoClient } from "@bento/api-client";
 
 /**
- * Whether the signed-in user is on the permanent beta-testers flag.
+ * Whether the signed-in user turned beta features on (Settings, Account).
  *
  * New product that is not ready for every signed-in user renders
- * through `BetaOnly` (or `useBetaTesters` for a lighter check). The
- * server evaluates PostHog; this module only consumes `/api/flags`.
- * Hidden until that answer arrives, so unfinished UI cannot flash.
- *
- * Add people in PostHog by putting their email on the `beta-testers`
- * flag's release conditions. Local mode is always on.
+ * through `BetaOnly` (or `useBetaTesters` for a lighter check). This
+ * module only consumes `/api/flags`. Hidden until that answer arrives,
+ * so unfinished UI cannot flash.
  */
-const BetaTestersContext = createContext({ ready: false, enabled: false });
+const BetaTestersContext = createContext<{ ready: boolean; enabled: boolean; set: (enabled: boolean) => void }>({
+  ready: false,
+  enabled: false,
+  set: () => {},
+});
 
 export function BetaTestersProvider({
   client,
@@ -46,7 +47,17 @@ export function BetaTestersProvider({
     };
   }, [client, userId]);
 
-  return <BetaTestersContext.Provider value={{ ready, enabled }}>{children}</BetaTestersContext.Provider>;
+  return (
+    <BetaTestersContext.Provider value={{ ready, enabled, set: setEnabled }}>{children}</BetaTestersContext.Provider>
+  );
+}
+
+/**
+ * Replaces the answer after the person changed their own switch, with
+ * what the server said it now is, so the console follows without a reload.
+ */
+export function useSetBetaTesters(): (enabled: boolean) => void {
+  return useContext(BetaTestersContext).set;
 }
 
 /**
@@ -58,7 +69,7 @@ export function useBetaTesters(): boolean {
   return ready && enabled;
 }
 
-/** Renders children only for users on the beta-testers flag. */
+/** Renders children only for users with beta features on. */
 export function BetaOnly({ children }: { children: ReactNode }) {
   if (!useBetaTesters()) return null;
   return children;
@@ -69,5 +80,5 @@ export function BetaOnly({ children }: { children: ReactNode }) {
  * Tests, and a parent that already knows.
  */
 export function BetaTestersScope({ enabled, children }: { enabled: boolean; children: ReactNode }) {
-  return <BetaTestersContext.Provider value={{ ready: true, enabled }}>{children}</BetaTestersContext.Provider>;
+  return <BetaTestersContext.Provider value={{ ready: true, enabled, set: () => {} }}>{children}</BetaTestersContext.Provider>;
 }

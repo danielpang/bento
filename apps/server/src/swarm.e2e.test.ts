@@ -29,7 +29,6 @@ import { SecretBox } from "./secrets.js";
 import { ensureLocalUser, type AppContext } from "./context.js";
 import { EventBus } from "./events.js";
 import { loadEnv } from "./env.js";
-import { createFeatureFlags } from "./feature-flags.js";
 import { mintRunGrant } from "./mcp/grants.js";
 import { BENTO_SWARM_SERVER_ID } from "./mcp/swarm-server.js";
 import { taskTrailer } from "./orchestrator/swarm/branches.js";
@@ -124,6 +123,8 @@ before(async () => {
 
   const env = loadEnv({
     BENTO_MODE: "local",
+    // Swarms are beta: started with beta features on, as the desktop app does.
+    BENTO_BETA_FEATURES: "true",
     DATABASE_URL: testUrl,
     BENTO_DATA_DIR: dataDir,
     BENTO_SANDBOX_DRIVER: "local-process",
@@ -156,7 +157,6 @@ before(async () => {
     liveInputs: new Map(),
     draining: false,
     userId,
-    featureFlags: createFeatureFlags(env),
   };
   app = createApp(ctx);
 

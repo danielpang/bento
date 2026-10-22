@@ -141,7 +141,6 @@ try {
     assert.equal(Math.round(viewportHeight - box.y - box.height), 16);
 
     // A newly opened console receives the existing notice through trusted IPC.
-    await launcher.locator('input[name="mode"][value="remote"]').check();
     await launcher.locator("#server-url").fill(`http://${host}`);
     const consoleOpened = desktop.waitForEvent("window");
     await launcher.locator("#connect").click();

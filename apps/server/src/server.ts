@@ -3,7 +3,6 @@ import type { Server } from "node:http";
 import { createDb, createPool, pgBossDatabase, poolMaxForRuns, runMigrations, runEvents } from "@bento/db";
 import type { AgentEvent } from "@bento/core";
 import { createAnalytics } from "./analytics.js";
-import { createFeatureFlags } from "./feature-flags.js";
 import { startLogExport } from "./log-export.js";
 import { attachPgBus } from "./pg-bus.js";
 import { WorktreeManager } from "@bento/sandbox";
@@ -90,7 +89,6 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   // starts the more of the boot story PostHog gets to keep.
   const logExport = startLogExport(env);
   const analytics = createAnalytics(env);
-  const featureFlags = createFeatureFlags(env);
 
   /**
    * Everything below can throw: pg-boss on an unreachable database,
@@ -237,7 +235,6 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     if (githubApp) ctx.githubApp = githubApp;
     if (auth) ctx.auth = auth;
     if (analytics) ctx.analytics = analytics;
-    ctx.featureFlags = featureFlags;
 
     await registerJobs(ctx);
     // The daily job is the one that keeps the list current. This one
@@ -416,7 +413,6 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
         // Flush before the pool closes: capture is fire and forget, so
         // whatever queued in the last seconds is only on this machine.
         await analytics?.shutdown().catch(() => {});
-        await featureFlags.shutdown().catch(() => {});
         await logExport?.stop().catch(() => {});
         await bossPool.end().catch(() => {});
         await pool.end().catch(() => {});
@@ -425,7 +421,6 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
   } catch (err) {
     analytics?.captureException(err, null, null, { source: "boot" });
     await analytics?.shutdown().catch(() => {});
-    await featureFlags.shutdown().catch(() => {});
     await logExport?.stop().catch(() => {});
     throw err;
   }

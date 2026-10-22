@@ -13,6 +13,8 @@ export interface DesktopSettings {
   databaseUrl: string;
   sandbox: "docker" | "local-process";
   sandboxImage: string;
+  /** The local user's beta features switch, written to the local server on each start. */
+  betaFeatures: boolean;
 }
 
 export interface DesktopStatus {
@@ -21,6 +23,12 @@ export interface DesktopStatus {
   serverUrl?: string;
   userCode?: string;
   verificationUrl?: string;
+  /**
+   * The settings local Bento is running with, while it runs. The launcher
+   * shows them and locks Advanced settings, since Start reopens the
+   * running local Bento rather than restarting it.
+   */
+  local?: Pick<DesktopSettings, "dataDir" | "databaseUrl" | "sandbox" | "sandboxImage" | "betaFeatures">;
 }
 
 export type RuntimeCommand =

@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { and, eq, inArray, isNull, sql, type SQL } from "drizzle-orm";
-import { mcpConnections, member, projects, user } from "@bento/db";
+import { mcpConnections, member, projects } from "@bento/db";
+import { hasBetaFeatures } from "../feature-flags.js";
 import type { AppContext } from "../context.js";
 
 /**
@@ -142,41 +143,14 @@ export function recordConnectionUse(ctx: AppContext, connectionId: string): void
 
 /**
  * Whether Bento's own MCP server is on for the member a connection acts
- * as, on the permanent `beta-testers` flag.
+ * as, in the connection's own team.
  *
  * The console hides the section and the management routes answer 404,
- * so a member off the flag cannot create a connection. This is the
+ * so a member without beta cannot create a connection. This is the
  * other half: the tool calls themselves. Without it a token minted
- * while its owner was on the flag would keep serving after they came
- * off it, which is the one direction that matters, since taking access
- * away is the whole point of an allowlist.
- *
- * The answer is cached briefly per connection because it sits on the
- * data path. Evaluating a remote flag on every tools/call would put a
- * PostHog round trip in front of each one, which is the cost
- * recordConnectionUse exists to avoid for writes. A minute is short
- * enough that removing someone takes effect while they are still
- * looking at the screen.
+ * while its owner had beta on would keep serving after they turned it
+ * off. A primary key read per call, so nothing is cached.
  */
-const BETA_TTL_MS = 60_000;
-const betaCache = new Map<string, { allowed: boolean; at: number }>();
-
-export async function connectionOwnerIsBetaTester(ctx: AppContext, ownerId: string): Promise<boolean> {
-  const now = Date.now();
-  const cached = betaCache.get(ownerId);
-  if (cached && now - cached.at < BETA_TTL_MS) return cached.allowed;
-
-  // Local mode has one trusted user and no allowlist to be off.
-  if (!ctx.featureFlags) return ctx.env.BENTO_MODE !== "multi";
-  const [row] = await ctx.db.select({ email: user.email }).from(user).where(eq(user.id, ownerId)).limit(1);
-  // Fails closed, like every other flag read here: a server that cannot
-  // reach PostHog serves no tools rather than serving them to everyone.
-  const allowed = await ctx.featureFlags.isBetaTester(ownerId, { email: row?.email ?? null });
-  betaCache.set(ownerId, { allowed, at: now });
-  return allowed;
-}
-
-/** Drops the cached decisions. For the tests, which flip the flag. */
-export function clearBetaCache(): void {
-  betaCache.clear();
+export async function connectionOwnerIsBetaTester(ctx: AppContext, ownerId: string, organizationId: string | null): Promise<boolean> {
+  return hasBetaFeatures(ctx, ownerId, organizationId);
 }

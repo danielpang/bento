@@ -89,7 +89,8 @@ before(async () => {
   );
 
   ctx = {
-    env: loadEnv({ BENTO_MODE: "local", DATABASE_URL: testUrl } as NodeJS.ProcessEnv),
+    // Beta on, because the swarm route is one of the doors checked here.
+    env: loadEnv({ BENTO_MODE: "local", DATABASE_URL: testUrl, BENTO_BETA_FEATURES: "true" } as NodeJS.ProcessEnv),
     db,
     pool,
     userId: "u1",

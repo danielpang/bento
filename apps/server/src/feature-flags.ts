@@ -1,139 +1,70 @@
-import { PostHog } from "posthog-node";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { Context } from "hono";
-import { user } from "@bento/db";
-import { posthogApiKey, type Env } from "./env.js";
+import { member, organization, user } from "@bento/db";
+import { getActiveOrganizationMembership } from "./access.js";
 import type { AppContext } from "./context.js";
 import { actor } from "./middleware/actor.js";
 
 /**
- * Permanent PostHog flags this server evaluates.
+ * Whether beta features (Bento Swarm and the rest) are on.
  *
- * `beta-testers` is the allowlist for unfinished product: a feature
- * that is not ready for every signed-in user renders only for people
- * whose email is on that flag. Add or remove people in PostHog by
- * editing the flag's release conditions. The key never changes.
+ * Local mode: the server's own startup flag, `BENTO_BETA_FEATURES`, which
+ * the desktop launcher's checkbox sets. Nothing in the database decides
+ * it, so it can only change by restarting local Bento.
  *
- * Local mode is always on. There is one trusted user and no tenant
- * boundary, so a laptop install must not hide the thing being built.
+ * Multi mode: both a team that allows beta (`identity.organization.
+ * beta_features_allowed`, an owner or admin's setting) and the person's
+ * own switch (`identity.user.beta_features`). The team asked about is
+ * the one the work belongs to; work outside any team is never beta.
  */
-export const FLAGS = {
-  BETA_TESTERS: "beta-testers",
-} as const;
-
-export type FlagKey = (typeof FLAGS)[keyof typeof FLAGS];
-
-/**
- * The PostHog surface this module needs. Narrower than the SDK so
- * tests can stub evaluation without constructing a client, and so a
- * future flags host does not have to look like posthog-node.
- */
-export interface FlagEvaluator {
-  evaluateFlags(
-    distinctId: string,
-    options?: { flagKeys?: string[]; personProperties?: Record<string, string> },
-  ): Promise<{ isEnabled(key: string): boolean }>;
-  shutdown(): Promise<void>;
-}
-
-export class FeatureFlags {
-  /**
-   * How long a PostHog round trip may take before the check fails
-   * closed. The flags endpoint is on the console's first paint, and
-   * an outage must not stall it for the SDK's default budget.
-   */
-  static readonly EVALUATE_BUDGET_MS = 2000;
-
-  constructor(
-    private readonly evaluator: FlagEvaluator | null,
-    private readonly alwaysOn: boolean,
-    private readonly budgetMs = FeatureFlags.EVALUATE_BUDGET_MS,
-  ) {}
-
-  /** True when this instance holds a PostHog client. */
-  usesPostHog(): boolean {
-    return this.evaluator !== null;
-  }
-
-  /** Whether this user is on the permanent beta-testers allowlist. */
-  isBetaTester(userId: string, person?: { email?: string | null }): Promise<boolean> {
-    return this.isEnabled(FLAGS.BETA_TESTERS, userId, person);
-  }
-
-  async isEnabled(flag: FlagKey, userId: string, person?: { email?: string | null }): Promise<boolean> {
-    if (this.alwaysOn) return true;
-    if (!this.evaluator) return false;
-    const personProperties = person?.email ? { email: person.email } : undefined;
-    try {
-      const snapshot = await withBudget(
-        this.evaluator.evaluateFlags(userId, {
-          flagKeys: [flag],
-          ...(personProperties ? { personProperties } : {}),
-        }),
-        this.budgetMs,
-      );
-      if (!snapshot) return false;
-      return snapshot.isEnabled(flag);
-    } catch (err) {
-      console.warn("feature flag evaluation failed:", err);
-      return false;
-    }
-  }
-
-  async snapshot(userId: string, person?: { email?: string | null }): Promise<{ betaTesters: boolean }> {
-    return { betaTesters: await this.isBetaTester(userId, person) };
-  }
-
-  async shutdown(): Promise<void> {
-    await this.evaluator?.shutdown();
-  }
+export async function hasBetaFeatures(ctx: AppContext, userId: string, organizationId: string | null): Promise<boolean> {
+  if (ctx.env.BENTO_MODE !== "multi") return ctx.env.BENTO_BETA_FEATURES === true;
+  if (!organizationId) return false;
+  const [row] = await ctx.db
+    .select({ allowed: organization.betaFeaturesAllowed, chosen: user.betaFeatures })
+    .from(member)
+    .innerJoin(organization, eq(organization.id, member.organizationId))
+    .innerJoin(user, eq(user.id, member.userId))
+    .where(and(eq(member.userId, userId), eq(member.organizationId, organizationId)))
+    .limit(1);
+  return row?.allowed === true && row.chosen === true;
 }
 
 /**
- * Builds the evaluator, or a flags object that never calls PostHog.
- *
- * Local mode is always on and never constructs a client, even if a
- * leftover POSTHOG_API_KEY is in the environment. Multi mode without
- * a key fails closed, so a hosted deployment that has not configured
- * PostHog does not leak unfinished UI to every signed-in user.
+ * The person's switch and whether the team they have open allows it,
+ * for the console's Beta features card. Local mode has no switch.
  */
-export function createFeatureFlags(env: Env): FeatureFlags {
-  const alwaysOn = env.BENTO_MODE !== "multi";
-  const apiKey = posthogApiKey(env);
-  if (!apiKey) return new FeatureFlags(null, alwaysOn);
-
-  const client = new PostHog(apiKey, {
-    host: env.POSTHOG_HOST,
-  });
-  client.on("error", (err) => {
-    console.warn("posthog feature flag client error:", err);
-  });
-  return new FeatureFlags(client, alwaysOn);
-}
-
-/**
- * The acting user when they are a beta tester, or null.
- *
- * Beta endpoints that a non-tester must not learn about treat null as
- * 404, the same convention as the access helpers. GET /api/flags is
- * the exception: the console has to hear "no" in order to hide the UI.
- */
-export async function getBetaTester(
+export async function betaFeaturesState(
   ctx: AppContext,
   c: Context,
-): Promise<{ userId: string; email: string | null } | null> {
+): Promise<{ enabled: boolean; allowed: boolean } | null> {
+  if (ctx.env.BENTO_MODE !== "multi") return null;
+  const membership = await getActiveOrganizationMembership(ctx, c);
+  const [row] = await ctx.db.select({ enabled: user.betaFeatures }).from(user).where(eq(user.id, actor(c))).limit(1);
+  let allowed = false;
+  if (membership) {
+    const [team] = await ctx.db
+      .select({ allowed: organization.betaFeaturesAllowed })
+      .from(organization)
+      .where(eq(organization.id, membership.organizationId))
+      .limit(1);
+    allowed = team?.allowed === true;
+  }
+  return { enabled: row?.enabled === true, allowed };
+}
+
+/**
+ * The acting user when beta features are on for them in the team they
+ * have open, or null.
+ *
+ * Beta endpoints that someone without beta must not learn about treat
+ * null as 404, the same convention as the access helpers. GET /api/flags
+ * is the exception: the console has to hear "no" in order to hide the UI.
+ */
+export async function getBetaTester(ctx: AppContext, c: Context): Promise<{ userId: string } | null> {
   const userId = actor(c);
-  const [row] = await ctx.db
-    .select({ email: user.email })
-    .from(user)
-    .where(eq(user.id, userId))
-    .limit(1);
-  const email = row?.email ?? null;
-  const allowed = ctx.featureFlags
-    ? await ctx.featureFlags.isBetaTester(userId, { email })
-    : ctx.env.BENTO_MODE !== "multi";
-  if (!allowed) return null;
-  return { userId, email };
+  const membership = await getActiveOrganizationMembership(ctx, c);
+  return (await hasBetaFeatures(ctx, userId, membership?.organizationId ?? null)) ? { userId } : null;
 }
 
 /**
@@ -142,42 +73,15 @@ export async function getBetaTester(
  * A run has no session and not always a person: the console and the
  * API start one as somebody, the gate evaluator and the schedules
  * start one as nobody. So it asks about the acting member when there
- * is one, and about the project's owner when there is not. It is their
- * board either way, and it means a team's auto-started stages behave
- * the same as the runs they start by hand, which is the whole point of
- * a per-team allowlist.
- *
- * Fails closed, like every other flag read: a run that cannot reach
- * PostHog runs without the unfinished capability rather than with it.
+ * is one, and about the project's owner when there is not, in the
+ * project's own team. It is their board either way, so auto-started
+ * stages behave the same as the runs they start by hand.
  */
 export async function isBetaRun(
   ctx: AppContext,
-  input: { actingUserId: string | null; projectOwnerId: string },
+  input: { actingUserId: string | null; projectOwnerId: string; organizationId: string | null },
 ): Promise<boolean> {
-  if (!ctx.featureFlags) return ctx.env.BENTO_MODE !== "multi";
-  const userId = input.actingUserId ?? input.projectOwnerId;
-  const [row] = await ctx.db
-    .select({ email: user.email })
-    .from(user)
-    .where(eq(user.id, userId))
-    .limit(1);
-  return ctx.featureFlags.isBetaTester(userId, { email: row?.email ?? null });
-}
-
-function withBudget<T>(promise: Promise<T>, ms: number): Promise<T | null> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => resolve(null), ms);
-    promise.then(
-      (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      (err: unknown) => {
-        clearTimeout(timer);
-        reject(err);
-      },
-    );
-  });
+  return hasBetaFeatures(ctx, input.actingUserId ?? input.projectOwnerId, input.organizationId);
 }
 
 /**
