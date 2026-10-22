@@ -1,19 +1,24 @@
 <h1 align="center">Supported coding agents</h1>
 
-Each stage runs one agent: harness, model, and skill. Tools differ in authentication, mid-run messaging, and cost reporting.
+Each stage runs one agent: harness, model, and skill. Tools differ in authentication, mid-run messaging, steering, interrupts, and cost reporting.
 
-| Tool | Model format | Credential | Mid-run messaging | Reports cost |
-| --- | --- | --- | --- | --- |
-| Claude Code | `claude-sonnet-5` | `ANTHROPIC_API_KEY` or subscription token | Queued in same session | Yes |
-| pi | `anthropic/claude-sonnet-5` | Provider key for selected model | Steering after current tool call | Yes |
-| Codex CLI | `gpt-5-codex`, `openai/gpt-5-mini`, or `vercel/moonshotai/kimi-k3` | `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, or `AI_GATEWAY_API_KEY` | Steering mid-turn; between runs for a profile with `codex exec` flags | No |
-| Cursor CLI | `claude-sonnet-5`, `composer-2.5`, `grok-4.6` | `CURSOR_API_KEY` | Between runs (session resume) | No |
-| opencode | `anthropic/claude-sonnet-5` | Provider key for selected model | Queued in same session; between runs for a profile with extra arguments | No |
-| Poolside (pool) | `poolside/laguna-s-2.1` | `POOLSIDE_API_KEY` | Between runs (new run, no session id) | No |
-| DeepSeek Harness (dsh, preview) | `deepseek-v4-pro` | `DEEPSEEK_API_KEY` | Between runs (new run, no session id) | No |
-| Antigravity CLI | `gemini-3.1-pro-high` | `GEMINI_API_KEY` | Between runs (conversation resume) | No |
-| Muse Code | `muse-spark-1.3` | `META_API_KEY` | Between runs (session resume) | No |
-| fx | `moonshotai/kimi-k3` | `AI_GATEWAY_API_KEY` | Between runs (session resume) | No |
+| Tool | Model format | Credential | Mid-run messaging | Steering | Interrupt | Reports cost |
+| --- | --- | --- | --- | --- | --- | --- |
+| Claude Code | `claude-sonnet-5` | `ANTHROPIC_API_KEY` or subscription token | Same session | No: queued, then run as one more turn after the current one | Yes | Yes |
+| pi | `anthropic/claude-sonnet-5` | Provider key for selected model | Same session | Yes, after the current tool call | Yes | Yes |
+| Codex CLI | `gpt-5-codex`, `openai/gpt-5-mini`, or `vercel/moonshotai/kimi-k3` | `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, or `AI_GATEWAY_API_KEY` | Same session; between runs for a profile with `codex exec` flags | Yes, at the next model call | Yes | No (tokens only) |
+| Cursor CLI | `claude-sonnet-5`, `composer-2.5`, `grok-4.6` | `CURSOR_API_KEY` | Between runs (session resume) | No | No | No |
+| opencode | `anthropic/claude-sonnet-5` | Provider key for selected model | Same session; between runs for a profile with extra arguments | Yes, at the next model call | Yes | No (tokens only, in a live session) |
+| Poolside (pool) | `poolside/laguna-s-2.1` | `POOLSIDE_API_KEY` | Between runs (new run, no session id) | No | No | No |
+| DeepSeek Harness (dsh, preview) | `deepseek-v4-pro` | `DEEPSEEK_API_KEY` | Between runs (new run, no session id) | No | No | No |
+| Antigravity CLI | `gemini-3.1-pro-high` | `GEMINI_API_KEY` | Between runs (conversation resume) | No | No | No |
+| Muse Code | `muse-spark-1.3` | `META_API_KEY` | Between runs (session resume) | No | No | No |
+| fx | `moonshotai/kimi-k3` | `AI_GATEWAY_API_KEY` | Between runs (session resume) | No | No | No |
+
+- **Mid-run messaging**: where a message you send while the agent works goes. "Same session" means into the running process; "between runs" means it waits for the run to end and starts the next one.
+- **Steering**: whether that message reaches the turn already running, rather than waiting for it to finish.
+- **Interrupt**: whether Stop ends only the current turn and keeps the run open for your next message (see [Talking to a working agent](#talking-to-a-working-agent)). Where it is No, Stop ends the run. Interrupt applies to a card's stage runs; a profile that keeps the one-shot command (above) has neither steering nor interrupt.
+- **Reports cost**: whether the tool reports a price for the run. Codex, and opencode in a live session, report only tokens.
 
 Keys are stored encrypted (per organization in multi mode; local scope in local mode) via the web console, `bento setup`, or the Mac app.
 
