@@ -48,6 +48,7 @@ function renderLocal(local: DesktopStatus["local"]) {
   for (const id of ["data-dir", "choose-directory", "database-url", "sandbox-image", "sandbox"]) {
     element<HTMLInputElement>(id).disabled = locked;
   }
+  element("local-lock-note").hidden = !locked;
 }
 
 function showError(error: unknown) { renderStatus({ phase: "error", message: error instanceof Error ? error.message.replace(/^Error invoking remote method '[^']+': Error: /, "") : String(error), ...(runningLocal ? { local: runningLocal } : {}) }); }
