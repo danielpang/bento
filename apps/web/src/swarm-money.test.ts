@@ -4,8 +4,10 @@ import {
   capUse,
   estimateLine,
   formatUsd,
+  hasReportedSpend,
   nodeSpendChip,
   nodeSpendLine,
+  showSwarmSpend,
   spendLine,
   spendParts,
   tierLabel,
@@ -63,18 +65,34 @@ test("a node prints only the tiers it has actually spent in", () => {
     nodeSpendLine({ measuredUsd: 1.4, estimatedUsd: 0.25, assumedUsd: 0 , notionalUsd: 0}),
     "$1.40 measured, $0.25 estimated",
   );
-  assert.equal(nodeSpendLine({ measuredUsd: 0, estimatedUsd: 0, assumedUsd: 0 , notionalUsd: 0}), "$0.00");
+  assert.equal(nodeSpendLine({ measuredUsd: 0, estimatedUsd: 0, assumedUsd: 0 , notionalUsd: 0}), "");
 });
 
 test("a node's chip marks more tiers with a plus, never with a sum", () => {
   const one = nodeSpendChip({ measuredUsd: 1.4, estimatedUsd: 0, assumedUsd: 0 , notionalUsd: 0});
-  assert.equal(one.text, "$1.40");
+  assert.equal(one!.text, "$1.40");
   const two = nodeSpendChip({ measuredUsd: 1.4, estimatedUsd: 0.25, assumedUsd: 0 , notionalUsd: 0});
-  assert.equal(two.text, "$1.40+");
-  assert.ok(!two.text.includes("1.65"));
+  assert.equal(two!.text, "$1.40+");
+  assert.ok(!two!.text.includes("1.65"));
   // The other tiers are named rather than added.
-  assert.match(two.title, /\$0\.25 estimated/);
-  assert.equal(nodeSpendChip({ measuredUsd: 0, estimatedUsd: 0, assumedUsd: 0 , notionalUsd: 0}).text, "$0.00");
+  assert.match(two!.title, /\$0\.25 estimated/);
+  assert.equal(nodeSpendChip({ measuredUsd: 0, estimatedUsd: 0, assumedUsd: 0 , notionalUsd: 0}), null);
+});
+
+/**
+ * A silent agent and an uncapped swarm have no figure to print.
+ * A reported price, or a budget the swarm set, is enough to show one.
+ */
+test("spend is shown only when a tool reported it or the swarm set a budget", () => {
+  const none = { measuredUsd: 0, estimatedUsd: 0, assumedUsd: 0, notionalUsd: 0 };
+  const reported = { measuredUsd: 1.4, estimatedUsd: 0, assumedUsd: 0, notionalUsd: 0 };
+  assert.equal(hasReportedSpend(none), false);
+  assert.equal(hasReportedSpend(reported), true);
+  assert.equal(hasReportedSpend({ measuredUsd: 0, estimatedUsd: 0, assumedUsd: 3, notionalUsd: 0 }), false,
+    "legacy assumed cost is not a reported figure");
+  assert.equal(showSwarmSpend(none, null), false);
+  assert.equal(showSwarmSpend(none, 40), true, "a budget is a figure even before anything is spent");
+  assert.equal(showSwarmSpend(reported, null), true);
 });
 
 test("the budget bar is one segment per tier against the cap, with no combined fill", () => {

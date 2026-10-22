@@ -74,6 +74,27 @@ export function cappedUsd(spend: SwarmSpend): number {
 }
 
 /**
+ * Whether a tool actually reported a priced figure.
+ *
+ * Measured and estimated only, matching `cappedUsd`: a silent agent
+ * and a leftover assumed charge both read as nothing reported.
+ */
+export function hasReportedSpend(spend: SwarmSpend): boolean {
+  return cappedUsd(spend) > 0;
+}
+
+/**
+ * Whether the swarm goal should print a spend figure.
+ *
+ * Hidden when the agents reported nothing and the swarm has no
+ * budget. A budget is itself a figure, so a zero against a cap
+ * still shows; a reported price shows even without a cap.
+ */
+export function showSwarmSpend(spend: SwarmSpend, budgetUsd: number | null): boolean {
+  return budgetUsd !== null || hasReportedSpend(spend);
+}
+
+/**
  * Whether this swarm is spending a subscription rather than a bill.
  *
  * True the moment any of its runs borrowed a logged in agent session,
@@ -107,18 +128,18 @@ export function spendLine(spend: SwarmSpend): string {
  * The same line for a node, which usually has only one tier on it.
  * Tiers at zero are dropped here and only here: a leaf card is 124px
  * wide, and zero valued tiers add no information. A node with no
- * reported spend still prints one figure rather than an empty slot.
+ * reported spend prints nothing rather than a placeholder zero.
  */
 export function nodeSpendLine(spend: SwarmSpend): string {
   const spent = spendParts(spend).filter((part) => part.usd > 0);
-  if (spent.length === 0) return formatUsd(0);
+  if (spent.length === 0) return "";
   return spent.map((part) => `${formatUsd(part.usd)} ${part.label}`).join(", ");
 }
 
 /** The compact figure on a node's face, with the tiers it stands for. */
-export function nodeSpendChip(spend: SwarmSpend): { text: string; title: string } {
+export function nodeSpendChip(spend: SwarmSpend): { text: string; title: string } | null {
   const spent = spendParts(spend).filter((part) => part.usd > 0);
-  if (spent.length === 0) return { text: formatUsd(0), title: "Nothing reported yet." };
+  if (spent.length === 0) return null;
   const lead = spent[0]!;
   return {
     // A plus rather than a sum: the other tiers are named in the title
@@ -184,5 +205,5 @@ export function estimateLine(spend: SwarmSpend, leaves: number): string {
    * other way round. A plan whose tools all report their cost has
    * no estimated figure to predict, so zero valued tiers are omitted.
    */
-  return `About ${nodeSpendLine(spend)} over ${tasks}.`;
+  return `About ${nodeSpendLine(spend) || formatUsd(0)} over ${tasks}.`;
 }

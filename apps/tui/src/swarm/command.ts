@@ -1,5 +1,5 @@
 import type { BentoClient, SwarmDetailResponse, SwarmSummaryRow } from "@bento/api-client";
-import { money, oneLine, spentUsd, swarmView, swarmWords } from "./tree.js";
+import { money, oneLine, showSwarmMoney, spentUsd, swarmView, swarmWords } from "./tree.js";
 
 /**
  * `bento swarm`, in a terminal.
@@ -73,14 +73,13 @@ export function findSwarm(
 
 /** One row of `bento swarm list`, tab separated the way the other lists are. */
 export function summaryLine(row: SwarmSummaryRow): string {
-  const spent = money(spentUsd(row));
   const budget = row.budgetUsd === null ? "" : ` of ${money(Number(row.budgetUsd))}`;
   return [
     row.slug,
     swarmWords(row),
     `${row.counts.done}/${row.counts.tasks}`,
     row.counts.attention > 0 ? `${row.counts.attention} waiting on you` : "",
-    `${spent}${budget}`,
+    showSwarmMoney(row) ? `${money(spentUsd(row))}${budget}` : "",
     oneLine(row.title, 48),
   ].join("\t");
 }
