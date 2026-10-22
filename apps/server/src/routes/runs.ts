@@ -329,7 +329,7 @@ export function runRoutes(ctx: AppContext) {
     })
     /**
      * Plain-text transcript for clients that cannot parse JSON or hold
-     * SSE connections (the Native SDK Mac app polls this). Line 1 is
+     * SSE connections (the TUI's full transcript view reads this). Line 1 is
      * "cursor|<lastSeq>|<runStatus>"; following lines are rendered
      * events after ?since=<seq>.
      */

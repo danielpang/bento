@@ -59,17 +59,6 @@ export function secretRoutes(ctx: AppContext) {
         canManage: resolved.role === "owner" || resolved.role === "admin",
       });
     })
-    /**
-     * Line format: secret|<id>|<name>|<hint>
-     * The hint is the same mask the console shows. No route anywhere
-     * returns plaintext, and this one is no exception.
-     */
-    .get("/plain", async (c) => {
-      const resolved = await scope(c);
-      if (!resolved) return c.text("");
-      const rows = await db(c, ctx).select().from(secrets).where(resolved.where);
-      return c.text(rows.map((row) => `secret|${row.id}|${row.name}|${row.hint}`).join("\n"));
-    })
     .post("/", zValidator("json", createSecret), async (c) => {
       if (ctx.env.BENTO_MODE === "multi" && !activeOrg(c)) {
         return c.json({ error: "choose an organization before adding secrets" }, 400);

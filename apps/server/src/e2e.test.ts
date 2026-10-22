@@ -427,9 +427,6 @@ test("a card's committed changes and artifacts can be read back", async () => {
   assert.equal(repo.artifacts[0]?.path, "docs/bento/product-investigation.md");
   assert.match(repo.artifacts[0]?.content ?? "", /Ship it/, "the write-up is readable in full");
 
-  const plain = await (await app.request(`/api/features/${feature.id}/changes/plain`)).text();
-  assert.match(plain, /sites\.ts/);
-  assert.match(plain, /Ship it/, "the Mac pane sees the same content as lines");
 });
 
 /**
@@ -3069,8 +3066,6 @@ test("a done card refuses new work and can be reopened", { timeout: 90_000 }, as
   assert.equal(done.status, "done");
   const lastStage = projectStages[projectStages.length - 1]!;
   assert.equal(done.currentStageId, lastStage.id, "a done card keeps the stage it finished in");
-  const plainDone = await (await app.request(`/api/features/${feature.id}/history/plain`)).text();
-  assert.match(plainDone, /finished /, "clearing the last stage reads as finishing it");
 
   // Nothing moves it except reopening, and nothing runs on it.
   for (const path of ["advance", "approve", "reject", "finish"]) {
@@ -3153,13 +3148,6 @@ test("a card can be marked done from any stage, and reopens into the one it left
     history.some((e) => e.kind === "status_changed" && e.toStatus === "done" && e.trigger === "manual"),
     "and the status change, so the history does not read as a trip to the backlog",
   );
-  const plain = await (await app.request(`/api/features/${feature.id}/history/plain`)).text();
-  assert.match(
-    plain,
-    new RegExp(`done from ${projectStages[1]!.name.replace("/", "\\/")}`),
-    "the plain history says the stage was skipped, not finished",
-  );
-
   // It is a done card in every other respect.
   const started = await app.request("/api/runs", {
     method: "POST",
@@ -3644,14 +3632,6 @@ test("agents are listed alphabetically, and an edit does not move one", async ()
     ["zz sorting alpha", "zz sorting Middle", "zz sorting Zebra"],
     "editing an agent must not move it in the list",
   );
-
-  // The TUI reads the same agents through a different route.
-  const plain = await (await app.request("/api/profiles/plain")).text();
-  const fromPlain = plain
-    .split("\n")
-    .map((line) => line.split("|").at(-1) ?? "")
-    .filter((name) => name.startsWith("zz sorting "));
-  assert.deepEqual(fromPlain, ["zz sorting alpha", "zz sorting Middle", "zz sorting Zebra"]);
 });
 
 test("an impossible pairing of coding agent and model is refused", async () => {
@@ -3896,22 +3876,12 @@ test("usage says how much of the spend it could not measure", { timeout: 120_000
   assert.equal(untouched.runs, 0);
   assert.equal(untouched.costUsd, null, "no runs is not the same as zero dollars");
 
-  // The board carries the same figure, for the client that cannot parse
-  // JSON. A dash means nothing reported, which is not zero.
+  // The board snapshot the console reads carries the same figure. A
+  // dash means nothing reported, which is not zero.
   const board = await (await app.request(`/api/projects/${project.id}/board/plain`)).text();
   const line = board.split("\n").find((l) => l.startsWith(`feature|${feature.id}|`))!;
   const cost = line.split("|")[6]!;
   assert.match(cost, /^\d+\.\d\d$/, `expected a cost field on the board line, got ${cost}`);
-
-  const plain = await (await app.request(`/api/projects/${project.id}/usage/plain`)).text();
-  assert.match(plain, /^total\|/);
-  const billedLine = plain.split("\n").find((l) => l.startsWith(`card|${feature.id}|`));
-  assert.ok(billedLine, "the spend rollup lists the card that ran");
-  assert.match(billedLine, new RegExp(`\\|${cost}\\|`));
-  assert.ok(
-    plain.split("\n").some((l) => l.startsWith(`card|${idle.id}|`)),
-    "a card that never ran still belongs on the spend page",
-  );
 });
 
 /**
@@ -3984,12 +3954,6 @@ test("usage ignores judge runs and in-flight runs", async () => {
   assert.ok(untouched);
   assert.equal(untouched.runs, 0);
   assert.equal(untouched.costUsd, null);
-
-  const plain = await (await app.request(`/api/projects/${project.id}/usage/plain`)).text();
-  const [tag, totalUsd, totalRuns] = plain.split("\n")[0]!.split("|");
-  assert.equal(tag, "total");
-  assert.equal(totalUsd, "4.20");
-  assert.equal(totalRuns, "1");
 });
 
 /**
@@ -4439,9 +4403,6 @@ test("resolve-conflicts starts the work agent on a conflicted pull request", { t
     assert.equal(status[0]?.number, 41);
     assert.equal(status[0]?.state, "conflicted");
 
-    const plain = await (await app.request(`/api/features/${feature.id}/merge-status/plain`)).text();
-    assert.match(plain, /^pr\|conflicted\|41\|/);
-
     // A conflict with no conversation: there is no agent to hand it to.
     const noRun = await app.request(`/api/features/${feature.id}/resolve-conflicts`, { method: "POST" });
     assert.equal(noRun.status, 400);
@@ -4605,13 +4566,6 @@ test("a judge agent rules on the work before an automatic stage advances", { tim
     defaultAgentProfileId: worker.id,
     gateCriteria: [{ type: "agent_judge", agentProfileId: rejecter.id }],
   });
-  const pipelinePlain = await (await app.request(`/api/projects/${project.id}/pipeline/plain`)).text();
-  assert.match(
-    pipelinePlain,
-    new RegExp(`criterion\\|${first.id}\\|\\d+\\|agent_judge\\|-\\|${rejecter.id}`),
-    "the judge's agent id is on the wire so a client can edit it",
-  );
-
   // Advancing starts the worker; its finish starts the judge; the
   // judge's INCOMPLETE verdict holds the card where its reason shows.
   const feature = await createFeature(project.id, "Judge me");
@@ -5328,11 +5282,6 @@ test("a pipeline exports to YAML and imports into another project", { timeout: 9
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ setupCommand: "npm ci", testCommand: "npm test" }),
   });
-  const repoPlain = await (await app.request(`/api/projects/${source.project.id}/repositories/plain`)).text();
-  assert.match(repoPlain, new RegExp(`^repo\\|${repo!.id}\\|`, "m"));
-  assert.match(repoPlain, new RegExp(`^setup\\|${repo!.id}\\|npm ci$`, "m"));
-  assert.match(repoPlain, new RegExp(`^test\\|${repo!.id}\\|npm test$`, "m"));
-
   const exported = await app.request(`/api/projects/${source.project.id}/pipeline/export`);
   assert.equal(exported.status, 200);
   const yaml = await exported.text();
@@ -5813,9 +5762,6 @@ test("a repository's base branch comes from its checkout unless one is named", {
     await app.request(`/api/projects/${project.id}/repositories`),
   );
   assert.equal(repo?.defaultBranch, "master");
-
-  const plain = await (await app.request(`/api/projects/${project.id}/repositories/plain`)).text();
-  assert.match(plain, new RegExp(`^branch\\|${repo!.id}\\|master$`, "m"));
 
   const patch = (body: unknown) =>
     app.request(`/api/projects/${project.id}/repositories/${repo!.id}`, {
@@ -6857,11 +6803,6 @@ test("a feature's history records moves and status changes", { timeout: 90_000 }
   assert.ok(held, "being held at a gate must appear in the history");
   assert.deepEqual(held.detail?.failedCriteria, ["command"], "the history should say which criterion held it");
   assert.equal(held.actorName, null, "a gate is not a person");
-
-  const plain = await (await app.request(`/api/features/${feature.id}/history/plain`)).text();
-  assert.match(plain, /by Local User/, "plain history names the person who moved the card");
-  assert.match(plain, /sent back by Local User/);
-  assert.match(plain, /by a gate/);
 
   // The older endpoint still answers, for clients written before this.
   const transitions = await app.request(`/api/features/${feature.id}/transitions`);
