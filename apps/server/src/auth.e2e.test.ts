@@ -3241,17 +3241,14 @@ test("beta features are off until a person turns them on", async () => {
     });
   const flags = async () => ((await (await app.request("/api/flags", { headers })).json()) as { betaTesters: boolean });
   const swarms = () => app.request("/api/swarms", { headers });
-  const plain = async () => (await app.request("/api/account/beta/plain", { headers })).text();
 
   assert.deepEqual(await (await app.request("/api/account/beta", { headers })).json(), { enabled: false });
-  assert.equal(await plain(), "beta|off");
   assert.equal((await flags()).betaTesters, false);
   assert.equal((await swarms()).status, 404, "swarms stay hidden before opting in");
 
   const on = await write(true);
   assert.equal(on.status, 200);
   assert.deepEqual(await on.json(), { enabled: true });
-  assert.equal(await plain(), "beta|on");
   assert.equal((await flags()).betaTesters, true);
   assert.equal((await swarms()).status, 200, "turning beta on opens what it gates");
 

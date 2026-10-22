@@ -6,8 +6,8 @@ import { actor } from "./middleware/actor.js";
 
 /**
  * Beta features are each person's own choice, `identity.user.beta_features`:
- * off until they turn it on in Settings, Account (or the Mac app's
- * checkbox), in both modes. Nothing else turns beta on. Unfinished
+ * off until they turn it on in Settings, Account (or the desktop app's
+ * launcher), in both modes. Nothing else turns beta on. Unfinished
  * product (Bento Swarm and the rest) checks it through the helpers here.
  */
 export async function hasBetaFeatures(ctx: AppContext, userId: string): Promise<boolean> {

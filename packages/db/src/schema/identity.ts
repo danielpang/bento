@@ -33,8 +33,8 @@ export const user = identity.table("user", {
   boardMascots: boolean("board_mascots").notNull().default(true),
   /**
    * Whether this person turned beta features on, from Settings, Account
-   * or the Mac app. Off until they do; nothing else turns beta on.
-   * `hasBetaFeatures` in the server is the one place that reads it.
+   * or the desktop app's launcher. Off until they do; nothing else
+   * turns beta on. `hasBetaFeatures` in the server reads it.
    */
   betaFeatures: boolean("beta_features").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

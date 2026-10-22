@@ -34,6 +34,7 @@ async function start() {
   field("database-url").value = settings.databaseUrl;
   field("sandbox-image").value = settings.sandboxImage;
   element<HTMLSelectElement>("sandbox").value = settings.sandbox;
+  field("beta-features").checked = settings.betaFeatures;
   element("sandbox").addEventListener("change", renderMode);
   renderMode();
   bridge.onStatus(renderStatus);
@@ -45,6 +46,7 @@ async function start() {
       serverUrl: field("server-url").value, dataDir: field("data-dir").value,
       databaseUrl: field("database-url").value, sandboxImage: field("sandbox-image").value,
       sandbox: element<HTMLSelectElement>("sandbox").value === "local-process" ? "local-process" : "docker",
+      betaFeatures: field("beta-features").checked,
     };
     void bridge.connect(next).catch(showError);
   });

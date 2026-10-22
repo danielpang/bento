@@ -953,8 +953,8 @@ serves one. Do not gate a change because it is new. When it is unclear
 whether a feature is large enough, ask rather than gate it by default.
 
 Beta is each person's own switch, `identity.user.beta_features`: off
-until they turn it on in Settings, Account (or the Mac app's checkbox),
-in both modes. Nothing else turns it on; there is no PostHog flag.
+until they turn it on in Settings, Account (or the desktop app's
+launcher), in both modes. Nothing else turns it on; there is no PostHog flag.
 `hasBetaFeatures` in `feature-flags.ts` reads it. When a feature is
 gated:
 

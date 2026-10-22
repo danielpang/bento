@@ -34,8 +34,12 @@ test("bundled assets cannot escape their root and external links cannot execute 
 });
 
 test("settings reject unrequested runner mode and relative local directories", () => {
-  const settings = { mode: "local", serverUrl: "", dataDir: "/tmp/bento", databaseUrl: "", sandbox: "docker", sandboxImage: "bento-sandbox:dev" };
+  const settings = { mode: "local", serverUrl: "", dataDir: "/tmp/bento", databaseUrl: "", sandbox: "docker", sandboxImage: "bento-sandbox:dev", betaFeatures: true };
   assert.deepEqual(validateSettings(settings), settings);
+  // Settings saved before the launcher offered beta features read as off.
+  const { betaFeatures: _beta, ...older } = settings;
+  assert.equal(validateSettings(older).betaFeatures, false);
+  assert.equal(validateSettings({ ...settings, betaFeatures: "yes" }).betaFeatures, false);
   assert.throws(() => validateSettings({ ...settings, mode: "runner" }));
   assert.throws(() => validateSettings({ ...settings, dataDir: "relative" }));
   assert.throws(() => validateSettings({ ...settings, sandboxImage: "name; touch /tmp/bad" }));

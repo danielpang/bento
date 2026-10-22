@@ -207,8 +207,10 @@ async function connect(settings: DesktopSettings): Promise<void> {
       controller.signal.throwIfAborted();
       await store.saveSettings(settings);
       let origin: string;
-      if (settings.mode === "local") origin = await runtime.start(settings);
-      else {
+      if (settings.mode === "local") {
+        origin = await runtime.start(settings);
+        await applyBetaFeatures(origin, settings.betaFeatures, controller.signal);
+      } else {
         origin = normalizeServerUrl(settings.serverUrl);
         const response = await fetch(`${origin}/api/health`, { signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]), redirect: "error" });
         if (!response.ok) throw new Error(`The server returned HTTP ${response.status}. Check its address and try again.`);
@@ -238,6 +240,22 @@ async function connect(settings: DesktopSettings): Promise<void> {
     }
   })();
   try { await connectionTask; } finally { connectionTask = undefined; }
+}
+
+/**
+ * The launcher's beta box is the local user's switch: written on every
+ * local start, so the server follows what the launcher shows. Turning it
+ * off inside Bento (Settings, Account) holds until the next start.
+ */
+async function applyBetaFeatures(origin: string, enabled: boolean, signal: AbortSignal) {
+  const response = await fetch(`${origin}/api/account/beta`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ enabled }),
+    signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]),
+    redirect: "error",
+  });
+  if (!response.ok) throw new Error(`Could not save the beta features choice (HTTP ${response.status}).`);
 }
 
 async function authenticate(origin: string, signal: AbortSignal) {

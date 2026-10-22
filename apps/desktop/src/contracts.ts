@@ -13,6 +13,8 @@ export interface DesktopSettings {
   databaseUrl: string;
   sandbox: "docker" | "local-process";
   sandboxImage: string;
+  /** The local user's beta features switch, written to the local server on each start. */
+  betaFeatures: boolean;
 }
 
 export interface DesktopStatus {

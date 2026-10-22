@@ -70,15 +70,6 @@ export function accountRoutes(ctx: AppContext) {
         .limit(1);
       return c.json({ enabled: row?.enabled ?? false });
     })
-    /** The same, as one `beta|on` or `beta|off` line, for the Mac app. */
-    .get("/beta/plain", async (c) => {
-      const [row] = await db(c, ctx)
-        .select({ enabled: user.betaFeatures })
-        .from(user)
-        .where(eq(user.id, actor(c)))
-        .limit(1);
-      return c.text(row?.enabled ? "beta|on" : "beta|off");
-    })
     .patch("/beta", zValidator("json", patchBeta), async (c) => {
       const { enabled } = c.req.valid("json");
       const [row] = await db(c, ctx)

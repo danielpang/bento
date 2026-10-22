@@ -9,7 +9,7 @@
 // the list it changed, which keeps one source of truth for what is on
 // screen and costs one extra round trip on an action, never on a poll.
 
-import { Cmd, Sub, asciiBytes, type EnvMsg } from "@native-sdk/core";
+import { Cmd, Sub, asciiBytes } from "@native-sdk/core";
 import { type ColorScheme } from "@native-sdk/core/events";
 import {
   applyTextInputEvent,
@@ -25,7 +25,6 @@ import {
   jsonObject1,
   jsonObject2,
   jsonObject3,
-  betaFeaturesPatch,
   mcpCreateBody,
   mcpEnabledPatch,
   numberBytes,
@@ -37,7 +36,6 @@ import {
   parseGate,
   parseHistory,
   parseMcpCanManage,
-  parseBetaSwitch,
   parseMcpServers,
   parsePipeline,
   parsePipelineId,
@@ -131,8 +129,6 @@ export interface Model {
   readonly mode: Mode;
   /** Server address typed on the setup screen, for client and runner. */
   readonly serverEdit: TextEditState;
-  /** The setup screen's choice for a server: agents here (runner) or there (client). */
-  readonly agentsHere: boolean;
   readonly setupDone: boolean;
   readonly helperState: HelperState;
   /** Bearer token for a hosted server. Empty in local mode. */
@@ -210,15 +206,6 @@ export interface Model {
   readonly colorScheme: ColorScheme;
 
   readonly isMulti: boolean;
-  /**
-   * Whether this person tries beta features, such as Bento Swarm. Ticked
-   * on the first screen, remembered in ~/.bento/mac-beta-features, and
-   * sent to a local server every time it starts, so the server's switch
-   * follows this one. Settings turns it off again.
-   */
-  readonly betaOptIn: boolean;
-  /** $HOME, for the file the beta choice is remembered in. Empty until it arrives. */
-  readonly homeDir: Uint8Array;
   readonly orgs: readonly Org[];
   readonly members: readonly Member[];
   readonly invitations: readonly Invitation[];
@@ -279,15 +266,6 @@ export type Msg =
   | { readonly kind: "choose_client" }
   | { readonly kind: "choose_runner" }
   | { readonly kind: "choose_local" }
-  | { readonly kind: "set_agents_on_server" }
-  | { readonly kind: "set_agents_here" }
-  | { readonly kind: "toggle_beta_opt_in" }
-  | { readonly kind: "home_found"; readonly value: Uint8Array }
-  | { readonly kind: "beta_pref_read"; readonly body: Uint8Array }
-  | { readonly kind: "beta_pref_failed"; readonly reason: Uint8Array }
-  | { readonly kind: "beta_pref_wrote" }
-  | { readonly kind: "beta_changed"; readonly status: number; readonly body: Uint8Array }
-  | { readonly kind: "beta_ok"; readonly status: number; readonly body: Uint8Array }
   | { readonly kind: "back_to_setup" }
   | { readonly kind: "server_edit"; readonly edit: TextInputEvent }
   | { readonly kind: "helper_line"; readonly line: Uint8Array }
@@ -477,17 +455,7 @@ export type Msg =
 /** The system appearance arrives on this arm. */
 export const appearanceMsg = "appearance_changed";
 
-/** Where the remembered beta choice lives, which needs $HOME. */
-export const envMsgs: readonly EnvMsg<Msg>[] = [{ env: "HOME", msg: "home_found" }] as const;
-
 export const viewUnbound = [
-  "home_found",
-  "beta_pref_read",
-  "beta_pref_failed",
-  "beta_pref_wrote",
-  "beta_changed",
-  "beta_ok",
-  "homeDir",
   "helper_line",
   "helper_exit",
   "helper_failed",
@@ -725,8 +693,7 @@ export function initialModel(): Model {
   return {
     baseUrl: new Uint8Array(0),
     mode: "local",
-    serverEdit: seedEdit(asciiBytes("https://app.usebento.ai")),
-    agentsHere: false,
+    serverEdit: seedEdit(asciiBytes("https://")),
     setupDone: false,
     helperState: "idle",
     token: new Uint8Array(0),
@@ -779,8 +746,6 @@ export function initialModel(): Model {
     colorScheme: "dark",
 
     isMulti: false,
-    betaOptIn: false,
-    homeDir: new Uint8Array(0),
     orgs: [],
     members: [],
     invitations: [],
@@ -927,16 +892,6 @@ function lineValue(line: Uint8Array): Uint8Array {
   return out;
 }
 
-function betaPrefPath(model: Model): Uint8Array {
-  return concat2(model.homeDir, asciiBytes("/.bento/mac-beta-features"));
-}
-
-/** The remembered choice: a file whose first line is "on". */
-function parseBetaPref(body: Uint8Array): boolean {
-  const lines = body.split(asciiBytes("\n"));
-  return lines.length > 0 && bytesEq(lines[0], asciiBytes("on"));
-}
-
 function lineEventIs(line: Uint8Array, event: Uint8Array): boolean {
   const parts = line.split(asciiBytes(" "));
   if (parts.length === 0) return false;
@@ -1040,15 +995,6 @@ function loadRefused(model: Model, status: number): Model {
   };
 }
 
-/** The board index of the card a sessions or spend row names, or -1. */
-function cardIndexById(model: Model, featureId: Uint8Array): number {
-  let cardIndex = -1;
-  for (let i = 0; i < model.cards.length; i++) {
-    if (bytesEq(model.cards[i].id, featureId)) cardIndex = i;
-  }
-  return cardIndex;
-}
-
 export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   switch (msg.kind) {
     case "server_edit":
@@ -1146,8 +1092,8 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     }
 
     /**
-     * Run locally. The helper runs the same stack the CLI does and
-     * reports its address on stdout, which this app then polls.
+     * Everything on this machine. The helper runs the same stack the CLI
+     * does and reports its address on stdout, which this app then polls.
      */
     case "choose_local":
       return [
@@ -1178,18 +1124,6 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
           return [
             next,
             Cmd.batch([
-              // The first screen's beta choice is this server's answer for
-              // its one user, so the console and the CLI follow it too.
-              Cmd.fetch(
-                {
-                  url: apiUrl(next, asciiBytes("/api/account/beta")),
-                  method: "PATCH",
-                  timeoutMs: 5000,
-                  headers: { authorization: authHeader(next), "content-type": "application/json" },
-                  body: betaFeaturesPatch(next.betaOptIn),
-                },
-                { key: "beta", ok: "beta_changed", err: "act_failed" },
-              ),
               Cmd.fetch(
                 { url: projectsUrl(next), method: "GET", timeoutMs: 5000, headers: { authorization: authHeader(next) } },
                 { key: "projects", ok: "projects_ok", err: "load_failed" },
@@ -1309,86 +1243,6 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
       }
       return model;
     }
-
-    case "set_agents_on_server":
-      return { ...model, agentsHere: false };
-
-    case "set_agents_here":
-      return { ...model, agentsHere: true };
-
-    /**
-     * The beta choice, on the first screen or in Settings. Remembered in
-     * a file so the box is ticked the way it was left next launch, and
-     * sent to a local server that is already up.
-     */
-    case "toggle_beta_opt_in": {
-      const next: Model = { ...model, betaOptIn: !model.betaOptIn };
-      return [
-        next,
-        Cmd.batch([
-          next.homeDir.length > 0
-            ? Cmd.writeFile(betaPrefPath(next), next.betaOptIn ? asciiBytes("on\n") : asciiBytes("off\n"), {
-                key: "beta_pref",
-                ok: "beta_pref_wrote",
-                err: "beta_pref_failed",
-              })
-            : Cmd.none,
-          next.mode === "local" && connected(next)
-            ? Cmd.fetch(
-                {
-                  url: apiUrl(next, asciiBytes("/api/account/beta")),
-                  method: "PATCH",
-                  timeoutMs: 5000,
-                  headers: { authorization: authHeader(next), "content-type": "application/json" },
-                  body: betaFeaturesPatch(next.betaOptIn),
-                },
-                { key: "beta", ok: "beta_changed", err: "act_failed" },
-              )
-            : Cmd.none,
-        ]),
-      ];
-    }
-
-    case "home_found":
-      if (msg.value.length === 0) return model;
-      return [
-        { ...model, homeDir: msg.value },
-        Cmd.readFile(betaPrefPath({ ...model, homeDir: msg.value }), {
-          key: "beta_pref",
-          ok: "beta_pref_read",
-          err: "beta_pref_failed",
-        }),
-      ];
-
-    case "beta_pref_read":
-      return { ...model, betaOptIn: parseBetaPref(msg.body) };
-
-    // No file yet is the first launch, and a choice that could not be
-    // written is still applied; the box just starts unticked next time.
-    case "beta_pref_failed":
-      return model;
-
-    case "beta_pref_wrote":
-      return model;
-
-    case "beta_changed":
-      if (msg.status >= 400) return refusedWrite(model, msg.status);
-      return [
-        model,
-        Cmd.fetch(
-          {
-            url: apiUrl(model, asciiBytes("/api/account/beta/plain")),
-            method: "GET",
-            timeoutMs: 5000,
-            headers: { authorization: authHeader(model) },
-          },
-          { key: "beta", ok: "beta_ok", err: "load_failed" },
-        ),
-      ];
-
-    case "beta_ok":
-      if (msg.status >= 400) return model;
-      return { ...model, betaOptIn: parseBetaSwitch(msg.body) };
 
     case "back_to_setup":
       return {
@@ -3040,118 +2894,20 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
       ];
     }
 
-    case "open_session": {
-      if (msg.index < 0 || msg.index >= model.sessions.length) return model;
-      const cardIndex = cardIndexById(model, model.sessions[msg.index].featureId);
-      if (cardIndex < 0) {
-        return { ...model, panel: "none", lastError: asciiBytes("That card is not on the board.") };
-      }
-      const opened: Model = { ...model, panel: "none", editingStage: -1, editingRepo: -1 };
-      const next: Model = {
-        ...opened,
-        lastError: new Uint8Array(0),
-        selectedCard: cardIndex,
-        transcript: new Uint8Array(0),
-        history: [],
-        gateChecks: [],
-        hasConflicts: false,
-        showHistory: false, showChanges: false, changes: new Uint8Array(0),
-        cursor: 0,
-        transcriptInFlight: selectedCardHasRun({ ...opened, selectedCard: cardIndex }),
-      };
-      const card = next.cards[cardIndex];
-      return [
-        next,
-        Cmd.batch([
-          Cmd.fetch(
-            {
-              url: idUrl(next, asciiBytes("/api/features/"), card.id, asciiBytes("/gate/plain")),
-              method: "GET",
-              timeoutMs: 5000,
-              headers: { authorization: authHeader(next) },
-            },
-            { key: "gate", ok: "gate_ok", err: "load_failed" },
-          ),
-          Cmd.fetch(
-            {
-              url: mergeStatusUrl(next),
-              method: "GET",
-              timeoutMs: 10000,
-              headers: { authorization: authHeader(next) },
-            },
-            { key: "merge", ok: "merge_ok", err: "merge_failed" },
-          ),
-          next.transcriptInFlight
-            ? Cmd.fetch(
-                {
-                  url: transcriptUrl(next),
-                  method: "GET",
-                  timeoutMs: 5000,
-                  headers: { authorization: authHeader(next) },
-                },
-                { key: "transcript", ok: "transcript_ok", err: "load_failed" },
-              )
-            : Cmd.none,
-        ]),
-      ];
-    }
-
+    case "open_session":
     case "open_spend_card": {
-      if (msg.index < 0 || msg.index >= model.spendCards.length) return model;
-      const cardIndex = cardIndexById(model, model.spendCards[msg.index].featureId);
+      const rows = msg.kind === "open_session" ? model.sessions : model.spendCards;
+      if (msg.index < 0 || msg.index >= rows.length) return model;
+      const featureId = rows[msg.index].featureId;
+      let cardIndex = -1;
+      for (let i = 0; i < model.cards.length; i++) {
+        if (bytesEq(model.cards[i].id, featureId)) cardIndex = i;
+      }
       if (cardIndex < 0) {
         return { ...model, panel: "none", lastError: asciiBytes("That card is not on the board.") };
       }
-      const opened: Model = { ...model, panel: "none", editingStage: -1, editingRepo: -1 };
-      const next: Model = {
-        ...opened,
-        lastError: new Uint8Array(0),
-        selectedCard: cardIndex,
-        transcript: new Uint8Array(0),
-        history: [],
-        gateChecks: [],
-        hasConflicts: false,
-        showHistory: false, showChanges: false, changes: new Uint8Array(0),
-        cursor: 0,
-        transcriptInFlight: selectedCardHasRun({ ...opened, selectedCard: cardIndex }),
-      };
-      const card = next.cards[cardIndex];
-      return [
-        next,
-        Cmd.batch([
-          Cmd.fetch(
-            {
-              url: idUrl(next, asciiBytes("/api/features/"), card.id, asciiBytes("/gate/plain")),
-              method: "GET",
-              timeoutMs: 5000,
-              headers: { authorization: authHeader(next) },
-            },
-            { key: "gate", ok: "gate_ok", err: "load_failed" },
-          ),
-          Cmd.fetch(
-            {
-              url: mergeStatusUrl(next),
-              method: "GET",
-              timeoutMs: 10000,
-              headers: { authorization: authHeader(next) },
-            },
-            { key: "merge", ok: "merge_ok", err: "merge_failed" },
-          ),
-          next.transcriptInFlight
-            ? Cmd.fetch(
-                {
-                  url: transcriptUrl(next),
-                  method: "GET",
-                  timeoutMs: 5000,
-                  headers: { authorization: authHeader(next) },
-                },
-                { key: "transcript", ok: "transcript_ok", err: "load_failed" },
-              )
-            : Cmd.none,
-        ]),
-      ];
+      return update({ ...model, panel: "none", editingStage: -1, editingRepo: -1 }, { kind: "pick_card", index: cardIndex });
     }
-
 
     // ---- team panel ----
 
@@ -3295,8 +3051,8 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     }
 
     case "confirm_remove_member": {
-      const index = model.confirmIndex;
-      if (index < 0 || index >= model.members.length) return model;
+      const msg = { index: model.confirmIndex };
+      if (msg.index < 0 || msg.index >= model.members.length) return model;
       return [
         { ...closedDialog(model), notice: asciiBytes("Removed the member") },
         Cmd.fetch(
@@ -3305,7 +3061,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
             method: "POST",
             timeoutMs: 5000,
             headers: { authorization: authHeader(model), "content-type": "application/json" },
-            body: jsonObject1(asciiBytes("memberIdOrEmail"), model.members[index].id),
+            body: jsonObject1(asciiBytes("memberIdOrEmail"), model.members[msg.index].id),
           },
           { key: "act", ok: "team_changed", err: "act_failed" },
         ),
@@ -3403,8 +3159,8 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     }
 
     case "confirm_delete_repo": {
-      const index = model.confirmIndex;
-      if (index < 0 || index >= model.repos.length || !hasSelectedProject(model)) return model;
+      const msg = { index: model.confirmIndex };
+      if (msg.index < 0 || msg.index >= model.repos.length || !hasSelectedProject(model)) return model;
       const base = concat2(
         concat2(model.baseUrl, asciiBytes("/api/projects/")),
         model.projects[model.selectedProject].id,
@@ -3413,7 +3169,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
         { ...closedDialog(model), notice: asciiBytes("Removed the repository") },
         Cmd.fetch(
           {
-            url: concat3(base, asciiBytes("/repositories/"), model.repos[index].id),
+            url: concat3(base, asciiBytes("/repositories/"), model.repos[msg.index].id),
             method: "DELETE",
             timeoutMs: 5000,
             headers: { authorization: authHeader(model) },
@@ -3603,13 +3359,13 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     }
 
     case "confirm_delete_secret": {
-      const index = model.confirmIndex;
-      if (index < 0 || index >= model.secrets.length) return model;
+      const msg = { index: model.confirmIndex };
+      if (msg.index < 0 || msg.index >= model.secrets.length) return model;
       return [
         { ...closedDialog(model), notice: asciiBytes("Removed the credential") },
         Cmd.fetch(
           {
-            url: idUrl(model, asciiBytes("/api/secrets/"), model.secrets[index].id, new Uint8Array(0)),
+            url: idUrl(model, asciiBytes("/api/secrets/"), model.secrets[msg.index].id, new Uint8Array(0)),
             method: "DELETE",
             timeoutMs: 5000,
             headers: { authorization: authHeader(model) },
@@ -3949,16 +3705,6 @@ export function connected(model: Model): boolean {
   return model.setupDone && model.helperState === "ready";
 }
 
-/** The mirror of agentsHere, so the setup toggle reads as one choice of two. */
-export function agentsOnServer(model: Model): boolean {
-  return !model.agentsHere;
-}
-
-/** Settings offers the beta switch to an app running its own server. */
-export function runsLocally(model: Model): boolean {
-  return model.setupDone && model.mode === "local";
-}
-
 export function serverText(model: Model): Uint8Array {
   return model.serverEdit.text;
 }
@@ -4175,6 +3921,10 @@ export function dialogNewRepo(model: Model): boolean {
 
 export function dialogConfirm(model: Model): boolean {
   return model.dialog === "confirm";
+}
+
+export function confirmText(model: Model): Uint8Array {
+  return model.confirmText;
 }
 
 /** Which pending action the confirm dialog's yes button fires. */

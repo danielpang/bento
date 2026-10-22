@@ -13,7 +13,7 @@
       <h2>Where do you want to work?</h2>
       <form id="connection-form">
         <fieldset class="modes" aria-label="Connection mode">
-          <label class="mode"><input type="radio" name="mode" value="local" checked /><span><strong>On this Mac</strong><small>Projects and agents run locally.</small></span></label>
+          <label class="mode"><input type="radio" name="mode" value="local" checked /><span><strong>Run locally</strong><small>Projects and agents run locally.</small></span></label>
           <label class="mode"><input type="radio" name="mode" value="remote" /><span><strong>Connect to a server</strong><small>Use your team's Bento workspace.</small></span></label>
         </fieldset>
         <section id="remote-options" hidden>
@@ -23,6 +23,7 @@
         <section id="local-options">
           <p class="hint">Start Docker Desktop or OrbStack before connecting. Bento manages its database and agent sandboxes for you.</p>
           <p class="muted hint">Configure provider keys and CLI login sharing inside Bento.</p>
+          <label class="checkbox"><input id="beta-features" type="checkbox" /><span>Try beta and experimental features<small>Warning beta features can cause issues.</small></span></label>
           <details>
             <summary>Advanced settings</summary>
             <label class="field">Data and worktrees<div class="input-row"><input id="data-dir" spellcheck="false" /><button id="choose-directory" type="button" class="secondary">Choose...</button></div></label>

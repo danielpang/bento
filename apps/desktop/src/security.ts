@@ -40,7 +40,9 @@ export function validateSettings(input: unknown): DesktopSettings {
   }
   const sandboxImage = string("sandboxImage", 255);
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._/:@-]*$/.test(sandboxImage)) throw new Error("Enter a valid sandbox image name.");
-  return { mode, sandbox, dataDir, serverUrl, databaseUrl, sandboxImage };
+  // Absent in settings saved before the launcher offered it: off.
+  const betaFeatures = value.betaFeatures === true;
+  return { mode, sandbox, dataDir, serverUrl, databaseUrl, sandboxImage, betaFeatures };
 }
 
 export function isApiPath(pathname: string): boolean {
