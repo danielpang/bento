@@ -2,10 +2,8 @@ import { createHash } from "node:crypto";
 import { WORKSPACE_ARTIFACT_DIR } from "@bento/core";
 import { AGENT_BINARIES, TOOLCHAIN_VERSION, agentToolchainScript } from "./agent-toolchain.js";
 import {
-  checkoutScriptBlame,
   execTimeoutMessage,
   collectExec,
-  ProvisionFailure,
   SandboxImageLost,
   type ExecChunk,
   type ExecOptions,
@@ -20,8 +18,8 @@ import {
 } from "./driver.js";
 import { BENTO_EXEC_PYTHON, FrameDecoder, execDirectory, execStamp } from "./modal-exec.js";
 import { spriteSize } from "./sprite.js";
-import { shellQuote, shellQuotePart } from "./shell.js";
-import { fetchStartBundleCommand } from "./start-bundle.js";
+import { shellQuote } from "./shell.js";
+import { checkoutStepFailure, checkoutSteps, type CheckoutStep } from "./checkout-steps.js";
 
 /**
  * One App for every sandbox this deployment creates. Development and
@@ -1000,70 +998,37 @@ export class ModalDriver implements SandboxDriver {
       const branch = repo.branch ?? "main";
       const baseBranch = repo.baseBranch ?? "main";
       await say(`Preparing repository ${repo.name}...`);
-      // Only where there is a remote to compare against. A seeded
-      // checkout has no origin, and comparing that against an empty
-      // string matches nothing, so the check would delete the workspace
-      // on every re-provision of the same machine.
-      const verify = repo.cloneUrl
-        ? [
-            `if [ -d ${shellQuote(dir)}/.git ]; then`,
-            `  current_origin=$(git -C ${shellQuote(dir)} remote get-url origin 2>/dev/null || true)`,
-            `  if [ "$current_origin" != ${shellQuote(repo.cloneUrl)} ]; then rm -rf ${shellQuote(dir)}; fi`,
-            "fi",
-          ]
-        : [];
+      // Each step is judged by itself; see checkoutSteps.
+      const runSteps = async (steps: CheckoutStep[]) => {
+        for (const step of steps) {
+          const result = await runShell(box, step.script, MODAL_REPO_PREPARE_TIMEOUT_MS);
+          if (result.exitCode !== 0) throw checkoutStepFailure("modal", step, checkoutScriptError(repo.name, result));
+        }
+      };
       if (repo.seedBundle) {
         const bundlePath = `/tmp/bento-seed-${repo.name}.bundle`;
         const startPath = `/tmp/bento-start-${repo.name}.bundle`;
         await box.writeBytes(repo.seedBundle, bundlePath);
         if (repo.startBundle) await box.writeBytes(repo.startBundle.data, startPath);
         try {
-          // A swarm worker's start point is the swarm's branch, which
-          // has never been pushed. It arrives as a second bundle, is
-          // fetched after the seed (its prerequisite is on the base
-          // branch), and the run's branch is cut from it.
-          const startRef = repo.startBundle ? repo.startBundle.branch : `origin/${baseBranch}`;
-          const script = [
-            "set -eu",
-            ...verify,
-            `if [ -d ${shellQuote(dir)}/.git ]; then`,
-            `  cd ${shellQuote(dir)} && git fetch ${shellQuote(bundlePath)} refs/heads/${shellQuotePart(baseBranch)}:refs/remotes/origin/${shellQuotePart(baseBranch)}`,
-            "else",
-            `  git clone ${shellQuote(bundlePath)} ${shellQuote(dir)}`,
-            ...(repo.cloneUrl
-              ? [`  cd ${shellQuote(dir)} && git remote set-url origin ${shellQuote(repo.cloneUrl)}`]
-              : []),
-            "fi",
-            ...(repo.startBundle
-              ? [
-                  // The bundle lists HEAD or the branch, depending on
-                  // who built it. Asking a HEAD bundle for the branch
-                  // ref is exit 128. Forced, so a re-provision replaces
-                  // the head the swarm has moved past.
-                  fetchStartBundleCommand(dir, startPath, repo.startBundle.branch),
-                ]
-              : []),
-            `cd ${shellQuote(dir)} && (git checkout ${shellQuote(branch)} || git checkout -b ${shellQuote(branch)} ${shellQuote(startRef)})`,
-          ].join("\n");
-          const result = await runShell(box, script, MODAL_REPO_PREPARE_TIMEOUT_MS);
-          if (result.exitCode !== 0) throw checkoutFailure(repo.name, result);
+          await runSteps(
+            checkoutSteps({
+              dir,
+              cloneUrl: repo.cloneUrl,
+              branch,
+              baseBranch,
+              seed: {
+                bundlePath,
+                start: repo.startBundle ? { bundlePath: startPath, branch: repo.startBundle.branch } : undefined,
+              },
+            }),
+          );
         } finally {
           await box.remove(bundlePath).catch(() => {});
           if (repo.startBundle) await box.remove(startPath).catch(() => {});
         }
       } else if (repo.cloneUrl) {
-        const script = [
-          "set -eu",
-          ...verify,
-          `if [ -d ${shellQuote(dir)}/.git ]; then`,
-          `  cd ${shellQuote(dir)} && git fetch --all --prune`,
-          "else",
-          `  git clone ${shellQuote(repo.cloneUrl)} ${shellQuote(dir)}`,
-          "fi",
-          `cd ${shellQuote(dir)} && (git checkout ${shellQuote(branch)} || git checkout -b ${shellQuote(branch)})`,
-        ].join("\n");
-        const result = await runShell(box, script, MODAL_REPO_PREPARE_TIMEOUT_MS);
-        if (result.exitCode !== 0) throw checkoutFailure(repo.name, result);
+        await runSteps(checkoutSteps({ dir, cloneUrl: repo.cloneUrl, branch, baseBranch }));
       }
       await say(`Repository ${repo.name} is ready on branch ${branch}.`);
     }
@@ -1103,18 +1068,12 @@ function isAlreadyExists(err: unknown): boolean {
   return err instanceof Error && (err.name === "AlreadyExistsError" || /AlreadyExistsError/.test(err.message));
 }
 
-/**
- * A checkout script that exited without making the checkout, tagged
- * with whose fault it was. git refusing the project's repository, branch
- * or credential is the project's, and asking another provider would get
- * the same answer; anything else here is this machine's.
- */
-function checkoutFailure(repoName: string, result: { stdout: string; stderr: string; exitCode: number }): ProvisionFailure {
-  const cause = Object.assign(
+/** A checkout step that exited without finishing, with what it said, for checkoutStepFailure to judge. */
+function checkoutScriptError(repoName: string, result: { stdout: string; stderr: string; exitCode: number }): Error {
+  return Object.assign(
     new Error(`could not prepare ${repoName}: ${result.stderr.trim() || `exit ${result.exitCode}`}`),
-    { stdout: result.stdout, stderr: result.stderr },
+    { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode },
   );
-  return new ProvisionFailure("modal", "checkout", checkoutScriptBlame(result.exitCode, result.stderr), cause);
 }
 
 async function runShell(

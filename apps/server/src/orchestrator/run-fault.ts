@@ -1,4 +1,4 @@
-import { SandboxProvisionError } from "./sandbox-provision.js";
+import { ProvisionRefused, SandboxProvisionError } from "./sandbox-provision.js";
 
 /**
  * Whose failure ended a run, when it was not the work's.
@@ -29,17 +29,20 @@ export function isBillable(outcome: { ok: boolean; fault?: RunFault | undefined 
 }
 
 /**
- * Whose fault a provision that made no machine was.
+ * Whose fault a provision that made no machine was, from what it threw.
  *
- * The provider loop has already decided this: a failure every driver
- * blamed on the provider is the sandbox's, and one a driver blamed on
- * the project (git refused the checkout) is the project's, which another
- * provider would refuse the same way. A refusal before any provider was
- * asked (a clone URL that does not answer, two repositories on one
- * checkout, GitHub refusing the seed bundle) is the project's or
- * GitHub's, so it is billed like one.
+ * The provider loop has already decided for what it asked: a failure
+ * every driver blamed on the provider is the sandbox's, and one a driver
+ * blamed on the project (git refused the checkout) is the project's,
+ * which another provider would refuse the same way. A refusal before any
+ * provider was asked (ProvisionRefused: a clone URL that does not answer,
+ * two repositories on one checkout, GitHub refusing the seed bundle) is
+ * the project's or GitHub's, so it is billed like one. Anything else
+ * threw in this server on the way to a provider (a database write, a
+ * bundle it could not build), which is Bento's.
  */
 export function provisionFault(err: unknown): RunFault | undefined {
   if (err instanceof SandboxProvisionError) return err.blame === "project" ? undefined : "sandbox";
-  return undefined;
+  if (err instanceof ProvisionRefused) return undefined;
+  return "bento";
 }

@@ -47,7 +47,6 @@ import {
   LineChannel,
   repositoryPathIn,
   sandboxErrorKind,
-  sandboxNeverStartedCommand,
   type ExecChunk,
   type PreparedRepository,
   type SandboxDriver,
@@ -937,7 +936,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       // Straight to the bus, no row: the transcript gets the finished
       // message; open streams get the typing.
       onDelta: (delta) => ctx.bus.emitRunDelta(runId, delta),
-      onEvent: async (event, cursor) => {
+      onEvent: recordingRun(async (event, cursor) => {
         // A draining process only consumes: its successor has the run.
         // So does one whose run another server adopted.
         if (yielded(ctx, runId)) return;
@@ -973,7 +972,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
         // spoken lines: tool starts and stops are ticker noise.
         const spoken = runOutputPreview(event);
         if (spoken) subject.emitOutput(spoken);
-      },
+      }),
     });
   } catch (err) {
     ctx.running.delete(runId);
@@ -1036,7 +1035,8 @@ interface RunSettlement {
   branch: string;
   publisher: Awaited<ReturnType<typeof githubConnectionFor>>;
   argv: string[];
-  result: { outcome: RunOutcome; exitCode: number };
+  /** What runAgent returned: the events the agent produced, and whether the sandbox never started it. */
+  result: { outcome: RunOutcome; exitCode: number; events: readonly unknown[]; neverStarted?: "refused" | "gone" | undefined };
   emitBoard: (status: string) => void;
 }
 
@@ -1283,11 +1283,13 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
      * that tail. Before this was told apart, a swarm planner whose exec
      * upgrade Fly refused failed twice as a billed agent failure with
      * nothing in error tracking, because only provisioning failures
-     * were captured. The driver's words go to the log and to error
-     * tracking; the run record gets one sentence the person can act on,
-     * which the coordinator's restart rules read.
+     * were captured. The driver says so on the exit itself
+     * (neverStarted), so nothing the agent printed can claim it. The
+     * driver's words go to the log and to error tracking; the run record
+     * gets one sentence the person can act on, which the coordinator's
+     * restart rules read.
      */
-    const neverStarted = sandboxNeverStartedCommand(outcome.error ?? "");
+    const neverStarted = result.neverStarted;
     if (neverStarted) {
       console.error(`the sandbox did not start the agent for run ${runId}:`, outcome.error);
       ctx.analytics?.captureException(new Error(outcome.error), subject.run.startedBy, subject.organizationId, {
@@ -1346,12 +1348,17 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
      * next: provisioning retries the install on every run, so running
      * again is usually the whole fix.
      *
-     * Matched on the runtimes' own phrasing and on 127, the exit status
-     * a shell reserves for it, rather than on "not found" anywhere in
-     * the error: an agent that cannot resume a session says that too.
+     * Only for a process that never produced a single event, because an
+     * agent that worked and then exited 127 (its last shell command was
+     * missing) did run. Matched on the runtimes' own phrasing and on 127,
+     * the exit status a shell reserves for it, rather than on "not
+     * found" anywhere in the error: an agent that cannot resume a
+     * session says that too. Waived only on the exit status: the phrase
+     * is text, and text is not what decides a bill.
      */
+    const agentSilent = result.events.length === 0;
     const toolMissing =
-      exitCode === 127 || /executable file[^\n]*not found/i.test(outcome.error ?? "");
+      agentSilent && (exitCode === 127 || /executable file[^\n]*not found/i.test(outcome.error ?? ""));
     const toolAdvice = toolFailureAdvice(profile.cli, outcome.error ?? "");
     const providerAdvice = toolAdvice
       ? `${outcome.error} ${toolAdvice}`
@@ -1369,7 +1376,7 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
               error: `${argv[0] ?? profile.cli} is not installed in this sandbox, so the agent never started. Its install did not finish, and the next run installs it again. If it keeps failing, the sandbox cannot reach that CLI's installer.`,
               // Provisioning installs the CLI, so a sandbox without it
               // is the sandbox's failure, not the agent's.
-              fault: "sandbox" as const,
+              ...(exitCode === 127 ? { fault: "sandbox" as const } : {}),
             }
           : providerAdvice !== (outcome.error ?? "")
             ? { ...outcome, error: providerAdvice }
@@ -1580,6 +1587,29 @@ class SandboxExecError extends Error {
   }
 }
 
+/**
+ * What this server's own handling of an agent event threw: the
+ * transcript write, the session id, the delivery confirmations. Tagged
+ * where runAgent calls back in, like SandboxExecError on the driver's
+ * side, so the catch can name it Bento's without guessing.
+ */
+class RunRecordingError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = cause instanceof Error ? cause.name : "Error";
+  }
+}
+
+function recordingRun<A extends unknown[]>(handler: (...args: A) => Promise<void>): (...args: A) => Promise<void> {
+  return async (...args) => {
+    try {
+      await handler(...args);
+    } catch (err) {
+      throw new RunRecordingError(err);
+    }
+  };
+}
+
 async function* taggedSandboxExec(chunks: AsyncIterable<ExecChunk>): AsyncIterable<ExecChunk> {
   try {
     for await (const chunk of chunks) yield chunk;
@@ -1598,8 +1628,10 @@ async function* taggedSandboxExec(chunks: AsyncIterable<ExecChunk>): AsyncIterab
  */
 function reportExecFailure(ctx: AppContext, runId: string, subject: RunSubject, err: unknown): void {
   if (isExecTimeout(String(err))) return;
-  const source = err instanceof SandboxExecError ? "agent_exec" : "run_recording";
-  console.error(`${source === "agent_exec" ? "exec" : "recording the run"} failed for run ${runId}:`, err);
+  const source =
+    err instanceof SandboxExecError ? "agent_exec" : err instanceof RunRecordingError ? "run_recording" : "agent_run";
+  const what = { agent_exec: "exec", run_recording: "recording the run", agent_run: "the agent run" }[source];
+  console.error(`${what} failed for run ${runId}:`, err);
   ctx.analytics?.captureException(err, subject.run.startedBy, subject.organizationId, {
     run_id: runId,
     ...runOwnerProperties(subject.sandboxOwner),
@@ -1609,13 +1641,16 @@ function reportExecFailure(ctx: AppContext, runId: string, subject: RunSubject, 
 
 /**
  * Whose fault a rejection out of runAgent is, read from what threw. The
- * run limit is the work's and is billed. The driver's stream breaking
- * (SandboxExecError) is the sandbox's, and anything else threw while this
- * server recorded the run, which is Bento's.
+ * driver's stream breaking (SandboxExecError) is the sandbox's, and this
+ * server failing to record an event (RunRecordingError) is Bento's.
+ * Anything else, the run limit included, is billed like any failure
+ * nobody classified.
  */
 function execFailureFault(err: unknown): RunFault | undefined {
   if (isExecTimeout(String(err))) return undefined;
-  return err instanceof SandboxExecError ? "sandbox" : "bento";
+  if (err instanceof SandboxExecError) return "sandbox";
+  if (err instanceof RunRecordingError) return "bento";
+  return undefined;
 }
 
 function execFailureReason(ctx: AppContext, err: unknown): string {
@@ -1625,7 +1660,9 @@ function execFailureReason(ctx: AppContext, err: unknown): string {
       ? "Docker is not reachable from the server. Check that Docker is running, then run again."
       : err instanceof SandboxExecError
         ? `exec failed: ${String(err)}`
-        : `the server failed while recording the run: ${String(err)}`;
+        : err instanceof RunRecordingError
+          ? `the server failed while recording the run: ${String(err)}`
+          : `the agent run failed: ${String(err)}`;
 }
 
 /**
@@ -2277,7 +2314,7 @@ async function finishRun(
   // the adopter once a run was adopted; see the yield checks in the
   // executor loops.
   if (yielded(ctx, runId)) return;
-  const unbilled = !isBillable(outcome);
+  const billable = isBillable(outcome);
   /**
    * What this run cost, and how well that is known, worked out before
    * the run is closed and written in the same statement that closes it.
@@ -2289,16 +2326,16 @@ async function finishRun(
    * set below, so it happens once however many loops are driving this
    * run.
    */
-  const charge = unbilled
-    ? null
-    : await chargeForRun(ctx.db, runId, outcome).catch((err: unknown) => {
+  const charge = billable
+    ? await chargeForRun(ctx.db, runId, outcome).catch((err: unknown) => {
         // A ledger that cannot be worked out must not turn a finished run
         // into a failed one. The run still ends; its cost reads as not
         // recorded, which is what null in that column means.
         console.warn(`could not work out what run ${runId} cost:`, err);
         ctx.analytics?.captureException(err, null, null, { run_id: runId, source: "ledger" });
         return null;
-      });
+      })
+    : null;
   /**
    * Compare-and-set: only a run still active can be finished, and only
    * whoever moved it gets to write the rest (the transcript line, the
@@ -2312,7 +2349,7 @@ async function finishRun(
     .set({
       status: outcome.ok ? "succeeded" : "failed",
       endedAt: new Date(),
-      billable: !unbilled,
+      billable,
       exitCode,
       /**
        * Only when the agent actually said. Overwriting with null on a
@@ -2326,7 +2363,7 @@ async function finishRun(
        * A reported price or an estimate priced from reported tokens.
        * If the agent reported neither, null means unknown cost.
        */
-      costUsd: unbilled
+      costUsd: !billable
         ? null
         : charge
           ? String(charge.usd)
@@ -2362,7 +2399,7 @@ async function finishRun(
   // The run is over, so its gateway token is too. Behind the CAS, so it
   // fires exactly once; a failure here never fails the close.
   await revokeRunGrant(ctx, runId);
-  await announceRunFinished(ctx, runId, outcome.ok ? "succeeded" : "failed", !unbilled);
+  await announceRunFinished(ctx, runId, outcome.ok ? "succeeded" : "failed", billable);
 
   /**
    * The reason goes into the transcript, because the transcript is the
@@ -3005,7 +3042,7 @@ async function failRunAsInterrupted(
         transcript: "Bento restarted while this run was working, so the run ended here. Send a message to pick up where it left off.",
         fault: "bento" as const,
       });
-  const unbilled = !isBillable({ ok: false, fault: how.fault });
+  const billable = isBillable({ ok: false, fault: how.fault });
   const [closed] = await ctx.db
     .update(agentRuns)
     .set({
@@ -3014,7 +3051,7 @@ async function failRunAsInterrupted(
       error: how.error,
       // The column the team's hours and a swarm's spend read. Left at its
       // default, a run the reaper closed before any agent ran was counted.
-      billable: !unbilled,
+      billable,
     })
     .where(and(eq(agentRuns.id, run.id), inArray(agentRuns.status, ["starting", "running"])))
     .returning({ id: agentRuns.id });
@@ -3028,7 +3065,7 @@ async function failRunAsInterrupted(
   // its own finish announces later; announcing here for every orphan
   // would have billed runs that never ended. Every way here is Bento's
   // or the sandbox's failure, so none of them is announced for billing.
-  await announceRunFinished(ctx, run.id, "failed", !unbilled);
+  await announceRunFinished(ctx, run.id, "failed", billable);
 
   await appendRunEvent(ctx, run.id, {
     type: "message",
@@ -3571,7 +3608,7 @@ async function resumeInterruptedRun(
       exec: () => taggedSandboxExec(stream),
       initialEvents: durableEvents,
       onDelta: (delta) => ctx.bus.emitRunDelta(run.id, delta),
-      onEvent: async (event, cursor) => {
+      onEvent: recordingRun(async (event, cursor) => {
         // A draining process only consumes: its successor has the run.
         // So does one whose run another server adopted.
         if (yielded(ctx, run.id)) return;
@@ -3587,7 +3624,7 @@ async function resumeInterruptedRun(
         }
         const spoken = runOutputPreview(event);
         if (spoken) subject.emitOutput(spoken);
-      },
+      }),
     });
   } catch (err) {
     ctx.running.delete(run.id);

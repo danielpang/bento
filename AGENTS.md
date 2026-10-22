@@ -260,16 +260,19 @@ out of band, and the sprite driver is the one place that knows what
 fits. The launcher carries the organization's keys, so it removes
 itself as its first act: no process on this side is guaranteed to be
 around when the command ends. The executor tells a sandbox that never
-started the agent (`sandboxNeverStartedCommand`, which says whether
-the machine refused the start or was gone) apart from an agent that
-failed: it goes to error tracking as `sandbox_exec`, the run record
+started the agent apart from an agent that failed by what the driver
+says on the exit itself (`neverStarted`, "refused" or "gone", which
+`runAgent` hands back), never by the stream's words, which the agent
+can print: it goes to error tracking as `sandbox_exec`, the run record
 opens with `SANDBOX_REFUSED_AGENT_PREFIX` or
 `SANDBOX_GONE_AGENT_PREFIX`, and the infra failure rules match those
 openings. A refused upgrade whose session listing shows the command
 did start is a running process, and goes to the reattach ladder, never
 to "never started". A rejection out of `runAgent` is captured as
-`agent_exec` when the driver's stream threw and `run_recording` when
-the transcript write did, because the two are different incidents.
+`agent_exec` when the driver's stream threw (`SandboxExecError`) and
+`run_recording` when this server's handling of an event did
+(`RunRecordingError`, from `recordingRun` around `onEvent`), because
+the two are different incidents.
 The real-sprite e2e test runs a command past the line and checks that
 the sprite lists its session by a line the driver looks for.
 
@@ -300,28 +303,42 @@ sandbox failed. A failure of the agent, its harness, the model
 provider, GitHub, or the project's own settings is the work's and is
 billed, and so is the run limit. `agent_runs.billable` records the
 answer, and the hours sum, the team hours route, a swarm's agent
-time, and the billing hook (`onRunFinished`) all read that column.
+time, and the billing hook (`onRunFinished`) all read that column. A
+swarm's agent time also leaves out a run that ended before its agent
+started (failed or cancelled with no `agent_started_at`).
 
 The answer comes from the failure, never from the words it left. The
 code that catches a failure knows what threw, and hands `finishRun`
 (or `failRunAsInterrupted`) a `RunFault` from
 `apps/server/src/orchestrator/run-fault.ts`: `"bento"` when this
-server failed (a restart under the run, a transcript write that threw,
-a driver it could not choose), `"sandbox"` when the machine did (a
-provider that could not make it, a stream that broke, a CLI it lost, a
-machine that stopped). A failure with no fault is billed, so a path
-nobody classified charges rather than waives. Do not decide billing by
-matching the run record's sentence: it is written for the person, and
-its tail is often the agent's own output.
+server failed (a restart under the run, a `RunRecordingError`, a
+driver it could not choose, anything its own code threw while
+provisioning), `"sandbox"` when the machine did (a provider that could
+not make it, a `SandboxExecError`, an exit the driver marked
+`neverStarted`, a machine that stopped, or a CLI it lost: exit 127 from
+a process that produced no event at all, because an agent that worked
+and then exited 127 did run). A failure with no fault is billed, so a
+path nobody classified charges rather than waives. Do not decide
+billing by matching the run record's sentence: it is written for the
+person, and its tail is often the agent's own output.
 
-Provisioning carries its blame on the error. Every driver tags a
-checkout git refused (`ProvisionFailure` with blame `"project"`):
-the sprite through `spriteBlame`, Modal through `checkoutScriptBlame`
-in `packages/sandbox/src/driver.ts`, which says a script is the
-project's only when it exited and git itself refused a remote it could
-reach. `provisionFault` turns the provider loop's verdict into a
-fault. A refusal before any provider was asked (an unreachable clone
-URL, GitHub refusing the seed bundle) is the project's or GitHub's.
+Provisioning carries its blame on the error. Both clone drivers make
+a checkout from the same steps (`checkoutSteps` in
+`packages/sandbox/src/checkout-steps.ts`), run one at a time so a
+failure is judged by the step that failed: the branch fallback's
+"error: pathspec" on a new branch once sat in front of every later
+failure and read as git refusing the project. A step that reads the
+remote or cuts the branch is the project's only when it exited and git
+itself said why about a remote it could reach (`checkoutScriptBlame`);
+a step on files Bento put in the machine (a seed or start bundle) is
+never the project's. `checkoutStepFailure` tags the failure
+(`ProvisionFailure`), and `spriteBlame` applies the same rule to
+anything else in the sprite's checkout. `provisionFault` turns the
+provider loop's verdict into a fault. A refusal before any provider
+was asked (`ProvisionRefused`: an unreachable clone URL, GitHub
+refusing the seed bundle, a network lock this deployment cannot
+honor) is billed like the project's; anything else thrown on the way
+to a provider is Bento's.
 
 The infra failure rules (`infra-failures.ts`) are a different
 question: whether a swarm run deserves another try without the planner

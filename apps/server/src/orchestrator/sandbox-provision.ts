@@ -237,13 +237,13 @@ export async function provisionWorkspace(
       errorName: errorClassName(err),
       attempts: 0,
     });
-  /** Runs one preflight step, counting its refusal as a final before rethrowing it. */
+  /** Runs one preflight step, counting its refusal as a final and rethrowing it as a refusal. */
   const preflight = async <T>(step: () => T | Promise<T>, blame?: "project" | "policy"): Promise<T> => {
     try {
       return await step();
     } catch (err) {
       refusedBeforeAsking(err, blame);
-      throw err;
+      throw new ProvisionRefused(err);
     }
   };
 
@@ -261,7 +261,7 @@ export async function provisionWorkspace(
         "Remove one under Settings, Repositories, then run again.",
     );
     refusedBeforeAsking(refused, "project");
-    throw refused;
+    throw new ProvisionRefused(refused);
   }
 
   /**
@@ -277,7 +277,7 @@ export async function provisionWorkspace(
   if (shape) {
     const refused = new Error(shape);
     refusedBeforeAsking(refused, "policy");
-    throw refused;
+    throw new ProvisionRefused(refused);
   }
 
   const restarted = new Set(input.restartedRepoUrls ?? []);
@@ -370,7 +370,7 @@ export async function provisionWorkspace(
       "This organization requires agents to run without network access, and this deployment has no restricted network configured. Set BENTO_SANDBOX_RESTRICTED_NETWORK, or turn the setting off under Team.",
     );
     refusedBeforeAsking(refused, "policy");
-    throw refused;
+    throw new ProvisionRefused(refused);
   }
   if (keepsOpenNetwork) {
     await input.say(
@@ -618,7 +618,7 @@ export async function provisionWorkspace(
  * reason, not the wrapper.
  */
 export function provisionFailureCause(err: unknown): unknown {
-  if (err instanceof SandboxProvisionError) return provisionFailureCause(err.cause);
+  if (err instanceof SandboxProvisionError || err instanceof ProvisionRefused) return provisionFailureCause(err.cause);
   if (err instanceof ModalProvisionLeak || err instanceof ProvisionFailure) {
     return err.cause === undefined ? err : provisionFailureCause(err.cause);
   }
@@ -658,6 +658,23 @@ export function provisionFailureContext(err: unknown): Record<string, string> {
     fields.failure = `${err.provider} ${err.phase} (${err.blame}): ${text}`;
   }
   return fields;
+}
+
+/**
+ * A provision refused before any provider was asked: the project's
+ * repositories, the swarm's isolation, the team's network lock, or the
+ * GitHub reads that seed the checkout said no. Its message is the
+ * refusal's own, and the cause is what refused.
+ *
+ * Its own class so whoever closes the run can tell a refusal from a
+ * failure of Bento's own code on the way to a provider, which throws
+ * whatever it throws.
+ */
+export class ProvisionRefused extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = "ProvisionRefused";
+  }
 }
 
 /** One driver's failed attempt, as the log and error tracking record it. */

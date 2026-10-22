@@ -246,10 +246,27 @@ export interface ProvisionSpec {
   onProgress?: (message: string) => void | Promise<void>;
 }
 
+/**
+ * Why a command never started, said by the driver that knows: the
+ * sandbox refused the connection that starts it (worth another try on
+ * the same machine), or the machine was gone (it needs a new one).
+ */
+export type SandboxNeverStarted = "refused" | "gone";
+
 export type ExecChunk =
   | { kind: "stdout"; data: string; cursor?: number }
   | { kind: "stderr"; data: string; cursor?: number }
-  | { kind: "exit"; exitCode: number; cursor?: number };
+  | {
+      kind: "exit";
+      exitCode: number;
+      cursor?: number;
+      /**
+       * Set only by a driver that did not start the command at all.
+       * The caller reads this rather than the stderr before it, which
+       * carries whatever the process printed too.
+       */
+      neverStarted?: SandboxNeverStarted;
+    };
 
 /**
  * What every driver writes to stderr when it stops an exec at
@@ -545,14 +562,18 @@ export interface SandboxDriver {
 /** Collects an exec stream into buffered output. Convenience for tests and gates. */
 export async function collectExec(
   stream: AsyncIterable<ExecChunk>,
-): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+): Promise<{ stdout: string; stderr: string; exitCode: number; neverStarted?: SandboxNeverStarted }> {
   let stdout = "";
   let stderr = "";
   let exitCode = -1;
+  let neverStarted: SandboxNeverStarted | undefined;
   for await (const chunk of stream) {
     if (chunk.kind === "stdout") stdout += chunk.data;
     else if (chunk.kind === "stderr") stderr += chunk.data;
-    else exitCode = chunk.exitCode;
+    else {
+      exitCode = chunk.exitCode;
+      neverStarted = chunk.neverStarted;
+    }
   }
-  return { stdout, stderr, exitCode };
+  return { stdout, stderr, exitCode, ...(neverStarted ? { neverStarted } : {}) };
 }

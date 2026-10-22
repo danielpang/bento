@@ -20,14 +20,15 @@ import {
   type RepositoryImportOutcome,
   type SandboxDriver,
   type SandboxHandle,
-  GIT_UNREACHABLE,
   ProvisionFailure,
+  checkoutScriptBlame,
+  type SandboxNeverStarted,
   type ProvisionBlame,
   type ProvisionPhase,
 } from "./driver.js";
 import { holdSpriteAwake } from "./keep-awake.js";
-import { shellQuote, shellQuotePart } from "./shell.js";
-import { fetchStartBundleCommand } from "./start-bundle.js";
+import { shellQuote } from "./shell.js";
+import { checkoutStepFailure, checkoutSteps, type CheckoutStep } from "./checkout-steps.js";
 
 /**
  * The machine one workspace's work happens on. Exported because a test
@@ -329,7 +330,7 @@ function provisionConnectionClosed(err: unknown): boolean {
 export function spriteBlame(phase: ProvisionPhase, err: unknown): ProvisionBlame {
   if (phase !== "checkout") return "provider";
   if (err instanceof APIError || err instanceof FilesystemError) return "provider";
-  if (!(err instanceof Error)) return "project";
+  if (!(err instanceof Error)) return "provider";
   if (execHandshakeIsRetriable(err) || provisionConnectionClosed(err)) return "provider";
   if (
     /Network error|fetch failed|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up|aborted due to timeout|exec connection failed|did not finish within|temporarily unavailable|closed before the provisioning script reported an exit/i.test(
@@ -338,11 +339,10 @@ export function spriteBlame(phase: ProvisionPhase, err: unknown): ProvisionBlame
   ) {
     return "provider";
   }
-  const stderr = (err as Error & { stderr?: unknown }).stderr;
-  if (typeof stderr === "string" && GIT_UNREACHABLE.test(stderr)) {
-    return "provider";
-  }
-  return "project";
+  // The rule every clone driver shares: the project's only when the
+  // script exited and git itself said why.
+  const { exitCode, stderr } = err as Error & { exitCode?: unknown; stderr?: unknown };
+  return checkoutScriptBlame(typeof exitCode === "number" ? exitCode : undefined, typeof stderr === "string" ? stderr : "");
 }
 
 /**
@@ -505,20 +505,16 @@ export class SpriteDriver implements SandboxDriver {
       const branch = repo.branch ?? "main";
       const baseBranch = repo.baseBranch ?? "main";
       await say(`Preparing repository ${repo.name}...`);
-      /*
-       * Only where there is a remote to compare against. A seeded
-       * checkout has no origin, and comparing that against an empty
-       * string matches nothing, so the check would delete the
-       * workspace on every re-provision of the same machine.
-       */
-      const verifyIdentity = repo.cloneUrl
-        ? [
-            `if [ -d ${shellQuote(dir)}/.git ]; then`,
-            `  current_origin=$(git -C ${shellQuote(dir)} remote get-url origin 2>/dev/null || true)`,
-            `  if [ "$current_origin" != ${shellQuote(repo.cloneUrl)} ]; then rm -rf ${shellQuote(dir)}; fi`,
-            "fi",
-          ]
-        : [];
+      // Each step is judged by itself; see checkoutSteps.
+      const runSteps = async (steps: CheckoutStep[]) => {
+        for (const step of steps) {
+          try {
+            await runScript(sprite, step.script);
+          } catch (err) {
+            throw checkoutStepFailure("sprite", step, err);
+          }
+        }
+      };
       if (repo.seedBundle) {
         const bundlePath = `/tmp/bento-seed-${repo.name}.bundle`;
         const seedBundle = repo.seedBundle;
@@ -556,30 +552,18 @@ export class SpriteDriver implements SandboxDriver {
            * prerequisite is a commit on the base branch, which the
            * seed is what brings in.
            */
-          const startRef = repo.startBundle ? repo.startBundle.branch : `origin/${baseBranch}`;
-          const script = [
-            "set -eu",
-            ...verifyIdentity,
-            `if [ -d ${shellQuote(dir)}/.git ]; then`,
-            `  cd ${shellQuote(dir)} && git fetch ${shellQuote(bundlePath)} refs/heads/${shellQuotePart(baseBranch)}:refs/remotes/origin/${shellQuotePart(baseBranch)}`,
-            "else",
-            `  git clone ${shellQuote(bundlePath)} ${shellQuote(dir)}`,
-            ...(repo.cloneUrl
-              ? [`  cd ${shellQuote(dir)} && git remote set-url origin ${shellQuote(repo.cloneUrl)}`]
-              : []),
-            "fi",
-            ...(repo.startBundle
-              ? [
-                  // The bundle lists HEAD or the branch, depending on
-                  // who built it. Asking a HEAD bundle for the branch
-                  // ref is exit 128. Forced, so a re-provision replaces
-                  // the head the swarm has moved past.
-                  fetchStartBundleCommand(dir, startPath, repo.startBundle.branch),
-                ]
-              : []),
-            `cd ${shellQuote(dir)} && (git checkout ${shellQuote(branch)} || git checkout -b ${shellQuote(branch)} ${shellQuote(startRef)})`,
-          ].join("\n");
-          await runScript(sprite, script);
+          await runSteps(
+            checkoutSteps({
+              dir,
+              cloneUrl: repo.cloneUrl,
+              branch,
+              baseBranch,
+              seed: {
+                bundlePath,
+                start: repo.startBundle ? { bundlePath: startPath, branch: repo.startBundle.branch } : undefined,
+              },
+            }),
+          );
         } finally {
           await callFilesystem(
             () => sprite.filesystem("/").rm(bundlePath),
@@ -597,18 +581,7 @@ export class SpriteDriver implements SandboxDriver {
         // No seed, so the remote is the only source there is. The
         // guard above is what makes this exhaustive.
       } else if (repo.cloneUrl) {
-        const cloneUrl = repo.cloneUrl;
-        const script = [
-          "set -eu",
-          ...verifyIdentity,
-          `if [ -d ${shellQuote(dir)}/.git ]; then`,
-          `  cd ${shellQuote(dir)} && git fetch --all --prune`,
-          `else`,
-          `  git clone ${shellQuote(cloneUrl)} ${shellQuote(dir)}`,
-          `fi`,
-          `cd ${shellQuote(dir)} && (git checkout ${shellQuote(branch)} || git checkout -b ${shellQuote(branch)})`,
-        ].join("\n");
-        await runScript(sprite, script);
+        await runSteps(checkoutSteps({ dir, cloneUrl: repo.cloneUrl, branch, baseBranch }));
       }
       await say(`Repository ${repo.name} is ready on branch ${branch}.`);
     }
@@ -900,13 +873,14 @@ export class SpriteDriver implements SandboxDriver {
          * sprite was billed would have depended on the prompt's size.
          */
         const detail = scrubExecUrl(err instanceof Error ? err.message : String(err));
+        const gone = /sprite not found/i.test(detail);
         yield {
           kind: "stderr",
-          data: /sprite not found/i.test(detail)
+          data: gone
             ? `the cloud sandbox ${handle.externalId} ${EXEC_SANDBOX_GONE}. Start the run again to provision a new sandbox.`
             : `${EXEC_NOT_STAGED}: ${detail}`,
         };
-        yield { kind: "exit", exitCode: -1 };
+        yield { kind: "exit", exitCode: -1, neverStarted: gone ? "gone" : "refused" };
         return;
       }
     }
@@ -1088,10 +1062,10 @@ export class SpriteDriver implements SandboxDriver {
     if (opts?.stdin) void pump(opts.stdin);
 
     /** Exactly one exit chunk ends the stream, whichever path is first. */
-    const conclude = (exitCode: number, reason?: string) => {
+    const conclude = (exitCode: number, reason?: string, neverStarted?: SandboxNeverStarted) => {
       if (done) return;
       if (reason) push({ kind: "stderr", data: reason });
-      push({ kind: "exit", exitCode });
+      push({ kind: "exit", exitCode, ...(neverStarted ? { neverStarted } : {}) });
       done = true;
       wakeStdin();
     };
@@ -1133,7 +1107,7 @@ export class SpriteDriver implements SandboxDriver {
       const delay = EXEC_HANDSHAKE_RETRY_DELAYS_MS[handshakeRetries];
       if (delay === undefined) {
         stopKeepaliveGuard();
-        conclude(-1, EXEC_REFUSED_AFTER_RETRIES);
+        conclude(-1, EXEC_REFUSED_AFTER_RETRIES, "refused");
         return;
       }
       handshakeRetries += 1;
@@ -1196,7 +1170,7 @@ export class SpriteDriver implements SandboxDriver {
             recoverInitialHandshake();
             return;
           }
-          conclude(-1, `${EXEC_REFUSED}${scrubExecUrl(err instanceof Error ? err.message : String(err))}`);
+          conclude(-1, `${EXEC_REFUSED}${scrubExecUrl(err instanceof Error ? err.message : String(err))}`, "refused");
         }
       })();
     };
@@ -1337,6 +1311,7 @@ export class SpriteDriver implements SandboxDriver {
             conclude(
               -1,
               `the cloud sandbox ${handle.externalId} ${EXEC_SANDBOX_GONE}. Start the run again to provision a new sandbox.`,
+              "gone",
             );
             return;
           }
@@ -2147,15 +2122,6 @@ export const EXEC_REFUSED = "the sandbox did not accept the exec connection: ";
 export const EXEC_NOT_STAGED = "the sandbox could not take the command, so it was not started";
 export const EXEC_SANDBOX_GONE = "was not found, so the command was not started";
 
-export type SandboxNeverStarted = "refused" | "gone";
-
-export function sandboxNeverStartedCommand(text: string): SandboxNeverStarted | null {
-  if (text.includes(EXEC_SANDBOX_GONE)) return "gone";
-  if (text.includes(EXEC_REFUSED_AFTER_RETRIES) || text.includes(EXEC_REFUSED) || text.includes(EXEC_NOT_STAGED)) {
-    return "refused";
-  }
-  return null;
-}
 
 /** The command line a staged command's session reports, for a test against a real sprite. */
 export function stagedCommandLine(sessionKey: string): string {
@@ -2458,7 +2424,7 @@ function provisioningScriptError(exitCode: number, stdout: string, stderr: strin
     detail === ""
       ? `provisioning script failed with exit code ${exitCode}`
       : `provisioning script failed with exit code ${exitCode}: ${detail}`;
-  return Object.assign(new Error(message), { stdout, stderr });
+  return Object.assign(new Error(message), { stdout, stderr, exitCode });
 }
 
 function collectProvisionSpawn(
