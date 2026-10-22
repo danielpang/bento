@@ -110,7 +110,7 @@
         <else>
           <checkbox key="beta-setup-off" checked="false" on-toggle="toggle_beta_opt_in" text="Try beta and experimental features" />
         </else>
-        <text foreground="text_muted" wrap="true">Warning beta can cause issues.</text>
+        <text foreground="text_muted" wrap="true">Warning beta features can cause issues.</text>
         <button variant="primary" on-press="choose_local">Start</button>
       </column>
 
@@ -412,7 +412,7 @@
           <else>
             <checkbox key="beta-settings-off" checked="false" on-toggle="toggle_beta_opt_in" text="Try beta and experimental features" />
           </else>
-          <text foreground="text_muted" wrap="true">Warning beta can cause issues.</text>
+          <text foreground="text_muted" wrap="true">Warning beta features can cause issues.</text>
         </if>
         <separator />
         <text>Setup</text>

@@ -407,7 +407,7 @@ function BetaFeaturesCard({ client }: { client: BentoClient }) {
         />
         <span className="gate-check-text">Try beta and experimental features</span>
       </label>
-      <p className="muted">Warning beta can cause issues.</p>
+      <p className="muted">Warning beta features can cause issues.</p>
     </section>
   );
 }
