@@ -1,6 +1,6 @@
 # Bento for macOS
 
-Shared web console plus embedded Bento server. Replaces the older Native SDK app in `apps/mac`.
+Shared web console plus embedded Bento server.
 
 ## Run from source
 
@@ -57,7 +57,7 @@ This is an explicit exception for Bento. It does not disable Gatekeeper for othe
 
 ### Versioning and CI
 
-TUI and desktop share the release tag (e.g. `v0.1.3` → `0.1.3`). Release workflow ships CLI + Mac installers + checksums (no `apps/mac`). Local packaging:
+TUI and desktop share the release tag (e.g. `v0.1.3` → `0.1.3`). Release workflow ships CLI + Mac installers + checksums. Local packaging:
 
 ```sh
 BENTO_RELEASE_TAG=v0.1.3 pnpm --filter @bento/desktop package:mac --unsigned --arm64 --x64

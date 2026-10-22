@@ -1057,15 +1057,5 @@ to the `test` task:
 DATABASE_URL=postgres://postgres:postgres@localhost:5439/app pnpm test
 ```
 
-The `mac` package tests need Node 22.15 or newer (the Native SDK refuses
-older), while the default `node` on this VM is 22.14, so those four tests
-fail with a version error and every other package passes. For a fully
-green suite including `mac`, put the nvm-managed Node first on PATH:
-
-```bash
-PATH="$HOME/.nvm/versions/node/v22.22.2/bin:$PATH" \
-  DATABASE_URL=postgres://postgres:postgres@localhost:5439/app pnpm test
-```
-
 `pnpm lint` is a no-op: no package defines a `lint` script. `pnpm
 typecheck` is the static check that runs.
