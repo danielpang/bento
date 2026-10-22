@@ -1,0 +1,37 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Bento explainer</title>
+<style>
+@font-face { font-family: "Serif"; src: url(fonts/instrument-serif-latin-400-normal.woff2); }
+@font-face { font-family: "Sans"; src: url(fonts/inter-latin-600-normal.woff2); font-weight: 600; }
+@font-face { font-family: "Sans"; src: url(fonts/inter-latin-700-normal.woff2); font-weight: 700; }
+html, body { margin: 0; background: #111; overflow: hidden; }
+canvas { display: block; max-width: 100vw; max-height: 100vh; margin: auto; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="kit.js"></script>
+<script>
+// ?scenes=swarm loads scenes/swarm.js. ?aspect=v|h. ?t=12 holds one frame. ?render waits for the renderer.
+const scenesName = Q.get("scenes") || "swarm";
+window.ready = new Promise((resolve, reject) => {
+  const s = document.createElement("script");
+  s.src = `scenes/${scenesName}.js`;
+  s.onload = resolve;
+  s.onerror = () => reject(new Error(`no scenes/${scenesName}.js`));
+  document.head.appendChild(s);
+})
+  .then(() => Promise.all(["400 40px Serif", "700 40px Sans", "600 40px Sans"].map(f => document.fonts.load(f))))
+  .then(() => { makeBg("paper"); makeBg("night"); });
+if (!Q.has("render")) window.ready.then(() => {
+  if (Q.has("t")) { renderAt(parseFloat(Q.get("t"))); return; }
+  const t0 = performance.now();
+  const loop = () => { renderAt(((performance.now() - t0) / 1000) % DURATION); requestAnimationFrame(loop); };
+  loop();
+});
+</script>
+</body>
+</html>
