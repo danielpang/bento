@@ -106,11 +106,18 @@ import { drivesRuns, runSlots } from "../env.js";
 import { customProviderRunEnv } from "./custom-provider.js";
 import { agentAuthEnv, agentAuthMounts, gitIdentityEnv } from "./agent-auth.js";
 import { prepareRunMcp } from "./mcp-run.js";
+import { proxyModelCredentials } from "./model-proxy-env.js";
 import { BENTO_SERVER_ID } from "../mcp/bento-tools.js";
 import { SWARM_DESIGN_PATH } from "./swarm/design-document.js";
 import { loadPlanSources, PLAN_SOURCE_DIR, writePlanSourceFiles, type PlanSource } from "./swarm/plan-sources.js";
 import { isBetaRun } from "../feature-flags.js";
-import { extendRunGrant, revokeRunGrant, runGrantServerIds, sweepExpiredGrants } from "../mcp/grants.js";
+import {
+  extendRunGrant,
+  revokeRunGrant,
+  runGrantUses,
+  runHadModelProxyFailure,
+  sweepExpiredGrants,
+} from "../mcp/grants.js";
 import { sweepExpiredOAuth } from "../mcp/oauth-sweep.js";
 import { shouldIncludeStageNotes, shouldShareAgentAuth } from "../settings.js";
 import { captureRunQueueDepth } from "./queue-snapshot.js";
@@ -597,6 +604,48 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     return;
   }
 
+  /**
+   * In multi mode the provider keys this tool can send through the
+   * model proxy are swapped for the run's grant token here, once the
+   * driver that made the machine is known (it decides the address the
+   * sandbox reaches the proxy on). The grant is minted now, ahead of
+   * MCP, which then joins it rather than minting a token that would
+   * replace the one this environment holds.
+   *
+   * A grant that cannot be minted is a database this server could not
+   * write, so the run ends as Bento's failure rather than starting
+   * with keys it was meant not to have.
+   */
+  let runEnv: Record<string, string>;
+  let grantToken: string | null;
+  try {
+    ({ env: runEnv, grantToken } = await proxyModelCredentials(ctx, {
+      runId,
+      organizationId: subject.organizationId,
+      actingUserId: run.startedBy,
+      ...(subject.kind === "swarm" ? { swarmId: subject.swarm.id } : {}),
+      adapter,
+      driver,
+      env: agentEnv,
+      say: saySystem,
+    }));
+  } catch (err) {
+    console.error(`could not mint the model proxy grant for run ${runId}:`, err);
+    ctx.analytics?.captureException(err, run.startedBy, subject.organizationId, {
+      run_id: runId,
+      source: "model_proxy_grant",
+    });
+    await finishRun(
+      ctx,
+      runId,
+      { ok: false, error: "Bento could not prepare this run's model credentials. Please try again.", fault: "bento" },
+      null,
+    );
+    emitBoard("failed");
+    await subject.settle(ctx);
+    return;
+  }
+
   // MCP servers are attached before the command is built, so the
   // gateway flags can join the argv. Never fails the run: an
   // unattachable server is left out with a transcript note.
@@ -623,6 +672,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       ...(subject.kind === "pipeline" ? [{ id: BENTO_SERVER_ID, slug: BENTO_SERVER_ID }] : []),
     ],
     ...(subject.kind === "swarm" ? { swarmId: subject.swarm.id } : {}),
+    grantToken,
     say: saySystem,
   });
 
@@ -729,12 +779,12 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     mcpArgs,
     cardTools,
     setupWarning: setupFailure,
-    credentials: agentEnv,
+    credentials: runEnv,
     ...(customProvider?.selection ? { customProvider: customProvider.selection } : {}),
   });
 
   const execEnv = {
-    ...mergeAgentExecEnv(toolEnv, agentEnv, authEnv, await gitIdentityEnv(ctx)),
+    ...mergeAgentExecEnv(toolEnv, runEnv, authEnv, await gitIdentityEnv(ctx)),
     ...(customProvider?.env ?? {}),
     ...mcpEnv,
   };
@@ -2483,6 +2533,16 @@ async function recordSwarmWorkspace(
     .where(eq(swarms.id, subject.swarm.id));
 }
 
+/** Whether the model proxy failed a request of this run's; a lookup that errors reads as no. */
+async function proxyFailedUnder(ctx: AppContext, runId: string): Promise<boolean> {
+  try {
+    return await runHadModelProxyFailure(ctx, runId);
+  } catch (err) {
+    console.warn(`could not read whether the model proxy failed run ${runId}:`, err);
+    return false;
+  }
+}
+
 async function finishRun(
   ctx: AppContext,
   runId: string,
@@ -2510,6 +2570,16 @@ async function finishRun(
   // executor loops.
   if (yielded(ctx, runId)) return;
   const status = stopped ? "cancelled" : outcome.ok ? "succeeded" : "failed";
+  /**
+   * A run the model proxy failed under is Bento's failure, whatever the
+   * agent made of the error it was handed: the proxy stamps its grant
+   * when it could not do its part (a lookup, a decryption, a provider
+   * it could not reach), and the stamp is read here rather than any
+   * sentence the run left. A fault the caller already knew stands.
+   */
+  if (!outcome.ok && !stopped && outcome.fault === undefined && (await proxyFailedUnder(ctx, runId))) {
+    outcome = { ...outcome, fault: "bento" };
+  }
   // A stop the person asked for is billed for the work before it.
   const billable = stopped || isBillable(outcome);
   /**
@@ -3583,13 +3653,16 @@ async function resumeInterruptedRun(
   }));
 
   // The sandbox still holds the config files and their gateway token
-  // from the run's first life; nothing is re-provisioned. So the flags
-  // are reproduced from whether a grant exists (never re-minted, or the
-  // token in the sandbox would stop matching), and the grant is
-  // extended to cover the rest of the budget. A grant revoked or
-  // expired during the outage stays dead, and the run's tools answer
-  // 404, which is honest.
-  const grantServers = adapter.mcp ? await runGrantServerIds(ctx, run.id) : [];
+  // from the run's first life, and a proxied run's environment holds
+  // the same token in place of its keys; nothing is re-provisioned. So
+  // the flags are reproduced from whether a grant exists (never
+  // re-minted, or the token in the sandbox would stop matching), and
+  // the grant is extended to cover the rest of the budget, for its
+  // servers and its model calls alike. A grant revoked or expired
+  // during the outage stays dead, and the run's tools and model calls
+  // answer 404, which is honest.
+  const grantUses = await runGrantUses(ctx, run.id);
+  const grantServers = adapter.mcp ? grantUses?.serverIds ?? [] : [];
   const mcpArgs = grantServers.length > 0 ? adapter.mcp?.extraArgs?.() ?? [] : [];
 
   const { argv, live, liveChannel, wire, workdir } = await buildRunCommand(ctx, {
@@ -3615,7 +3688,9 @@ async function resumeInterruptedRun(
     60_000,
     ctx.env.BENTO_RUN_TIMEOUT_MIN * 60_000 - (run.startedAt ? Date.now() - run.startedAt.getTime() : 0),
   );
-  if (grantServers.length > 0) await extendRunGrant(ctx, run.id, timeoutMs + 60 * 60_000);
+  if (grantUses && (grantServers.length > 0 || grantUses.modelCredentials.length > 0)) {
+    await extendRunGrant(ctx, run.id, timeoutMs + 60 * 60_000);
+  }
 
   // Attach before touching shared state or the transcript, so a failed
   // attach leaves no misleading "reattached" line and no stale abort

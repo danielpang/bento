@@ -5,7 +5,7 @@ import { resolveSandboxPath, writeFileCommand, type AgentAdapter, type McpRemote
 import type { AppContext } from "../context.js";
 import { CONTAINER_HOME } from "./agent-auth.js";
 import { BENTO_SERVER_ID } from "../mcp/bento-tools.js";
-import { mintRunGrant, revokeRunGrant } from "../mcp/grants.js";
+import { mintRunGrant, revokeRunGrant, setRunGrantServers } from "../mcp/grants.js";
 
 /**
  * Attaches the organization's MCP servers to one run.
@@ -34,6 +34,11 @@ const EXEC_TIMEOUT_MS = 30_000;
 /** The run's whole budget plus an hour, so a reattach after a restart still authenticates. */
 const GRANT_SLACK_MS = 60 * 60_000;
 
+/** How long a run's grant lives from its mint, for MCP and the model proxy alike. */
+export function runGrantTtlMs(ctx: AppContext): number {
+  return ctx.env.BENTO_RUN_TIMEOUT_MIN * 60_000 + GRANT_SLACK_MS;
+}
+
 export interface PrepareRunMcpInput {
   runId: string;
   organizationId: string | null;
@@ -61,6 +66,13 @@ export interface PrepareRunMcpInput {
   ownServers?: { id: string; slug: string }[];
   /** Copied onto the grant, so the swarm tools can check it per call. */
   swarmId?: string | null;
+  /**
+   * The token of the grant this run already holds, when its model keys
+   * are proxied (see model-proxy-env.ts). The sandbox's environment
+   * carries it in place of each key, so the servers join that grant
+   * rather than minting a second token that would replace it.
+   */
+  grantToken?: string | null;
   say: (text: string) => Promise<void>;
 }
 
@@ -223,24 +235,32 @@ export async function prepareRunMcp(
     return none;
   }
 
-  const token = await mintRunGrant(ctx, {
-    runId: input.runId,
-    organizationId: input.organizationId,
-    actingUserId: input.actingUserId,
-    serverIds: attachedIds,
-    swarmId: input.swarmId ?? null,
-    ttlMs: ctx.env.BENTO_RUN_TIMEOUT_MIN * 60_000 + GRANT_SLACK_MS,
-  });
+  let token: string;
+  if (input.grantToken) {
+    await setRunGrantServers(ctx, input.runId, attachedIds);
+    token = input.grantToken;
+  } else {
+    token = await mintRunGrant(ctx, {
+      runId: input.runId,
+      organizationId: input.organizationId,
+      actingUserId: input.actingUserId,
+      serverIds: attachedIds,
+      swarmId: input.swarmId ?? null,
+      ttlMs: runGrantTtlMs(ctx),
+    });
+  }
   for (const server of attached) {
     server.headers.Authorization = `Bearer ${token}`;
   }
 
   // If the config could not be written, the agent has no file to read, so
   // do not hand it the flags. Revoke the grant so a resume does not try
-  // to reattach MCP either.
+  // to reattach MCP either; a grant the model proxy also rides only
+  // drops its servers, because revoking it would take the model too.
   const written = await writeConfigs(input.driver, input.handle, capability.renderConfig(attached));
   if (!written) {
-    await revokeRunGrant(ctx, input.runId);
+    if (input.grantToken) await setRunGrantServers(ctx, input.runId, []);
+    else await revokeRunGrant(ctx, input.runId);
     await input.say(
       `Could not write the MCP configuration into the sandbox, so ${input.adapter.cli}'s MCP servers are not attached to this run.`,
     );
@@ -354,9 +374,11 @@ async function writeConfigs(
 }
 
 /**
- * The gateway base a sandbox writes into its config. A Docker sandbox
- * reaches the host loopback as host.docker.internal, so a localhost base
- * is rewritten to it; an explicit BENTO_MCP_GATEWAY_URL is always
+ * The gateway base a sandbox writes into its config, and the base of the
+ * model proxy's addresses. A Docker sandbox reaches the host loopback as
+ * host.docker.internal, so a localhost base is rewritten to it; an agent
+ * running as a local process is on the host already, so loopback is
+ * what it should use; an explicit BENTO_MCP_GATEWAY_URL is always
  * honored as given. Returns null when the resolved base is one the
  * sandbox cannot reach (a sprite on a loopback base).
  */
@@ -374,6 +396,7 @@ export function resolveGatewayBase(ctx: AppContext, driver: SandboxDriver): stri
   if (driver.provider === "docker") {
     return base.replace(/\/\/(localhost|127\.0\.0\.1|\[::1\])/, "//host.docker.internal");
   }
+  if (driver.provider === "local-process") return base;
   // A sprite (or any remote sandbox) cannot reach the server's own
   // loopback; the caller turns this into a transcript note.
   return null;

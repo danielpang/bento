@@ -1,5 +1,5 @@
 import type { AgentDelta, AgentEvent, RunOutcome } from "@bento/core";
-import { lastResultEvent, providerKeyFor, type AgentAdapter, type BuildCommandInput, type McpFile } from "./adapter.js";
+import { lastResultEvent, providerBaseUrl, providerKeyFor, type AgentAdapter, type BuildCommandInput, type McpFile } from "./adapter.js";
 import { PI_ASK_USER_ENV, PI_ASK_USER_EXTENSION, PI_ASK_USER_PATH, piLiveProtocol } from "./pi-live.js";
 
 /**
@@ -29,24 +29,34 @@ export const piAdapter: AgentAdapter = {
     "DEEPSEEK_API_KEY",
   ],
   configPaths: [".pi"],
+  /**
+   * pi takes a built-in provider's base URL only from models.json,
+   * where setting `baseUrl` alone on a built-in provider id re-routes
+   * every model of it and keeps its auth (pi's docs/models.md, "route a
+   * built-in provider through a proxy"). So the proxy's addresses reach
+   * pi as that file in the sandbox home.
+   */
+  modelProxy: {
+    keys: ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "AI_GATEWAY_API_KEY", "GEMINI_API_KEY", "DEEPSEEK_API_KEY"],
+    homeFile: true,
+  },
 
   files(input: BuildCommandInput) {
     const files: McpFile[] = [];
     if (input.askUser) files.push({ path: PI_ASK_USER_PATH, content: PI_ASK_USER_EXTENSION });
+    const providers: Record<string, unknown> = piProviderBaseUrls(input);
     const provider = input.customProvider;
-    if (!provider) return files;
-    return [...files, {
-      path: "~/.pi/agent/models.json",
-      content: JSON.stringify({ providers: {
-        [provider.slug]: {
-          baseUrl: provider.baseUrl,
-          api: provider.protocol === "anthropic" ? "anthropic-messages"
-            : provider.protocol === "openai-responses" ? "openai-responses" : "openai-completions",
-          apiKey: "$BENTO_CUSTOM_PROVIDER_API_KEY",
-          models: provider.models,
-        },
-      } }),
-    }];
+    if (provider) {
+      providers[provider.slug] = {
+        baseUrl: provider.baseUrl,
+        api: provider.protocol === "anthropic" ? "anthropic-messages"
+          : provider.protocol === "openai-responses" ? "openai-responses" : "openai-completions",
+        apiKey: "$BENTO_CUSTOM_PROVIDER_API_KEY",
+        models: provider.models,
+      };
+    }
+    if (Object.keys(providers).length === 0) return files;
+    return [...files, { path: "~/.pi/agent/models.json", content: JSON.stringify({ providers }) }];
   },
 
   /**
@@ -250,6 +260,32 @@ function assistantText(message: PiMessage | undefined): string {
  * `vercel`. The picker writes `vercel/<slug>` so every tool shares one
  * catalog id; this is the rewrite that provider expects.
  */
+/**
+ * Built-in providers pointed at the base URLs this run was given, in
+ * the shape each one's built-in models use (read off pi 1.4.0's own
+ * catalog): Anthropic, DeepSeek and AI Gateway at the origin, OpenAI
+ * with /v1, Google with /v1beta. OpenRouter serves its anthropic/
+ * models over Anthropic's API at /api and the rest over OpenAI's at
+ * /api/v1, and one provider has one base URL, so the run's own model
+ * decides which. Nothing for a provider the run was given no base URL
+ * for, so pi's own default stands.
+ */
+function piProviderBaseUrls(input: BuildCommandInput): Record<string, { baseUrl: string }> {
+  const credentials = input.credentials ?? {};
+  const out: Record<string, { baseUrl: string }> = {};
+  const set = (provider: string, name: string, suffix = "") => {
+    if (!credentials[name]?.trim()) return;
+    out[provider] = { baseUrl: `${providerBaseUrl(credentials, name, "")}${suffix}` };
+  };
+  set("anthropic", "ANTHROPIC_BASE_URL");
+  set("openai", "OPENAI_BASE_URL");
+  set("google", "GOOGLE_GEMINI_BASE_URL", "/v1beta");
+  set("deepseek", "DEEPSEEK_BASE_URL");
+  set("vercel-ai-gateway", "AI_GATEWAY_BASE_URL");
+  set("openrouter", "OPENROUTER_BASE_URL", input.model.startsWith("openrouter/anthropic/") ? "/api" : "/api/v1");
+  return out;
+}
+
 function piModelArgs(model: string): string[] {
   if (model.startsWith("vercel/")) {
     return ["--provider", "vercel-ai-gateway", "--model", model.slice("vercel/".length)];

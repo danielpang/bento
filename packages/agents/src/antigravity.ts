@@ -77,6 +77,14 @@ export const antigravityAdapter: AgentAdapter = {
   // settings.json, and the key is what the CLI then runs against.
   requiredEnv: ["GEMINI_API_KEY"],
   optionalEnv: ["GOOGLE_GEMINI_BASE_URL"],
+  /**
+   * GOOGLE_GEMINI_BASE_URL is how Bento already points the CLI at a
+   * Gemini compatible endpoint, with GEMINI_API_KEY beside it, so the
+   * proxy's address and token there are the whole of the wiring. The
+   * proxy takes the token from any of Gemini's places for a key (the
+   * x-goog-api-key header or the key query parameter) or a bearer.
+   */
+  modelProxy: { keys: ["GEMINI_API_KEY"] },
   // Local mode only, and only when sharing is switched on: ~/.gemini
   // holds the CLI's own settings and, where the keyring is unavailable,
   // its stored login.

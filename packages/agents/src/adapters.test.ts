@@ -1423,3 +1423,133 @@ test("a reattached stream keeps its output cursor and prior result", async () =>
   assert.equal(result.outcome.ok, true);
   assert.equal(result.outcome.sessionId, "already-reported");
 });
+
+/**
+ * The model proxy's wiring, adapter by adapter. A proxied multi mode
+ * run's credentials hold the run token under each key's name and the
+ * proxy's address in each provider's base URL variable; these pin what
+ * each tool builds from them. The paths are the ones each real CLI was
+ * seen calling (model-proxy-cli.e2e.test.ts drives them end to end).
+ */
+const PROXY = "https://bento.example/api/model-proxy";
+
+test("the adapters that can send their keys through the model proxy say which", () => {
+  assert.deepEqual(claudeCodeAdapter.modelProxy?.keys, ["ANTHROPIC_API_KEY"]);
+  assert.deepEqual(codexAdapter.modelProxy?.keys, ["OPENAI_API_KEY", "OPENROUTER_API_KEY", "AI_GATEWAY_API_KEY"]);
+  assert.deepEqual(dshAdapter.modelProxy?.keys, ["DEEPSEEK_API_KEY"]);
+  assert.deepEqual(antigravityAdapter.modelProxy?.keys, ["GEMINI_API_KEY"]);
+  assert.deepEqual(poolAdapter.modelProxy?.keys, ["POOLSIDE_API_KEY"]);
+  for (const adapter of [piAdapter, opencodeAdapter]) {
+    assert.deepEqual([...(adapter.modelProxy?.keys ?? [])].sort(), [
+      "AI_GATEWAY_API_KEY",
+      "ANTHROPIC_API_KEY",
+      "DEEPSEEK_API_KEY",
+      "GEMINI_API_KEY",
+      "OPENAI_API_KEY",
+      "OPENROUTER_API_KEY",
+    ]);
+  }
+  assert.equal(piAdapter.modelProxy?.homeFile, true, "pi's addresses travel in a file in its home");
+  // Login tokens are never proxied, and these have no base URL to point.
+  for (const adapter of [cursorAdapter, fxAdapter, museAdapter, fakeAdapter]) assert.equal(adapter.modelProxy, undefined, adapter.cli);
+  // A key the adapter proxies is one it forwards at all.
+  for (const adapter of [claudeCodeAdapter, codexAdapter, dshAdapter, antigravityAdapter, poolAdapter, piAdapter, opencodeAdapter]) {
+    const forwarded = new Set([...adapter.requiredEnv, ...(adapter.optionalEnv ?? []), ...(adapter.requiredEnvFor?.("openrouter/x") ?? []), ...(adapter.requiredEnvFor?.("vercel/x") ?? [])]);
+    for (const key of adapter.modelProxy!.keys) assert.ok(forwarded.has(key), `${adapter.cli} forwards ${key}`);
+  }
+});
+
+test("codex sends OpenRouter and AI Gateway calls to the proxy's address when it has one", () => {
+  const credentials = {
+    OPENROUTER_API_KEY: "bmg_token",
+    OPENROUTER_BASE_URL: `${PROXY}/openrouter`,
+    AI_GATEWAY_API_KEY: "bmg_token",
+    AI_GATEWAY_BASE_URL: `${PROXY}/vercel`,
+  };
+  for (const build of [codexAdapter.buildCommand, codexAdapter.live!.buildCommand]) {
+    const openrouter = build({ prompt: "p", model: "openai/gpt-5-mini", cwd: "/w", credentials }).join(" ");
+    assert.match(openrouter, new RegExp(`model_providers.openrouter.base_url="${PROXY}/openrouter/api/v1"`));
+    const vercel = build({ prompt: "p", model: "vercel/openai/gpt-5-mini", cwd: "/w", credentials }).join(" ");
+    assert.match(vercel, new RegExp(`model_providers.vercel.base_url="${PROXY}/vercel/codex/v1"`));
+    assert.ok(!openrouter.includes("bmg_token") && !vercel.includes("bmg_token"), "the token stays out of argv");
+
+    const direct = build({ prompt: "p", model: "openai/gpt-5-mini", cwd: "/w", credentials: { OPENROUTER_API_KEY: "sk-or" } }).join(" ");
+    assert.match(direct, /model_providers.openrouter.base_url="https:\/\/openrouter.ai\/api\/v1"/, "OpenRouter's own endpoint without one");
+    const directVercel = build({ prompt: "p", model: "vercel/x", cwd: "/w", credentials: { AI_GATEWAY_API_KEY: "k" } }).join(" ");
+    assert.match(directVercel, /model_providers.vercel.base_url="https:\/\/ai-gateway.vercel.sh\/codex\/v1"/);
+  }
+  const openai = { OPENAI_API_KEY: "bmg_token", OPENAI_BASE_URL: `${PROXY}/openai` };
+  assert.ok(codexAdapter.buildCommand({ prompt: "p", model: "gpt-5-codex", cwd: "/w", credentials: openai }).includes(`openai_base_url="${PROXY}/openai"`));
+  assert.ok(codexAdapter.live!.buildCommand({ prompt: "p", model: "gpt-5-codex", cwd: "/w", credentials: openai }).includes(`model_providers.bento-openai.base_url="${PROXY}/openai"`));
+  assert.deepEqual(codexAdapter.env!({ prompt: "p", model: "gpt-5-codex", cwd: "/w", credentials: openai }), { CODEX_API_KEY: "bmg_token" });
+});
+
+test("pi gets the proxy's addresses as built-in provider base URLs in models.json", () => {
+  const credentials = {
+    ANTHROPIC_BASE_URL: `${PROXY}/anthropic`,
+    OPENAI_BASE_URL: `${PROXY}/openai`,
+    GOOGLE_GEMINI_BASE_URL: `${PROXY}/gemini`,
+    DEEPSEEK_BASE_URL: `${PROXY}/deepseek`,
+    AI_GATEWAY_BASE_URL: `${PROXY}/vercel`,
+    OPENROUTER_BASE_URL: `${PROXY}/openrouter`,
+  };
+  const models = (model: string, extra: Partial<BuildCommandInputLike> = {}) => {
+    const file = piAdapter.files!({ prompt: "p", model, cwd: "/w", credentials, ...extra }).find((f) => f.path === "~/.pi/agent/models.json");
+    return file ? (JSON.parse(file.content) as { providers: Record<string, { baseUrl: string }> }).providers : null;
+  };
+  const providers = models("openrouter/openai/gpt-5-mini")!;
+  assert.deepEqual(providers, {
+    anthropic: { baseUrl: `${PROXY}/anthropic` },
+    openai: { baseUrl: `${PROXY}/openai` },
+    google: { baseUrl: `${PROXY}/gemini/v1beta` },
+    deepseek: { baseUrl: `${PROXY}/deepseek` },
+    "vercel-ai-gateway": { baseUrl: `${PROXY}/vercel` },
+    openrouter: { baseUrl: `${PROXY}/openrouter/api/v1` },
+  });
+  // OpenRouter's anthropic/ models speak Anthropic's API, one level up.
+  assert.equal(models("openrouter/anthropic/claude-sonnet-5")!.openrouter!.baseUrl, `${PROXY}/openrouter/api`);
+  // No base URL, no file: pi's own defaults stand, and a shared ~/.pi is left alone.
+  assert.equal(piAdapter.files!({ prompt: "p", model: "anthropic/x", cwd: "/w", credentials: { ANTHROPIC_API_KEY: "sk" } }).length, 0);
+});
+
+type BuildCommandInputLike = Parameters<NonNullable<typeof piAdapter.files>>[0];
+
+test("opencode gets the proxy's addresses as provider base URLs, in each SDK's shape", () => {
+  const credentials = {
+    ANTHROPIC_BASE_URL: `${PROXY}/anthropic`,
+    OPENAI_BASE_URL: `${PROXY}/openai`,
+    GOOGLE_GEMINI_BASE_URL: `${PROXY}/gemini`,
+    GEMINI_API_KEY: "bmg_token",
+    DEEPSEEK_BASE_URL: `${PROXY}/deepseek`,
+    AI_GATEWAY_BASE_URL: `${PROXY}/vercel`,
+    AI_GATEWAY_API_KEY: "bmg_token",
+    OPENROUTER_BASE_URL: `${PROXY}/openrouter`,
+  };
+  const config = (model: string) =>
+    JSON.parse(opencodeAdapter.env!({ prompt: "p", model, cwd: "/w", credentials }).OPENCODE_CONFIG_CONTENT!) as {
+      provider: Record<string, { options: Record<string, string> }>;
+    };
+  const { provider } = config("vercel/anthropic/claude-sonnet-4.5");
+  assert.equal(provider.anthropic!.options.baseURL, `${PROXY}/anthropic/v1`);
+  assert.equal(provider.openai!.options.baseURL, `${PROXY}/openai`);
+  assert.equal(provider.google!.options.baseURL, `${PROXY}/gemini/v1beta`);
+  assert.equal(provider.deepseek!.options.baseURL, `${PROXY}/deepseek`);
+  assert.equal(provider.openrouter!.options.baseURL, `${PROXY}/openrouter/api/v1`);
+  assert.equal(provider.vercel!.options.baseURL, `${PROXY}/vercel/v3/ai`);
+  assert.equal(provider.vercel!.options.apiKey, "{env:AI_GATEWAY_API_KEY}", "the Gateway key is still named");
+  assert.equal(config("google/gemini-2.5-pro").provider.google!.options.apiKey, "{env:GEMINI_API_KEY}");
+  assert.ok(!JSON.stringify(provider).includes("bmg_token"), "keys stay in the environment");
+  assert.deepEqual(opencodeAdapter.env!({ prompt: "p", model: "anthropic/x", cwd: "/w", credentials: { ANTHROPIC_API_KEY: "sk" } }), {});
+});
+
+test("pool takes its base URL from the run when it has one", () => {
+  assert.equal(
+    poolAdapter.env!({ prompt: "p", model: "poolside/laguna", cwd: "/w", credentials: { POOLSIDE_STANDALONE_BASE_URL: `${PROXY}/poolside` } })
+      .POOLSIDE_STANDALONE_BASE_URL,
+    `${PROXY}/poolside`,
+  );
+  assert.equal(
+    poolAdapter.env!({ prompt: "p", model: "poolside/laguna", cwd: "/w" }).POOLSIDE_STANDALONE_BASE_URL,
+    "https://inference.poolside.ai/v1",
+  );
+});

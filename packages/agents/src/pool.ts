@@ -1,5 +1,5 @@
 import type { AgentDelta, AgentEvent, RunOutcome } from "@bento/core";
-import type { AgentAdapter, BuildCommandInput } from "./adapter.js";
+import { providerBaseUrl, type AgentAdapter, type BuildCommandInput } from "./adapter.js";
 
 /** Poolside-hosted inference, which is where a Platform key is valid. */
 const POOLSIDE_BASE_URL = "https://inference.poolside.ai/v1";
@@ -56,6 +56,13 @@ export const poolAdapter: AgentAdapter = {
   // deployment, a gateway, or another provider entirely. Unset means
   // Poolside Platform, which the env hook fills in below.
   optionalEnv: ["POOLSIDE_STANDALONE_BASE_URL"],
+  /**
+   * The base URL is what puts pool in standalone mode at all, and the
+   * key rides with it to that OpenAI-compatible endpoint, so the proxy's
+   * address and token in those two variables are the whole of the
+   * wiring.
+   */
+  modelProxy: { keys: ["POOLSIDE_API_KEY"] },
 
   mcp: {
     renderConfig(servers) {
@@ -82,7 +89,10 @@ export const poolAdapter: AgentAdapter = {
 
   env(input: BuildCommandInput): Record<string, string> {
     return {
-      POOLSIDE_STANDALONE_BASE_URL: POOLSIDE_BASE_URL,
+      // The organization's own endpoint or the model proxy's address
+      // when the run was given one (the stored value would win over
+      // this anyway, being merged on top); Poolside Platform otherwise.
+      POOLSIDE_STANDALONE_BASE_URL: providerBaseUrl(input.credentials, "POOLSIDE_STANDALONE_BASE_URL", POOLSIDE_BASE_URL),
       POOLSIDE_STANDALONE_MODEL: input.model,
     };
   },

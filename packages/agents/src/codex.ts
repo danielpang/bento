@@ -1,5 +1,5 @@
 import { providerForProfile, type AgentDelta, type AgentEvent, type RunOutcome } from "@bento/core";
-import { lastResultEvent, type AgentAdapter, type BuildCommandInput, type McpRemoteServer } from "./adapter.js";
+import { lastResultEvent, providerBaseUrl, type AgentAdapter, type BuildCommandInput, type McpRemoteServer } from "./adapter.js";
 import { codexAppServerProtocol, parseAppServerDelta, parseAppServerEvent } from "./codex-app-server.js";
 import { readRpcLine } from "./live-wire.js";
 
@@ -14,10 +14,27 @@ interface CodexLine {
   params?: unknown;
 }
 
+/** OpenRouter's origin; its OpenAI-compatible Responses endpoint is under /api/v1. */
+const OPENROUTER_ORIGIN = "https://openrouter.ai";
+/** Vercel AI Gateway's origin; Codex's own compatibility endpoint is under /codex/v1. */
+const AI_GATEWAY_ORIGIN = "https://ai-gateway.vercel.sh";
 /** OpenRouter's OpenAI-compatible Responses endpoint. */
-const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
+const OPENROUTER_BASE_URL = `${OPENROUTER_ORIGIN}/api/v1`;
 /** Codex's own AI Gateway compatibility endpoint. */
-const VERCEL_CODEX_BASE_URL = "https://ai-gateway.vercel.sh/codex/v1";
+const VERCEL_CODEX_BASE_URL = `${AI_GATEWAY_ORIGIN}/codex/v1`;
+
+/**
+ * Where a run's OpenRouter and AI Gateway calls go: the provider's own
+ * endpoint, or, when the model proxy carries the key, the same path
+ * under the proxy's address for that provider (OPENROUTER_BASE_URL and
+ * AI_GATEWAY_BASE_URL are origins, so the path is Codex's to add).
+ */
+function openRouterBaseUrl(credentials: BuildCommandInput["credentials"]): string {
+  return `${providerBaseUrl(credentials, "OPENROUTER_BASE_URL", OPENROUTER_ORIGIN)}/api/v1`;
+}
+function vercelCodexBaseUrl(credentials: BuildCommandInput["credentials"]): string {
+  return `${providerBaseUrl(credentials, "AI_GATEWAY_BASE_URL", AI_GATEWAY_ORIGIN)}/codex/v1`;
+}
 
 /**
  * Codex config that names OpenRouter as a custom model_provider.
@@ -63,6 +80,15 @@ export const codexAdapter: AgentAdapter = {
     return openRouterSelected(model) ? ["OPENROUTER_API_KEY"] : ["OPENAI_API_KEY"];
   },
   configPaths: [".codex"],
+  /**
+   * Every route Codex takes names its base URL in argv: OpenAI's from
+   * OPENAI_BASE_URL (through openai_base_url or the bento-openai
+   * provider), OpenRouter's and AI Gateway's through their
+   * model_provider tables. Each provider reads its key from the
+   * environment and sends it as a bearer token, which is where the
+   * proxy looks for the run's token.
+   */
+  modelProxy: { keys: ["OPENAI_API_KEY", "OPENROUTER_API_KEY", "AI_GATEWAY_API_KEY"] },
 
   /**
    * Codex 0.153 ignores OPENAI_API_KEY for its built in provider: with
@@ -117,13 +143,13 @@ export const codexAdapter: AgentAdapter = {
     if (input.customProvider) {
       cmd.push(...customProviderConfigOverrides(input.customProvider));
     } else if (vercelSelected(input.model)) {
-      cmd.push(...vercelConfigOverrides());
+      cmd.push(...vercelConfigOverrides(vercelCodexBaseUrl(input.credentials)));
     } else if (openRouterSelected(input.model)) {
       // OpenRouter is the selected provider: tell Codex to use that
       // model_provider. -c still applies when ~/.codex is mounted
       // read-only and the config file above was not written. Nested
       // keys create the provider table if it is missing.
-      cmd.push(...openRouterConfigOverrides());
+      cmd.push(...openRouterConfigOverrides(openRouterBaseUrl(input.credentials)));
     } else {
       // OPENAI_BASE_URL is ignored as an env var the same way the key
       // is, so a non-OpenRouter gateway the organization saved arrives
@@ -157,9 +183,9 @@ export const codexAdapter: AgentAdapter = {
       if (input.customProvider) {
         cmd.push(...customProviderConfigOverrides(input.customProvider));
       } else if (vercelSelected(input.model)) {
-        cmd.push(...vercelConfigOverrides());
+        cmd.push(...vercelConfigOverrides(vercelCodexBaseUrl(input.credentials)));
       } else if (openRouterSelected(input.model)) {
-        cmd.push(...openRouterConfigOverrides());
+        cmd.push(...openRouterConfigOverrides(openRouterBaseUrl(input.credentials)));
       } else if (input.credentials?.OPENAI_API_KEY) {
         /**
          * The app-server's built-in OpenAI provider reads neither
@@ -343,14 +369,14 @@ function vercelSelected(model: string): boolean {
   return model.startsWith("vercel/");
 }
 
-function openRouterConfigOverrides(): string[] {
+function openRouterConfigOverrides(baseUrl: string): string[] {
   return [
     "-c",
     'model_provider="openrouter"',
     "-c",
     'model_providers.openrouter.name="OpenRouter"',
     "-c",
-    `model_providers.openrouter.base_url=${tomlString(OPENROUTER_BASE_URL)}`,
+    `model_providers.openrouter.base_url=${tomlString(baseUrl)}`,
     "-c",
     'model_providers.openrouter.env_key="OPENROUTER_API_KEY"',
     "-c",
@@ -358,14 +384,14 @@ function openRouterConfigOverrides(): string[] {
   ];
 }
 
-function vercelConfigOverrides(): string[] {
+function vercelConfigOverrides(baseUrl: string): string[] {
   return [
     "-c",
     'model_provider="vercel"',
     "-c",
     'model_providers.vercel.name="Vercel AI Gateway"',
     "-c",
-    `model_providers.vercel.base_url=${tomlString(VERCEL_CODEX_BASE_URL)}`,
+    `model_providers.vercel.base_url=${tomlString(baseUrl)}`,
     "-c",
     'model_providers.vercel.env_key="AI_GATEWAY_API_KEY"',
     "-c",

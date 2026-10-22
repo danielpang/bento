@@ -70,7 +70,7 @@ MCP is not attached when:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `BENTO_MCP_GATEWAY_URL` | `BETTER_AUTH_URL` | Gateway base URL seen by sandboxes |
+| `BENTO_MCP_GATEWAY_URL` | `BETTER_AUTH_URL` | Gateway base URL seen by sandboxes, also where a hosted sandbox reaches the model proxy |
 | `BENTO_MCP_REGISTRY_URL` | public registry | Catalog source |
 
 Set `BENTO_MCP_GATEWAY_URL` explicitly when sandboxes cannot reach `BETTER_AUTH_URL`:

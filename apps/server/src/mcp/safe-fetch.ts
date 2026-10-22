@@ -30,10 +30,16 @@ export interface SafeFetchPolicy {
 export interface SafeFetchInit {
   method?: string;
   headers?: Record<string, string>;
-  body?: string;
+  /**
+   * A string, or a stream passed through as it arrives (the model
+   * proxy forwards an agent's request body without buffering it).
+   */
+  body?: string | ReadableStream<Uint8Array>;
   signal?: AbortSignal;
   /** Time allowed for the upstream to answer with headers. */
   headersTimeoutMs?: number;
+  /** Time allowed between body chunks; undici's own default when unset. */
+  bodyTimeoutMs?: number;
   /**
    * What to do with a redirect. "refuse", the default, throws: MCP
    * JSON-RPC has no legitimate need for one. "return" hands the 3xx
@@ -91,9 +97,12 @@ export async function safeFetch(
         throw new SafeFetchRefused("this host resolves to a private address");
       }
     }
-    dispatcher = pinnedAgent(addresses, init.headersTimeoutMs);
-  } else if (init.headersTimeoutMs) {
-    dispatcher = new Agent({ headersTimeout: init.headersTimeoutMs });
+    dispatcher = pinnedAgent(addresses, init.headersTimeoutMs, init.bodyTimeoutMs);
+  } else if (init.headersTimeoutMs || init.bodyTimeoutMs) {
+    dispatcher = new Agent({
+      ...(init.headersTimeoutMs !== undefined ? { headersTimeout: init.headersTimeoutMs } : {}),
+      ...(init.bodyTimeoutMs !== undefined ? { bodyTimeout: init.bodyTimeoutMs } : {}),
+    });
   }
 
   try {
@@ -101,6 +110,8 @@ export async function safeFetch(
       method: init.method ?? "GET",
       ...(init.headers ? { headers: init.headers } : {}),
       ...(init.body !== undefined ? { body: init.body } : {}),
+      // A stream body is sent as it is read, which fetch only does when told.
+      ...(typeof init.body === "object" ? { duplex: "half" as const } : {}),
       ...(init.signal ? { signal: init.signal } : {}),
       ...(dispatcher ? { dispatcher } : {}),
       // A redirect would escape the address we just validated, so
@@ -134,9 +145,10 @@ async function resolveAll(hostname: string): Promise<string[]> {
 }
 
 /** Connects only to the already-validated addresses, never a fresh lookup. */
-function pinnedAgent(addresses: string[], headersTimeoutMs?: number): Agent {
+function pinnedAgent(addresses: string[], headersTimeoutMs?: number, bodyTimeoutMs?: number): Agent {
   return new Agent({
     ...(headersTimeoutMs !== undefined ? { headersTimeout: headersTimeoutMs } : {}),
+    ...(bodyTimeoutMs !== undefined ? { bodyTimeout: bodyTimeoutMs } : {}),
     connect: {
       lookup: (_hostname, options, callback) => {
         const all = addresses.map((address) => ({ address, family: isIP(address) }));

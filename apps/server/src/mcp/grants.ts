@@ -6,11 +6,17 @@ import type { AppContext } from "../context.js";
 /**
  * Run-scoped gateway tokens: the only credential a sandbox ever holds.
  *
+ * One token per run serves both doors into Bento: the MCP gateway, for
+ * the servers the grant pins, and the model proxy, for the provider
+ * keys it names (model_credentials), which in multi mode the sandbox
+ * holds this token in place of.
+ *
  * The raw token exists outside this database: the harness config
  * files written into the run's sandbox (or, for fx, the
  * BENTO_MCP_GRANT process environment that file names, because fx
- * rejects a literal Authorization header), and the Authorization
- * header of gateway requests. The row keeps its sha256, so a
+ * rejects a literal Authorization header), the provider key variables
+ * of a proxied run's environment, and the headers of gateway and
+ * proxy requests. The row keeps its sha256, so a
  * database read yields nothing replayable. Revocation on the run's
  * terminal paths is what makes exfiltrating one worth so little: the
  * token outlives its run only by the sweep interval.
@@ -37,6 +43,12 @@ export async function mintRunGrant(
     actingUserId: string | null;
     serverIds: string[];
     /**
+     * The stored secrets the model proxy may use for this run: the keys
+     * the sandbox holds this token in place of, and a saved base URL
+     * the run would have used. Empty when nothing is proxied.
+     */
+    modelCredentials?: string[];
+    /**
      * The swarm this run works for, copied onto the grant at mint.
      *
      * Bento's own swarm tools authorize per call against the run, and
@@ -58,6 +70,7 @@ export async function mintRunGrant(
       actingUserId: input.actingUserId,
       tokenHash: hashGrantToken(raw),
       serverIds: input.serverIds,
+      modelCredentials: input.modelCredentials ?? [],
       swarmId: input.swarmId ?? null,
       expiresAt,
     })
@@ -67,12 +80,31 @@ export async function mintRunGrant(
         tokenHash: hashGrantToken(raw),
         actingUserId: input.actingUserId,
         serverIds: input.serverIds,
+        modelCredentials: input.modelCredentials ?? [],
         swarmId: input.swarmId ?? null,
         expiresAt,
         revokedAt: null,
+        // A new life of the run: a proxy failure in the last one is
+        // not this one's.
+        proxyFailedAt: null,
       },
     });
   return raw;
+}
+
+/**
+ * Pins the MCP servers a run attached onto the grant it already holds.
+ *
+ * A run whose model keys are proxied minted its grant before its MCP
+ * servers were known, and its sandbox already carries that token in
+ * the provider key variables. Minting again would replace the token
+ * those variables hold, so the servers join the existing row instead.
+ * An empty list detaches every server and leaves the proxy working,
+ * which is what a failed config write needs: revoking would take the
+ * model with it.
+ */
+export async function setRunGrantServers(ctx: AppContext, runId: string, serverIds: string[]): Promise<void> {
+  await ctx.db.update(mcpRunGrants).set({ serverIds }).where(eq(mcpRunGrants.runId, runId));
 }
 
 /** Ends the grant with its run. Behind the terminal paths' CAS, so once. */
@@ -110,6 +142,61 @@ export async function runGrantExists(ctx: AppContext, runId: string): Promise<bo
     .where(eq(mcpRunGrants.runId, runId))
     .limit(1);
   return Boolean(row);
+}
+
+/**
+ * What a run's live grant is for: the MCP servers it pins and the
+ * provider keys the model proxy carries. Null when the run has no grant
+ * or it was revoked. The reattach path extends a grant that serves
+ * either, because the sandbox holds its token for both.
+ */
+export async function runGrantUses(
+  ctx: AppContext,
+  runId: string,
+): Promise<{ serverIds: string[]; modelCredentials: string[] } | null> {
+  const [row] = await ctx.db
+    .select({
+      serverIds: mcpRunGrants.serverIds,
+      modelCredentials: mcpRunGrants.modelCredentials,
+      revokedAt: mcpRunGrants.revokedAt,
+    })
+    .from(mcpRunGrants)
+    .where(eq(mcpRunGrants.runId, runId))
+    .limit(1);
+  if (!row || row.revokedAt) return null;
+  return {
+    serverIds: Array.isArray(row.serverIds) ? row.serverIds : [],
+    modelCredentials: row.modelCredentials ?? [],
+  };
+}
+
+/**
+ * Records that the model proxy itself failed one of this grant's
+ * requests. Best effort: the request is already being answered with
+ * the proxy's own error, and a stamp that cannot be written must not
+ * turn that into something else.
+ */
+export async function markModelProxyFailed(ctx: AppContext, grantId: string): Promise<void> {
+  try {
+    await ctx.db.update(mcpRunGrants).set({ proxyFailedAt: new Date() }).where(eq(mcpRunGrants.id, grantId));
+  } catch (err) {
+    console.error(`could not record a model proxy failure on grant ${grantId}:`, err);
+  }
+}
+
+/**
+ * Whether the model proxy failed a request of this run's. A run that
+ * then failed failed on Bento, whatever the agent made of the error it
+ * was handed, so it is not billed. Read from the grant, which records
+ * what the proxy did, never from the run's error text.
+ */
+export async function runHadModelProxyFailure(ctx: AppContext, runId: string): Promise<boolean> {
+  const [row] = await ctx.db
+    .select({ proxyFailedAt: mcpRunGrants.proxyFailedAt })
+    .from(mcpRunGrants)
+    .where(eq(mcpRunGrants.runId, runId))
+    .limit(1);
+  return Boolean(row?.proxyFailedAt);
 }
 
 /**
@@ -154,6 +241,8 @@ export interface ResolvedGrant {
   organizationId: string | null;
   actingUserId: string | null;
   serverIds: string[];
+  /** The stored secrets the model proxy may use for this run. */
+  modelCredentials: string[];
   /** The swarm this grant was minted for; null for a card's run. */
   swarmId: string | null;
 }
@@ -179,6 +268,7 @@ export async function resolveGrant(ctx: AppContext, rawToken: string): Promise<R
     organizationId: row.organizationId,
     actingUserId: row.actingUserId,
     serverIds: row.serverIds,
+    modelCredentials: row.modelCredentials ?? [],
     swarmId: row.swarmId,
   };
 }
