@@ -98,7 +98,7 @@ export function AccountSettings({ client, mode }: { client: BentoClient; mode: "
       <>
         <OnboardingCard client={client} />
         <MascotsCard client={client} />
-        <BetaFeaturesCard client={client} mode="local" />
+        <BetaFeaturesCard client={client} />
       </>
     );
   }
@@ -143,7 +143,7 @@ function MultiAccountSettings({ client }: { client: BentoClient }) {
 
       <OnboardingCard client={client} />
       <MascotsCard client={client} />
-      <BetaFeaturesCard client={client} mode="multi" />
+      <BetaFeaturesCard client={client} />
 
       <section className="section settings-card">
         <h3 className="settings-title">Signed in as</h3>
@@ -363,10 +363,9 @@ function MascotsCard({ client }: { client: BentoClient }) {
 /**
  * The person's own switch for unfinished product, such as Bento Swarm.
  * On wins over the beta-testers flag. Off means off in local mode; in
- * multi mode it leaves the flag to decide, so a person their team put
- * on it is told why beta is still on.
+ * multi mode it leaves the flag to decide.
  */
-function BetaFeaturesCard({ client, mode }: { client: BentoClient; mode: "local" | "multi" }) {
+function BetaFeaturesCard({ client }: { client: BentoClient }) {
   const toast = useToast();
   const setBetaTesters = useSetBetaTesters();
   const [state, setState] = useState<{ enabled: boolean; betaTesters: boolean } | null>(null);
@@ -403,10 +402,6 @@ function BetaFeaturesCard({ client, mode }: { client: BentoClient; mode: "local"
   return (
     <section className="section settings-card">
       <h3 className="settings-title">Beta features</h3>
-      <p className="muted">
-        Try what is still being built, such as Bento Swarm, before it is ready for everyone. Beta features can
-        change or break, and only you see them.
-      </p>
       <label className="gate-check">
         <input
           type="checkbox"
@@ -414,11 +409,9 @@ function BetaFeaturesCard({ client, mode }: { client: BentoClient; mode: "local"
           disabled={busy || state === null}
           onChange={(e) => void change(e.target.checked)}
         />
-        <span className="gate-check-text">Try beta features</span>
+        <span className="gate-check-text">Try beta and experimental features</span>
       </label>
-      {mode === "multi" && state && !state.enabled && state.betaTesters && (
-        <p className="muted">Beta features are already on for you as a beta tester.</p>
-      )}
+      <p className="muted">Warning beta can cause issues.</p>
     </section>
   );
 }
