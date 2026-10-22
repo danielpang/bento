@@ -6,11 +6,13 @@ import type {
   PlanState,
   TeamPolicy,
 } from "./settings.js";
-import { SseParser, type AgentDelta, type AgentEvent, type CatalogProvider, type CustomProviderProtocol, type GateCriteria } from "@bento/core";
+import { SseParser, type AgentDelta, type AgentEvent, type CatalogProvider, type CustomProviderProtocol, type GateCriteria, type TurnState } from "@bento/core";
 import { BUILD_HEADER } from "@bento/core";
 import type {
   AgentProfile,
   AgentRun,
+  QuestionChoice,
+  RunQuestion,
   AgentTool,
   CompletionRange,
   Feature,
@@ -88,6 +90,8 @@ export interface CustomModelProvider extends CustomModelProviderInput {
 export interface RunStreamHandlers {
   onEvent?: (event: AgentEvent, seq: number) => void;
   onDelta?: (delta: AgentDelta) => void;
+  /** A live run's agent started or ended a turn, as the server holding it says. */
+  onTurn?: (state: TurnState) => void;
   onDone?: (status: string) => void;
   /**
    * The stream failed: a rejected token, a dropped connection, or a
@@ -1109,6 +1113,33 @@ export class BentoClient {
     return this.request<AgentRun>(`/api/runs/${runId}/cancel`, { method: "POST" });
   }
 
+  /**
+   * Stops the turn the agent is working on and keeps the run open for
+   * the next message. A card's live session on an agent that can.
+   * `interrupted` is false when there was nothing to stop: the agent was
+   * already waiting ("waiting"), or the session was closing ("closed").
+   * "requested" went to another server, whose turn state follows.
+   */
+  interruptRun(runId: string) {
+    return this.request<{ interrupted: boolean; outcome: "sent" | "stopped" | "waiting" | "closed" | "requested" }>(
+      `/api/runs/${runId}/interrupt`,
+      { method: "POST" },
+    );
+  }
+
+  /** The agent's questions waiting on a person. */
+  listRunQuestions(runId: string) {
+    return this.request<RunQuestion[]>(`/api/runs/${runId}/questions`);
+  }
+
+  /** Answers one of the agent's questions; see QuestionChoice. */
+  answerRunQuestion(runId: string, questionId: string, answers: QuestionChoice[]) {
+    return this.request<{ answered: true; answers: Record<string, string> }>(
+      `/api/runs/${runId}/questions/${questionId}/answer`,
+      { method: "POST", body: JSON.stringify({ answers }) },
+    );
+  }
+
   /** Everything that has happened to this feature, oldest first. */
   getHistory(featureId: string) {
     return this.request<FeatureEvent[]>(`/api/features/${featureId}/history`);
@@ -1667,6 +1698,9 @@ export class BentoClient {
     source.addEventListener("run_delta", (e) => {
       handlers.onDelta?.(JSON.parse((e as MessageEvent<string>).data) as AgentDelta);
     });
+    source.addEventListener("run_turn", (e) => {
+      handlers.onTurn?.((JSON.parse((e as MessageEvent<string>).data) as { state: TurnState }).state);
+    });
     source.addEventListener("done", (e) => {
       const message = e as MessageEvent<string>;
       handlers.onDone?.((JSON.parse(message.data) as { status: string }).status);
@@ -1734,6 +1768,8 @@ export class BentoClient {
                   handlers.onEvent?.(JSON.parse(frame.data) as AgentEvent, seq);
                 } else if (frame.event === "run_delta") {
                   handlers.onDelta?.(JSON.parse(frame.data) as AgentDelta);
+                } else if (frame.event === "run_turn") {
+                  handlers.onTurn?.((JSON.parse(frame.data) as { state: TurnState }).state);
                 } else if (frame.event === "done") {
                   handlers.onDone?.((JSON.parse(frame.data) as { status: string }).status);
                   controller.abort();

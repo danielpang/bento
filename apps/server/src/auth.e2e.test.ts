@@ -20,6 +20,7 @@ import {
   pipelines,
   projects,
   runArtifacts,
+  runQuestions,
   runMigrations,
   sandboxes,
   swarmPlanSources,
@@ -854,6 +855,18 @@ test("every entity route refuses a foreign tenant", async () => {
     })
     .returning({ id: runArtifacts.id });
   assert.ok(artifact?.id, "the owner's artifact must exist for the artifact routes to be probed");
+  // Inserted directly because only a live agent asks questions; the
+  // answer route needs a real question id to aim at.
+  const [question] = await ctx.db
+    .insert(runQuestions)
+    .values({
+      runId: run.id,
+      requestId: "matrix-request",
+      questions: [{ question: "Which?", multiSelect: false, options: [{ label: "A" }, { label: "B" }] }],
+      input: {},
+    })
+    .returning({ id: runQuestions.id });
+  assert.ok(question?.id, "the owner's question must exist for the answer route to be probed");
 
   // Inserted directly: the matrix users have no organization, and the
   // MCP routes refuse org-less callers in multi mode outright. The row
@@ -1036,6 +1049,13 @@ test("every entity route refuses a foreign tenant", async () => {
     ["POST", `/api/runs/${run.id}/resume`, { body: JSON.stringify({ prompt: "hi" }) }],
     ["POST", `/api/runs/${run.id}/rollback`],
     ["POST", `/api/runs/${run.id}/cancel`],
+    ["POST", `/api/runs/${run.id}/interrupt`],
+    ["GET", `/api/runs/${run.id}/questions`],
+    [
+      "POST",
+      `/api/runs/${run.id}/questions/${question!.id}/answer`,
+      { body: JSON.stringify({ answers: [{ question: "Which?", selected: ["A"] }] }) },
+    ],
     ["GET", `/api/runs/${run.id}/transcript`],
     ["GET", `/api/runs/${swarm.plannerRunId}/transcript`],
     // The SSE stream: for a foreign tenant it must refuse before it
@@ -1182,6 +1202,7 @@ test("every entity route refuses a foreign tenant", async () => {
   // budget to spend.
   const swarmAfter = await asOwner(`/api/swarms/${swarm.id}`);
   assert.equal(swarmAfter.status, 200, "the intruder must not have deleted the owner's swarm");
+
   const swarmBody = (await swarmAfter.json()) as { swarm: { title: string; maxWorkers: number; status: string } };
   assert.equal(swarmBody.swarm.title, "Mine", "nor renamed it");
   assert.equal(swarmBody.swarm.maxWorkers, 4, "nor raised how many agents it may run at once");
@@ -1200,6 +1221,22 @@ test("every entity route refuses a foreign tenant", async () => {
     .where(eq(swarms.id, swarm.id));
   assert.equal(settingsAfter?.completionCommand, null, "the intruder must not have set a command on the owner's swarm");
   ctx.featureFlags = flagsBefore;
+
+  // The question routes refuse only by tenant: with the beta flag off
+  // again, the owner still reaches them, and the intruder's answer
+  // never landed.
+  const ownQuestions = await asOwner(`/api/runs/${run.id}/questions`);
+  assert.equal(ownQuestions.status, 200, "the run's own organization can read its questions, beta or not");
+  const [asked] = await ctx.db.select().from(runQuestions).where(eq(runQuestions.id, question!.id));
+  assert.equal(asked!.status, "pending", "the intruder's answer must not have been stored");
+
+  // Interrupt is a stage's: a judge or a rebase is ended by Stop, not
+  // paused. Refused for the owner too, on a judge that is live and running.
+  const [before] = await ctx.db.select({ status: agentRuns.status, role: agentRuns.role }).from(agentRuns).where(eq(agentRuns.id, run.id));
+  await ctx.db.update(agentRuns).set({ status: "running", liveSession: true, role: "judge" }).where(eq(agentRuns.id, run.id));
+  const judgeInterrupt = await asOwner(`/api/runs/${run.id}/interrupt`, { method: "POST" });
+  assert.equal(judgeInterrupt.status, 409, "a judge run is not interrupted");
+  await ctx.db.update(agentRuns).set({ status: before!.status, liveSession: null, role: before!.role }).where(eq(agentRuns.id, run.id));
 
   // The MCP server row survived, under its own name. Read through
   // ctx.db because the org-less owner cannot use the routes either.

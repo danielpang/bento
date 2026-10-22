@@ -208,6 +208,36 @@ export interface AgentRun {
    * the run provisions, when provisioning failed, and on older runs.
    */
   sandboxProvider?: string | null;
+  /**
+   * Whether the run's agent was started as a live session, so a message
+   * reaches it mid-run. Null until the agent starts, and on older runs.
+   */
+  liveSession?: boolean | null;
+}
+
+/** One multiple choice question an agent put to a person. */
+export interface AskedQuestion {
+  question: string;
+  /** A short label for the question. */
+  header?: string;
+  /** Whether more than one option may be chosen. */
+  multiSelect: boolean;
+  options: { label: string; description?: string }[];
+}
+
+/** Questions the agent is blocked on until a person answers them. */
+export interface RunQuestion {
+  id: string;
+  runId: string;
+  questions: AskedQuestion[];
+  createdAt: string;
+}
+
+/** A person's answer to one question: options picked, and free text beside or instead of them. */
+export interface QuestionChoice {
+  question: string;
+  selected: string[];
+  other?: string;
 }
 
 /**

@@ -44,21 +44,26 @@ test("opencode recovery reads assistant text parts out of an export", () => {
     "user turns, step markers, and tool parts stay out",
   );
 
-  // Round trip: a recovered message carries the same ids a streamed
-  // one does, so a later recovery sees it as already delivered.
+  // A message with one text part is named by its message id alone: a
+  // live (ACP) session never learns part ids, and the message id is
+  // exact when there is only one part.
   const first = held[0]!;
   const ids = recovery.persistedIds({ type: "message", role: "assistant", text: first.text, raw: first.raw });
-  assert.deepEqual(ids, ["prt_a1", "msg_a1"]);
+  assert.deepEqual(ids, ["msg_a1"]);
 
-  // And the ids match what the live stream persists: raw.part carries
-  // the part id and message id on every "text" line.
+  // Round trip: `opencode run` persists the part id and message id on
+  // every "text" line, and every id of the recovered message is among
+  // them, so a later recovery sees it as already delivered (the rule
+  // isPersisted applies: all of an event's ids, not any).
   const streamed: AgentEvent = {
     type: "message",
     role: "assistant",
     text: "Looking at the bug now.",
     raw: { type: "text", part: { id: "prt_a1", messageID: "msg_a1", type: "text", text: "Looking at the bug now." } },
   };
-  assert.deepEqual(recovery.persistedIds(streamed), ["prt_a1", "msg_a1"]);
+  const seen = new Set(recovery.persistedIds(streamed));
+  assert.deepEqual([...seen], ["prt_a1", "msg_a1"]);
+  assert.ok(ids.every((id) => seen.has(id)), "recovered against a streamed transcript: already delivered");
 
   assert.deepEqual(recovery.parseLog("not json"), [], "a broken export recovers nothing rather than throwing");
 });

@@ -111,14 +111,36 @@ export function criterionName(type: string): string {
 
 /**
  * Tools that hold a live stdin conversation, and what a mid-task
- * message means there. Mirrors the adapters' live capability: pi
- * steers the working agent; Claude Code queues behind the current
- * turn. Anything absent takes messages between runs.
+ * message means there. Mirrors the adapters' live capability: pi and
+ * Codex steer the working agent; Claude Code and opencode queue behind
+ * the current turn. Anything absent takes messages between runs.
  */
 export const LIVE_TOOLS: Record<string, "steer" | "queue" | undefined> = {
   pi: "steer",
   "claude-code": "queue",
+  codex: "steer",
+  opencode: "queue",
 };
+
+/**
+ * Tools whose live mode arrived with the run's liveSession record, so a
+ * run without it (from before the record) ran one-shot.
+ */
+const LIVE_SINCE_RECORD: ReadonlySet<string> = new Set(["codex", "opencode"]);
+
+/** Tools whose live session can stop a turn and keep the run open. */
+export const INTERRUPTIBLE_TOOLS: ReadonlySet<string> = new Set(["claude-code", "codex", "opencode", "pi"]);
+
+/**
+ * How a mid-task message is treated in this run. The run says whether
+ * it went live (liveSession, recorded as its agent started); until it
+ * has, and for runs from before that record, the tool decides.
+ */
+export function runLiveKind(cli: string, liveSession: boolean | null | undefined): "steer" | "queue" | undefined {
+  if (liveSession === false) return undefined;
+  if (liveSession === true) return LIVE_TOOLS[cli];
+  return LIVE_SINCE_RECORD.has(cli) ? undefined : LIVE_TOOLS[cli];
+}
 
 /** Tools whose upstream interface is explicitly unstable. */
 export const PREVIEW_TOOLS: Record<string, true | undefined> = { dsh: true };
@@ -141,10 +163,11 @@ export interface ToolCapability {
 }
 
 export function toolCapabilities(cli: string, model?: string): ToolCapability[] {
+  const live = LIVE_TOOLS[cli];
   const messaging: ToolCapability =
-    LIVE_TOOLS[cli] === "steer"
+    live === "steer"
       ? { icon: "steer", label: "Steer mid-run", detail: "Messages steer it while it works." }
-      : LIVE_TOOLS[cli] === "queue"
+      : live === "queue"
         ? {
             icon: "queue",
             label: "Queues mid-run",

@@ -3,13 +3,15 @@ import { and, asc, desc, eq, gt, lt, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { z } from "zod";
-import type { AgentDelta } from "@bento/core";
-import { agentProfiles, agentRuns, features, projects, runEvents, sandboxes, stages } from "@bento/db";
+import type { AgentCli, AgentDelta, TurnState } from "@bento/core";
+import { agentProfiles, agentRuns, features, projects, runEvents, runQuestions, sandboxes, stages } from "@bento/db";
 import type { AppContext } from "../context.js";
 import { deferAfterCommit, tenantDb as db } from "../middleware/tenant.js";
 import { actor } from "../middleware/actor.js";
 import { markCancelled } from "../orchestrator/run-executor.js";
-import { requestRunAbort } from "../orchestrator/run-ownership.js";
+import { nudgeRun, requestRunAbort, requestRunInterrupt } from "../orchestrator/run-ownership.js";
+import { answersFor, openQuestions, storeAnswer } from "../orchestrator/questions.js";
+import { getAdapter } from "@bento/agents";
 import { modalNetworkForProject } from "../orchestrator/sandbox-network.js";
 import { markSandboxAwake } from "../orchestrator/hibernate-sandbox.js";
 import { CARD_BUSY, NO_REPOSITORIES, projectHasRepositories, startRunIfIdle } from "../orchestrator/start-run.js";
@@ -151,6 +153,94 @@ export function runRoutes(ctx: AppContext) {
       return c.json(visible);
     })
     /**
+     * Stops the turn the agent is working on, without ending the run: the
+     * session stays open for the person's next message, which is what
+     * they stopped it to send. Only where the run went live on a tool
+     * that can (Claude Code, Codex, opencode); anything else answers 409
+     * and Stop remains.
+     */
+    .post("/:id/interrupt", async (c) => {
+      const found = await getAccessibleRun(ctx, c, c.req.param("id"));
+      if (!found) return c.json({ error: "not found" }, 404);
+      const run = found.run;
+      if (run.status !== "running" || run.liveSession !== true) {
+        return c.json({ error: "Only a running live session can be interrupted." }, 409);
+      }
+      // A stage's agent waits for the person after an interrupt. A judge
+      // or a rebase is the board's own work, which a stop should end
+      // rather than leave half done and then publish.
+      if (run.role !== "stage") {
+        return c.json({ error: "Only a stage's agent can be interrupted. Stop ends this run instead." }, 409);
+      }
+      const [profile] = await db(c, ctx)
+        .select({ cli: agentProfiles.cli })
+        .from(agentProfiles)
+        .where(eq(agentProfiles.id, run.agentProfileId));
+      if (!profile || !interrupts(profile.cli)) {
+        return c.json({ error: "This agent cannot be interrupted. Stop ends the run instead." }, 409);
+      }
+      // Through whichever process holds the run. Held here, the answer
+      // is what happened; held elsewhere, it is "requested", and the
+      // turn state that process announces next is the rest.
+      const outcome = requestRunInterrupt(ctx, run.id);
+      return c.json({ interrupted: outcome === "sent" || outcome === "stopped" || outcome === "requested", outcome });
+    })
+    /**
+     * The questions the run's agent is waiting on a person to answer.
+     * Empty once the run is no longer running: nothing would read them.
+     */
+    .get("/:id/questions", async (c) => {
+      const found = await getAccessibleRun(ctx, c, c.req.param("id"));
+      if (!found) return c.json({ error: "not found" }, 404);
+      if (found.run.status !== "running") return c.json([]);
+      return c.json(await openQuestions(db(c, ctx), found.run.id));
+    })
+    /**
+     * Answers one of the agent's questions. The choice is checked against
+     * what was asked (only offered options, one answer for a single
+     * choice question, every question answered), stored, and handed to
+     * the process holding the run once the row is committed.
+     */
+    .post(
+      "/:id/questions/:questionId/answer",
+      zValidator(
+        "json",
+        z.object({
+          answers: z
+            .array(
+              z.object({
+                question: z.string().min(1).max(2000),
+                selected: z.array(z.string().max(500)).max(10),
+                other: z.string().max(2000).optional(),
+              }),
+            )
+            .min(1)
+            .max(10),
+        }),
+      ),
+      async (c) => {
+          const found = await getAccessibleRun(ctx, c, c.req.param("id"));
+        if (!found) return c.json({ error: "not found" }, 404);
+        const [question] = await db(c, ctx)
+          .select()
+          .from(runQuestions)
+          .where(and(eq(runQuestions.id, c.req.param("questionId")), eq(runQuestions.runId, found.run.id)));
+        if (!question) return c.json({ error: "not found" }, 404);
+        if (question.status !== "pending" || found.run.status !== "running") {
+          return c.json({ error: "This question is no longer waiting for an answer." }, 409);
+        }
+        const body = c.req.valid("json");
+        const result = answersFor(question.questions, body.answers);
+        if ("error" in result) return c.json({ error: result.error }, 400);
+        if (!(await storeAnswer(db(c, ctx), question.id, result.answers, actor(c)))) {
+          return c.json({ error: "This question is no longer waiting for an answer." }, 409);
+        }
+        const runId = found.run.id;
+        deferAfterCommit(c, async () => nudgeRun(ctx, runId));
+        return c.json({ answered: true, answers: result.answers });
+      },
+    )
+    /**
      * Undoes a run by restoring the sandbox to the snapshot taken before
      * it started. Only available where the driver supports snapshots,
      * and only for finished runs: rolling back under a live agent would
@@ -276,6 +366,7 @@ export function runRoutes(ctx: AppContext) {
           ok?: boolean;
           error?: string;
           costUsd?: number;
+          interrupted?: boolean;
         };
         if (ev.type === "message") {
           // The profile's name, not the wire role: "Product Designer>"
@@ -287,7 +378,13 @@ export function runRoutes(ctx: AppContext) {
         } else if (ev.type === "init") {
           lines.push(`[session started]`);
         } else if (ev.type === "result") {
-          lines.push(ev.ok ? `[done${ev.costUsd !== undefined ? ` cost $${ev.costUsd}` : ""}]` : `[failed: ${ev.error ?? "no reason reported; see the lines above"}]`);
+          lines.push(
+            ev.ok
+              ? `[done${ev.costUsd !== undefined ? ` cost $${ev.costUsd}` : ""}]`
+              : ev.interrupted
+                ? "[turn stopped]"
+                : `[failed: ${ev.error ?? "no reason reported; see the lines above"}]`,
+          );
         }
       }
       return c.text(lines.join("\n"));
@@ -357,7 +454,7 @@ export function runRoutes(ctx: AppContext) {
          * delayed agent output by up to a second even though the event
          * was already in hand.
          */
-        const queue: ({ seq: number; event: unknown } | { delta: AgentDelta })[] = [];
+        const queue: ({ seq: number; event: unknown } | { delta: AgentDelta } | { turn: TurnState })[] = [];
         let finished: string | null = null;
         let wake: (() => void) | null = null;
         const nudge = () => {
@@ -391,6 +488,13 @@ export function runRoutes(ctx: AppContext) {
           } else {
             queue.push({ delta });
           }
+          nudge();
+        });
+        // Whether the agent is in a turn, from the process holding the
+        // run; live only, like a delta, and in the same queue so it
+        // never overtakes the result that ended the turn.
+        const unsubscribeTurns = ctx.bus.onRunTurn(runId, (turn) => {
+          queue.push({ turn });
           nudge();
         });
         const unsubscribeDone = ctx.bus.onRunDone(runId, (status) => {
@@ -443,6 +547,9 @@ export function runRoutes(ctx: AppContext) {
             });
           }
 
+          const turn = ctx.bus.runTurn(runId);
+          if (turn) await stream.writeSSE({ event: "run_turn", data: JSON.stringify({ state: turn }) });
+
           // A run that already ended before we subscribed has no further
           // events coming, so check its status once rather than waiting.
           const [current] = await db(c, ctx)
@@ -459,6 +566,10 @@ export function runRoutes(ctx: AppContext) {
               const item = queue.shift()!;
               if ("delta" in item) {
                 await stream.writeSSE({ event: "run_delta", data: JSON.stringify(item.delta) });
+                continue;
+              }
+              if ("turn" in item) {
+                await stream.writeSSE({ event: "run_turn", data: JSON.stringify({ state: item.turn }) });
                 continue;
               }
               if (item.seq <= lastSeq) continue;
@@ -513,6 +624,7 @@ export function runRoutes(ctx: AppContext) {
         } finally {
           unsubscribeEvents();
           unsubscribeDeltas();
+          unsubscribeTurns();
           unsubscribeDone();
           unsubscribeResync();
         }
@@ -566,4 +678,13 @@ export function boardEventRoutes(ctx: AppContext) {
       }
     });
   });
+}
+
+/** Whether this tool can stop a turn and keep its session (see LiveSession.interrupts). */
+function interrupts(cli: string): boolean {
+  try {
+    return getAdapter(cli as AgentCli).live?.interrupts === true;
+  } catch {
+    return false;
+  }
 }

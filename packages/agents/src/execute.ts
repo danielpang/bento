@@ -24,6 +24,14 @@ export interface RunAgentInput {
    * purpose. A consumer that needs durability wants onEvent.
    */
   onDelta?: (delta: AgentDelta) => void;
+  /**
+   * Shown every stdout line before it is parsed, for a live session
+   * whose protocol has to answer the process or keep state across lines
+   * (see LiveProtocol.read). Events it returns are emitted in place of
+   * what parseEvent would make of the line; undefined leaves the line to
+   * the adapter. A streaming fragment is forwarded either way.
+   */
+  readLine?: (line: string) => AgentEvent[] | undefined;
 }
 
 export interface RunAgentResult {
@@ -81,7 +89,29 @@ export async function runAgent(input: RunAgentInput): Promise<RunAgentResult> {
    */
   const streamed = { text: 0, thinking: 0 };
 
+  const record = async (event: AgentEvent, cursor?: number) => {
+    if (event.type === "init" && initialized) return;
+    if (event.type === "init") initialized = true;
+    // Assistant messages and results end the composition; a user line
+    // echoed into the stream mid turn does not, and resetting on it
+    // desynchronized these counters from every draft downstream.
+    if (event.type === "result" || (event.type === "message" && event.role === "assistant")) {
+      streamed.text = 0;
+      streamed.thinking = 0;
+    }
+    events.push(event);
+    await onEvent?.(event, cursor);
+  };
+
   const emit = async (line: string, cursor?: number) => {
+    /**
+     * A live protocol sees the line first. What it says comes before
+     * the line's own fragment, because the message it closes (one
+     * assembled from earlier fragments) precedes the text this line
+     * starts, and closing it is what resets the fragment offsets.
+     */
+    const owned = input.readLine?.(line);
+    if (owned) for (const event of owned) await record(event, cursor);
     /**
      * Deltas first, and unconditionally: a per token line is neither a
      * transcript event nor stray output, and before this check pi's
@@ -97,22 +127,13 @@ export async function runAgent(input: RunAgentInput): Promise<RunAgentResult> {
       }
       return;
     }
+    if (owned) return;
     const event = adapter.parseEvent(line);
     if (!event) {
       if (line.trim()) keep(line);
       return;
     }
-    if (event.type === "init" && initialized) return;
-    if (event.type === "init") initialized = true;
-    // Assistant messages and results end the composition; a user line
-    // echoed into the stream mid turn does not, and resetting on it
-    // desynchronized these counters from every draft downstream.
-    if (event.type === "result" || (event.type === "message" && event.role === "assistant")) {
-      streamed.text = 0;
-      streamed.thinking = 0;
-    }
-    events.push(event);
-    await onEvent?.(event, cursor);
+    await record(event, cursor);
   };
 
   for await (const chunk of exec()) {
