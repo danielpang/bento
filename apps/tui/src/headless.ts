@@ -8,7 +8,16 @@ import { FileTokenStore } from "./credentials.js";
 import type { CliOptions } from "./cli-options.js";
 import { prepareRepositoryPath, repositoryPathOwnerForMode } from "./repository-path.js";
 
-type HeadlessEvent = "verify_url" | "verify_code" | "token" | "ready" | "sandbox" | "stopping" | "status" | "error";
+type HeadlessEvent =
+  | "verify_url"
+  | "verify_code"
+  | "token"
+  | "ready"
+  | "connected"
+  | "sandbox"
+  | "stopping"
+  | "status"
+  | "error";
 
 /** One status line for the person running a headless command. */
 function emit(event: HeadlessEvent, detail = ""): void {
@@ -18,12 +27,14 @@ function emit(event: HeadlessEvent, detail = ""): void {
     // Never the token itself: it is in the credentials file.
     token: "Signed in. The TUI and runner will use this login.",
     ready: `Ready. The board and API are at ${detail}`,
+    connected: `Connected to ${detail}. Claiming runs.`,
     sandbox: `Agents run in ${detail}.`,
     stopping: "Stopping. Waiting for the sandboxes to close.",
     status: detail,
     error: detail,
   };
-  console.log(spoken[event]);
+  if (event === "error") console.error(spoken[event]);
+  else console.log(spoken[event]);
 }
 
 /**
@@ -72,7 +83,7 @@ export async function runRunner(options: CliOptions): Promise<void> {
     onStatus: (message) => emit("status", message),
   });
 
-  emit("ready", options.server);
+  emit("connected", options.server);
   emit("sandbox", options.sandbox);
 
   const shutdown = () => {

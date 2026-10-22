@@ -1778,7 +1778,6 @@ test("history names the person who moved the card", async () => {
   assert.ok(moved, "advancing the card writes a manual history row");
   assert.equal(moved.actorName, "Ada Lovelace");
   assert.equal(moved.actorEmail, "history-actor@bento.test");
-
 });
 
 /**
@@ -1827,7 +1826,6 @@ test("agent credentials are per organization and write only", async () => {
     await app.request("/api/secrets", { headers: { authorization: `Bearer ${outsiderToken}` } })
   ).json()) as { secrets: unknown[] };
   assert.equal(theirs.secrets.length, 0, "secrets must not cross organizations");
-
 });
 
 test("credential access follows current membership and mutation roles", async () => {

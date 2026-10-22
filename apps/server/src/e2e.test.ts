@@ -426,7 +426,6 @@ test("a card's committed changes and artifacts can be read back", async () => {
   assert.match(repo.diff, /export const sites/, "the diff carries the change itself");
   assert.equal(repo.artifacts[0]?.path, "docs/bento/product-investigation.md");
   assert.match(repo.artifacts[0]?.content ?? "", /Ship it/, "the write-up is readable in full");
-
 });
 
 /**
