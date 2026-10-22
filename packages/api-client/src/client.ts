@@ -1624,11 +1624,6 @@ export class BentoClient {
     return this.request<AgentRun>("/api/runs", { method: "POST", body: JSON.stringify(input) });
   }
 
-  quickRun(featureId: string, cli: string, model?: string) {
-    const query = new URLSearchParams({ cli, ...(model ? { model } : {}) });
-    return this.request<AgentRun>(`/api/features/${featureId}/quick-run?${query}`, { method: "POST" });
-  }
-
   resumeRun(runId: string, prompt: string) {
     return this.request<AgentRun>(`/api/runs/${runId}/resume`, {
       method: "POST",

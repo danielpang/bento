@@ -2,22 +2,20 @@ import { and, asc, eq, gt, isNotNull, isNull, lt, or } from "drizzle-orm";
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { z } from "zod";
-import { agentRuns, features, invitation, member, organization, organizationPolicies, projects, user, type Db } from "@bento/db";
+import { agentRuns, features, invitation, organization, organizationPolicies, projects, user, type Db } from "@bento/db";
 import type { AppContext } from "../context.js";
 import { allCandidates, candidateDrivers } from "../orchestrator/sandbox-driver.js";
 import { tenantDb as db } from "../middleware/tenant.js";
-import { actor, activeOrg } from "../middleware/actor.js";
+import { actor } from "../middleware/actor.js";
 import { getActiveOrganizationMembership } from "../access.js";
 import { hoursByFeature } from "../hours-by-feature.js";
 
 /**
- * The organization roster in line form, for the Mac app.
- *
- * Everything here is a READ. Creating organizations, inviting, changing
- * roles, and removing members stay on better-auth's own endpoints under
- * /api/auth/organization/*, which the app calls with the same bearer
- * token: reimplementing them would mean reimplementing their invitation
- * tokens and role rules, and the two copies would drift.
+ * The organization's policy and the caller's pending invitations.
+ * Creating organizations, inviting, changing roles, and removing members
+ * stay on better-auth's own endpoints under /api/auth/organization/*:
+ * reimplementing them would mean reimplementing their invitation tokens
+ * and role rules, and the two copies would drift.
  *
  * Access note: these are better-auth's tables in the identity schema,
  * and the row-level security migration covers the application tables
@@ -157,53 +155,7 @@ export function teamRoutes(ctx: AppContext) {
         )
         .orderBy(asc(invitation.createdAt));
       return c.json(rows);
-    })
-    .get("/plain", async (c) => {
-    // Local mode has one trusted user and no organizations at all.
-    if (ctx.env.BENTO_MODE !== "multi") return c.text("mode|local");
-
-    const userId = actor(c);
-    const handle = db(c, ctx);
-
-    const memberships = await handle
-      .select({ organizationId: member.organizationId, role: member.role, name: organization.name })
-      .from(member)
-      .innerJoin(organization, eq(organization.id, member.organizationId))
-      .where(eq(member.userId, userId));
-
-    // The session's active organization is only meaningful if the
-    // caller is still in it: membership can be revoked while a session
-    // lives, and the roster below must not answer for a stale one.
-    const requestedOrg = activeOrg(c);
-    const active = memberships.find((row) => row.organizationId === requestedOrg) ?? null;
-
-    const lines = ["mode|multi"];
-    for (const row of memberships) {
-      const isActive = row.organizationId === active?.organizationId ? "1" : "0";
-      lines.push(`org|${row.organizationId}|${isActive}|${row.role}|${row.name}`);
-    }
-
-    if (!active) return c.text(lines.join("\n"));
-
-    const members = await handle
-      .select({ id: member.id, userId: member.userId, role: member.role, email: user.email, name: user.name })
-      .from(member)
-      .innerJoin(user, eq(user.id, member.userId))
-      .where(eq(member.organizationId, active.organizationId));
-    for (const row of members) {
-      lines.push(`member|${row.id}|${row.userId}|${row.role}|${row.email}|${row.name}`);
-    }
-
-    const invitations = await handle
-      .select({ id: invitation.id, role: invitation.role, status: invitation.status, email: invitation.email })
-      .from(invitation)
-      .where(and(eq(invitation.organizationId, active.organizationId), eq(invitation.status, "pending")));
-    for (const row of invitations) {
-      lines.push(`invitation|${row.id}|${row.status}|${row.role ?? "member"}|${row.email}`);
-    }
-
-    return c.text(lines.join("\n"));
-  });
+    });
 }
 
 /**

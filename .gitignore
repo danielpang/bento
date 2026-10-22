@@ -16,8 +16,6 @@ coverage/
 
 # rendered email previews, from `pnpm --filter @bento/server preview:email`
 .email-preview/
-.native/
-zig-out/
 
 # design-sync: staged converter scripts, build output, machine state
 .ds-sync/

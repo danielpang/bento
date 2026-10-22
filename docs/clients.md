@@ -1,6 +1,6 @@
 <h1 align="center">Other clients</h1>
 
-Bento has three clients: the web console (`apps/web`), the terminal (`apps/tui`), and a macOS app (`apps/mac`). All three use the same API. The web console has the broadest feature set. TUI and macOS app are still in development and probably don't even work. I wouldn't try it unless you want to help build it.
+Bento has two clients: the web console (`apps/web`) and the terminal (`apps/tui`). Both use the same API. The web console has the broadest feature set. The TUI is still in development and probably doesn't even work. I wouldn't try it unless you want to help build it. The Mac app (`apps/desktop`) is the web console in a window; see the [Mac application guide](../apps/desktop/README.md).
 
 ## Terminal
 
@@ -20,34 +20,30 @@ bento pipeline export team-pipeline.yaml
 
 
 
-## macOS app
-
-`apps/mac` is a native board on the Native SDK. It spawns the CLI underneath. It supports cards, gates, and agent editing. It does not yet support stage configuration, repository commands, or pipeline YAML.
-
 ## Feature coverage
 
 
-| Task                                          | Web console           | Terminal                         | Mac app                 |
-| --------------------------------------------- | --------------------- | -------------------------------- | ----------------------- |
-| Create a project                              | Yes                   | Yes                              | Yes                     |
-| Create one spanning several repositories      | Yes                   | One, then add                    | One, then add           |
-| Connect and remove repositories               | Yes                   | Yes                              | Yes                     |
-| Set a repository's setup and test commands    | Yes                   | `bento repos set`                | No                      |
-| Export and import a pipeline as YAML          | Yes                   | `bento pipeline`                 | No                      |
-| Export and import agents as YAML              | Yes                   | `bento agents export` / `import` | No                      |
-| Add a card                                    | Yes                   | No                               | Yes                     |
-| Add, edit and remove agents                   | Yes                   | Yes                              | Yes                     |
-| Assign an agent to a stage                    | Yes                   | Yes                              | Yes                     |
-| Add, remove and rename stages                 | Yes                   | Yes                              | Rename only             |
-| Reorder stages                                | Drag, or arrow keys   | No                               | No                      |
-| Switch a stage between manual and automatic   | Yes                   | Yes                              | Yes                     |
-| Edit stage requirements, judge agent included | Yes                   | Yes                              | Judge shown, not edited |
-| Turn a stage's pull request on or off         | Yes                   | Yes                              | No                      |
-| Approve or reject a card                      | Yes                   | Yes                              | Yes                     |
-| Move a card between stages                    | Drag it between lanes | `a` and `b` keys, one step       | Arrows on each card     |
-| Start, stop, and continue an agent            | Yes                   | Yes                              | Yes                     |
-| Save and remove provider API keys             | Yes                   | Yes                              | Yes                     |
-| Manage the team and its credentials           | Yes                   | No                               | Yes                     |
+| Task                                          | Web console           | Terminal                         |
+| --------------------------------------------- | --------------------- | -------------------------------- |
+| Create a project                              | Yes                   | Yes                              |
+| Create one spanning several repositories      | Yes                   | One, then add                    |
+| Connect and remove repositories               | Yes                   | Yes                              |
+| Set a repository's setup and test commands    | Yes                   | `bento repos set`                |
+| Export and import a pipeline as YAML          | Yes                   | `bento pipeline`                 |
+| Export and import agents as YAML              | Yes                   | `bento agents export` / `import` |
+| Add a card                                    | Yes                   | No                               |
+| Add, edit and remove agents                   | Yes                   | Yes                              |
+| Assign an agent to a stage                    | Yes                   | Yes                              |
+| Add, remove and rename stages                 | Yes                   | Yes                              |
+| Reorder stages                                | Drag, or arrow keys   | No                               |
+| Switch a stage between manual and automatic   | Yes                   | Yes                              |
+| Edit stage requirements, judge agent included | Yes                   | Yes                              |
+| Turn a stage's pull request on or off         | Yes                   | Yes                              |
+| Approve or reject a card                      | Yes                   | Yes                              |
+| Move a card between stages                    | Drag it between lanes | `a` and `b` keys, one step       |
+| Start, stop, and continue an agent            | Yes                   | Yes                              |
+| Save and remove provider API keys             | Yes                   | Yes                              |
+| Manage the team and its credentials           | Yes                   | No                               |
 
 
 Team management and stored credentials require multi mode. Local mode has one user and no organization.

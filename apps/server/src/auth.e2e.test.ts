@@ -982,14 +982,10 @@ test("every entity route refuses a foreign tenant", async () => {
       { body: "version: 1\npipeline:\n  stages:\n    - name: Mine\n      slug: mine\n" },
     ],
     ["GET", `/api/projects/${project.id}/sessions`],
-    ["GET", `/api/projects/${project.id}/sessions/plain`],
     ["GET", `/api/projects/${project.id}/usage`],
-    ["GET", `/api/projects/${project.id}/usage/plain`],
     ["GET", `/api/projects/${project.id}/completions`],
     ["GET", `/api/projects/${project.id}/board/plain`],
-    ["GET", `/api/projects/${project.id}/pipeline/plain`],
     ["GET", `/api/projects/${project.id}/repositories`],
-    ["GET", `/api/projects/${project.id}/repositories/plain`],
     ["POST", `/api/projects/${project.id}/repositories`, { body: JSON.stringify({ localPath: "/tmp/injected" }) }],
     [
       "PATCH",
@@ -1007,9 +1003,7 @@ test("every entity route refuses a foreign tenant", async () => {
     ["POST", `/api/features/${feature.id}/move`, { body: JSON.stringify({ stageId: null }) }],
     ["POST", `/api/features/${feature.id}/finish`],
     ["GET", `/api/features/${feature.id}/gate`],
-    ["GET", `/api/features/${feature.id}/gate/plain`],
     ["GET", `/api/features/${feature.id}/changes`],
-    ["GET", `/api/features/${feature.id}/changes/plain`],
     ["GET", `/api/features/${feature.id}/artifacts`],
     ["GET", `/api/features/${feature.id}/related`],
     ["GET", `/api/artifacts/${artifact!.id}`],
@@ -1033,13 +1027,10 @@ test("every entity route refuses a foreign tenant", async () => {
     ["GET", `/api/features/${feature.id}/merge-status`],
     ["GET", `/api/features/${feature.id}/check-status`],
     ["GET", `/api/features/${feature.id}/pull-request-status`],
-    ["GET", `/api/features/${feature.id}/merge-status/plain`],
     ["POST", `/api/features/${feature.id}/resolve-conflicts`],
     ["POST", `/api/features/${feature.id}/fix-ci-tests`],
-    ["POST", `/api/features/${feature.id}/quick-run?cli=fake`],
     ["GET", `/api/features/${feature.id}/transitions`],
     ["GET", `/api/features/${feature.id}/history`],
-    ["GET", `/api/features/${feature.id}/history/plain`],
     ["GET", `/api/stages/${stageId}`],
     ["PATCH", `/api/stages/${stageId}`, { body: JSON.stringify({ gateCriteria: [{ type: "command", cmd: "id", timeoutSec: 5 }] }) }],
     ["PATCH", `/api/profiles/${profile.id}`, { body: JSON.stringify({ name: "stolen" }) }],
@@ -1787,10 +1778,6 @@ test("history names the person who moved the card", async () => {
   assert.ok(moved, "advancing the card writes a manual history row");
   assert.equal(moved.actorName, "Ada Lovelace");
   assert.equal(moved.actorEmail, "history-actor@bento.test");
-
-  const plain = await (await asUser(`/api/features/${feature.id}/history/plain`)).text();
-  assert.match(plain, /by Ada Lovelace/);
-  assert.doesNotMatch(plain, /by a person/);
 });
 
 /**
@@ -1839,17 +1826,6 @@ test("agent credentials are per organization and write only", async () => {
     await app.request("/api/secrets", { headers: { authorization: `Bearer ${outsiderToken}` } })
   ).json()) as { secrets: unknown[] };
   assert.equal(theirs.secrets.length, 0, "secrets must not cross organizations");
-
-  // The line form the Mac app reads is a second route over the same
-  // rows, so it needs the same two assertions rather than inheriting
-  // them: it masks the value, and it does not cross organizations.
-  const mine = await (await app.request("/api/secrets/plain", { headers: { authorization: `Bearer ${token}` } })).text();
-  assert.match(mine, /^secret\|[^|]+\|ANTHROPIC_API_KEY\|••••••••1234$/m);
-  assert.doesNotMatch(mine, /sk-ant-secret/, "the line form must mask the value too");
-  const theirsPlain = await (
-    await app.request("/api/secrets/plain", { headers: { authorization: `Bearer ${outsiderToken}` } })
-  ).text();
-  assert.equal(theirsPlain, "", "the line form must not cross organizations either");
 });
 
 test("credential access follows current membership and mutation roles", async () => {
@@ -1941,10 +1917,6 @@ test("credential access follows current membership and mutation roles", async ()
     headers: { authorization: `Bearer ${teammateToken}` },
   });
   assert.deepEqual(await staleList.json(), { secrets: [], canManage: false });
-  const stalePlain = await app.request("/api/secrets/plain", {
-    headers: { authorization: `Bearer ${teammateToken}` },
-  });
-  assert.equal(await stalePlain.text(), "");
   const staleCreate = await jsonPost(
     "/api/secrets",
     { name: "ANTHROPIC_API_KEY", value: "stale-must-not-write" },
@@ -2315,56 +2287,6 @@ test("machine settings are absent on a shared server", async () => {
 });
 
 /**
- * The roster the Mac app reads. These are better-auth's tables in the
- * identity schema, which the row-level security migration does not
- * cover, so this route's own scoping is the only thing between two
- * organizations: worth its own test rather than trust.
- */
-test("the team roster does not cross organizations", async () => {
-  const insider = await jsonPost("/api/auth/sign-up/email", {
-    email: "roster-insider@bento.test",
-    password: "correct-horse-battery",
-    name: "Insider",
-  });
-  const insiderToken = insider.headers.get("set-auth-token")!;
-  const org = (await (
-    await jsonPost("/api/auth/organization/create", { name: "Roster Inc", slug: "roster-inc" }, insiderToken)
-  ).json()) as { id: string };
-  await jsonPost("/api/auth/organization/set-active", { organizationId: org.id }, insiderToken);
-  await jsonPost("/api/auth/organization/invite-member", { email: "pending@bento.test", role: "member" }, insiderToken);
-
-  const asInsider = await (
-    await app.request("/api/team/plain", { headers: { authorization: `Bearer ${insiderToken}` } })
-  ).text();
-  assert.match(asInsider, /^org\|[^|]+\|1\|owner\|Roster Inc$/m, "the active organization is flagged");
-  assert.match(asInsider, /^member\|[^|]+\|[^|]+\|owner\|roster-insider@bento\.test\|Insider$/m);
-  assert.match(asInsider, /^invitation\|[^|]+\|pending\|member\|pending@bento\.test$/m);
-
-  // An outsider must see their own (empty) roster, never this one.
-  const outsider = await jsonPost("/api/auth/sign-up/email", {
-    email: "roster-outsider@bento.test",
-    password: "correct-horse-battery",
-    name: "Outsider",
-  });
-  const outsiderToken = outsider.headers.get("set-auth-token")!;
-  const asOutsider = await (
-    await app.request("/api/team/plain", { headers: { authorization: `Bearer ${outsiderToken}` } })
-  ).text();
-  assert.equal(asOutsider, "mode|multi", "an outsider sees no organization, member, or invitation");
-  assert.doesNotMatch(asOutsider, /Roster Inc|roster-insider/);
-
-  // Pointing a session at an organization you are not in must not
-  // answer for it. better-auth refuses the switch, and the route checks
-  // membership again rather than trusting the session's answer: a
-  // session outlives the membership that made it meaningful.
-  await jsonPost("/api/auth/organization/set-active", { organizationId: org.id }, outsiderToken);
-  const forged = await (
-    await app.request("/api/team/plain", { headers: { authorization: `Bearer ${outsiderToken}` } })
-  ).text();
-  assert.doesNotMatch(forged, /roster-insider|pending@bento\.test/, "a non-member must not read the roster");
-});
-
-/**
  * The plan-limit seam. The open source server has no plans; what it
  * has is ctx.entitlements, asked before an invitation is created and
  * before a card goes live. A stub provider proves both doors consult
@@ -2504,6 +2426,12 @@ test("a run is refused when the plan has no compute left", async () => {
   // win, which would test the wrong door: the card is settled first so
   // the only reason left to refuse is the plan.
   await ctx.db.update(agentRuns).set({ status: "cancelled" }).where(eq(agentRuns.featureId, feature.id));
+  const [settled] = await ctx.db
+    .select({ agentProfileId: agentRuns.agentProfileId })
+    .from(agentRuns)
+    .where(eq(agentRuns.featureId, feature.id))
+    .limit(1);
+  assert.ok(settled?.agentProfileId, "going live started the stage's agent");
 
   const asked: string[] = [];
   ctx.entitlements = {
@@ -2521,9 +2449,10 @@ test("a run is refused when the plan has no compute left", async () => {
     },
   };
   try {
-    const started = await app.request(`/api/features/${feature.id}/quick-run`, {
+    const started = await app.request("/api/runs", {
       method: "POST",
-      headers: { authorization: `Bearer ${token}` },
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({ featureId: feature.id, agentProfileId: settled.agentProfileId }),
     });
     // 402 rather than 409: nothing is busy, and there is something the
     // team can do about it that waiting will not fix.

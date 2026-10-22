@@ -29,7 +29,7 @@ import { QUEUE_POLL_SECONDS } from "./queue.js";
  * succeeded, and what it keeps serving when models.dev or the Gateway
  * answers badly. One fetch per machine per day, stored in one row so a
  * restart does not have to wait for the next morning to catch up. The
- * console, the TUI, and the Mac app read the served list, so a model
+ * console and the TUI read the served list, so a model
  * that shipped yesterday is choosable without a deploy.
  */
 export const MODEL_CATALOG_QUEUE = "model-catalog.refresh";
