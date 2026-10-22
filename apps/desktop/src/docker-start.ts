@@ -16,6 +16,8 @@ export const DOCKER_NOT_INSTALLED_MESSAGE =
 /** How long a launched app gets to answer before the start gives up. */
 export const DOCKER_START_TIMEOUT_MS = 90_000;
 const POLL_MS = 1_500;
+/** One check's limit: a socket that accepts and never answers is a Docker still starting. */
+export const DOCKER_PING_TIMEOUT_MS = 5_000;
 
 export interface DockerStartDeps {
   /** Resolves when Docker answers. A fresh client each time: the socket may not exist until the app is up. */
@@ -25,6 +27,8 @@ export interface DockerStartDeps {
   launch(bundlePath: string): Promise<void>;
   sleep(ms: number): Promise<void>;
   now(): number;
+  /** How long one ping may take before it counts as no answer. */
+  pingTimeoutMs: number;
   platform: NodeJS.Platform;
   applicationDirs: string[];
 }
@@ -37,6 +41,7 @@ export const realDockerStartDeps = (): DockerStartDeps => ({
   }),
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   now: () => Date.now(),
+  pingTimeoutMs: DOCKER_PING_TIMEOUT_MS,
   platform: process.platform,
   applicationDirs: ["/Applications", path.join(os.homedir(), "Applications")],
 });
@@ -70,11 +75,12 @@ export async function ensureDockerRunning(
 }
 
 async function answers(deps: DockerStartDeps): Promise<boolean> {
+  let timer: NodeJS.Timeout | undefined;
+  const timedOut = new Promise<false>((resolve) => { timer = setTimeout(() => resolve(false), deps.pingTimeoutMs); });
   try {
-    await deps.ping();
-    return true;
-  } catch {
-    return false;
+    return await Promise.race([deps.ping().then(() => true, () => false), timedOut]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 

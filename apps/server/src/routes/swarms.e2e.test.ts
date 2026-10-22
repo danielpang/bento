@@ -27,7 +27,6 @@ import {
   swarmTasks,
   swarms,
   type Db,
-  user,
 } from "@bento/db";
 import { LocalProcessDriver, WorktreeManager, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
 import { performTaskStartOver } from "../orchestrator/swarm/start-over.js";
@@ -87,6 +86,8 @@ before(async () => {
   const dataDir = await mkdtemp(path.join(tmpdir(), "bento-swarm-data-"));
   const env = loadEnv({
     BENTO_MODE: "local",
+    // Swarms are beta: started with beta features on, as the desktop app does.
+    BENTO_BETA_FEATURES: "true",
     DATABASE_URL: testUrl,
     BENTO_DATA_DIR: dataDir,
     BENTO_SANDBOX_DRIVER: "local-process",
@@ -104,8 +105,6 @@ before(async () => {
   };
   db = createDb(pool);
   const userId = await ensureLocalUser(db);
-  // Swarms are beta: the local user has turned beta features on.
-  await db.update(user).set({ betaFeatures: true }).where(eq(user.id, userId));
   queued = [];
 
   ctx = {
@@ -979,15 +978,15 @@ test("the stream queries at setup and then never again", async () => {
   const decoder = new TextDecoder();
 
   /**
-   * Three reads, and no more: the swarm, the project it hangs off
-   * (together the access check), and the caller's address for the beta
-   * gate. Pinned exactly, because the number that matters is what
+   * Two reads, and no more: the swarm and the project it hangs off
+   * (together the access check). The beta gate reads local Bento's
+   * startup flag, which costs no query. Pinned exactly, because the number that matters is what
    * happens after: a stream that queried anything on a timer would hold
    * a pooled connection for the length of a swarm, which is what the
    * card stream was fixed for.
    */
   const setup = statements.filter((sql) => /select/i.test(sql)).length;
-  assert.equal(setup, 3, `the stream ran ${setup} statements at setup, not 3:\n${statements.join("\n")}`);
+  assert.equal(setup, 2, `the stream ran ${setup} statements at setup, not 2:\n${statements.join("\n")}`);
 
   // Events reach it off the bus, and cost nothing.
   ctx.bus.emitBoardEvent({ type: "swarm_updated", projectId, swarmId: swarm.id, status: "running" });
@@ -2263,14 +2262,14 @@ test("a person who is not a beta tester is not told the swarms exist", async () 
   const seen = (await asTester.json()) as { bySwarm: { swarmId: string }[] };
   assert.equal(seen.bySwarm.length, 1, "a tester sees the swarm section");
 
-  await db.update(user).set({ betaFeatures: false }).where(eq(user.id, ctx.userId));
+  ctx.env.BENTO_BETA_FEATURES = false;
   try {
     const res = await app.request(`/api/projects/${projectId}/usage`);
     assert.equal(res.status, 200, "the cards on this page are not behind the flag");
     const body = (await res.json()) as { bySwarm: unknown[] };
     assert.deepEqual(body.bySwarm, [], "and the swarms are not on it at all");
   } finally {
-    await db.update(user).set({ betaFeatures: true }).where(eq(user.id, ctx.userId));
+    ctx.env.BENTO_BETA_FEATURES = true;
   }
 });
 

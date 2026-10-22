@@ -28,7 +28,7 @@ export interface DesktopStatus {
    * shows them and locks Advanced settings, since Start reopens the
    * running local Bento rather than restarting it.
    */
-  local?: Pick<DesktopSettings, "dataDir" | "databaseUrl" | "sandbox" | "sandboxImage">;
+  local?: Pick<DesktopSettings, "dataDir" | "databaseUrl" | "sandbox" | "sandboxImage" | "betaFeatures">;
 }
 
 export type RuntimeCommand =

@@ -952,23 +952,37 @@ existing agent, a new control on an existing screen, an endpoint that
 serves one. Do not gate a change because it is new. When it is unclear
 whether a feature is large enough, ask rather than gate it by default.
 
-Beta is each person's own switch, `identity.user.beta_features`: off
-until they turn it on in Settings, Account (or the desktop app's
-launcher), in both modes. Nothing else turns it on; there is no PostHog flag.
-`hasBetaFeatures` in `feature-flags.ts` reads it. When a feature is
-gated:
+What turns beta on depends on the mode, and nothing else turns it on;
+there is no PostHog flag. `hasBetaFeatures` in `feature-flags.ts` is the
+one place that decides:
 
-- Server: `hasBetaFeatures(ctx, userId)`. A beta endpoint that someone
-  without beta must not learn about answers 404 via `getBetaTester`,
-  the same convention as the access helpers.
+- Local Bento reads its startup flag, `BENTO_BETA_FEATURES`, which the
+  desktop app sets from the launcher's "Try beta and experimental
+  features" box. Nothing in the database counts, so it changes only by
+  restarting local Bento, and the launcher locks the box while it runs.
+- A hosted server needs two things: the team allows it
+  (`identity.organization.beta_features_allowed`, an owner or admin's
+  setting in Settings, Team) and the person turned it on
+  (`identity.user.beta_features`, Settings, Account). Both are off
+  until someone turns them on. The team asked about is the one the
+  work belongs to: the open team for a page, the project's team for a
+  run, the connection's team for an MCP call. Work in no team is never
+  beta.
+
+When a feature is gated:
+
+- Server: `hasBetaFeatures(ctx, userId, organizationId)`. A beta
+  endpoint that someone without beta must not learn about answers 404
+  via `getBetaTester` (which asks about the open team), the same
+  convention as the access helpers.
 - Console: wrap the UI in `<BetaOnly>` from `apps/web/src/beta.tsx`.
   `useBetaTesters()` is the boolean for lighter checks.
 - Orchestrator: a run has no session, and not always a person. The
   console and the API start one as somebody; the gate evaluator and the
   schedules start one as nobody. `isBetaRun` asks about the acting
   member when there is one and the project's owner when there is not,
-  so a team's auto-started stages behave like the runs it starts by
-  hand. A capability given to an agent belongs behind the same switch
+  in the project's team, so a team's auto-started stages behave like
+  the runs it starts by hand. A capability given to an agent belongs behind the same switch
   as the console that shows what the agent did with it, until both are
   ready. The card tools on the MCP gateway (`create_card`,
   `set_pull_request`, `add_pull_request_comment`) are rolled out to

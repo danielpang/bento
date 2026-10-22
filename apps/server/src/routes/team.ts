@@ -70,6 +70,37 @@ export function teamRoutes(ctx: AppContext) {
       return c.json({ restrictNetwork });
     })
     /**
+     * Whether members may turn on beta features for this team's work.
+     * Read by any member, changed only by an owner or admin, like the
+     * policy above. Each member still turns beta on for themselves.
+     */
+    .get("/beta", async (c) => {
+      const membership = await getActiveOrganizationMembership(ctx, c);
+      if (!membership) return c.json({ error: "not found" }, 404);
+      const [row] = await db(c, ctx)
+        .select({ allowed: organization.betaFeaturesAllowed })
+        .from(organization)
+        .where(eq(organization.id, membership.organizationId))
+        .limit(1);
+      return c.json({
+        allowed: row?.allowed === true,
+        canEdit: membership.role === "owner" || membership.role === "admin",
+      });
+    })
+    .patch("/beta", zValidator("json", z.object({ allowed: z.boolean() })), async (c) => {
+      const membership = await getActiveOrganizationMembership(ctx, c);
+      if (!membership) return c.json({ error: "not found" }, 404);
+      if (membership.role !== "owner" && membership.role !== "admin") {
+        return c.json({ error: "only organization owners and admins can change this" }, 403);
+      }
+      const { allowed } = c.req.valid("json");
+      await db(c, ctx)
+        .update(organization)
+        .set({ betaFeaturesAllowed: allowed })
+        .where(eq(organization.id, membership.organizationId));
+      return c.json({ allowed });
+    })
+    /**
      * Agent hours this team spent, by card, in the billing month.
      *
      * Billing's meter is a team total; this is the ranking that says

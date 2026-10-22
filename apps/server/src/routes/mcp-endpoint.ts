@@ -227,7 +227,7 @@ export function mcpEndpointRoutes(ctx: AppContext) {
    * a non-tester must not learn about.
    */
   async function beta(c: Context, conn: ResolvedConnection): Promise<Response | null> {
-    return (await connectionOwnerIsBetaTester(ctx, conn.ownerId)) ? null : notFound(c);
+    return (await connectionOwnerIsBetaTester(ctx, conn.ownerId, conn.organizationId)) ? null : notFound(c);
   }
 
   routes.post("/", async (c) => {

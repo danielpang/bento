@@ -60,8 +60,9 @@ async function boot() {
   await store.load();
   runtime = new RuntimeController(directory,
     (message) => publish({ phase: "starting", message }),
-    // Local Bento stopped on its own: the next Start makes it again.
-    (message) => { connections.delete("local"); publish({ phase: "error", message }); void showLauncher(); },
+    // Local Bento stopped on its own: its windows go, since nothing answers
+    // them now, and the launcher says why. The next Start makes it again.
+    (message) => { closeLocal(); publish({ phase: "error", message }); void showLauncher(); },
   );
   protocol.handle("bento-desktop", (request) => {
     const url = new URL(request.url);
@@ -70,10 +71,8 @@ async function boot() {
   });
   installIpc();
   updates = await createUpdates({ changed: refreshUpdates, shutdown: prepareShutdown, shutdownFailed: () => {
-    const local = connections.get("local");
-    if (quitPrepared && local) {
-      connections.delete("local");
-      for (const window of local.windows) window.destroy();
+    if (quitPrepared && connections.has("local")) {
+      closeLocal();
       publish({ phase: "idle", message: "The update could not finish. Reconnect to restart local Bento." });
       void showLauncher();
     }
@@ -148,6 +147,13 @@ function assertSender(event: IpcMainInvokeEvent, kind: "launcher" | "console") {
   }
 }
 
+/** Forgets local Bento and closes every window on it. */
+function closeLocal() {
+  const local = connections.get("local");
+  connections.delete("local");
+  for (const window of local?.windows ?? []) window.destroy();
+}
+
 /** The connection the sending console window belongs to, checked against its origin. */
 function consoleConnection(event: IpcMainInvokeEvent): Connection {
   const window = BrowserWindow.fromWebContents(event.sender);
@@ -161,8 +167,8 @@ function withLocal(next: DesktopStatus): DesktopStatus {
   const { local: _stale, ...rest } = next;
   const running = connections.get("local")?.settings;
   if (!running) return rest;
-  const { dataDir, databaseUrl, sandbox, sandboxImage } = running;
-  return { ...rest, local: { dataDir, databaseUrl, sandbox, sandboxImage } };
+  const { dataDir, databaseUrl, sandbox, sandboxImage, betaFeatures } = running;
+  return { ...rest, local: { dataDir, databaseUrl, sandbox, sandboxImage, betaFeatures } };
 }
 
 /** The connection a new window or a menu command means when none is in focus. */
@@ -255,7 +261,6 @@ async function connect(settings: DesktopSettings): Promise<void> {
       // Already connected there: another window, and nothing restarts.
       const existing = connections.get(key);
       if (existing) {
-        if (settings.mode === "local") await applyBetaFeatures(existing.origin, settings.betaFeatures, controller.signal);
         lastUsed = existing;
         publish({ phase: "ready", message: settings.mode === "local" ? "Bento is running on this Mac." : "Connected to your Bento server.", serverUrl: existing.origin });
         openConsole(existing);
@@ -268,7 +273,6 @@ async function connect(settings: DesktopSettings): Promise<void> {
         startedLocal = true;
         startingLocal = true;
         origin = await runtime.start(settings);
-        await applyBetaFeatures(origin, settings.betaFeatures, controller.signal);
       } else {
         origin = normalizeServerUrl(settings.serverUrl);
         const response = await fetch(`${origin}/api/health`, { signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]), redirect: "error" });
@@ -308,22 +312,6 @@ async function connect(settings: DesktopSettings): Promise<void> {
 /** One local Bento, and one connection per server address. */
 function connectionKey(settings: DesktopSettings): string {
   return settings.mode === "local" ? "local" : `remote:${normalizeServerUrl(settings.serverUrl)}`;
-}
-
-/**
- * The launcher's beta box is the local user's switch: written on every
- * local start, so the server follows what the launcher shows. Turning it
- * off inside Bento (Settings, Account) holds until the next start.
- */
-async function applyBetaFeatures(origin: string, enabled: boolean, signal: AbortSignal) {
-  const response = await fetch(`${origin}/api/account/beta`, {
-    method: "PATCH",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ enabled }),
-    signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]),
-    redirect: "error",
-  });
-  if (!response.ok) throw new Error(`Could not save the beta features choice (HTTP ${response.status}).`);
 }
 
 async function authenticate(origin: string, signal: AbortSignal) {

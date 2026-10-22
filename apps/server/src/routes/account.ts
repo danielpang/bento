@@ -61,16 +61,13 @@ export function accountRoutes(ctx: AppContext) {
       if (!row) return c.json({ error: "not found" }, 404);
       return c.json({ show: row.show });
     })
-    /** Whether this person turned beta features on. */
-    .get("/beta", async (c) => {
-      const [row] = await db(c, ctx)
-        .select({ enabled: user.betaFeatures })
-        .from(user)
-        .where(eq(user.id, actor(c)))
-        .limit(1);
-      return c.json({ enabled: row?.enabled ?? false });
-    })
+    /**
+     * This person's own beta switch on a hosted server. It counts only in
+     * a team that allows beta. Local Bento has no switch (its startup flag
+     * decides), so there is nothing here to change.
+     */
     .patch("/beta", zValidator("json", patchBeta), async (c) => {
+      if (ctx.env.BENTO_MODE !== "multi") return c.json({ error: "not found" }, 404);
       const { enabled } = c.req.valid("json");
       const [row] = await db(c, ctx)
         .update(user)

@@ -12,6 +12,7 @@ import {
   mcpOAuthRequests,
   pipelines,
   runMigrations,
+  organization,
   user,
 } from "@bento/db";
 import { sweepExpiredOAuth } from "./mcp/oauth-sweep.js";
@@ -134,6 +135,8 @@ async function makeOrg(token: string, name: string, slug: string): Promise<strin
     id: string;
   };
   await jsonPost("/api/auth/organization/set-active", { organizationId: org.id }, token);
+  // Every team here allows beta; each account's own switch decides.
+  await ctx.db.update(organization).set({ betaFeaturesAllowed: true }).where(eq(organization.id, org.id));
   return org.id;
 }
 

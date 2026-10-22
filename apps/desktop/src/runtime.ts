@@ -84,6 +84,8 @@ async function start(command: Extract<RuntimeCommand, { type: "start" }>): Promi
         BETTER_AUTH_URL: `http://127.0.0.1:${address.port}`,
         BENTO_DATA_DIR: settings.dataDir, BENTO_SANDBOX_DRIVER: settings.sandbox,
         BENTO_SANDBOX_IMAGE: settings.sandboxImage,
+        // The launcher's beta box, read once at start: the local server's only beta switch.
+        BENTO_BETA_FEATURES: settings.betaFeatures ? "true" : "false",
         BENTO_WEB_DIR: path.join(import.meta.dirname, "web"),
       },
     });

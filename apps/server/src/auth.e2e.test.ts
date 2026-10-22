@@ -16,6 +16,7 @@ import {
   mcpCredentials,
   mcpServers,
   member,
+  organization,
   organizationPolicies,
   pipelines,
   projects,
@@ -113,10 +114,19 @@ after(async () => {
   await ctx.pool.end();
 });
 
-/** Turns beta features on or off for these accounts, the way their own switch would. */
+/**
+ * Turns beta features on or off for these accounts, the way their own
+ * switch would. Turning it on also allows beta in every team they are
+ * in, as an owner would, since the switch counts only there.
+ */
 async function setBetaFeatures(emails: string[], enabled: boolean) {
   for (const email of emails) {
-    await ctx.db.update(user).set({ betaFeatures: enabled }).where(eq(user.email, email));
+    const [row] = await ctx.db.update(user).set({ betaFeatures: enabled }).where(eq(user.email, email)).returning({ id: user.id });
+    if (!enabled || !row) continue;
+    const teams = await ctx.db.select({ id: member.organizationId }).from(member).where(eq(member.userId, row.id));
+    for (const team of teams) {
+      await ctx.db.update(organization).set({ betaFeaturesAllowed: true }).where(eq(organization.id, team.id));
+    }
   }
 }
 
@@ -136,7 +146,7 @@ test("the API refuses unauthenticated requests in multi mode", async () => {
   assert.equal(res.status, 401);
 });
 
-test("feature flags refuse an anonymous caller and follow the person's beta switch", async () => {
+test("beta features need the team to allow them and the person to turn them on", async () => {
   const anonymous = await app.request("/api/flags");
   assert.equal(anonymous.status, 401);
 
@@ -147,15 +157,62 @@ test("feature flags refuse an anonymous caller and follow the person's beta swit
   });
   assert.equal(signUp.status, 200);
   const token = signUp.headers.get("set-auth-token")!;
+  const auth = { authorization: `Bearer ${token}` };
+  const flags = async () => {
+    const res = await app.request("/api/flags", { headers: auth });
+    assert.equal(res.status, 200);
+    return res.json();
+  };
+  const setOwn = (enabled: boolean) =>
+    app.request("/api/account/beta", { method: "PATCH", headers: { ...auth, "content-type": "application/json" }, body: JSON.stringify({ enabled }) });
+  const swarms = () => app.request("/api/swarms", { headers: auth });
+  const setTeam = (allowed: boolean, headers: Record<string, string>) =>
+    app.request("/api/team/beta", { method: "PATCH", headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify({ allowed }) });
 
-  const off = await app.request("/api/flags", { headers: { authorization: `Bearer ${token}` } });
-  assert.equal(off.status, 200);
-  assert.deepEqual(await off.json(), { betaTesters: false });
+  assert.deepEqual(await flags(), { betaTesters: false, betaFeatures: { enabled: false, allowed: false } });
 
-  await setBetaFeatures(["flags-user@bento.test"], true);
-  const on = await app.request("/api/flags", { headers: { authorization: `Bearer ${token}` } });
-  assert.equal(on.status, 200);
-  assert.deepEqual(await on.json(), { betaTesters: true });
+  // Their own switch alone, with no team open, turns nothing on.
+  assert.equal((await setOwn(true)).status, 200);
+  assert.deepEqual(await flags(), { betaTesters: false, betaFeatures: { enabled: true, allowed: false } });
+
+  // Nor in a team that has not allowed it.
+  const team = (await (await jsonPost("/api/auth/organization/create", { name: "Flags Team", slug: "flags-team" }, token)).json()) as { id: string };
+  await jsonPost("/api/auth/organization/set-active", { organizationId: team.id }, token);
+  assert.deepEqual(await (await app.request("/api/team/beta", { headers: auth })).json(), { allowed: false, canEdit: true });
+  assert.deepEqual(await flags(), { betaTesters: false, betaFeatures: { enabled: true, allowed: false } });
+
+  // A member who is not an owner or admin cannot allow it.
+  const memberSignUp = await jsonPost("/api/auth/sign-up/email", {
+    email: "flags-member@bento.test",
+    password: "correct-horse-battery",
+    name: "Flags Member",
+  });
+  const memberToken = memberSignUp.headers.get("set-auth-token")!;
+  const [memberUser] = await ctx.db.select({ id: user.id }).from(user).where(eq(user.email, "flags-member@bento.test"));
+  await ctx.db.insert(member).values({ id: crypto.randomUUID(), organizationId: team.id, userId: memberUser!.id, role: "member" });
+  await jsonPost("/api/auth/organization/set-active", { organizationId: team.id }, memberToken);
+  const memberAuth = { authorization: `Bearer ${memberToken}` };
+  assert.deepEqual(await (await app.request("/api/team/beta", { headers: memberAuth })).json(), { allowed: false, canEdit: false });
+  assert.equal((await setTeam(true, memberAuth)).status, 403);
+
+  // The owner allows it, and the switch now counts.
+  assert.equal((await swarms()).status, 404, "swarms stay hidden until both say yes");
+  assert.equal((await setTeam(true, auth)).status, 200);
+  assert.deepEqual(await flags(), { betaTesters: true, betaFeatures: { enabled: true, allowed: true } });
+  assert.equal((await swarms()).status, 200, "and then open what beta gates");
+
+  // Allowing it turned nothing on for the member, who has not chosen it.
+  const memberFlags = await (await app.request("/api/flags", { headers: memberAuth })).json();
+  assert.deepEqual(memberFlags, { betaTesters: false, betaFeatures: { enabled: false, allowed: true } });
+
+  // Either one off turns it off.
+  assert.equal((await setOwn(false)).status, 200);
+  assert.deepEqual(await flags(), { betaTesters: false, betaFeatures: { enabled: false, allowed: true } });
+  assert.equal((await setOwn(true)).status, 200);
+  assert.equal((await setTeam(false, auth)).status, 200);
+  assert.deepEqual(await flags(), { betaTesters: false, betaFeatures: { enabled: true, allowed: false } });
+  assert.equal((await swarms()).status, 404);
+  assert.equal((await app.request("/api/account/beta", { method: "PATCH" })).status, 401);
 });
 
 test("sign up returns a bearer token that authenticates API calls", async () => {
@@ -787,6 +844,15 @@ test("every entity route refuses a foreign tenant", async () => {
     app.request(path, { ...init, headers: { "content-type": "application/json", authorization: `Bearer ${ownerToken}`, ...(init.headers ?? {}) } });
   const asIntruder = (path: string, init: RequestInit = {}) =>
     app.request(path, { ...init, headers: { "content-type": "application/json", authorization: `Bearer ${intruderToken}`, ...(init.headers ?? {}) } });
+  // Each in a team of their own, because beta (which the swarm routes
+  // below need) counts only in a team, the one the work belongs to.
+  const teams: string[] = [];
+  for (const [token, slug] of [[ownerToken, "matrix-owner-team"], [intruderToken, "matrix-intruder-team"]] as const) {
+    const team = (await (await jsonPost("/api/auth/organization/create", { name: slug, slug }, token)).json()) as { id: string };
+    await jsonPost("/api/auth/organization/set-active", { organizationId: team.id }, token);
+    teams.push(team.id);
+  }
+  const ownerTeamId = teams[0]!;
 
   // The owner sets up a project, feature, stage assignment, and a run.
   const project = (await (
@@ -1161,6 +1227,13 @@ test("every entity route refuses a foreign tenant", async () => {
     ["DELETE", `/api/projects/${project.id}`],
   ];
 
+  // The intruder's session claims the owner's team, as a forged active
+  // organization would: the team routes must re-check membership rather
+  // than trust it, and no other route may take it as a way in.
+  await ctx.pool.query(
+    `update identity.session set active_organization_id = $1 where user_id = (select id from identity."user" where email = $2)`,
+    [ownerTeamId, "matrix-intruder@bento.test"],
+  );
   for (const [method, path, init] of attempts) {
     const res = await asIntruder(path, { method, ...(init ?? {}) });
     assert.ok(
@@ -1168,6 +1241,11 @@ test("every entity route refuses a foreign tenant", async () => {
       `${method} ${path} answered ${res.status} to a foreign tenant; it must refuse`,
     );
   }
+  // Back in their own team for the checks below, which act as themselves.
+  await ctx.pool.query(
+    `update identity.session set active_organization_id = $1 where user_id = (select id from identity."user" where email = $2)`,
+    [teams[1]!, "matrix-intruder@bento.test"],
+  );
 
   // The card is still on the owner's board. A refusal that answered
   // 404 and deleted the row anyway would pass the loop above and lose
@@ -1301,7 +1379,6 @@ test("custom providers keep definitions and keys inside their organization", asy
     const firstToken = first.headers.get("set-auth-token")!;
     const secondToken = second.headers.get("set-auth-token")!;
     const memberToken = memberSignUp.headers.get("set-auth-token")!;
-    await setBetaFeatures(["provider-a@bento.test", "provider-b@bento.test", "provider-member@bento.test"], true);
     const firstOrg = (await (await jsonPost("/api/auth/organization/create", { name: "Provider A", slug: "provider-a" }, firstToken)).json()) as { id: string };
     const secondOrg = (await (await jsonPost("/api/auth/organization/create", { name: "Provider B", slug: "provider-b" }, secondToken)).json()) as { id: string };
     await jsonPost("/api/auth/organization/set-active", { organizationId: firstOrg.id }, firstToken);
@@ -1309,6 +1386,7 @@ test("custom providers keep definitions and keys inside their organization", asy
     const [memberUser] = await ctx.db.select({ id: user.id }).from(user).where(eq(user.email, "provider-member@bento.test"));
     await ctx.db.insert(member).values({ id: crypto.randomUUID(), organizationId: firstOrg.id, userId: memberUser!.id, role: "member" });
     await jsonPost("/api/auth/organization/set-active", { organizationId: firstOrg.id }, memberToken);
+    await setBetaFeatures(["provider-a@bento.test", "provider-b@bento.test", "provider-member@bento.test"], true);
     const asUser = (token: string, path: string, init: RequestInit = {}) => app.request(path, {
       ...init, headers: { authorization: `Bearer ${token}`, "content-type": "application/json", ...(init.headers ?? {}) },
     });
@@ -3223,40 +3301,6 @@ test("the board mascots are on for everyone until dismissed", async () => {
   assert.equal((await write(true)).status, 200);
   assert.equal(await show(), true, "Settings, Account brings them back");
   assert.equal((await app.request("/api/account/mascots")).status, 401);
-});
-
-test("beta features are off until a person turns them on", async () => {
-  const signup = await jsonPost("/api/auth/sign-up/email", {
-    email: "beta-switch@bento.test",
-    password: "correct-horse-battery",
-    name: "Beta Switch",
-  });
-  const token = signup.headers.get("set-auth-token")!;
-  const headers = { authorization: `Bearer ${token}` };
-  const write = (enabled: boolean) =>
-    app.request("/api/account/beta", {
-      method: "PATCH",
-      headers: { ...headers, "content-type": "application/json" },
-      body: JSON.stringify({ enabled }),
-    });
-  const flags = async () => ((await (await app.request("/api/flags", { headers })).json()) as { betaTesters: boolean });
-  const swarms = () => app.request("/api/swarms", { headers });
-
-  assert.deepEqual(await (await app.request("/api/account/beta", { headers })).json(), { enabled: false });
-  assert.equal((await flags()).betaTesters, false);
-  assert.equal((await swarms()).status, 404, "swarms stay hidden before opting in");
-
-  const on = await write(true);
-  assert.equal(on.status, 200);
-  assert.deepEqual(await on.json(), { enabled: true });
-  assert.equal((await flags()).betaTesters, true);
-  assert.equal((await swarms()).status, 200, "turning beta on opens what it gates");
-
-  const off = await write(false);
-  assert.deepEqual(await off.json(), { enabled: false });
-  assert.equal((await flags()).betaTesters, false);
-  assert.equal((await swarms()).status, 404);
-  assert.equal((await app.request("/api/account/beta")).status, 401);
 });
 
 /**

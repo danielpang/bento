@@ -12,8 +12,6 @@
   user-select: none;
 }
 
-/* Blank header space drags the window. Menus, links, and form fields keep
-   normal pointer behavior, including the project picker's whole subtree. */
 /* Where this window's Bento runs, beside the wordmark: this Mac or a
    server. Only the desktop bridge answers, so browsers never show it. */
 .desktop-connection {
@@ -41,6 +39,8 @@
   stroke-linejoin: round;
 }
 
+/* Blank header space drags the window. Menus, links, and form fields keep
+   normal pointer behavior, including the project picker's whole subtree. */
 :root[data-desktop="mac"] .topbar > :not(.topbar-spacer) {
   -webkit-app-region: no-drag;
 }

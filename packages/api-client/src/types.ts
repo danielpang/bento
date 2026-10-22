@@ -401,8 +401,14 @@ export interface RunArtifact {
 }
 
 export interface FlagSnapshot {
-  /** Whether this user has beta features on. */
+  /** Whether this user has beta features on, for the team they have open. */
   betaTesters: boolean;
+  /**
+   * The switch behind it on a hosted server: the person's own choice, and
+   * whether their open team allows beta. Absent in local mode, where the
+   * desktop app's startup flag decides.
+   */
+  betaFeatures?: { enabled: boolean; allowed: boolean };
 }
 
 export interface FeatureEvent {

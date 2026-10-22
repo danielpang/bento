@@ -65,8 +65,7 @@ before(async () => {
 
   pool = createPool(testUrl);
   db = createDb(pool);
-  // Beta on, because the swarm route is one of the doors checked here.
-  await pool.query(`insert into identity."user" (id,name,email,beta_features) values ('u1','U','u@x.test',true)`);
+  await pool.query(`insert into identity."user" (id,name,email) values ('u1','U','u@x.test')`);
   await pool.query(`insert into identity.organization (id,name,slug) values ('org-a','A','org-a')`);
   await pool.query(
     `insert into projects (id,owner_id,organization_id,name,default_branch) values ($1,'u1','org-a','P','main')`,
@@ -90,7 +89,8 @@ before(async () => {
   );
 
   ctx = {
-    env: loadEnv({ BENTO_MODE: "local", DATABASE_URL: testUrl } as NodeJS.ProcessEnv),
+    // Beta on, because the swarm route is one of the doors checked here.
+    env: loadEnv({ BENTO_MODE: "local", DATABASE_URL: testUrl, BENTO_BETA_FEATURES: "true" } as NodeJS.ProcessEnv),
     db,
     pool,
     userId: "u1",

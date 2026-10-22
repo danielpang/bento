@@ -547,6 +547,17 @@ export class BentoClient {
       body: JSON.stringify({ restrictNetwork }),
     });
   }
+  /** Whether this team lets its members turn on beta features, and whether the caller may change that. */
+  getTeamBeta() {
+    return this.request<{ allowed: boolean; canEdit: boolean }>("/api/team/beta");
+  }
+  /** Owners and admins only. */
+  setTeamBeta(allowed: boolean) {
+    return this.request<{ allowed: boolean }>("/api/team/beta", {
+      method: "PATCH",
+      body: JSON.stringify({ allowed }),
+    });
+  }
   getTeamHours(from: string, to: string) {
     return this.request<{ features: { featureId: string; title: string; agentHours: number }[] }>(
       `/api/team/hours?${new URLSearchParams({ from, to })}`,
@@ -1584,12 +1595,10 @@ export class BentoClient {
     });
   }
 
-  /** Whether this person turned beta features on. */
-  getBetaFeatures() {
-    return this.request<{ enabled: boolean }>("/api/account/beta");
-  }
-
-  /** Turns beta features on or off for this person. */
+  /**
+   * Turns beta features on or off for this person, on a hosted server.
+   * Read it back from `flags()`, which also says whether the team allows it.
+   */
   setBetaFeatures(enabled: boolean) {
     return this.request<{ enabled: boolean }>("/api/account/beta", {
       method: "PATCH",

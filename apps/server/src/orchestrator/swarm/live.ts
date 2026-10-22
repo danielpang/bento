@@ -128,7 +128,11 @@ export async function swarmLiveConversation(
 ): Promise<LiveConversation | null> {
   const { run, task } = subject;
   if (run.role !== "planner" && !(run.role === "worker" && task)) return null;
-  const beta = await isBetaRun(ctx, { actingUserId: run.startedBy, projectOwnerId: subject.project.ownerId });
+  const beta = await isBetaRun(ctx, {
+    actingUserId: run.startedBy,
+    projectOwnerId: subject.project.ownerId,
+    organizationId: subject.project.organizationId,
+  });
   if (!beta) return null;
   if (run.role === "planner") {
     return plannerConversation(ctx, { swarmId: subject.swarm.id, idleSec: ctx.env.BENTO_SWARM_PLANNER_HOLD_SEC });

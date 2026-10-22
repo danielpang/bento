@@ -214,6 +214,17 @@ const envSchema = z.object({
     .optional(),
 
   /**
+   * Beta features (Bento Swarm and the rest) for a local server. Local
+   * mode only: the desktop launcher's checkbox sets it, and it is read
+   * at startup, so changing it means restarting. Multi mode ignores it;
+   * there a team allows beta and each person turns it on.
+   */
+  BENTO_BETA_FEATURES: z
+    .enum(["true", "false"])
+    .transform((v) => v === "true")
+    .optional(),
+
+  /**
    * SMTP. Without SMTP_HOST, invitation mail is written to the log
    * instead of sent, and the link can be passed along by hand.
    */

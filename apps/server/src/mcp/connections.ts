@@ -143,7 +143,7 @@ export function recordConnectionUse(ctx: AppContext, connectionId: string): void
 
 /**
  * Whether Bento's own MCP server is on for the member a connection acts
- * as, which is their beta features switch.
+ * as, in the connection's own team.
  *
  * The console hides the section and the management routes answer 404,
  * so a member without beta cannot create a connection. This is the
@@ -151,6 +151,6 @@ export function recordConnectionUse(ctx: AppContext, connectionId: string): void
  * while its owner had beta on would keep serving after they turned it
  * off. A primary key read per call, so nothing is cached.
  */
-export async function connectionOwnerIsBetaTester(ctx: AppContext, ownerId: string): Promise<boolean> {
-  return hasBetaFeatures(ctx, ownerId);
+export async function connectionOwnerIsBetaTester(ctx: AppContext, ownerId: string, organizationId: string | null): Promise<boolean> {
+  return hasBetaFeatures(ctx, ownerId, organizationId);
 }

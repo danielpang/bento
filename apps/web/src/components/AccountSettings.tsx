@@ -85,11 +85,12 @@ function ownedAccountMessage(names: string[]): string {
  * account is confirmed a second time by email; deleting an organization
  * takes its boards with it and happens at once, so it is the one that
  * has to be spelled out hardest. Local mode has no sign in and no
- * organizations, so there the tab is only the three switches.
+ * organizations, so there the tab is only the two switches; beta is the
+ * desktop app's startup flag there.
  */
 export function AccountSettings({ client, mode }: { client: BentoClient; mode: "local" | "multi" }) {
   // Local mode has one trusted user and no sign in, so the only things
-  // on this tab there are the three switches. Split rather than
+  // on this tab there are the two switches. Split rather than
   // returned early below: the sign in and organization hooks there ask
   // /api/auth, which local mode does not mount, and a hook cannot be
   // skipped once called.
@@ -98,7 +99,6 @@ export function AccountSettings({ client, mode }: { client: BentoClient; mode: "
       <>
         <OnboardingCard client={client} />
         <MascotsCard client={client} />
-        <BetaFeaturesCard client={client} />
       </>
     );
   }
@@ -360,19 +360,24 @@ function MascotsCard({ client }: { client: BentoClient }) {
   );
 }
 
-/** The person's own switch for unfinished product, such as Bento Swarm. */
+/**
+ * The person's own switch for unfinished product, such as Bento Swarm,
+ * on a hosted server. It counts only in a team that allows beta, so it
+ * is disabled with a note when the open team does not. Local Bento has
+ * no card: the desktop app's startup flag decides there.
+ */
 function BetaFeaturesCard({ client }: { client: BentoClient }) {
   const toast = useToast();
   const setBetaTesters = useSetBetaTesters();
-  const [state, setState] = useState<{ enabled: boolean } | null>(null);
+  const [state, setState] = useState<{ enabled: boolean; allowed: boolean } | null>(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     void client
-      .getBetaFeatures()
-      .then((row) => {
-        if (!cancelled) setState(row);
+      .flags()
+      .then((snapshot) => {
+        if (!cancelled) setState(snapshot.betaFeatures ?? null);
       })
       .catch((err: unknown) => {
         if (!cancelled) toast.fail(err);
@@ -385,9 +390,10 @@ function BetaFeaturesCard({ client }: { client: BentoClient }) {
   async function change(next: boolean) {
     setBusy(true);
     try {
-      const row = await client.setBetaFeatures(next);
-      setState(row);
-      setBetaTesters(row.enabled);
+      await client.setBetaFeatures(next);
+      const snapshot = await client.flags();
+      setState(snapshot.betaFeatures ?? null);
+      setBetaTesters(snapshot.betaTesters);
     } catch (err) {
       toast.fail(err);
     } finally {
@@ -402,12 +408,13 @@ function BetaFeaturesCard({ client }: { client: BentoClient }) {
         <input
           type="checkbox"
           checked={state?.enabled === true}
-          disabled={busy || state === null}
+          disabled={busy || state === null || !state.allowed}
           onChange={(e) => void change(e.target.checked)}
         />
         <span className="gate-check-text">Try beta and experimental features</span>
       </label>
       <p className="muted">Warning beta features can cause issues.</p>
+      {state && !state.allowed && <p className="muted">Ask a team owner or admin to allow beta features.</p>}
     </section>
   );
 }

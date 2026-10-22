@@ -32,9 +32,10 @@ export const user = identity.table("user", {
    */
   boardMascots: boolean("board_mascots").notNull().default(true),
   /**
-   * Whether this person turned beta features on, from Settings, Account
-   * or the desktop app's launcher. Off until they do; nothing else
-   * turns beta on. `hasBetaFeatures` in the server reads it.
+   * Whether this person turned beta features on, in Settings, Account
+   * on a hosted server. It counts only in a team whose owner or admin
+   * allowed beta (organization.beta_features_allowed); local Bento
+   * ignores it and reads its startup flag. `hasBetaFeatures` reads it.
    */
   betaFeatures: boolean("beta_features").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -134,6 +135,12 @@ export const organization = identity.table("organization", {
   slug: text("slug").notNull().unique(),
   logo: text("logo"),
   metadata: text("metadata"),
+  /**
+   * Whether members may turn on beta features for this team's work.
+   * An owner or admin's choice, in Team settings; each member still
+   * turns beta on for themselves. Ours, not better-auth's.
+   */
+  betaFeaturesAllowed: boolean("beta_features_allowed").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

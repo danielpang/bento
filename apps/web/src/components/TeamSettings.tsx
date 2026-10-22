@@ -5,6 +5,7 @@ import type { BentoClient } from "@bento/api-client";
 import { authClient, useActiveOrganization, useListOrganizations } from "../auth-client.js";
 import { useToast } from "./Toasts.js";
 import { seatChangeNote, useBillingPlan } from "./billing-plan.js";
+import { useSetBetaTesters } from "../beta.js";
 
 interface Member {
   id: string;
@@ -366,6 +367,7 @@ export function TeamSettings({ client }: { client: BentoClient }) {
             </section>
 
             <NetworkPolicyCard />
+            <TeamBetaCard client={client} />
 
             {/*
               Agent credentials belong to the organization, not the
@@ -510,6 +512,61 @@ function NetworkPolicyCard() {
         />
         <span className="gate-check-text">Block network access for every agent in this team.</span>
       </label>
+      {!state.canEdit && <p className="muted">Only an owner or admin can change this.</p>}
+    </section>
+  );
+}
+
+/**
+ * Whether this team's members may turn on beta features. Allowing it
+ * turns nothing on by itself: each member still chooses in Settings,
+ * Account. The console's own answer is fetched again after a change,
+ * since the person changing it is a member too.
+ */
+function TeamBetaCard({ client }: { client: BentoClient }) {
+  const toast = useToast();
+  const setBetaTesters = useSetBetaTesters();
+  const [state, setState] = useState<{ allowed: boolean; canEdit: boolean } | null>(null);
+  const [ready, setReady] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    void client
+      .getTeamBeta()
+      .then(setState)
+      .catch(() => setState(null))
+      .finally(() => setReady(true));
+  }, [client]);
+
+  if (!ready) return <SettingsCardSkeleton rows={2} />;
+  if (!state) return null;
+
+  async function toggle(next: boolean) {
+    setBusy(true);
+    try {
+      const row = await client.setTeamBeta(next);
+      setState((current) => (current ? { ...current, allowed: row.allowed } : current));
+      setBetaTesters((await client.flags()).betaTesters);
+    } catch (err) {
+      toast.fail(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="section settings-card">
+      <h3 className="settings-title">Beta features</h3>
+      <label className="gate-check">
+        <input
+          type="checkbox"
+          checked={state.allowed}
+          disabled={busy || !state.canEdit}
+          onChange={(e) => void toggle(e.target.checked)}
+        />
+        <span className="gate-check-text">Allow beta features</span>
+      </label>
+      <p className="muted">Members can then turn on beta and experimental features in Settings, Account.</p>
       {!state.canEdit && <p className="muted">Only an owner or admin can change this.</p>}
     </section>
   );

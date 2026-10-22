@@ -119,6 +119,9 @@ before(async () => {
     BENTO_DATA_DIR: dataDir,
     BENTO_SANDBOX_DRIVER: "local-process",
     BENTO_LIVE_IDLE_SEC: "0",
+    // Started with beta features on, as the desktop app does once the box
+    // is ticked; the tests that need them off turn them off.
+    BENTO_BETA_FEATURES: "true",
   } as NodeJS.ProcessEnv);
 
   const pool = createPool(testUrl);
@@ -127,9 +130,6 @@ before(async () => {
   boss.on("error", () => {});
   await boss.start();
   const userId = await ensureLocalUser(db);
-  // The local user has beta features on, as they would after ticking
-  // the box; the tests that need them off turn them off.
-  await db.update(user).set({ betaFeatures: true }).where(eq(user.id, userId));
 
   ctx = {
     env,
@@ -156,9 +156,9 @@ after(async () => {
   await ctx.pool.end();
 });
 
-/** Turns beta features on or off for the local user, the way the switch would. */
+/** Turns beta features on or off for local Bento, the way its startup flag would. */
 async function setLocalBeta(enabled: boolean) {
-  await ctx.db.update(user).set({ betaFeatures: enabled }).where(eq(user.id, ctx.userId));
+  ctx.env.BENTO_BETA_FEATURES = enabled;
 }
 
 async function json<T>(res: Response): Promise<T> {

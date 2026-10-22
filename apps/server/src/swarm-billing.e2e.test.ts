@@ -19,7 +19,6 @@ import {
   swarmTasks,
   swarms,
   type Db,
-  user,
 } from "@bento/db";
 import { LocalProcessDriver, WorktreeManager } from "@bento/sandbox";
 import { singleDriver } from "./orchestrator/sandbox-driver.js";
@@ -140,6 +139,8 @@ before(async () => {
   const dataDir = await mkdtemp(path.join(tmpdir(), "bento-swarm-billing-"));
   const env = loadEnv({
     BENTO_MODE: "local",
+    // Swarms are beta: started with beta features on, as the desktop app does.
+    BENTO_BETA_FEATURES: "true",
     DATABASE_URL: testUrl,
     BENTO_DATA_DIR: dataDir,
     BENTO_SANDBOX_DRIVER: "local-process",
@@ -148,8 +149,6 @@ before(async () => {
   const pool = createPool(testUrl);
   db = createDb(pool);
   const userId = await ensureLocalUser(db);
-  // Swarms are beta: the local user has turned beta features on.
-  await db.update(user).set({ betaFeatures: true }).where(eq(user.id, userId));
 
   ctx = {
     env,

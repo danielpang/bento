@@ -33,7 +33,7 @@ function renderStatus(status: DesktopStatus) {
 /**
  * While local Bento runs, Advanced settings show what it runs with and
  * cannot be changed: Start opens another window on it, it does not
- * restart it. The beta box stays live, since Start applies it.
+ * restart it, and the beta box is read only when it starts.
  */
 function renderLocal(local: DesktopStatus["local"]) {
   runningLocal = local;
@@ -43,9 +43,10 @@ function renderLocal(local: DesktopStatus["local"]) {
     field("database-url").value = local.databaseUrl;
     field("sandbox-image").value = local.sandboxImage;
     element<HTMLSelectElement>("sandbox").value = local.sandbox;
+    field("beta-features").checked = local.betaFeatures;
     renderIsolation();
   }
-  for (const id of ["data-dir", "choose-directory", "database-url", "sandbox-image", "sandbox"]) {
+  for (const id of ["beta-features", "data-dir", "choose-directory", "database-url", "sandbox-image", "sandbox"]) {
     element<HTMLInputElement>(id).disabled = locked;
   }
   element("local-lock-note").hidden = !locked;
@@ -77,6 +78,12 @@ async function start() {
       betaFeatures: field("beta-features").checked,
     };
     void bridge.connect(next).catch(showError);
+  });
+  // Enter in the address means Connect, not the form's first button (Start).
+  field("server-url").addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" || event.isComposing) return;
+    event.preventDefault();
+    element<HTMLButtonElement>(actions.remote.id).click();
   });
   element("choose-directory").addEventListener("click", () => void bridge.chooseDirectory().then((directory) => { if (directory) field("data-dir").value = directory; }).catch(showError));
   element("cancel").addEventListener("click", () => void bridge.cancel().catch(showError));

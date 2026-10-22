@@ -1,7 +1,8 @@
 import type { Context } from "hono";
 import { getActiveOrganizationMembership } from "../../access.js";
 import type { AppContext } from "../../context.js";
-import { getBetaTester } from "../../feature-flags.js";
+import { hasBetaFeatures } from "../../feature-flags.js";
+import { actor } from "../../middleware/actor.js";
 
 /**
  * Why a swarm request is refused, as the status and body the route
@@ -17,7 +18,8 @@ export type SwarmRefusal =
  *
  * Two gates, in this order and never the other way round:
  *
- * 1. The person's beta features switch, answered as 404 when it is off.
+ * 1. Beta features, for the team the work belongs to (see
+ *    hasBetaFeatures), answered as 404 when they are off.
  *    Someone without beta must not be able to tell that swarms exist,
  *    and a 402 saying "your plan does not include swarms" would tell
  *    them. Same convention as the access helpers: not yours reads as
@@ -41,16 +43,15 @@ export async function requireSwarms(
    */
   organizationId?: string | null,
 ): Promise<SwarmRefusal | null> {
-  const tester = await getBetaTester(ctx, c);
-  if (!tester) return { status: 404, body: { error: "not found" } };
+  const organization =
+    organizationId === undefined ? (await getActiveOrganizationMembership(ctx, c))?.organizationId ?? null : organizationId;
+  // Beta is asked about the same team: the one the work belongs to.
+  if (!(await hasBetaFeatures(ctx, actor(c), organization))) return { status: 404, body: { error: "not found" } };
 
   const canUseSwarms = ctx.entitlements?.canUseSwarms;
   if (!canUseSwarms) return null;
-
-  const organization =
-    organizationId === undefined ? (await getActiveOrganizationMembership(ctx, c))?.organizationId ?? null : organizationId;
-  // Nothing to charge and nobody to charge it to: a personal project in
-  // multi mode belongs to no organization, and plans are per team.
+  // Nothing to charge and nobody to charge it to: plans are per team.
+  // (Only local mode gets here without one, since beta needs a team.)
   if (!organization) return null;
 
   const refusal = await canUseSwarms.call(ctx.entitlements, organization);
