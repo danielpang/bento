@@ -29,7 +29,17 @@ let launcher: BrowserWindow | undefined;
 const windows = new Set<BrowserWindow>();
 let store: DesktopStore;
 let runtime: RuntimeController;
-let current: { origin: string; session: Session; settings: DesktopSettings } | undefined;
+/**
+ * Every Bento this app is connected to, at once: at most one local server
+ * (it owns the runtime) and any number of servers elsewhere. Each console
+ * window belongs to exactly one, so a local window and a server window
+ * can sit side by side, and opening one never closes the other.
+ */
+interface Connection { key: string; origin: string; session: Session; settings: DesktopSettings; windows: Set<BrowserWindow> }
+const connections = new Map<string, Connection>();
+const windowConnection = new WeakMap<BrowserWindow, Connection>();
+let lastUsed: Connection | undefined;
+let startingLocal = false;
 let status: DesktopStatus = { phase: "idle", message: "Choose where Bento runs." };
 let connectionTask: Promise<void> | undefined;
 let cancelled: AbortController | undefined;
@@ -50,7 +60,8 @@ async function boot() {
   await store.load();
   runtime = new RuntimeController(directory,
     (message) => publish({ phase: "starting", message }),
-    (message) => { publish({ phase: "error", message }); void showLauncher(); },
+    // Local Bento stopped on its own: the next Start makes it again.
+    (message) => { connections.delete("local"); publish({ phase: "error", message }); void showLauncher(); },
   );
   protocol.handle("bento-desktop", (request) => {
     const url = new URL(request.url);
@@ -59,17 +70,18 @@ async function boot() {
   });
   installIpc();
   updates = await createUpdates({ changed: refreshUpdates, shutdown: prepareShutdown, shutdownFailed: () => {
-    if (quitPrepared && current?.settings.mode === "local") {
-      current = undefined;
-      for (const window of windows) window.destroy();
+    const local = connections.get("local");
+    if (quitPrepared && local) {
+      connections.delete("local");
+      for (const window of local.windows) window.destroy();
       publish({ phase: "idle", message: "The update could not finish. Reconnect to restart local Bento." });
       void showLauncher();
     }
     quitting = false; quitPrepared = false; shutdownTask = undefined;
   } });
   installMenu();
-  app.on("second-instance", () => { if (current) openConsole(); else void showLauncher(); });
-  app.on("activate", () => { if (windows.size === 0) { if (current) openConsole(); else void showLauncher(); } });
+  app.on("second-instance", () => openRecent());
+  app.on("activate", () => { if (windows.size === 0) openRecent(); });
   app.on("window-all-closed", () => { /* macOS keeps local runs alive until Quit. */ });
   app.on("before-quit", (event) => {
     if (quitPrepared) return;
@@ -132,9 +144,33 @@ function assertSender(event: IpcMainInvokeEvent, kind: "launcher" | "console") {
   if (kind === "launcher") {
     if (!launcher || event.sender !== launcher.webContents || event.senderFrame.url !== `${LAUNCHER_ORIGIN}/`) throw new Error("Untrusted settings window.");
   } else {
-    const owned = [...windows].some((window) => window.webContents === event.sender);
-    if (!owned || !current || !isTrustedConsoleUrl(event.senderFrame.url, current.origin)) throw new Error("Untrusted console window.");
+    consoleConnection(event);
   }
+}
+
+/** The connection the sending console window belongs to, checked against its origin. */
+function consoleConnection(event: IpcMainInvokeEvent): Connection {
+  const window = BrowserWindow.fromWebContents(event.sender);
+  const connection = window && windows.has(window) ? windowConnection.get(window) : undefined;
+  if (!connection || !event.senderFrame || !isTrustedConsoleUrl(event.senderFrame.url, connection.origin)) throw new Error("Untrusted console window.");
+  return connection;
+}
+
+/** The connection a new window or a menu command means when none is in focus. */
+function recentConnection(): Connection | undefined {
+  if (lastUsed && connections.get(lastUsed.key) === lastUsed) return lastUsed;
+  return [...connections.values()].at(-1);
+}
+
+function focusedConnection(): Connection | undefined {
+  const window = BrowserWindow.getFocusedWindow();
+  return window && windows.has(window) ? windowConnection.get(window) : undefined;
+}
+
+function openRecent() {
+  const connection = recentConnection();
+  if (connection) openConsole(connection);
+  else void showLauncher();
 }
 
 function installIpc() {
@@ -157,16 +193,22 @@ function installIpc() {
   handle("launcher:status", "launcher", () => status);
   handle("launcher:connect", "launcher", (_event, settings) => connect(validateSettings(settings)));
   handle("launcher:cancel", "launcher", async () => {
-    cancelled?.abort(); await runtime.stop(); await connectionTask?.catch(() => {});
-    if (!current) publish({ phase: "idle", message: "Choose where Bento runs." });
+    cancelled?.abort();
+    // Only a local start still in progress is this cancel's to stop.
+    if (startingLocal) await runtime.stop();
+    await connectionTask?.catch(() => {});
+    if (connections.size === 0) publish({ phase: "idle", message: "Choose where Bento runs." });
   });
   handle("launcher:choose-directory", "launcher", chooseDirectory);
   handle("launcher:open-verification", "launcher", async () => {
     const url = status.verificationUrl && safeExternalUrl(status.verificationUrl);
     if (status.phase === "login" && url) await shell.openExternal(url);
   });
-  handle("launcher:show-console", "launcher", () => { if (current) { openConsole(); launcher?.hide(); } });
-  handle("console:choose-directory", "console", (event) => current?.settings.mode === "local" ? chooseDirectory(event) : null);
+  handle("launcher:show-console", "launcher", () => {
+    const connection = recentConnection();
+    if (connection) { openConsole(connection); launcher?.hide(); }
+  });
+  handle("console:choose-directory", "console", (event) => consoleConnection(event).settings.mode === "local" ? chooseDirectory(event) : null);
   handle("console:settings", "console", () => showLauncher());
   handle("console:appearance", "console", (event, theme) => {
     if (theme !== "light" && theme !== "dark" && theme !== "navy") throw new Error("Unknown appearance.");
@@ -179,13 +221,16 @@ function installIpc() {
     }
     return { fullscreen: window.isFullScreen() };
   });
-  handle("console:open-integration", "console", async (_event, tab) => {
+  handle("console:open-integration", "console", async (event, tab) => {
     if (tab !== "github" && tab !== "slack" && tab !== "mcp") throw new Error("Unknown integration.");
     // Start and finish OAuth in one browser session. Sending an OAuth URL
     // created in Electron to Safari would lose its state cookies and team.
-    await shell.openExternal(`${current!.origin}/settings?tab=${tab}`);
+    await shell.openExternal(`${consoleConnection(event).origin}/settings?tab=${tab}`);
   });
-  handle("console:connection", "console", () => ({ mode: current!.settings.mode, serverUrl: current!.origin }));
+  handle("console:connection", "console", (event) => {
+    const connection = consoleConnection(event);
+    return { mode: connection.settings.mode, serverUrl: connection.origin };
+  });
 }
 
 async function connect(settings: DesktopSettings): Promise<void> {
@@ -194,20 +239,25 @@ async function connect(settings: DesktopSettings): Promise<void> {
   const controller = new AbortController();
   cancelled = controller;
   connectionTask = (async () => {
+    let startedLocal = false;
     try {
-      if (current?.settings.mode === "local") {
-        const result = await dialog.showMessageBox({ type: "question", buttons: ["Cancel", "Switch connection"], defaultId: 0, cancelId: 0,
-          message: "Switch away from local Bento?", detail: "The local server will stop. Projects and history are kept. Active agent sessions can reconnect when local Bento starts again." });
-        if (result.response !== 1) return;
+      await store.saveSettings(settings);
+      const key = connectionKey(settings);
+      // Already connected there: another window, and nothing restarts.
+      const existing = connections.get(key);
+      if (existing) {
+        if (settings.mode === "local") await applyBetaFeatures(existing.origin, settings.betaFeatures, controller.signal);
+        lastUsed = existing;
+        publish({ phase: "ready", message: settings.mode === "local" ? "Bento is running on this Mac." : "Connected to your Bento server.", serverUrl: existing.origin });
+        openConsole(existing);
+        launcher?.hide();
+        return;
       }
       publish({ phase: "starting", message: "Connecting to Bento..." });
-      for (const window of windows) window.destroy();
-      current = undefined;
-      await runtime.stop();
-      controller.signal.throwIfAborted();
-      await store.saveSettings(settings);
       let origin: string;
       if (settings.mode === "local") {
+        startedLocal = true;
+        startingLocal = true;
         origin = await runtime.start(settings);
         await applyBetaFeatures(origin, settings.betaFeatures, controller.signal);
       } else {
@@ -229,17 +279,26 @@ async function connect(settings: DesktopSettings): Promise<void> {
       await installConsoleProtocol({ session: browserSession, origin, webDirectory: path.join(directory, "web"), token: () => settings.mode === "remote" ? store.token(origin) : null,
         signedOut: async () => { await store.setToken(origin, null); },
       });
-      current = { origin, session: browserSession, settings };
+      const connection: Connection = { key, origin, session: browserSession, settings, windows: new Set() };
+      connections.set(key, connection);
+      lastUsed = connection;
       publish({ phase: "ready", message: settings.mode === "local" ? "Bento is running on this Mac." : "Connected to your Bento server.", serverUrl: origin });
-      openConsole();
+      openConsole(connection);
       launcher?.hide();
     } catch (error) {
       if (controller.signal.aborted) publish({ phase: "idle", message: "Connection cancelled." });
       else publish({ phase: "error", message: error instanceof Error ? error.message : String(error) });
-      await runtime.stop();
+      if (startedLocal) await runtime.stop();
+    } finally {
+      if (startedLocal) startingLocal = false;
     }
   })();
   try { await connectionTask; } finally { connectionTask = undefined; }
+}
+
+/** One local Bento, and one connection per server address. */
+function connectionKey(settings: DesktopSettings): string {
+  return settings.mode === "local" ? "local" : `remote:${normalizeServerUrl(settings.serverUrl)}`;
 }
 
 /**
@@ -282,16 +341,19 @@ async function authenticate(origin: string, signal: AbortSignal) {
   await store.setToken(origin, nextToken);
 }
 
-function openConsole(route = "/") {
-  if (!current) return;
-  const connection = current;
+function openConsole(connection: Connection, route = "/") {
   const window = new BrowserWindow({ title: "Bento", width: 1440, height: 960, minWidth: 900, minHeight: 600, show: false,
     backgroundColor: backgrounds[appearance], titleBarStyle: "hiddenInset", trafficLightPosition: { x: 18, y: 20 },
     webPreferences: { session: connection.session, preload: path.join(directory, "preload.cjs"), sandbox: true, contextIsolation: true, nodeIntegration: false, webviewTag: false },
   });
   windows.add(window);
+  connection.windows.add(window);
+  windowConnection.set(window, connection);
   trackWindowChrome(window);
-  window.on("closed", () => windows.delete(window));
+  // Closing a connection's last window leaves it running, local Bento
+  // included, so agents keep working until the app quits.
+  window.on("closed", () => { windows.delete(window); connection.windows.delete(window); });
+  window.on("focus", () => { lastUsed = connection; });
   window.once("ready-to-show", () => window.show());
   window.webContents.on("will-attach-webview", (event) => event.preventDefault());
   const navigation = (event: Electron.Event, url: string) => {
@@ -305,7 +367,7 @@ function openConsole(route = "/") {
   window.webContents.setWindowOpenHandler(({ url }) => {
     if (isTrustedConsoleUrl(url, connection.origin)) {
       const parsed = new URL(url);
-      openConsole(`${parsed.pathname}${parsed.search}${parsed.hash}`);
+      openConsole(connection, `${parsed.pathname}${parsed.search}${parsed.hash}`);
     } else {
       const external = safeExternalUrl(url);
       if (external) void shell.openExternal(external);
@@ -324,8 +386,11 @@ function trackWindowChrome(window: BrowserWindow) {
 function installMenu() {
   const navigate = (route: string) => {
     const window = BrowserWindow.getFocusedWindow();
-    if (current && window && windows.has(window)) void window.loadURL(`${current.origin}${route}`);
-    else openConsole(route);
+    const focused = focusedConnection();
+    if (window && focused) { void window.loadURL(`${focused.origin}${route}`); return; }
+    const connection = recentConnection();
+    if (connection) openConsole(connection, route);
+    else void showLauncher();
   };
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     { label: "Bento", submenu: [ { role: "about" }, { type: "separator" },
@@ -333,7 +398,15 @@ function installMenu() {
       { type: "separator" },
       { label: "Connection Settings...", accelerator: "CmdOrCtrl+,", click: () => void showLauncher() },
       { type: "separator" }, { role: "services" }, { type: "separator" }, { role: "hide" }, { role: "hideOthers" }, { role: "unhide" }, { type: "separator" }, { role: "quit" } ] },
-    { label: "File", submenu: [ { label: "New Window", accelerator: "CmdOrCtrl+Shift+N", click: () => openConsole() }, { role: "close" } ] },
+    { label: "File", submenu: [
+      { label: "New Window", accelerator: "CmdOrCtrl+Shift+N", click: () => {
+        const connection = focusedConnection() ?? recentConnection();
+        if (connection) openConsole(connection);
+        else void showLauncher();
+      } },
+      // The startup screen, to open a window on another connection beside this one.
+      { label: "Switch Connection...", accelerator: "Alt+CmdOrCtrl+N", click: () => void showLauncher() },
+      { type: "separator" }, { role: "close" } ] },
     { role: "editMenu" },
     { label: "View", submenu: [ { label: "Board", accelerator: "CmdOrCtrl+1", click: () => navigate("/") },
       { label: "Sessions", accelerator: "CmdOrCtrl+2", click: () => navigate("/sessions") },

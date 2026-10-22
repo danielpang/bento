@@ -1,3 +1,5 @@
+import { useDesktopConnection } from "../desktop.js";
+
 /**
  * The wordmark: the bento glyph beside the name.
  *
@@ -15,7 +17,7 @@
  * decorative here because the name is right beside it.
  */
 export function BrandLockup({ size = "sm" }: { size?: "sm" | "lg" }) {
-  return (
+  const mark = (
     <span className={size === "lg" ? "brand brand-lg" : "brand"}>
       <svg className="brand-glyph" viewBox="0 0 64 64" aria-hidden="true" focusable="false">
         <rect x="1" y="1" width="62" height="62" rx="14" fill="#12161E" stroke="#39414F" strokeWidth="2" />
@@ -27,4 +29,39 @@ export function BrandLockup({ size = "sm" }: { size?: "sm" | "lg" }) {
       Bento
     </span>
   );
+  // The top bar's wordmark also says where this window's Bento runs,
+  // which matters in the desktop app once local and server windows are
+  // open side by side.
+  if (size === "lg") return mark;
+  return (
+    <>
+      {mark}
+      <DesktopConnectionBadge />
+    </>
+  );
+}
+
+function DesktopConnectionBadge() {
+  const connection = useDesktopConnection();
+  if (!connection) return null;
+  const local = connection.mode === "local";
+  const label = local ? "This Mac" : hostOf(connection.serverUrl);
+  return (
+    <span className="desktop-connection" title={local ? "Running on this Mac" : `Connected to ${connection.serverUrl}`}>
+      {local ? (
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="2" y="3" width="20" height="14" rx="2" /><path d="M8 21h8M12 17v4" /></svg>
+      ) : (
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z" /></svg>
+      )}
+      <span>{label}</span>
+    </span>
+  );
+}
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
 }
