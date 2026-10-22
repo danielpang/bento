@@ -18,6 +18,7 @@ strong { font-weight: 600; }
 small { display: block; font-size: 12px; line-height: 1.5; margin-top: 5px; }
 .hint { color: var(--muted); line-height: 1.55; font-size: 13px; }
 .checkbox { display: flex; align-items: flex-start; gap: 10px; }
+details .checkbox { margin: 15px 0; }
 details { border-top: 1px solid var(--line); padding-top: 12px; }
 summary { cursor: pointer; color: var(--muted); margin-bottom: 14px; }
 .field { display: block; margin: 15px 0; font-size: 13px; font-weight: 500; }

@@ -16,10 +16,10 @@
         <section class="card" aria-labelledby="local-title">
           <h2 id="local-title">Run locally</h2>
           <p class="muted">Your own database, board, and agents in containers.</p>
-          <label class="checkbox"><input id="beta-features" type="checkbox" /><span>Try beta and experimental features<small>Warning beta features can cause issues.</small></span></label>
           <p class="hint">Bento requires OrbStack or Docker Desktop. Bento will run OrbStack or Docker for you.</p>
           <details>
             <summary>Advanced settings</summary>
+            <label class="checkbox"><input id="beta-features" type="checkbox" /><span>Try beta and experimental features<small>Warning beta features can cause issues.</small></span></label>
             <label class="field">Data and worktrees<div class="input-row"><input id="data-dir" spellcheck="false" /><button id="choose-directory" type="button" class="secondary">Choose...</button></div></label>
             <label class="field">PostgreSQL URL <span class="muted">(optional)</span><input id="database-url" type="password" placeholder="Leave empty to manage with Docker" autocomplete="off" /></label>
             <label class="field">Sandbox image<input id="sandbox-image" value="bento-sandbox:dev" spellcheck="false" /></label>
@@ -29,7 +29,7 @@
           <div class="card-actions"><button id="start" type="submit" name="mode" value="local" formnovalidate>Start</button></div>
         </section>
         <section class="card" aria-labelledby="server-title">
-          <h2 id="server-title">Use a server</h2>
+          <h2 id="server-title">Connect to server</h2>
           <p class="muted">Your team's board and history live on the server.</p>
           <label class="field">Server address<input id="server-url" type="url" placeholder="https://app.usebento.ai" spellcheck="false" /></label>
           <div id="login" hidden><strong id="user-code"></strong><button id="open-verification" type="button" class="secondary">Open sign-in page</button></div>
