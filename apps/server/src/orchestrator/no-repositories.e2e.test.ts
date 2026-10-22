@@ -89,7 +89,8 @@ before(async () => {
   );
 
   ctx = {
-    env: loadEnv({ BENTO_MODE: "local", DATABASE_URL: testUrl } as NodeJS.ProcessEnv),
+    // Beta on, because the swarm route is one of the doors checked here.
+    env: loadEnv({ BENTO_MODE: "local", DATABASE_URL: testUrl, BENTO_BETA_FEATURES: "true" } as NodeJS.ProcessEnv),
     db,
     pool,
     userId: "u1",
@@ -172,10 +173,6 @@ test("a project with no repositories refuses a new run and cancels one already q
   const again = await db.select().from(runEvents).where(eq(runEvents.runId, run!.id));
   assert.equal(again.length, 0);
   assert.deepEqual(jobs, [{ name: "gate.evaluate", data: { featureId: FEATURE } }]);
-
-  const quick = await app.request(`/api/features/${FEATURE}/quick-run?cli=claude-code`, { method: "POST" });
-  assert.equal(quick.status, 409, await quick.clone().text());
-  assert.deepEqual(await quick.json(), { error: NO_REPOSITORIES });
 
   const message = await app.request(`/api/features/${FEATURE}/message`, {
     method: "POST",

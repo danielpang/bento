@@ -12,7 +12,7 @@ export class DesktopStore {
   private data: StoredData = {
     settings: {
       mode: "local", serverUrl: "https://app.usebento.ai", dataDir: path.join(os.homedir(), ".bento"),
-      databaseUrl: "", sandbox: "docker", sandboxImage: "bento-sandbox:dev",
+      databaseUrl: "", sandbox: "docker", sandboxImage: "bento-sandbox:dev", betaFeatures: false,
     },
     tokens: {},
   };

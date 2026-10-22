@@ -29,12 +29,6 @@ import type { CatalogProvider } from "./models.js";
  * a tool can run is checked against the catalog only to refuse a pairing
  * no provider serves, and a model the catalog has never heard of stays
  * typeable. See checkAgentPairing.
- *
- * The Mac app draws no mark for these providers yet. It reads its marks
- * as PNGs rendered by scripts/render-provider-logos.mjs, which needs a
- * mac to run, and logoIdFor() in apps/mac/src/wire.ts answers zero for
- * any provider whose renditions are not registered yet. Zero is drawn as
- * nothing, so the agent still lists and runs; only the logo is missing.
  */
 export const MANUAL_CATALOG: readonly CatalogProvider[] = [
   {

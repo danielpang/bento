@@ -39,8 +39,8 @@ if (options.version) {
   process.exit(0);
 }
 
-// Headless commands exist so another application can supervise the
-// stack: the desktop app spawns these and reads their status lines.
+// Headless commands run without the terminal UI, for scripts and
+// machines nobody watches a board on.
 if (options.command === "update") {
   try {
     const { runUpdate } = await import("./update.js");

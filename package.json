@@ -25,7 +25,6 @@
     "db:migrate": "pnpm --filter @bento/db db:migrate"
   },
   "devDependencies": {
-    "@native-sdk/cli": "^0.6.1",
     "turbo": "^2.5.0",
     "typescript": "^5.7.3"
   }

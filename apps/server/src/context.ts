@@ -13,7 +13,6 @@ import {
 import type PgBoss from "pg-boss";
 import type pg from "pg";
 import type { Analytics } from "./analytics.js";
-import type { FeatureFlags } from "./feature-flags.js";
 import type { ArtifactStore } from "./artifact-store.js";
 import type { Auth } from "./auth.js";
 import type { SecretBox } from "./secrets.js";
@@ -23,11 +22,25 @@ import type { DiskSpaceMonitor } from "./disk-space.js";
 
 export const LOCAL_USER_ID = "local-user";
 
+/**
+ * What an interrupt did: "sent" stopped the running turn (or will, as
+ * soon as the turn the agent is starting announces itself), "stopped"
+ * ended the run instead because the turn could not be named, "waiting"
+ * found no turn to stop, and "closed" found no session to stop it in.
+ */
+export type InterruptOutcome = "sent" | "stopped" | "waiting" | "closed";
+
 export interface LiveInput {
   /** How the tool treats a mid-task message; shown to the user. */
   delivery: "steer" | "queue";
   /** False when the session just closed; callers fall back to queueing. */
   deliver(text: string): Promise<boolean>;
+  /**
+   * Stops the turn in progress and keeps the session open for the next
+   * message, and says what happened (see InterruptOutcome). Absent where
+   * a run cannot be interrupted at all.
+   */
+  interrupt?(): InterruptOutcome;
   /**
    * Whether the process is between turns, held open for the next
    * message. The swarm coordinator delivers a folded wake only then,
@@ -168,12 +181,6 @@ export interface AppContext {
   entitlements?: Entitlements;
   /** PostHog, when a key is configured; absent means nothing is sent. */
   analytics?: Analytics;
-  /**
-   * Permanent feature flags (the beta-testers allowlist). Always
-   * constructed: local mode is on, multi mode without a key is off.
-   * Absent only in tests that never touch flags.
-   */
-  featureFlags?: FeatureFlags;
   /** Encrypts organization secrets at rest. */
   secretBox: SecretBox;
   /**

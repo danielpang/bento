@@ -1,5 +1,7 @@
-import { providerForProfile, type AgentEvent, type RunOutcome } from "@bento/core";
+import { providerForProfile, type AgentDelta, type AgentEvent, type RunOutcome } from "@bento/core";
 import { lastResultEvent, type AgentAdapter, type BuildCommandInput, type McpRemoteServer } from "./adapter.js";
+import { codexAppServerProtocol, parseAppServerDelta, parseAppServerEvent } from "./codex-app-server.js";
+import { readRpcLine } from "./live-wire.js";
 
 interface CodexLine {
   type?: string;
@@ -7,6 +9,9 @@ interface CodexLine {
   item?: { type?: string; text?: string; command?: string; status?: string };
   usage?: { input_tokens?: number; output_tokens?: number };
   error?: { message?: string };
+  /** Set on app-server notifications, which a live session reads. */
+  method?: string;
+  params?: unknown;
 }
 
 /** OpenRouter's OpenAI-compatible Responses endpoint. */
@@ -107,7 +112,7 @@ export const codexAdapter: AgentAdapter = {
       "--cd",
       input.cwd,
       "-m",
-      input.customProvider?.modelId ?? (vercelSelected(input.model) ? input.model.slice("vercel/".length) : input.model),
+      codexModelId(input),
     );
     if (input.customProvider) {
       cmd.push(...customProviderConfigOverrides(input.customProvider));
@@ -131,6 +136,64 @@ export const codexAdapter: AgentAdapter = {
     return cmd;
   },
 
+  /**
+   * `codex app-server`: a mid-task message steers the running turn (see
+   * codex-app-server.ts for what was verified and how). A run that
+   * cannot hold one (see appliesTo) keeps `codex exec`.
+   */
+  live: {
+    delivery: "steer",
+    liveSinceRecord: true,
+    interrupts: true,
+    /**
+     * Only when every profile argument is a config override. The
+     * profile's extra args were written for `codex exec`, and an exec
+     * flag (`--search`, `--oss`) passed to app-server stops it at argv
+     * parsing; such a profile keeps the one-shot command.
+     */
+    appliesTo: (input) => configOnlyArgs(input.extraArgs ?? []),
+    buildCommand(input: BuildCommandInput): string[] {
+      const cmd = ["codex", "app-server", "-c", `model=${tomlString(codexModelId(input))}`];
+      if (input.customProvider) {
+        cmd.push(...customProviderConfigOverrides(input.customProvider));
+      } else if (vercelSelected(input.model)) {
+        cmd.push(...vercelConfigOverrides());
+      } else if (openRouterSelected(input.model)) {
+        cmd.push(...openRouterConfigOverrides());
+      } else if (input.credentials?.OPENAI_API_KEY) {
+        /**
+         * The app-server's built-in OpenAI provider reads neither
+         * CODEX_API_KEY nor OPENAI_API_KEY (verified on 0.163.0: no
+         * Authorization header with either set), and logging in over
+         * the protocol writes the key into ~/.codex/auth.json. So a
+         * saved key gets a provider of its own that reads CODEX_API_KEY,
+         * which env() already sets: the key stays in the environment,
+         * where `codex exec` keeps it, and never reaches a file.
+         * Without a saved key (a shared login in local mode) the
+         * built-in provider and its auth.json are left as they are.
+         */
+        cmd.push(...openAiKeyConfigOverrides(input.credentials.OPENAI_BASE_URL));
+      } else if (input.credentials?.OPENAI_BASE_URL) {
+        cmd.push("-c", `openai_base_url=${tomlString(input.credentials.OPENAI_BASE_URL)}`);
+      }
+      /**
+       * Where a person can answer, request_user_input works outside Plan
+       * mode too. The feature is Codex's "under development" one, so it
+       * is on only for those runs.
+       */
+      if (input.askUser) cmd.push("--enable", "default_mode_request_user_input");
+      if (input.extraArgs?.length) cmd.push(...input.extraArgs);
+      return cmd;
+    },
+    connect: (input, how) => codexAppServerProtocol(input, how, { model: codexModelId(input) }),
+  },
+
+  parseDelta(line: string): Pick<AgentDelta, "channel" | "text"> | null {
+    if (!line.includes('"method"')) return null;
+    const message = readRpcLine(line);
+    return message?.kind === "notification" ? parseAppServerDelta(message.method, message.params) : null;
+  },
+
   parseEvent(line: string): AgentEvent | null {
     const trimmed = line.trim();
     if (!trimmed.startsWith("{")) return null;
@@ -140,6 +203,9 @@ export const codexAdapter: AgentAdapter = {
     } catch {
       return null;
     }
+    // A live session's notification (app-server); `codex exec --json`
+    // lines carry a `type` instead.
+    if (typeof parsed.method === "string") return parseAppServerEvent(parsed.method, parsed.params);
 
     switch (parsed.type) {
       case "thread.started": {
@@ -234,6 +300,40 @@ function sumTokens(counts: (number | undefined)[]): number | undefined {
  */
 function openRouterSelected(model: string): boolean {
   return providerForProfile("codex", model)?.id === "openrouter";
+}
+
+/** The model id Codex is given, whichever route the profile selected. */
+function codexModelId(input: BuildCommandInput): string {
+  return input.customProvider?.modelId ?? (vercelSelected(input.model) ? input.model.slice("vercel/".length) : input.model);
+}
+
+/**
+ * Whether a profile's extra args are all config overrides, which
+ * `codex app-server` takes exactly as `codex exec` does.
+ */
+function configOnlyArgs(args: string[]): boolean {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (/^(--config|--enable|--disable)=/.test(arg)) continue;
+    if (arg === "-c" || arg === "--config" || arg === "--enable" || arg === "--disable") {
+      if (i + 1 >= args.length) return false;
+      i++;
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
+/** OpenAI through a provider that reads the key from CODEX_API_KEY; see the live command. */
+function openAiKeyConfigOverrides(baseUrl: string | undefined): string[] {
+  return [
+    "-c", 'model_provider="bento-openai"',
+    "-c", 'model_providers.bento-openai.name="OpenAI"',
+    "-c", `model_providers.bento-openai.base_url=${tomlString(baseUrl || "https://api.openai.com/v1")}`,
+    "-c", 'model_providers.bento-openai.env_key="CODEX_API_KEY"',
+    "-c", 'model_providers.bento-openai.wire_api="responses"',
+  ];
 }
 
 function vercelSelected(model: string): boolean {

@@ -19,6 +19,12 @@ export interface BuildCommandInput {
   credentials?: Readonly<Record<string, string>>;
   /** A Bento-owned provider selected for this run. The API key stays in env. */
   customProvider?: CustomProviderSelection;
+  /**
+   * A person can answer the agent's questions on this run, so a tool
+   * that can ask (Claude Code's AskUserQuestion) is let to. Off for
+   * every run nobody can answer, where the tool stays disabled.
+   */
+  askUser?: boolean;
 }
 
 export interface CustomProviderSelection {
@@ -44,6 +50,17 @@ export interface CustomProviderSelection {
  * current tool call); "queue" waits for the current turn to finish
  * (Claude Code processes stdin messages sequentially). Tools without
  * this capability fall back to queue-and-resume between runs.
+ *
+ * A tool speaks one of two shapes, and declares exactly one of
+ * `encodeMessage` and `connect`. A tool that reads one JSON line per
+ * user message and needs nothing back declares `encodeMessage`, the
+ * whole protocol. Codex (`codex app-server`) and opencode (`opencode
+ * acp`) are JSON-RPC servers on stdio: a message names a thread or
+ * session id the process handed out earlier, and the process sends
+ * requests of its own that must be answered. Claude Code and pi send
+ * lines as messages too, but ask questions that wait for an answer
+ * (Claude Code's control requests, pi's extension dialogs). Those need
+ * state or replies, which is what `connect` returns.
  */
 export interface LiveSession {
   delivery: "steer" | "queue";
@@ -53,10 +70,119 @@ export interface LiveSession {
    * one-shot behaviors (SLOW, FAIL) stay available to tests.
    */
   appliesTo?(input: BuildCommandInput): boolean;
+  /**
+   * Live mode on this tool arrived with `agent_runs.live_session`, the
+   * record a reattach reads. A run whose row has no record (one from
+   * before that column) ran the one-shot command, so a reattach to it
+   * must not go live.
+   */
+  liveSinceRecord?: boolean;
+  /**
+   * The tool can stop the turn in progress and keep the session open
+   * (LiveProtocol.interrupt), so a person can redirect it without
+   * ending the run.
+   */
+  interrupts?: boolean;
   /** argv for a session that reads user messages on stdin. */
   buildCommand(input: BuildCommandInput): string[];
   /** One stdin line delivering the opening prompt or a follow-up. */
-  encodeMessage(text: string, kind: "initial" | "followUp"): string;
+  encodeMessage?(text: string, kind: "initial" | "followUp"): string;
+  /**
+   * A conversation with one process, for tools whose live mode is a
+   * protocol rather than a line per message. `attach` is true when the
+   * process is already running (a server reattaching after a restart),
+   * so the protocol must not repeat its handshake and takes the
+   * session id from `input.resumeSessionId`.
+   */
+  connect?(input: BuildCommandInput, how: { attach: boolean }): LiveProtocol;
+}
+
+/**
+ * One live process's side of a stdio protocol.
+ *
+ * Every method returns the stdin lines to write, so the protocol never
+ * holds the channel itself: the executor writes them, and a channel
+ * that has closed refuses them the same way it refuses any other line.
+ */
+export interface LiveProtocol {
+  /**
+   * The first lines: the handshake, then the opening prompt when there
+   * is one. The prompt may be held until the handshake answers (a
+   * thread id the first turn has to name), and goes out from `read`.
+   */
+  open(prompt: string | null): string[];
+  /**
+   * A message from a person. Lines to write now; a message that cannot
+   * go out yet is held and released by `read`, and counts in `held`.
+   * Null when this process will never take it (its handshake failed),
+   * so the caller puts the message back for the next run.
+   */
+  send(text: string): string[] | null;
+  /**
+   * Every stdout line, before it is parsed. `write` answers the process
+   * (a response to its request, a held message now that it can go).
+   * `events`, when present, replace what parseEvent would make of the
+   * line, for the facts only a protocol with memory can state: a turn's
+   * end with the usage reported lines earlier, or a message assembled
+   * from its fragments.
+   */
+  read(line: string): {
+    write: string[];
+    events?: AgentEvent[];
+    /** Questions the process just asked; see LiveAsk. */
+    asks?: LiveAsk[];
+    /** Ids of questions the process withdrew (its turn was interrupted, or it gave up waiting). */
+    withdrawn?: string[];
+  };
+  /** Messages accepted by `send` or `open` and not written yet. */
+  readonly held: number;
+  /**
+   * Whether a turn is still due after the result just read, for a tool
+   * that queues a message sent mid turn into a turn of its own: Claude
+   * Code ends the running turn, then takes everything sent during it as
+   * one more. The live conversation neither holds nor closes the
+   * process while it is true, because another result is coming. Absent
+   * means a result ends the agent's work (a tool that steers a running
+   * turn, or one that answers every queued prompt with one result).
+   */
+  readonly working?: boolean;
+  /**
+   * Stops the turn in progress without ending the process, for a tool
+   * that can. The turn then ends with a result marked `interrupted`,
+   * and the session waits for the next message.
+   *
+   * The lines to write now. Empty when a turn was asked for and has not
+   * announced itself yet: the protocol sends the interrupt from `read`
+   * as it does. Null when there is no turn this process can name (none
+   * running, or one that started before this process attached).
+   */
+  interrupt?(): string[] | null;
+  /** The lines that answer a question this process asked (`read` reported it in `asks`). */
+  answer?(ask: LiveAsk, answers: Record<string, string>): string[];
+  /** The lines that tell the process nobody will answer, with the reason it is given instead. */
+  decline?(ask: LiveAsk, reason: string): string[];
+}
+
+/** One multiple choice question an agent put to a person. */
+export interface AskQuestion {
+  question: string;
+  /** A short label for the question, a few words at most. */
+  header?: string;
+  multiSelect: boolean;
+  options: { label: string; description?: string }[];
+}
+
+/**
+ * Questions the process is blocked on until somebody answers. `id` is
+ * the process's own request id, which the answer has to echo; `input`
+ * is the tool input as the process sent it, which the answer carries
+ * back. Both are stored, so an answer can be written by a process that
+ * reattached after the question was asked.
+ */
+export interface LiveAsk {
+  id: string;
+  questions: AskQuestion[];
+  input: unknown;
 }
 
 /**

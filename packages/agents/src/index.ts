@@ -13,6 +13,7 @@ import { poolAdapter } from "./pool.js";
 import { opencodeAdapter } from "./opencode.js";
 
 export * from "./adapter.js";
+export { openLiveWire, type LiveWire } from "./live-wire.js";
 export { antigravityAdapter } from "./antigravity.js";
 export { claudeCodeAdapter } from "./claude-code.js";
 export { codexAdapter } from "./codex.js";

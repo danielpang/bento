@@ -6,6 +6,7 @@ import {
   type BuildCommandInput,
   type RecoveredMessage,
 } from "./adapter.js";
+import { claudeCodeLiveProtocol } from "./claude-code-live.js";
 
 interface ClaudeContentBlock {
   type: string;
@@ -118,14 +119,18 @@ export const claudeCodeAdapter: AgentAdapter = {
    */
   live: {
     delivery: "queue",
+    interrupts: true,
     buildCommand(input: BuildCommandInput): string[] {
       // No positional prompt: with stream-json input, the opening
       // prompt arrives as the first stdin message like any other.
-      return ["claude", "-p", "--input-format", "stream-json", ...sharedFlags(input)];
+      const argv = ["claude", "-p", "--input-format", "stream-json", ...sharedFlags(input)];
+      // Questions come back over stdio as can_use_tool requests; without
+      // this the CLI disables AskUserQuestion for the session. Only where
+      // a person can answer (see claude-code-live.ts).
+      if (input.askUser) argv.push("--permission-prompt-tool", "stdio");
+      return argv;
     },
-    encodeMessage(text: string): string {
-      return JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text }] } });
-    },
+    connect: () => claudeCodeLiveProtocol(),
   },
 
   /**

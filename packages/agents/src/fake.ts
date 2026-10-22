@@ -89,13 +89,18 @@ export const fakeAdapter: AgentAdapter = {
    * The live fake: one assistant reply and one result per stdin line,
    * exit on end-of-input. Enough to prove the whole live path (driver
    * stdin, executor delivery, run staying open across turns) in tests
-   * without spending a token.
+   * without spending a token. A prompt with INTERRUPTIBLE runs a Node
+   * version whose turn (20 seconds with SLOW in its message) an
+   * interrupt line cuts short with an interrupted result, the way the
+   * real CLIs end a turn they were told to stop.
    */
   live: {
     delivery: "queue",
+    interrupts: true,
     appliesTo: (input: BuildCommandInput) => input.prompt.includes("LIVE"),
     buildCommand(input: BuildCommandInput): string[] {
       const model = input.model.replace(/[^a-zA-Z0-9._-]/g, "");
+      if (input.prompt.includes("INTERRUPTIBLE")) return ["node", "-e", interruptibleFake(model)];
       const script = [
         `echo '{"type":"system","subtype":"init","session_id":"fake-live-1","model":"${model}"}'`,
         "while IFS= read -r line; do",
@@ -108,9 +113,28 @@ export const fakeAdapter: AgentAdapter = {
       ].join("\n");
       return ["sh", "-c", script];
     },
-    encodeMessage(text: string): string {
-      // One line per message; the fake only counts lines.
-      return text.replaceAll(/[\r\n]+/g, " ");
+    connect: () => {
+      // The fake answers every line with a turn of its own.
+      let turns = 0;
+      return {
+        held: 0,
+        get working() {
+          return turns > 0;
+        },
+        // One line per message; the fake only counts lines.
+        open: (prompt) => (prompt === null ? [] : (turns++, [fakeLine(prompt)])),
+        send: (text) => (turns++, [fakeLine(text)]),
+        interrupt: () => [FAKE_INTERRUPT],
+        read(line) {
+          if (line.includes('"type":"result"')) turns = Math.max(0, turns - 1);
+          if (!line.includes('"subtype":"interrupted"')) return { write: [] };
+          const cost = (JSON.parse(line) as { total_cost_usd?: number }).total_cost_usd;
+          return {
+            write: [],
+            events: [{ type: "result", ok: false, interrupted: true, error: "Interrupted.", sessionId: "fake-live-1", ...(cost !== undefined ? { costUsd: cost } : {}) }],
+          };
+        },
+      };
     },
   },
 
@@ -171,4 +195,31 @@ function claudeStyleParse(line: string): AgentEvent | null {
     return ev;
   }
   return null;
+}
+
+/** The line the fake reads as an interrupt. */
+const FAKE_INTERRUPT = "BENTO_FAKE_INTERRUPT";
+
+function fakeLine(text: string): string {
+  return text.replaceAll(/[\r\n]+/g, " ");
+}
+
+/** The interruptible live fake: a turn is a timer, and an interrupt line clears it. */
+function interruptibleFake(model: string): string {
+  return `
+const out = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
+const result = (extra) => out({ type: "result", is_error: false, session_id: "fake-live-1", total_cost_usd: 0, num_turns: 1, subtype: "success", ...extra });
+let turn = null;
+out({ type: "system", subtype: "init", session_id: "fake-live-1", model: ${JSON.stringify(model)} });
+require("readline").createInterface({ input: process.stdin })
+  .on("line", (line) => {
+    if (line === ${JSON.stringify(FAKE_INTERRUPT)}) {
+      if (turn) { clearTimeout(turn); turn = null; result({ subtype: "interrupted", is_error: true, total_cost_usd: 0.02 }); }
+      return;
+    }
+    out({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Heard." }] } });
+    turn = setTimeout(() => { turn = null; result({}); }, line.includes("SLOW") ? 20000 : 1000);
+  })
+  .on("close", () => process.exit(0));
+`;
 }

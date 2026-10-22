@@ -18,7 +18,6 @@ import pg from "pg";
 import { createApp } from "../app.js";
 import { createDrivers, ensureLocalUser, type AppContext } from "../context.js";
 import { loadEnv } from "../env.js";
-import { FeatureFlags } from "../feature-flags.js";
 import {
   autoDrivers,
   candidateDrivers,
@@ -300,12 +299,10 @@ test("a pinned provider is honored for everyone, and a hibernated modal row stil
       db,
       drivers,
       env: loadEnv({ BENTO_MODE: "multi", DATABASE_URL: testUrl, BENTO_SANDBOX_DRIVER: "docker" }),
-      featureFlags: new FeatureFlags(null, false),
     } as AppContext;
 
     const featureId = randomUUID();
-    // A row an operator pinned by hand is honored whether or not the
-    // run is on the beta flag: this context has it off.
+    // A row an operator pinned by hand is honored.
     const [project] = await db
       .insert(projects)
       .values({ ownerId, name: "Pinned to Modal", sandboxProvider: "modal" })
@@ -379,13 +376,11 @@ test("a swarm on a modal project uses Modal, and a live Sprite swarm stays on Sp
       MODAL_TOKEN_ID: "id",
       MODAL_TOKEN_SECRET: "secret",
     });
-    const betaOn = {
+    const ctx = {
       db,
       drivers,
       env: loadEnv({ BENTO_MODE: "multi", DATABASE_URL: testUrl, BENTO_SANDBOX_DRIVER: "docker" }),
-      featureFlags: new FeatureFlags(null, true),
     } as AppContext;
-    const betaOff = { ...betaOn, featureFlags: new FeatureFlags(null, false) } as AppContext;
 
     const [project] = await db
       .insert(projects)
@@ -402,15 +397,10 @@ test("a swarm on a modal project uses Modal, and a live Sprite swarm stays on Sp
       })
       .returning();
 
-    const fresh = (await driversForSwarmProvision(db, betaOn, swarm!, null, ownerId)).driver;
+    const fresh = (await driversForSwarmProvision(db, ctx, swarm!, null, ownerId)).driver;
     assert.equal(fresh, drivers.get("modal"));
     assert.notEqual(fresh, drivers.default);
     assert.equal(fresh.provider, "modal");
-
-    // The pin is not a beta feature: a context with the flag off reads it the same way.
-    const alsoModal = (await driversForSwarmProvision(db, betaOff, swarm!, null, ownerId)).driver;
-    assert.equal(alsoModal, drivers.get("modal"));
-    assert.equal(alsoModal.provider, "modal");
 
     const [spriteSwarm] = await db
       .insert(swarms)
@@ -435,7 +425,7 @@ test("a swarm on a modal project uses Modal, and a live Sprite swarm stays on Sp
       .returning();
     const keptChoice = await driversForSwarmProvision(
       db,
-      betaOn,
+      ctx,
       { ...spriteSwarm!, sandboxId: spriteRow!.id },
       null,
       ownerId,
@@ -480,7 +470,6 @@ test("a worker whose swarm is on a sprite falls back to Modal on auto, and the s
       db,
       drivers,
       env: loadEnv({ BENTO_MODE: "multi", DATABASE_URL: testUrl, BENTO_SANDBOX_DRIVER: "sprite" }),
-      featureFlags: new FeatureFlags(null, true),
     } as AppContext;
 
     const seed = async (sandboxProvider: string | null, slug: string) => {

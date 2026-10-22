@@ -16,10 +16,12 @@ import {
   mcpCredentials,
   mcpServers,
   member,
+  organization,
   organizationPolicies,
   pipelines,
   projects,
   runArtifacts,
+  runQuestions,
   runMigrations,
   sandboxes,
   swarmPlanSources,
@@ -45,7 +47,6 @@ import { recordingAnalytics } from "./test-analytics.js";
 import { createDrivers, type AppContext } from "./context.js";
 import { EventBus } from "./events.js";
 import { loadEnv } from "./env.js";
-import { createFeatureFlags, FeatureFlags } from "./feature-flags.js";
 import { resolveAgentEnv } from "./orchestrator/agent-env.js";
 import { customProviderRunEnv } from "./orchestrator/custom-provider.js";
 import { executeRun } from "./orchestrator/run-executor.js";
@@ -101,7 +102,6 @@ before(async () => {
     liveInputs: new Map(),
     draining: false,
     userId: "",
-    featureFlags: createFeatureFlags(env),
   };
   const auth = createAuth(env, db);
   assert.ok(auth, "multi mode must construct an auth instance");
@@ -113,6 +113,22 @@ after(async () => {
   await ctx.boss.stop({ close: true, timeout: 1000 });
   await ctx.pool.end();
 });
+
+/**
+ * Turns beta features on or off for these accounts, the way their own
+ * switch would. Turning it on also allows beta in every team they are
+ * in, as an owner would, since the switch counts only there.
+ */
+async function setBetaFeatures(emails: string[], enabled: boolean) {
+  for (const email of emails) {
+    const [row] = await ctx.db.update(user).set({ betaFeatures: enabled }).where(eq(user.email, email)).returning({ id: user.id });
+    if (!enabled || !row) continue;
+    const teams = await ctx.db.select({ id: member.organizationId }).from(member).where(eq(member.userId, row.id));
+    for (const team of teams) {
+      await ctx.db.update(organization).set({ betaFeaturesAllowed: true }).where(eq(organization.id, team.id));
+    }
+  }
+}
 
 function jsonPost(path: string, body: unknown, token?: string) {
   return app.request(path, {
@@ -130,7 +146,7 @@ test("the API refuses unauthenticated requests in multi mode", async () => {
   assert.equal(res.status, 401);
 });
 
-test("feature flags refuse an anonymous caller and follow the beta testers allowlist", async () => {
+test("beta features need the team to allow them and the person to turn them on", async () => {
   const anonymous = await app.request("/api/flags");
   assert.equal(anonymous.status, 401);
 
@@ -141,28 +157,62 @@ test("feature flags refuse an anonymous caller and follow the beta testers allow
   });
   assert.equal(signUp.status, 200);
   const token = signUp.headers.get("set-auth-token")!;
+  const auth = { authorization: `Bearer ${token}` };
+  const flags = async () => {
+    const res = await app.request("/api/flags", { headers: auth });
+    assert.equal(res.status, 200);
+    return res.json();
+  };
+  const setOwn = (enabled: boolean) =>
+    app.request("/api/account/beta", { method: "PATCH", headers: { ...auth, "content-type": "application/json" }, body: JSON.stringify({ enabled }) });
+  const swarms = () => app.request("/api/swarms", { headers: auth });
+  const setTeam = (allowed: boolean, headers: Record<string, string>) =>
+    app.request("/api/team/beta", { method: "PATCH", headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify({ allowed }) });
 
-  const off = await app.request("/api/flags", { headers: { authorization: `Bearer ${token}` } });
-  assert.equal(off.status, 200);
-  assert.deepEqual(await off.json(), { betaTesters: false });
+  assert.deepEqual(await flags(), { betaTesters: false, betaFeatures: { enabled: false, allowed: false } });
 
-  const previous = ctx.featureFlags;
-  ctx.featureFlags = new FeatureFlags(
-    {
-      async evaluateFlags(_id, opts) {
-        return { isEnabled: () => opts?.personProperties?.email === "flags-user@bento.test" };
-      },
-      async shutdown() {},
-    },
-    false,
-  );
-  try {
-    const on = await app.request("/api/flags", { headers: { authorization: `Bearer ${token}` } });
-    assert.equal(on.status, 200);
-    assert.deepEqual(await on.json(), { betaTesters: true });
-  } finally {
-    ctx.featureFlags = previous;
-  }
+  // Their own switch alone, with no team open, turns nothing on.
+  assert.equal((await setOwn(true)).status, 200);
+  assert.deepEqual(await flags(), { betaTesters: false, betaFeatures: { enabled: true, allowed: false } });
+
+  // Nor in a team that has not allowed it.
+  const team = (await (await jsonPost("/api/auth/organization/create", { name: "Flags Team", slug: "flags-team" }, token)).json()) as { id: string };
+  await jsonPost("/api/auth/organization/set-active", { organizationId: team.id }, token);
+  assert.deepEqual(await (await app.request("/api/team/beta", { headers: auth })).json(), { allowed: false, canEdit: true });
+  assert.deepEqual(await flags(), { betaTesters: false, betaFeatures: { enabled: true, allowed: false } });
+
+  // A member who is not an owner or admin cannot allow it.
+  const memberSignUp = await jsonPost("/api/auth/sign-up/email", {
+    email: "flags-member@bento.test",
+    password: "correct-horse-battery",
+    name: "Flags Member",
+  });
+  const memberToken = memberSignUp.headers.get("set-auth-token")!;
+  const [memberUser] = await ctx.db.select({ id: user.id }).from(user).where(eq(user.email, "flags-member@bento.test"));
+  await ctx.db.insert(member).values({ id: crypto.randomUUID(), organizationId: team.id, userId: memberUser!.id, role: "member" });
+  await jsonPost("/api/auth/organization/set-active", { organizationId: team.id }, memberToken);
+  const memberAuth = { authorization: `Bearer ${memberToken}` };
+  assert.deepEqual(await (await app.request("/api/team/beta", { headers: memberAuth })).json(), { allowed: false, canEdit: false });
+  assert.equal((await setTeam(true, memberAuth)).status, 403);
+
+  // The owner allows it, and the switch now counts.
+  assert.equal((await swarms()).status, 404, "swarms stay hidden until both say yes");
+  assert.equal((await setTeam(true, auth)).status, 200);
+  assert.deepEqual(await flags(), { betaTesters: true, betaFeatures: { enabled: true, allowed: true } });
+  assert.equal((await swarms()).status, 200, "and then open what beta gates");
+
+  // Allowing it turned nothing on for the member, who has not chosen it.
+  const memberFlags = await (await app.request("/api/flags", { headers: memberAuth })).json();
+  assert.deepEqual(memberFlags, { betaTesters: false, betaFeatures: { enabled: false, allowed: true } });
+
+  // Either one off turns it off.
+  assert.equal((await setOwn(false)).status, 200);
+  assert.deepEqual(await flags(), { betaTesters: false, betaFeatures: { enabled: false, allowed: true } });
+  assert.equal((await setOwn(true)).status, 200);
+  assert.equal((await setTeam(false, auth)).status, 200);
+  assert.deepEqual(await flags(), { betaTesters: false, betaFeatures: { enabled: true, allowed: false } });
+  assert.equal((await swarms()).status, 404);
+  assert.equal((await app.request("/api/account/beta", { method: "PATCH" })).status, 401);
 });
 
 test("sign up returns a bearer token that authenticates API calls", async () => {
@@ -746,36 +796,28 @@ test("a team's swarm and its planner run carry the team, under RLS", async () =>
   ).json()) as { id: string; organizationId: string };
   assert.equal(project.organizationId, org.id);
 
-  const flagsBefore = ctx.featureFlags;
-  ctx.featureFlags = new FeatureFlags(
-    { async evaluateFlags() { return { isEnabled: () => true }; }, async shutdown() {} },
-    false,
+  await setBetaFeatures(["swarm-owner@bento.test"], true);
+  const created = await jsonPost("/api/swarms", { projectId: project.id, title: "Team goal", goal: "ship it" }, token);
+  assert.equal(created.status, 201, await created.clone().text());
+  const swarm = (await created.json()) as { id: string; plannerRunId: string; organizationId: string | null };
+  assert.equal(swarm.organizationId, org.id, "the insert trigger derived the team from the project");
+  assert.ok(swarm.plannerRunId, "and a planner was started");
+
+  const [run] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, swarm.plannerRunId));
+  assert.equal(run?.organizationId, org.id, "the run carries the same team");
+  assert.equal(run?.type, "swarm");
+  assert.equal(run?.role, "planner");
+  assert.equal(run?.featureId, null, "and no card, which is what its shape constraint says");
+
+  const [profile] = await ctx.db
+    .select({ organizationId: agentProfiles.organizationId })
+    .from(agentProfiles)
+    .where(eq(agentProfiles.id, run!.agentProfileId));
+  assert.equal(
+    profile?.organizationId,
+    org.id,
+    "the seeded planner agent belongs to the team too, which the run tenant trigger requires",
   );
-  try {
-    const created = await jsonPost("/api/swarms", { projectId: project.id, title: "Team goal", goal: "ship it" }, token);
-    assert.equal(created.status, 201, await created.clone().text());
-    const swarm = (await created.json()) as { id: string; plannerRunId: string; organizationId: string | null };
-    assert.equal(swarm.organizationId, org.id, "the insert trigger derived the team from the project");
-    assert.ok(swarm.plannerRunId, "and a planner was started");
-
-    const [run] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, swarm.plannerRunId));
-    assert.equal(run?.organizationId, org.id, "the run carries the same team");
-    assert.equal(run?.type, "swarm");
-    assert.equal(run?.role, "planner");
-    assert.equal(run?.featureId, null, "and no card, which is what its shape constraint says");
-
-    const [profile] = await ctx.db
-      .select({ organizationId: agentProfiles.organizationId })
-      .from(agentProfiles)
-      .where(eq(agentProfiles.id, run!.agentProfileId));
-    assert.equal(
-      profile?.organizationId,
-      org.id,
-      "the seeded planner agent belongs to the team too, which the run tenant trigger requires",
-    );
-  } finally {
-    ctx.featureFlags = flagsBefore;
-  }
 });
 
 /**
@@ -802,6 +844,15 @@ test("every entity route refuses a foreign tenant", async () => {
     app.request(path, { ...init, headers: { "content-type": "application/json", authorization: `Bearer ${ownerToken}`, ...(init.headers ?? {}) } });
   const asIntruder = (path: string, init: RequestInit = {}) =>
     app.request(path, { ...init, headers: { "content-type": "application/json", authorization: `Bearer ${intruderToken}`, ...(init.headers ?? {}) } });
+  // Each in a team of their own, because beta (which the swarm routes
+  // below need) counts only in a team, the one the work belongs to.
+  const teams: string[] = [];
+  for (const [token, slug] of [[ownerToken, "matrix-owner-team"], [intruderToken, "matrix-intruder-team"]] as const) {
+    const team = (await (await jsonPost("/api/auth/organization/create", { name: slug, slug }, token)).json()) as { id: string };
+    await jsonPost("/api/auth/organization/set-active", { organizationId: team.id }, token);
+    teams.push(team.id);
+  }
+  const ownerTeamId = teams[0]!;
 
   // The owner sets up a project, feature, stage assignment, and a run.
   const project = (await (
@@ -854,6 +905,18 @@ test("every entity route refuses a foreign tenant", async () => {
     })
     .returning({ id: runArtifacts.id });
   assert.ok(artifact?.id, "the owner's artifact must exist for the artifact routes to be probed");
+  // Inserted directly because only a live agent asks questions; the
+  // answer route needs a real question id to aim at.
+  const [question] = await ctx.db
+    .insert(runQuestions)
+    .values({
+      runId: run.id,
+      requestId: "matrix-request",
+      questions: [{ question: "Which?", multiSelect: false, options: [{ label: "A" }, { label: "B" }] }],
+      input: {},
+    })
+    .returning({ id: runQuestions.id });
+  assert.ok(question?.id, "the owner's question must exist for the answer route to be probed");
 
   // Inserted directly: the matrix users have no organization, and the
   // MCP routes refuse org-less callers in multi mode outright. The row
@@ -875,17 +938,13 @@ test("every entity route refuses a foreign tenant", async () => {
   assert.ok(mcpServer!.id, "the owner's MCP server must exist for the MCP routes to be probed");
 
   /**
-   * Swarms sit behind the beta testers flag, which answers 404 for
-   * everybody without a PostHog key. Turned on for both users here, so
-   * what the matrix measures is the tenant check rather than the flag:
-   * a route that refuses because the feature is hidden proves nothing
-   * about whether it would refuse a foreign tenant once it is not.
+   * Swarms are beta, which answers 404 to anybody with beta features
+   * off. Turned on for both users here, so what the matrix measures is
+   * the tenant check rather than the switch: a route that refuses
+   * because the feature is hidden proves nothing about whether it would
+   * refuse a foreign tenant once it is not.
    */
-  const flagsBefore = ctx.featureFlags;
-  ctx.featureFlags = new FeatureFlags(
-    { async evaluateFlags() { return { isEnabled: () => true }; }, async shutdown() {} },
-    false,
-  );
+  await setBetaFeatures(["matrix-owner@bento.test", "matrix-intruder@bento.test"], true);
   const swarm = (await (
     await asOwner("/api/swarms", { method: "POST", body: JSON.stringify({ projectId: project.id, title: "Mine" }) })
   ).json()) as { id: string; plannerRunId: string };
@@ -969,14 +1028,10 @@ test("every entity route refuses a foreign tenant", async () => {
       { body: "version: 1\npipeline:\n  stages:\n    - name: Mine\n      slug: mine\n" },
     ],
     ["GET", `/api/projects/${project.id}/sessions`],
-    ["GET", `/api/projects/${project.id}/sessions/plain`],
     ["GET", `/api/projects/${project.id}/usage`],
-    ["GET", `/api/projects/${project.id}/usage/plain`],
     ["GET", `/api/projects/${project.id}/completions`],
     ["GET", `/api/projects/${project.id}/board/plain`],
-    ["GET", `/api/projects/${project.id}/pipeline/plain`],
     ["GET", `/api/projects/${project.id}/repositories`],
-    ["GET", `/api/projects/${project.id}/repositories/plain`],
     ["POST", `/api/projects/${project.id}/repositories`, { body: JSON.stringify({ localPath: "/tmp/injected" }) }],
     [
       "PATCH",
@@ -994,9 +1049,7 @@ test("every entity route refuses a foreign tenant", async () => {
     ["POST", `/api/features/${feature.id}/move`, { body: JSON.stringify({ stageId: null }) }],
     ["POST", `/api/features/${feature.id}/finish`],
     ["GET", `/api/features/${feature.id}/gate`],
-    ["GET", `/api/features/${feature.id}/gate/plain`],
     ["GET", `/api/features/${feature.id}/changes`],
-    ["GET", `/api/features/${feature.id}/changes/plain`],
     ["GET", `/api/features/${feature.id}/artifacts`],
     ["GET", `/api/features/${feature.id}/related`],
     ["GET", `/api/artifacts/${artifact!.id}`],
@@ -1020,13 +1073,10 @@ test("every entity route refuses a foreign tenant", async () => {
     ["GET", `/api/features/${feature.id}/merge-status`],
     ["GET", `/api/features/${feature.id}/check-status`],
     ["GET", `/api/features/${feature.id}/pull-request-status`],
-    ["GET", `/api/features/${feature.id}/merge-status/plain`],
     ["POST", `/api/features/${feature.id}/resolve-conflicts`],
     ["POST", `/api/features/${feature.id}/fix-ci-tests`],
-    ["POST", `/api/features/${feature.id}/quick-run?cli=fake`],
     ["GET", `/api/features/${feature.id}/transitions`],
     ["GET", `/api/features/${feature.id}/history`],
-    ["GET", `/api/features/${feature.id}/history/plain`],
     ["GET", `/api/stages/${stageId}`],
     ["PATCH", `/api/stages/${stageId}`, { body: JSON.stringify({ gateCriteria: [{ type: "command", cmd: "id", timeoutSec: 5 }] }) }],
     ["PATCH", `/api/profiles/${profile.id}`, { body: JSON.stringify({ name: "stolen" }) }],
@@ -1036,6 +1086,13 @@ test("every entity route refuses a foreign tenant", async () => {
     ["POST", `/api/runs/${run.id}/resume`, { body: JSON.stringify({ prompt: "hi" }) }],
     ["POST", `/api/runs/${run.id}/rollback`],
     ["POST", `/api/runs/${run.id}/cancel`],
+    ["POST", `/api/runs/${run.id}/interrupt`],
+    ["GET", `/api/runs/${run.id}/questions`],
+    [
+      "POST",
+      `/api/runs/${run.id}/questions/${question!.id}/answer`,
+      { body: JSON.stringify({ answers: [{ question: "Which?", selected: ["A"] }] }) },
+    ],
     ["GET", `/api/runs/${run.id}/transcript`],
     ["GET", `/api/runs/${swarm.plannerRunId}/transcript`],
     // The SSE stream: for a foreign tenant it must refuse before it
@@ -1161,6 +1218,13 @@ test("every entity route refuses a foreign tenant", async () => {
     ["DELETE", `/api/projects/${project.id}`],
   ];
 
+  // The intruder's session claims the owner's team, as a forged active
+  // organization would: the team routes must re-check membership rather
+  // than trust it, and no other route may take it as a way in.
+  await ctx.pool.query(
+    `update identity.session set active_organization_id = $1 where user_id = (select id from identity."user" where email = $2)`,
+    [ownerTeamId, "matrix-intruder@bento.test"],
+  );
   for (const [method, path, init] of attempts) {
     const res = await asIntruder(path, { method, ...(init ?? {}) });
     assert.ok(
@@ -1168,6 +1232,11 @@ test("every entity route refuses a foreign tenant", async () => {
       `${method} ${path} answered ${res.status} to a foreign tenant; it must refuse`,
     );
   }
+  // Back in their own team for the checks below, which act as themselves.
+  await ctx.pool.query(
+    `update identity.session set active_organization_id = $1 where user_id = (select id from identity."user" where email = $2)`,
+    [teams[1]!, "matrix-intruder@bento.test"],
+  );
 
   // The card is still on the owner's board. A refusal that answered
   // 404 and deleted the row anyway would pass the loop above and lose
@@ -1182,6 +1251,7 @@ test("every entity route refuses a foreign tenant", async () => {
   // budget to spend.
   const swarmAfter = await asOwner(`/api/swarms/${swarm.id}`);
   assert.equal(swarmAfter.status, 200, "the intruder must not have deleted the owner's swarm");
+
   const swarmBody = (await swarmAfter.json()) as { swarm: { title: string; maxWorkers: number; status: string } };
   assert.equal(swarmBody.swarm.title, "Mine", "nor renamed it");
   assert.equal(swarmBody.swarm.maxWorkers, 4, "nor raised how many agents it may run at once");
@@ -1199,7 +1269,23 @@ test("every entity route refuses a foreign tenant", async () => {
     .from(swarms)
     .where(eq(swarms.id, swarm.id));
   assert.equal(settingsAfter?.completionCommand, null, "the intruder must not have set a command on the owner's swarm");
-  ctx.featureFlags = flagsBefore;
+  await setBetaFeatures(["matrix-owner@bento.test", "matrix-intruder@bento.test"], false);
+
+  // The question routes refuse only by tenant: with beta features off
+  // again, the owner still reaches them, and the intruder's answer
+  // never landed.
+  const ownQuestions = await asOwner(`/api/runs/${run.id}/questions`);
+  assert.equal(ownQuestions.status, 200, "the run's own organization can read its questions, beta or not");
+  const [asked] = await ctx.db.select().from(runQuestions).where(eq(runQuestions.id, question!.id));
+  assert.equal(asked!.status, "pending", "the intruder's answer must not have been stored");
+
+  // Interrupt is a stage's: a judge or a rebase is ended by Stop, not
+  // paused. Refused for the owner too, on a judge that is live and running.
+  const [before] = await ctx.db.select({ status: agentRuns.status, role: agentRuns.role }).from(agentRuns).where(eq(agentRuns.id, run.id));
+  await ctx.db.update(agentRuns).set({ status: "running", liveSession: true, role: "judge" }).where(eq(agentRuns.id, run.id));
+  const judgeInterrupt = await asOwner(`/api/runs/${run.id}/interrupt`, { method: "POST" });
+  assert.equal(judgeInterrupt.status, 409, "a judge run is not interrupted");
+  await ctx.db.update(agentRuns).set({ status: before!.status, liveSession: null, role: before!.role }).where(eq(agentRuns.id, run.id));
 
   // The MCP server row survived, under its own name. Read through
   // ctx.db because the org-less owner cannot use the routes either.
@@ -1277,8 +1363,6 @@ test("every entity route refuses a foreign tenant", async () => {
 });
 
 test("custom providers keep definitions and keys inside their organization", async () => {
-  const previous = ctx.featureFlags;
-  ctx.featureFlags = new FeatureFlags(null, true);
   try {
     const first = await jsonPost("/api/auth/sign-up/email", { email: "provider-a@bento.test", password: "correct-horse-battery", name: "Provider A" });
     const second = await jsonPost("/api/auth/sign-up/email", { email: "provider-b@bento.test", password: "correct-horse-battery", name: "Provider B" });
@@ -1293,6 +1377,7 @@ test("custom providers keep definitions and keys inside their organization", asy
     const [memberUser] = await ctx.db.select({ id: user.id }).from(user).where(eq(user.email, "provider-member@bento.test"));
     await ctx.db.insert(member).values({ id: crypto.randomUUID(), organizationId: firstOrg.id, userId: memberUser!.id, role: "member" });
     await jsonPost("/api/auth/organization/set-active", { organizationId: firstOrg.id }, memberToken);
+    await setBetaFeatures(["provider-a@bento.test", "provider-b@bento.test", "provider-member@bento.test"], true);
     const asUser = (token: string, path: string, init: RequestInit = {}) => app.request(path, {
       ...init, headers: { authorization: `Bearer ${token}`, "content-type": "application/json", ...(init.headers ?? {}) },
     });
@@ -1447,7 +1532,9 @@ test("custom providers keep definitions and keys inside their organization", asy
     assert.equal(provisioned, false);
     assert.equal(finished?.status, "failed");
     assert.match(finished?.error ?? "", /custom provider is not available/);
-  } finally { ctx.featureFlags = previous; }
+  } finally {
+    await setBetaFeatures(["provider-a@bento.test", "provider-b@bento.test", "provider-member@bento.test"], false);
+  }
 });
 
 /**
@@ -1750,10 +1837,6 @@ test("history names the person who moved the card", async () => {
   assert.ok(moved, "advancing the card writes a manual history row");
   assert.equal(moved.actorName, "Ada Lovelace");
   assert.equal(moved.actorEmail, "history-actor@bento.test");
-
-  const plain = await (await asUser(`/api/features/${feature.id}/history/plain`)).text();
-  assert.match(plain, /by Ada Lovelace/);
-  assert.doesNotMatch(plain, /by a person/);
 });
 
 /**
@@ -1802,17 +1885,6 @@ test("agent credentials are per organization and write only", async () => {
     await app.request("/api/secrets", { headers: { authorization: `Bearer ${outsiderToken}` } })
   ).json()) as { secrets: unknown[] };
   assert.equal(theirs.secrets.length, 0, "secrets must not cross organizations");
-
-  // The line form the Mac app reads is a second route over the same
-  // rows, so it needs the same two assertions rather than inheriting
-  // them: it masks the value, and it does not cross organizations.
-  const mine = await (await app.request("/api/secrets/plain", { headers: { authorization: `Bearer ${token}` } })).text();
-  assert.match(mine, /^secret\|[^|]+\|ANTHROPIC_API_KEY\|••••••••1234$/m);
-  assert.doesNotMatch(mine, /sk-ant-secret/, "the line form must mask the value too");
-  const theirsPlain = await (
-    await app.request("/api/secrets/plain", { headers: { authorization: `Bearer ${outsiderToken}` } })
-  ).text();
-  assert.equal(theirsPlain, "", "the line form must not cross organizations either");
 });
 
 test("credential access follows current membership and mutation roles", async () => {
@@ -1904,10 +1976,6 @@ test("credential access follows current membership and mutation roles", async ()
     headers: { authorization: `Bearer ${teammateToken}` },
   });
   assert.deepEqual(await staleList.json(), { secrets: [], canManage: false });
-  const stalePlain = await app.request("/api/secrets/plain", {
-    headers: { authorization: `Bearer ${teammateToken}` },
-  });
-  assert.equal(await stalePlain.text(), "");
   const staleCreate = await jsonPost(
     "/api/secrets",
     { name: "ANTHROPIC_API_KEY", value: "stale-must-not-write" },
@@ -2278,56 +2346,6 @@ test("machine settings are absent on a shared server", async () => {
 });
 
 /**
- * The roster the Mac app reads. These are better-auth's tables in the
- * identity schema, which the row-level security migration does not
- * cover, so this route's own scoping is the only thing between two
- * organizations: worth its own test rather than trust.
- */
-test("the team roster does not cross organizations", async () => {
-  const insider = await jsonPost("/api/auth/sign-up/email", {
-    email: "roster-insider@bento.test",
-    password: "correct-horse-battery",
-    name: "Insider",
-  });
-  const insiderToken = insider.headers.get("set-auth-token")!;
-  const org = (await (
-    await jsonPost("/api/auth/organization/create", { name: "Roster Inc", slug: "roster-inc" }, insiderToken)
-  ).json()) as { id: string };
-  await jsonPost("/api/auth/organization/set-active", { organizationId: org.id }, insiderToken);
-  await jsonPost("/api/auth/organization/invite-member", { email: "pending@bento.test", role: "member" }, insiderToken);
-
-  const asInsider = await (
-    await app.request("/api/team/plain", { headers: { authorization: `Bearer ${insiderToken}` } })
-  ).text();
-  assert.match(asInsider, /^org\|[^|]+\|1\|owner\|Roster Inc$/m, "the active organization is flagged");
-  assert.match(asInsider, /^member\|[^|]+\|[^|]+\|owner\|roster-insider@bento\.test\|Insider$/m);
-  assert.match(asInsider, /^invitation\|[^|]+\|pending\|member\|pending@bento\.test$/m);
-
-  // An outsider must see their own (empty) roster, never this one.
-  const outsider = await jsonPost("/api/auth/sign-up/email", {
-    email: "roster-outsider@bento.test",
-    password: "correct-horse-battery",
-    name: "Outsider",
-  });
-  const outsiderToken = outsider.headers.get("set-auth-token")!;
-  const asOutsider = await (
-    await app.request("/api/team/plain", { headers: { authorization: `Bearer ${outsiderToken}` } })
-  ).text();
-  assert.equal(asOutsider, "mode|multi", "an outsider sees no organization, member, or invitation");
-  assert.doesNotMatch(asOutsider, /Roster Inc|roster-insider/);
-
-  // Pointing a session at an organization you are not in must not
-  // answer for it. better-auth refuses the switch, and the route checks
-  // membership again rather than trusting the session's answer: a
-  // session outlives the membership that made it meaningful.
-  await jsonPost("/api/auth/organization/set-active", { organizationId: org.id }, outsiderToken);
-  const forged = await (
-    await app.request("/api/team/plain", { headers: { authorization: `Bearer ${outsiderToken}` } })
-  ).text();
-  assert.doesNotMatch(forged, /roster-insider|pending@bento\.test/, "a non-member must not read the roster");
-});
-
-/**
  * The plan-limit seam. The open source server has no plans; what it
  * has is ctx.entitlements, asked before an invitation is created and
  * before a card goes live. A stub provider proves both doors consult
@@ -2467,6 +2485,12 @@ test("a run is refused when the plan has no compute left", async () => {
   // win, which would test the wrong door: the card is settled first so
   // the only reason left to refuse is the plan.
   await ctx.db.update(agentRuns).set({ status: "cancelled" }).where(eq(agentRuns.featureId, feature.id));
+  const [settled] = await ctx.db
+    .select({ agentProfileId: agentRuns.agentProfileId })
+    .from(agentRuns)
+    .where(eq(agentRuns.featureId, feature.id))
+    .limit(1);
+  assert.ok(settled?.agentProfileId, "going live started the stage's agent");
 
   const asked: string[] = [];
   ctx.entitlements = {
@@ -2484,9 +2508,10 @@ test("a run is refused when the plan has no compute left", async () => {
     },
   };
   try {
-    const started = await app.request(`/api/features/${feature.id}/quick-run`, {
+    const started = await app.request("/api/runs", {
       method: "POST",
-      headers: { authorization: `Bearer ${token}` },
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({ featureId: feature.id, agentProfileId: settled.agentProfileId }),
     });
     // 402 rather than 409: nothing is busy, and there is something the
     // team can do about it that waiting will not fix.

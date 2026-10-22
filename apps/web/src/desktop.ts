@@ -11,6 +11,22 @@ export interface DesktopBridge {
 export const desktop: DesktopBridge | undefined = typeof window === "undefined"
   ? undefined : (window as Window & { bentoDesktop?: DesktopBridge }).bentoDesktop;
 
+/**
+ * Where this desktop window's Bento runs: a local server on this Mac, or
+ * a server elsewhere. Null outside the desktop app and until it answers.
+ * Each window belongs to one connection, so the answer never changes.
+ */
+export function useDesktopConnection(): { mode: "local" | "remote"; serverUrl: string } | null {
+  const [connection, setConnection] = useState<{ mode: "local" | "remote"; serverUrl: string } | null>(null);
+  useEffect(() => {
+    if (!desktop) return;
+    let cancelled = false;
+    void desktop.connection().then((value) => { if (!cancelled) setConnection(value); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+  return connection;
+}
+
 /** OAuth state, provider cookies, and callbacks stay in the system browser. */
 export async function startIntegration(tab: "github" | "slack" | "mcp", start: () => Promise<{ url: string }>): Promise<void> {
   if (desktop) await desktop.openIntegration(tab);

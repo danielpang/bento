@@ -2961,6 +2961,10 @@ a.pr-row:hover .pr-external {
   color: var(--succeeded);
   border-color: color-mix(in srgb, var(--succeeded) 40%, transparent);
 }
+/* A turn a person stopped: the session goes on, so it is not a failure. */
+.chat-result[data-ok="interrupted"] {
+  color: var(--text-dim);
+}
 .chat-result[data-ok="false"] {
   color: var(--failed);
   border-color: color-mix(in srgb, var(--failed) 40%, transparent);
@@ -10822,3 +10826,197 @@ a.swarm-plan-source-name:hover {
 .repo-entry-row .btn { flex: none; }
 .repo-entry-branch { font-family: var(--mono); font-size: 12px; }
 .repo-entry-remove { padding: 2px 8px; min-height: 0; font-size: 12px; }
+
+/* The agent's questions sit just above the composer, where the person
+   is already looking, and read as a form rather than a chat line. */
+.question-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 8px;
+  padding: 12px;
+  border: 1px solid var(--brand);
+  border-radius: var(--radius);
+  background: var(--panel-raised);
+  min-width: 0;
+}
+.question-card-lead {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+.question-card-question {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+.question-card-question legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  padding: 0;
+  margin-bottom: 2px;
+}
+.question-card-text {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.question-card-hint {
+  margin: 0;
+  font-size: 12px;
+}
+.question-card-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  cursor: pointer;
+  min-width: 0;
+}
+.question-card-option input {
+  margin-top: 3px;
+  flex-shrink: 0;
+}
+.question-card-option > span {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.question-card-description {
+  font-size: 12px;
+}
+.question-card-other {
+  width: 100%;
+  box-sizing: border-box;
+}
+.question-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.question-card-spacer {
+  flex: 1;
+}
+.question-card-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.question-card-count {
+  flex-shrink: 0;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.question-card-steps {
+  display: flex;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.question-card-steps li {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.question-card-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 160px;
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.question-card-step:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+.question-card-step.is-done {
+  color: var(--text);
+}
+.question-card-step.is-current {
+  border-color: var(--brand);
+  color: var(--text);
+}
+.question-card-step-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.question-card-tick {
+  color: var(--brand);
+}
+.question-card-body {
+  min-width: 0;
+  animation: question-card-in-forward 180ms ease-out;
+}
+.question-card-body[data-direction="back"] {
+  animation-name: question-card-in-back;
+}
+@keyframes question-card-in-forward {
+  from {
+    opacity: 0;
+    transform: translateX(16px);
+  }
+}
+@keyframes question-card-in-back {
+  from {
+    opacity: 0;
+    transform: translateX(-16px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .question-card-body {
+    animation: none;
+  }
+}
+.question-card-option.is-picked {
+  border-color: var(--brand);
+}
+.question-card-review {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.question-card-review li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.question-card-review-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.question-card-review-question {
+  font-size: 12px;
+}
+.question-card-change {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  font-size: 12px;
+}

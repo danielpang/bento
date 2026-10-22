@@ -4,15 +4,7 @@ import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { messageAttachments, writeMessageAttachments } from "../message-attachments.js";
 import { z } from "zod";
-import { DEFAULT_MODELS } from "@bento/agents";
-import {
-  actorDisplayName,
-  agentCli,
-  checkAgentPairing,
-  gateCriterion,
-  historyTriggerLabel,
-  parentDeleteRefusal,
-} from "@bento/core";
+import { parentDeleteRefusal } from "@bento/core";
 import {
   agentProfiles,
   agentRuns,
@@ -24,10 +16,8 @@ import {
   features,
   gateChecks,
   pipelines,
-  projects,
   repositories,
   sandboxes,
-  stages,
   user,
 } from "@bento/db";
 import type { SandboxDriver, SandboxHandle } from "@bento/sandbox";
@@ -49,7 +39,7 @@ import {
   reopenFeature,
   activationRefusal,
 } from "../orchestrator/gate-evaluator.js";
-import { ACTIVE_RUN_STATUSES, CARD_BUSY, CARD_BUSY_DELETE, NO_REPOSITORIES, projectHasRepositories, startRunIfIdle } from "../orchestrator/start-run.js";
+import { ACTIVE_RUN_STATUSES, CARD_BUSY_DELETE, NO_REPOSITORIES, projectHasRepositories, startRunIfIdle } from "../orchestrator/start-run.js";
 import { enqueueRun } from "../orchestrator/queue.js";
 import { liveDeliveryOf, nudgeAndAwaitSent } from "../orchestrator/remote-live.js";
 import { queueLinearIssueCreate } from "../orchestrator/linear-sync.js";
@@ -89,35 +79,6 @@ const createFeature = z.object({
    */
   parentId: z.string().uuid().optional(),
 });
-
-/**
- * One line of why a criterion is where it is. The evaluator writes a
- * `message` alongside criterion specific data; newlines would break the
- * line protocol, so they collapse to spaces.
- */
-function summariseDetail(detail: unknown): string {
-  if (!detail || typeof detail !== "object") return "-";
-  const message = (detail as { message?: unknown }).message;
-  if (typeof message !== "string" || message.length === 0) return "-";
-  const flat = message.replaceAll(/[\r\n|]+/g, " ");
-  // Cut at a word and say so, rather than stopping mid-syllable.
-  return flat.length > 200 ? `${flat.slice(0, 199).replace(/\s+\S*$/, "")}…` : flat;
-}
-
-/** Human names for criterion types; raw tokens read as debug output. */
-const CRITERION_LABELS: Record<string, string> = {
-  manual: "Approval",
-  run_succeeded: "Agent run",
-  agent_judge: "Judge agent",
-  command: "Command",
-  checks_pass: "GitHub checks",
-  pr_comments_resolved: "Review comments",
-};
-
-/** Pipes and newlines would split the Mac/TUI line protocol. */
-function wireSafe(value: string): string {
-  return value.replaceAll(/[|\r\n]+/g, " ").trim();
-}
 
 /**
  * The card's own log, with the person who moved it when a person did.
@@ -929,38 +890,6 @@ export function featureRoutes(ctx: AppContext) {
       return c.json(await relatedGroup(db(c, ctx), feature));
     })
     /**
-     * The same, pre-rendered as display lines: the Mac app has no JSON
-     * parser, so every line here is already what its pane shows.
-     */
-    .get("/:id/changes/plain", async (c) => {
-      const feature = await getAccessibleFeature(ctx, c, c.req.param("id"));
-      if (!feature) return c.text("error|not found", 404);
-      const repos = await collectFeatureChanges(ctx, feature.projectId, feature.branchName);
-      const lines: string[] = [];
-      for (const repo of repos) {
-        const adds = repo.files.reduce((n, f) => n + f.additions, 0);
-        const dels = repo.files.reduce((n, f) => n + f.deletions, 0);
-        lines.push(`== ${repo.name}  +${adds} -${dels} in ${repo.files.length} file${repo.files.length === 1 ? "" : "s"}`);
-        for (const f of repo.files) lines.push(`   +${f.additions} -${f.deletions}  ${f.path}`);
-        for (const artifact of repo.artifacts) {
-          lines.push("", `-- ${artifact.path}`);
-          lines.push(...artifact.content.replaceAll("\r", "").split("\n"));
-        }
-        if (repo.diff.trim()) {
-          lines.push("", `-- diff (${repo.name})`);
-          lines.push(...repo.diff.replaceAll("\r", "").split("\n"));
-          if (repo.truncated) lines.push("... diff truncated; the full change is on the branch");
-        }
-        lines.push("");
-      }
-      if (lines.length === 0) {
-        lines.push("Nothing committed yet. Changes and stage write-ups appear once an agent commits.");
-      }
-      const CAP = 1200;
-      const body = lines.length > CAP ? [...lines.slice(0, CAP), "... truncated; see the web console for the rest"] : lines;
-      return c.text(body.join("\n"));
-    })
-    /**
      * Moves the card forward unconditionally: the user is the gate.
      * From backlog it enters the first stage. Use /approve instead when
      * the stage has automated criteria that should also be satisfied.
@@ -1127,33 +1056,6 @@ export function featureRoutes(ctx: AppContext) {
             .where(and(eq(gateChecks.featureId, feature.id), eq(gateChecks.stageId, feature.currentStageId)))
         : [];
       return c.json({ status: feature.status, currentStageId: feature.currentStageId, checks });
-    })
-    /**
-     * The same gate status in line form, for the Mac app.
-     *
-     *   gate|<featureStatus>|<currentStageId or ->
-     *   check|<criterionType>|<status>|<detail>
-     *
-     * The detail is a one-line summary rather than the raw jsonb: a
-     * client that cannot parse JSON has no use for the structure, and
-     * what a person needs is why a criterion is red.
-     */
-    .get("/:id/gate/plain", async (c) => {
-      const feature = await getAccessibleFeature(ctx, c, c.req.param("id"));
-      if (!feature) return c.text("error|not found", 404);
-      const checks = feature.currentStageId
-        ? await db(c, ctx)
-            .select()
-            .from(gateChecks)
-            .where(and(eq(gateChecks.featureId, feature.id), eq(gateChecks.stageId, feature.currentStageId)))
-        : [];
-      const lines = [`gate|${feature.status}|${feature.currentStageId ?? "-"}`];
-      for (const check of checks) {
-        const criterion = gateCriterion.safeParse(check.criterion);
-        const type = criterion.success ? criterion.data.type : "unrecognized";
-        lines.push(`check|${CRITERION_LABELS[type] ?? type}|${check.status}|${summariseDetail(check.detail)}`);
-      }
-      return c.text(lines.join("\n"));
     })
     /** Forces a gate re-check (the "re-run checks" button). */
     .post("/:id/recheck", async (c) => {
@@ -1443,25 +1345,6 @@ export function featureRoutes(ctx: AppContext) {
       return c.json(result.run, 201);
     })
     /**
-     * The same merge status in line form, for the Mac app.
-     *
-     *   pr|<state>|<number>|<name>
-     *
-     * Name is last because a repository name may contain pipes. "conflicted"
-     * is the only state that asks for a button; the others are listed so
-     * a later client can show clean pull requests without a new route.
-     */
-    .get("/:id/merge-status/plain", async (c) => {
-      const feature = await getAccessibleFeature(ctx, c, c.req.param("id"));
-      if (!feature) return c.text("error|not found", 404);
-      const rows = await featurePullRequestTargets(db(c, ctx), feature);
-      if (rows.length === 0) return c.text("");
-      const connection = await githubConnectionFor(ctx, feature.organizationId, db(c, ctx));
-      const states = await readMergeStates(connection, rows);
-      const lines = states.map((pr) => `pr|${pr.state}|${pr.number}|${pr.name}`);
-      return c.text(lines.join("\n"));
-    })
-    /**
      * Starts a run that rebases the card's branch onto the latest base
      * branch and resolves the merge conflicts GitHub is reporting.
      *
@@ -1538,88 +1421,6 @@ export function featureRoutes(ctx: AppContext) {
       await ctx.boss.send("gate.evaluate", { featureId: updated.id });
       return c.json(updated);
     })
-    /**
-     * Starts a run on the feature's current stage using a shared
-     * "quick" profile for the given cli, creating it on first use.
-     * Exists so line-protocol clients (the Mac app) can start runs
-     * without composing JSON.
-     */
-    .post("/:id/quick-run", async (c) => {
-      const parsedCli = agentCli.safeParse(c.req.query("cli") ?? "claude-code");
-      if (!parsedCli.success) return c.json({ error: `unknown agent "${c.req.query("cli")}"; supported: ${agentCli.options.join(", ")}` }, 400);
-      const cli = parsedCli.data;
-      const model = c.req.query("model") ?? DEFAULT_MODELS[cli];
-      // This route creates a profile of its own, so it needs the same
-      // pairing check the profile route applies. ?model= is the way an
-      // impossible combination would otherwise get in through the back.
-      const pairing = checkAgentPairing(cli, model);
-      if (pairing.status === "impossible") return c.json({ error: pairing.detail, cli, model }, 400);
-
-      const feature = await getAccessibleFeature(ctx, c, c.req.param("id"));
-      if (!feature) return c.json({ error: "not found" }, 404);
-      if (!feature.currentStageId) return c.json({ error: "feature has no current stage; advance it first" }, 400);
-      // A done card keeps the stage it finished in, so the stage check
-      // alone would let an agent run on a card nobody is watching.
-      if (feature.status === "done" || feature.status === "cancelled") {
-        return c.json({ error: `feature is ${feature.status}; reopen it first` }, 409);
-      }
-      if (!(await projectHasRepositories(db(c, ctx), feature.projectId))) {
-        return c.json({ error: NO_REPOSITORIES }, 409);
-      }
-
-      /**
-       * The stage's assigned agent comes first: asking to "run
-       * claude-code" on a stage whose agent IS a claude-code agent
-       * means that agent, with its name and its skill. The nameless
-       * quick-<cli> stand-in exists only for a stage with no matching
-       * assignment, and ?model= opts out of the assigned agent because
-       * it asks for a specific pairing.
-       */
-      const [stageRow] = feature.currentStageId
-        ? await db(c, ctx).select().from(stages).where(eq(stages.id, feature.currentStageId)).limit(1)
-        : [];
-      let profile;
-      if (stageRow?.defaultAgentProfileId && !c.req.query("model")) {
-        const [assigned] = await db(c, ctx)
-          .select()
-          .from(agentProfiles)
-          .where(eq(agentProfiles.id, stageRow.defaultAgentProfileId))
-          .limit(1);
-        if (assigned?.cli === cli) profile = assigned;
-      }
-      if (!profile) {
-        const profileName = `quick-${cli}`;
-        [profile] = await db(c, ctx)
-          .select()
-          .from(agentProfiles)
-          .where(and(eq(agentProfiles.ownerId, actor(c)), eq(agentProfiles.name, profileName)));
-        if (!profile) {
-          [profile] = await db(c, ctx)
-            .insert(agentProfiles)
-            .values({ ownerId: actor(c), name: profileName, cli, model })
-            .returning();
-        }
-      }
-      if (!profile) return c.json({ error: "something went wrong saving the agent; try again" }, 500);
-
-      const [project] = await db(c, ctx).select().from(projects).where(eq(projects.id, feature.projectId));
-      const executor = project?.executor ?? "server";
-
-      const run = await startRunIfIdle(db(c, ctx), {
-        type: "pipeline" as const,
-        featureId: feature.id,
-        stageId: feature.currentStageId,
-        agentProfileId: profile.id,
-        prompt: "",
-        executor,
-        startedBy: actor(c),
-      }, ctx.entitlements, ctx.analytics, (task) => deferAfterCommit(c, async () => task()));
-      if (run === "busy") return c.json({ error: CARD_BUSY }, 409);
-      if (run === "gone") return c.json({ error: "not found" }, 404);
-      if ("outOfCompute" in run) return c.json({ error: run.outOfCompute, code: "PLAN_LIMIT" }, 402);
-      if (executor === "server") await enqueueRun(ctx, run.id);
-      return c.json(run, 201);
-    })
     /** Full history: stage moves and status changes, oldest first. */
     .get("/:id/history", async (c) => {
       if (!(await getAccessibleFeature(ctx, c, c.req.param("id")))) return c.json({ error: "not found" }, 404);
@@ -1631,46 +1432,6 @@ export function featureRoutes(ctx: AppContext) {
           actorEmail: actorEmail ?? null,
         })),
       );
-    })
-    /**
-     * Line format: event|<at>|<kind>|<trigger>|<description>
-     * Stage names are resolved here because the Native SDK client has no
-     * JSON parser and no way to join.
-     */
-    .get("/:id/history/plain", async (c) => {
-      const feature = await getAccessibleFeature(ctx, c, c.req.param("id"));
-      if (!feature) return c.text("error|not found", 404);
-      const [rows, stageRows] = await Promise.all([
-        featureHistory(c, ctx, feature.id),
-        db(c, ctx).select().from(stages).where(eq(stages.pipelineId, feature.pipelineId)).orderBy(asc(stages.position)),
-      ]);
-      const nameOf = (id: string | null) =>
-        id ? (stageRows.find((s) => s.id === id)?.name ?? "unknown") : "Backlog";
-      const lastStage = stageRows[stageRows.length - 1];
-
-      const lines = rows.map(({ event: row, actorName, actorEmail }) => {
-        const when = row.at.toISOString();
-        /**
-         * A null destination is two different stories, and the trigger
-         * tells them apart: a backward move went to the backlog, a
-         * forward one left the last stage, which is finishing. Reading
-         * both as "to Backlog" told a finished card's history exactly
-         * backwards. A forward one off an earlier stage is a card
-         * marked done with stages left, which is a third story: that
-         * stage was not finished, it was skipped.
-         */
-        const description =
-          row.kind === "stage_moved"
-            ? !row.toStageId && row.fromStageId && !row.trigger.endsWith("_back")
-              ? lastStage && row.fromStageId !== lastStage.id
-                ? `done from ${nameOf(row.fromStageId)}`
-                : `finished ${nameOf(row.fromStageId)}`
-              : `${nameOf(row.fromStageId)} to ${nameOf(row.toStageId)}`
-            : `${row.fromStatus ?? "new"} to ${row.toStatus ?? "unknown"}`;
-        const who = historyTriggerLabel(row.trigger, actorDisplayName(actorName, actorEmail));
-        return `event|${when}|${row.kind}|${wireSafe(who)}|${description}`;
-      });
-      return c.text(lines.join("\n"));
     })
     /** Stage moves only. Kept for clients written before the history view. */
     .get("/:id/transitions", async (c) => {

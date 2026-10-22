@@ -2,7 +2,7 @@ import { zValidator } from "@hono/zod-validator";
 import { and, asc, count, eq, sql } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
-import { MODEL_GUIDANCE, agentCli, checkAgentPairing, providerForProfile } from "@bento/core";
+import { MODEL_GUIDANCE, agentCli, checkAgentPairing } from "@bento/core";
 import { agentProfiles, agentRuns, projects, stages } from "@bento/db";
 import type { SandboxDriver } from "@bento/sandbox";
 import { canAccessProject, getActiveOrganizationMembership } from "../access.js";
@@ -137,36 +137,6 @@ export function profileRoutes(ctx: AppContext) {
           installUrl: tool.installUrl,
           installCommand: tool.installCommand,
         })),
-      );
-    })
-    /**
-     * Line format:
-     *   profile|<id>|<cli>|<model>|<providerId or ->|<pairing>|<name>
-     *
-     * The provider and the pairing verdict are resolved here rather than
-     * by the client: both are catalog knowledge, and the desktop app
-     * cannot import the catalog. A dash means no provider applies, which
-     * is the fake agent.
-     *
-     * The verdict is carried for agents that already exist. New ones
-     * cannot be impossible, because this route refuses them, but rows
-     * stored before that check, or reached through another client, still
-     * can be, and a routed pairing is worth flagging either way.
-     */
-    .get("/plain", async (c) => {
-      const rows = await db(c, ctx)
-        .select()
-        .from(agentProfiles)
-        .where(eq(agentProfiles.ownerId, actor(c)))
-        .orderBy(...byName);
-      return c.text(
-        rows
-          .map((p) => {
-            const provider = providerForProfile(p.cli, p.model);
-            const pairing = checkAgentPairing(p.cli, p.model);
-            return `profile|${p.id}|${p.cli}|${p.model}|${provider?.id ?? "-"}|${pairing.status}|${p.name}`;
-          })
-          .join("\n"),
       );
     })
     /**

@@ -442,6 +442,27 @@
       "when": 1791100960000,
       "tag": "0062_user_board_mascots",
       "breakpoints": true
+    },
+    {
+      "idx": 63,
+      "version": "7",
+      "when": 1791187360000,
+      "tag": "0063_agent_run_live_session",
+      "breakpoints": true
+    },
+    {
+      "idx": 64,
+      "version": "7",
+      "when": 1791273760000,
+      "tag": "0064_run_questions",
+      "breakpoints": true
+    },
+    {
+      "idx": 65,
+      "version": "7",
+      "when": 1791360160000,
+      "tag": "0065_user_beta_features",
+      "breakpoints": true
     }
   ]
 }

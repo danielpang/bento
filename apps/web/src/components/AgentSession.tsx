@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as Menu from "@radix-ui/react-dropdown-menu";
 import { ThinkingOrb } from "thinking-orbs";
-import type { AgentProfile, AgentRun, BentoClient, ConversationBlock, Stage } from "@bento/api-client";
+import type { AgentProfile, AgentRun, BentoClient, ConversationBlock, RunQuestion, Stage } from "@bento/api-client";
 import {
   forgetsBetweenRuns,
   hasNoLiveTranscript,
@@ -9,19 +9,24 @@ import {
   quietRunMessage,
   withProviderOutageAdvice,
   type AgentEvent,
+  type TurnState,
 } from "@bento/core";
 import { linkifiedError } from "../error-text.js";
 import { useBetaTesters } from "../beta.js";
 import { sandboxProviderWords } from "../sandbox-provider.js";
 import type { LineQuote } from "./DiffReview.js";
 import { StopButton } from "./IconButtons.js";
-import { LIVE_TOOLS } from "./ui.js";
+import { stopAction, turnRunning } from "../stop-action.js";
+import { QuestionCard } from "./QuestionCard.js";
+import { INTERRUPTIBLE_TOOLS, runLiveKind } from "./ui.js";
 import { toolActivity, type ToolActivity } from "../tool-activity.js";
 import { ToolActivityGroup } from "./ToolActivityGroup.js";
 import { REDUCED_MOTION, orbStateFor } from "./AgentOrb.js";
 import { SendMark, growComposer } from "./ChatComposer.js";
 
 const TERMINAL_RUN = new Set(["succeeded", "failed", "cancelled"]);
+/** How long Stop rests after an interrupt whose turn end never arrived. */
+const INTERRUPT_SETTLE_MS = 15_000;
 
 /**
  * How close to the end still counts as reading the newest line, in
@@ -38,7 +43,15 @@ const AT_BOTTOM_SLACK = 120;
 export type ChatItem =
   | { key: string; kind: "message"; role: "assistant" | "user" | "system"; text: string; speaker: string }
   | { key: string; kind: "tools"; calls: ToolCall[] }
-  | { key: string; kind: "result"; ok: boolean; costUsd?: number | undefined; error?: string | undefined };
+  | {
+      key: string;
+      kind: "result";
+      ok: boolean;
+      costUsd?: number | undefined;
+      error?: string | undefined;
+      /** A turn a person stopped, which is not a failure: the session goes on. */
+      interrupted?: boolean | undefined;
+    };
 
 type ToolCall = ToolActivity;
 
@@ -238,7 +251,49 @@ export function AgentSession({
   const latestAgent = profiles.find((p) => p.id === latestRun?.agentProfileId);
   const runActive = !!latestRun && !TERMINAL_RUN.has(latestRun.status);
   /** How the latest agent's tool treats a mid-task message, if at all. */
-  const liveKind = latestAgent ? LIVE_TOOLS[latestAgent.cli] : undefined;
+  const liveKind = latestAgent ? runLiveKind(latestAgent.cli, latestRun?.liveSession) : undefined;
+  /**
+   * Interrupting and answering the agent's questions, only for a run
+   * that went live on a tool that supports them.
+   */
+  const liveRun = runActive && latestRun?.liveSession === true;
+  const canInterrupt =
+    liveRun && (latestRun.role ?? "stage") === "stage" && Boolean(latestAgent && INTERRUPTIBLE_TOOLS.has(latestAgent.cli));
+  /**
+   * An interrupt sent and its turn not yet ended: Stop rests until the
+   * turn's end arrives (or, should it never, a little while later).
+   */
+  const [interruptPending, setInterruptPending] = useState(false);
+  useEffect(() => {
+    if (!interruptPending) return;
+    const timer = setTimeout(() => setInterruptPending(false), INTERRUPT_SETTLE_MS);
+    return () => clearTimeout(timer);
+  }, [interruptPending]);
+  // The events are the latest run's only while no earlier run is open.
+  /** Whether the agent is in a turn, as the server holding the run last said; null until it does. */
+  const [turn, setTurn] = useState<TurnState | null>(null);
+  const stopDoes = interruptPending ? "none" : stopAction(canInterrupt && !viewedRunId, events, turn);
+  const [questions, setQuestions] = useState<RunQuestion[]>([]);
+  /** Bumped when the transcript says a question arrived or a turn ended, to fetch them again. */
+  const [questionsTick, setQuestionsTick] = useState(0);
+  useEffect(() => {
+    if (!liveRun || !latestRun) {
+      setQuestions([]);
+      return;
+    }
+    let current = true;
+    client
+      .listRunQuestions(latestRun.id)
+      .then((open) => {
+        if (current) setQuestions(open);
+      })
+      .catch(() => {
+        // The card stays as it was; the next tick asks again.
+      });
+    return () => {
+      current = false;
+    };
+  }, [client, liveRun, latestRun?.id, questionsTick]);
   /** Whether a new run can pick the conversation up where this left it. */
   const resumes = !latestAgent || !forgetsBetweenRuns(latestAgent.cli);
   const quietTool = Boolean(latestAgent && hasNoLiveTranscript(latestAgent.cli));
@@ -289,6 +344,8 @@ export function AgentSession({
   const streamedRun = viewedRunId ? viewedRun : runActive ? latestRun : null;
   useEffect(() => {
     setEvents([]);
+    setInterruptPending(false);
+    setTurn(null);
     clearDraft();
     lastSeq.current = 0;
     if (!streamedRun) return;
@@ -301,6 +358,15 @@ export function AgentSession({
         if (seq > 0 && seq <= lastSeq.current) return;
         if (seq > lastSeq.current) lastSeq.current = seq;
         onEvent?.(featureId, event);
+        // A question arrived (the transcript line names it), or a turn
+        // ended, which is when an interrupted question is withdrawn.
+        if (
+          event.type === "result" ||
+          (event.type === "message" && (event.raw as { bento?: unknown } | undefined)?.bento === "question")
+        ) {
+          setQuestionsTick((tick) => tick + 1);
+        }
+        if (event.type === "result") setInterruptPending(false);
         // The persisted line supersedes the fragments that previewed
         // it. Assistant lines and results only: a steer the user sends
         // mid turn says nothing about the message still being typed,
@@ -347,6 +413,10 @@ export function AgentSession({
             setDraft(draftRef.current);
           });
         }
+      },
+      onTurn: (state) => {
+        setTurn(state);
+        if (state === "waiting") setInterruptPending(false);
       },
       onDone: () => {
         // A cancelled run ends with no result event, so this is the
@@ -665,7 +735,7 @@ export function AgentSession({
           appears here.
         </p>
       )}
-      {runActive && !viewedRunId && hasMessages && !quietTool && (
+      {runActive && !viewedRunId && hasMessages && !quietTool && (!liveRun || turnRunning(events, turn)) && (
         <div className="working-row" role="status">
           <ThinkingOrb state={orbStateFor(activity.tool)} size={20} paused={REDUCED_MOTION} aria-label="Agent working" />
           <span className="muted">
@@ -693,6 +763,17 @@ export function AgentSession({
       )}
       {latestRun && !finished && (
         <div className="composer-dock">
+          {questions.map((asked) => (
+            <QuestionCard
+              key={asked.id}
+              asked={asked}
+              agentName={latestAgent?.name ?? "The agent"}
+              onAnswer={async (choices) => {
+                await client.answerRunQuestion(latestRun.id, asked.id, choices);
+                setQuestions((prev) => prev.filter((q) => q.id !== asked.id));
+              }}
+            />
+          ))}
           {blocked && (
             <div className="setup-prompt setup-prompt-inline" role="status">
               <span>{blocked.message}</span>
@@ -734,9 +815,34 @@ export function AgentSession({
             />
             {runActive && (
               <StopButton
-                disabled={busy}
+                disabled={busy || stopDoes === "none"}
+                label={
+                  stopDoes === "end"
+                    ? "Stop the agent"
+                    : stopDoes === "interrupt"
+                      ? "Stop this turn. The agent waits for your next message."
+                      : interruptPending
+                        ? "Stopping this turn."
+                        : "The agent is waiting for your next message."
+                }
                 onClick={() => {
                   setBusy(true);
+                  setError("");
+                  if (stopDoes === "interrupt") {
+                    setInterruptPending(true);
+                    void client
+                      .interruptRun(latestRun.id)
+                      .then(({ interrupted }) => {
+                        // Nothing was running to stop: no turn end is coming.
+                        if (!interrupted) setInterruptPending(false);
+                      })
+                      .catch((err: unknown) => {
+                        setInterruptPending(false);
+                        setError(err instanceof Error ? err.message : String(err));
+                      })
+                      .finally(() => setBusy(false));
+                    return;
+                  }
                   void client
                     .cancelRun(latestRun.id)
                     .then(() => onChanged())
@@ -823,6 +929,13 @@ export function ChatRow({ item, showDetail }: { item: ChatItem; showDetail: bool
   if (item.kind === "tools") {
     return <ToolActivityGroup calls={item.calls} showDetail={showDetail} />;
   }
+  if (item.interrupted) {
+    return (
+      <div className="chat-row chat-row-system">
+        <span className="chat-result" data-ok="interrupted">turn stopped</span>
+      </div>
+    );
+  }
   return (
     <div className="chat-row chat-row-system">
       <span className="chat-result" data-ok={item.ok}>
@@ -899,6 +1012,7 @@ export function toChatItems(
       ok: event.ok,
       costUsd: event.costUsd,
       error: event.error,
+      interrupted: event.interrupted,
     });
     n += 1;
   }
@@ -1006,7 +1120,7 @@ export function withProviderOutageErrors(
   agent?: { cli: string; model: string } | undefined,
 ): ChatItem[] {
   return items.map((item) => {
-    if (item.kind !== "result" || item.ok || !item.error) return item;
+    if (item.kind !== "result" || item.ok || item.interrupted || !item.error) return item;
     return { ...item, error: withProviderOutageAdvice(item.error, agent) };
   });
 }

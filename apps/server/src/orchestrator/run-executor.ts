@@ -19,9 +19,13 @@ import {
   getAdapter,
   runAgent,
   isSandboxHomePath,
+  openLiveWire,
   writeFileCommand,
   type AgentAdapter,
+  type BuildCommandInput,
+  type LiveAsk,
   type LiveSession,
+  type LiveWire,
   type McpFile,
   type CustomProviderSelection,
 } from "@bento/agents";
@@ -54,7 +58,7 @@ import {
   SANDBOX_STOPPED_MESSAGE,
 } from "@bento/sandbox";
 import { captureJobErrors } from "../analytics.js";
-import type { AppContext } from "../context.js";
+import type { AppContext, InterruptOutcome } from "../context.js";
 import {
   SANDBOX_GONE_AGENT_PREFIX,
   SANDBOX_STOPPED_AGENT_PREFIX,
@@ -138,7 +142,8 @@ import {
 } from "./run-ownership.js";
 import { isPersisted, loadPersistedIds, recoverMissedMessages } from "./recover-session.js";
 import { compactedConversation } from "./conversation-history.js";
-import { attachLiveConversation, cardConversation, headlessConversation, type LiveConversation, type LiveConversationHandle } from "./live-session.js";
+import { attachLiveConversation, cardConversation, headlessConversation, NOBODY_TO_ASK, type LiveConversation, type LiveConversationHandle } from "./live-session.js";
+import { withdrawQuestions } from "./questions.js";
 import { swarmLiveConversation } from "./swarm/live.js";
 import { registerLinearJobs } from "./linear-sync.js";
 import { registerModelCatalogJobs } from "./model-catalog.js";
@@ -345,7 +350,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
 
   const customProviderError = customProvider && customProviderRunError(customProvider, profile.cli);
   if (customProvider && (
-    customProviderError || !(await isBetaRun(ctx, { actingUserId: run.startedBy, projectOwnerId: project.ownerId }))
+    customProviderError || !(await isBetaRun(ctx, { actingUserId: run.startedBy, projectOwnerId: project.ownerId, organizationId: project.organizationId }))
   )) {
     await finishRun(ctx, runId, {
       ok: false,
@@ -714,7 +719,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     await saySystem("Dependency setup needs attention. Starting the agent with the error details so it can diagnose and repair the environment.");
   }
 
-  const { argv, live, liveChannel, workdir, toolEnv, files } = await buildRunCommand(ctx, {
+  const { argv, live, liveChannel, wire, workdir, toolEnv, files } = await buildRunCommand(ctx, {
     driver,
     subject,
     adapter,
@@ -807,17 +812,19 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
    * after its first turn. Only a run somebody can talk to is registered
    * for delivery.
    */
-  if (live && liveChannel) {
+  if (live && liveChannel && wire) {
     const conversation = await liveConversationFor(ctx, subject);
     const liveHold = attachLiveConversation({
       runId,
-      live,
+      wire,
       liveChannel,
       conversation: conversation ?? headlessConversation(),
       holdUntil: Date.now() + ctx.env.BENTO_RUN_TIMEOUT_MIN * 60_000 - HOLD_MARGIN_MS,
       mayEnd: () => confirmRunOwnership(ctx, runId),
       sayAsUser,
       saySystem,
+      sayAsked: (questionId, asked) => sayAsked(ctx, runId, questionId, asked),
+      onTurnState: (state) => ctx.bus.emitRunTurn(runId, state),
     });
     // The message route (a card's, or a swarm's for a node) and the
     // swarm coordinator deliver through this handle; seq stays a
@@ -826,10 +833,16 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       ctx.liveInputs.set(runId, {
         delivery: live.delivery,
         deliver: liveHold.deliver,
+        // A card's stage run only, as the interrupt route allows: its
+        // conversation is the one that waits after an interrupt. A
+        // swarm's interrupted turn would end as a failure handed to the
+        // planner, and a judge or rebase should end, not pause.
+        ...(interruptible(subject) ? { interrupt: interruptOrStop(ctx, runId, liveHold) } : {}),
         waiting: liveHold.waiting,
         close: liveHold.dispose,
         // How a nudge from another server's message route reaches
-        // this session: the row is committed there, claimed here.
+        // this session: the row is committed there, claimed here. It
+        // carries a person's answers to the agent's questions too.
         pump: liveHold.pump,
       });
     }
@@ -850,9 +863,9 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
    * workers still close stdin immediately, because their gate, or the
    * planner, has to run.
    */
-  const onTurnFinished = async (ok: boolean) => {
+  const onTurnFinished = async (ok: boolean, interrupted = false) => {
     if (!liveSession) return;
-    await liveSession.onTurnFinished(ok);
+    await liveSession.onTurnFinished(ok, interrupted);
   };
   // Two lines bracket a streamed agent's launch. The first says the CLI
   // is being spawned; the second, on its first event, that it came up
@@ -888,6 +901,9 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   if (!announcesLaunchOnFirstEvent(adapter)) reportAgentUp();
   let agentReported = false;
   let sessionRecorded = false;
+  // Whether the last turn was one a person interrupted: a run that then
+  // ends with nobody writing is stopped, not failed (see settleAgentResult).
+  let lastTurnInterrupted = false;
   /**
    * Running means the agent process is about to be in the sandbox.
    *
@@ -907,7 +923,9 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
    */
   const [stillOurs] = await ctx.db
     .update(agentRuns)
-    .set({ status: "running", agentStartedAt: new Date() })
+    // Whether it goes live is recorded with the start, for a reattach
+    // to speak to the process the same way (see liveSessionFor).
+    .set({ status: "running", agentStartedAt: new Date(), liveSession: live !== null })
     .where(and(eq(agentRuns.id, runId), eq(agentRuns.status, "starting")))
     .returning({ id: agentRuns.id });
   if (!stillOurs) {
@@ -936,6 +954,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       // Straight to the bus, no row: the transcript gets the finished
       // message; open streams get the typing.
       onDelta: (delta) => ctx.bus.emitRunDelta(runId, delta),
+      ...(wire && liveChannel ? { readLine: (line: string) => readLiveLine(ctx, runId, wire, liveChannel, line, () => liveSession) } : {}),
       onEvent: recordingRun(async (event, cursor) => {
         // A draining process only consumes: its successor has the run.
         // So does one whose run another server adopted.
@@ -961,11 +980,12 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
         }
         await appendRunEvent(ctx, runId, withDockerCursor(withTrustedCost(profile.cli, profile.model, event), cursor));
         if (event.type === "result") {
+          lastTurnInterrupted = event.interrupted === true;
           // A completed turn confirms every message this run was
           // carrying; only then are new arrivals fed in.
           await confirmDelivered(ctx.db, runId);
           if (subject.kind === "swarm") await confirmSwarmMessagesDelivered(ctx.db, runId);
-          await onTurnFinished(event.ok);
+          await onTurnFinished(event.ok, event.interrupted === true);
         }
         // The board shows what the agent last said, so a wall of
         // running cards reads as work rather than as spinners. Only
@@ -979,6 +999,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     ctx.liveInputs.delete(runId);
     liveSession?.dispose();
     endStdinUnlessDisowned(ctx, runId, liveChannel);
+    await closeQuestions(ctx, runId, liveSession);
     // A draining process does not end runs: the agent is still working
     // in the sandbox and the next boot reattaches to it. Whatever threw
     // here is this process's shutdown seen from inside the loop. A run
@@ -1000,6 +1021,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   ctx.liveInputs.delete(runId);
   liveSession?.dispose();
   endStdinUnlessDisowned(ctx, runId, liveChannel);
+  await closeQuestions(ctx, runId, liveSession);
 
   if (yielded(ctx, runId)) return;
   if (controller.signal.aborted) {
@@ -1020,6 +1042,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     argv,
     result,
     emitBoard,
+    endedInterrupted: lastTurnInterrupted,
   });
 }
 
@@ -1038,6 +1061,8 @@ interface RunSettlement {
   /** What runAgent returned: the events the agent produced, and whether the sandbox never started it. */
   result: { outcome: RunOutcome; exitCode: number; events: readonly unknown[]; neverStarted?: "refused" | "gone" | undefined };
   emitBoard: (status: string) => void;
+  /** The last turn was one a person interrupted, and nothing came after it. */
+  endedInterrupted: boolean;
 }
 
 /**
@@ -1193,6 +1218,42 @@ export function mergeAgentExecEnv(
   return { ...toolEnv, ...agentEnv, ...authEnv, ...identityEnv };
 }
 
+/** What the transcript says when an interrupted run closes with nobody having written. */
+export const STOPPED_AFTER_INTERRUPT_MESSAGE = "Session paused. Your next message will resume it.";
+
+/** Whether Stop may interrupt this run's turn: a card's stage run. */
+function interruptible(subject: RunSubject): boolean {
+  return subject.kind === "pipeline" && subject.run.role === "stage";
+}
+
+/**
+ * What Stop does on a live run: interrupt the turn, never end the run.
+ * The one exception is a turn the protocol cannot name (a Codex or pi
+ * turn that started before this process attached to the run): the
+ * work would carry on with no way to stop it, so the run is stopped
+ * instead, keeping its session for the next message. An agent already
+ * waiting has nothing to stop.
+ */
+function interruptOrStop(ctx: AppContext, runId: string, session: LiveConversationHandle): () => InterruptOutcome {
+  return () => {
+    const tried = session.tryInterrupt();
+    if (tried !== "unnamed") return tried;
+    void (async () => {
+      await appendRunEvent(ctx, runId, {
+        type: "message",
+        role: "system",
+        text: "Couldn't interrupt this turn, so the run was stopped. Your next message will resume the session.",
+      });
+      requestRunAbort(ctx, runId);
+      await markCancelled(ctx, runId);
+    })().catch((err: unknown) => {
+      console.warn(`could not stop run ${runId} after an interrupt that could not land:`, err);
+      ctx.analytics?.captureException(err, null, null, { run_id: runId, source: "run_interrupt" });
+    });
+    return "stopped";
+  };
+}
+
 /**
  * Everything that happens after the agent process ends: naming the
  * failure, publishing branches, and writing the terminal state. Shared
@@ -1207,12 +1268,24 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
   const saySystem = (text: string) =>
     appendRunEvent(ctx, runId, { type: "message", role: "system", text });
   const { exitCode } = result;
+  /**
+   * A card's run whose last turn a person interrupted, and which then
+   * ended cleanly because nobody wrote within the idle window: stopped,
+   * not failed. Everything a finished run does still happens (its cost
+   * and tokens are recorded, its artifacts captured, its branch
+   * published), because the turns before the interrupt did real work.
+   * Only the ending differs: the person stopped the work on purpose, so
+   * the card neither fails nor advances. The session id was recorded as
+   * the CLI announced it, so the next message continues the same
+   * session, and the sandbox is kept for it as after any run.
+   */
+  const stopped = settlement.endedInterrupted && exitCode === 0 && subject.kind === "pipeline";
   // Claude Code prices an Ollama model as a Claude one, so that figure is
   // not recorded. See trustedCostUsd.
   const { costUsd: reportedCost, ...reportedOutcome } = result.outcome;
   const cost = trustedCostUsd(profile.cli, profile.model, reportedCost);
   const outcome: RunOutcome = cost === undefined ? reportedOutcome : { ...reportedOutcome, costUsd: cost };
-  if (!outcome.ok) {
+  if (!outcome.ok && !stopped) {
     /**
      * A resume against a conversation the sandbox no longer holds
      * (recreated machine, cleared CLI state) fails instantly, and the
@@ -1552,6 +1625,14 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
   // Publication notes are part of the run transcript. Persist and emit
   // all of them before announcing the terminal state, otherwise an SSE
   // client closes on run_done and misses the final notes.
+  if (stopped) {
+    await saySystem(STOPPED_AFTER_INTERRUPT_MESSAGE);
+    await finishRun(ctx, runId, outcome, exitCode, { stopped: true });
+    emitBoard("cancelled");
+    // Not settled: the gate would read a finished run as the stage's
+    // work being done, and the person stopped it before that.
+    return;
+  }
   await finishRun(ctx, runId, outcome, exitCode);
   emitBoard("succeeded");
 
@@ -1728,6 +1809,8 @@ async function buildRunCommand(
   argv: string[];
   live: LiveSession | null;
   liveChannel: LineChannel | null;
+  /** The live process's side of its protocol; null for a one-shot command. */
+  wire: LiveWire | null;
   workdir: string;
   /** Environment this tool takes instead of flags, per run. */
   toolEnv: Record<string, string>;
@@ -1793,7 +1876,7 @@ async function buildRunCommand(
   // The org's MCP gateway flags follow the profile's own extra args, so
   // a profile cannot shadow them and they read as one list to the CLI.
   const combinedArgs = [...profile.extraArgs, ...(input.mcpArgs ?? [])];
-  const commandInput = {
+  const commandInput: BuildCommandInput = {
     prompt,
     model: profile.model,
     cwd: workdir,
@@ -1802,27 +1885,133 @@ async function buildRunCommand(
     ...(input.credentials ? { credentials: input.credentials } : {}),
     ...(input.customProvider ? { customProvider: input.customProvider } : {}),
   };
+  const live = liveSessionFor({ adapter, driver, subject, commandInput, attach: !input.sendInitialPrompt });
   /**
-   * Live mode: the tool holds a conversation over stdin, so a message
-   * sent while it works reaches the process instead of waiting for the
-   * run to end. Needs both halves: an adapter that speaks it and a
-   * driver that can attach stdin.
+   * The agent may ask a person a question only where one can answer: a
+   * card's own stage work, live. Everywhere else (judges, rebases,
+   * swarms) the tool stays disabled, as it always was. Decided on a
+   * fresh start only; a reattach never re-executes argv.
    */
-  const live =
-    adapter.live && driver.supportsStdin && (adapter.live.appliesTo?.(commandInput) ?? true)
-      ? adapter.live
-      : null;
+  if (live && input.sendInitialPrompt && subject.kind === "pipeline" && run.role === "stage") {
+    commandInput.askUser = true;
+  }
   const liveChannel = live ? new LineChannel() : null;
-  if (input.sendInitialPrompt && live && liveChannel) liveChannel.write(live.encodeMessage(prompt, "initial"));
+  /**
+   * The process's side of the conversation. A reattach opens it without
+   * the handshake, which the process already had in its first life, and
+   * without the prompt, which it already consumed.
+   */
+  const wire = live ? openLiveWire(live, commandInput, { attach: !input.sendInitialPrompt }) : null;
+  if (wire && liveChannel) {
+    for (const line of wire.open(input.sendInitialPrompt ? prompt : null)) liveChannel.write(line);
+  }
   const argv = live ? live.buildCommand(commandInput) : adapter.buildCommand(commandInput);
   return {
     argv,
     live,
     liveChannel,
+    wire,
     workdir,
     toolEnv: adapter.env?.(commandInput) ?? {},
     files: adapter.files?.(commandInput) ?? [],
   };
+}
+
+/**
+ * Whether this run's agent holds a live session over stdin, so a
+ * message sent while it works reaches the process instead of waiting
+ * for the run to end. Needs both halves: an adapter that speaks it and
+ * a driver that can attach stdin.
+ *
+ * A reattach does not decide again. It speaks to the process its first
+ * life started, which the run row recorded as the agent was exec'd: a
+ * deploy in between must not have a one-shot process fed JSON, or a
+ * live one left waiting on a stdin nobody will ever close. A row from
+ * before that record went live only on a tool whose live mode is older
+ * than it (not `liveSinceRecord`).
+ */
+export function liveSessionFor(input: {
+  adapter: AgentAdapter;
+  driver: SandboxDriver;
+  subject: RunSubject;
+  commandInput: BuildCommandInput;
+  attach: boolean;
+}): LiveSession | null {
+  const { adapter, driver, subject, commandInput } = input;
+  const { run } = subject;
+  if (input.attach && typeof run.liveSession === "boolean") return run.liveSession ? adapter.live ?? null : null;
+  const offered =
+    adapter.live && driver.supportsStdin && (adapter.live.appliesTo?.(commandInput) ?? true) ? adapter.live : null;
+  if (input.attach && offered?.liveSinceRecord) return null;
+  return offered;
+}
+
+/**
+ * One stdout line of a live process, shown to its protocol before it is
+ * parsed. What the protocol answers goes straight back on stdin, unless
+ * this process no longer speaks for the run (draining, or another
+ * server adopted it): the owner's own connection answers then, and a
+ * second answer to one request would be a reply to nothing.
+ */
+function readLiveLine(
+  ctx: AppContext,
+  runId: string,
+  wire: LiveWire,
+  channel: LineChannel,
+  line: string,
+  session: () => LiveConversationHandle | null,
+) {
+  const { write, events, asks, withdrawn } = wire.read(line);
+  if (yielded(ctx, runId)) return events;
+  for (const reply of write) channel.write(reply);
+  /**
+   * A question or a withdrawal goes to the conversation, which stores it
+   * for a person or declines it when nobody can answer. Not awaited: the
+   * stream keeps flowing while the row is written, and the agent is
+   * blocked on the question anyway.
+   */
+  const conversation = session();
+  if (asks?.length) {
+    if (conversation) {
+      conversation.ask(asks).catch((err: unknown) => reportLiveQuestionError(ctx, runId, err));
+    } else {
+      for (const asked of asks) for (const reply of wire.decline?.(asked, NOBODY_TO_ASK) ?? []) channel.write(reply);
+    }
+  }
+  if (withdrawn?.length && conversation) {
+    conversation.withdraw(withdrawn).catch((err: unknown) => reportLiveQuestionError(ctx, runId, err));
+  }
+  return events;
+}
+
+/**
+ * The agent's stream ended, so nothing is waiting on its questions any
+ * more: their cards go away. After any question still being stored, or
+ * a question asked just before the end would be inserted after this
+ * and wait on nobody. A process that no longer speaks for the run
+ * leaves them to the one that does.
+ */
+async function closeQuestions(ctx: AppContext, runId: string, session: LiveConversationHandle | null): Promise<void> {
+  await session?.recorded();
+  if (yielded(ctx, runId)) return;
+  await withdrawQuestions(ctx.db, runId).catch((err: unknown) => reportLiveQuestionError(ctx, runId, err));
+}
+
+function reportLiveQuestionError(ctx: AppContext, runId: string, err: unknown): void {
+  console.warn(`could not record a question for run ${runId}:`, err);
+  ctx.analytics?.captureException(err, null, null, { run_id: runId, source: "live_question" });
+}
+
+/**
+ * The transcript line saying the agent asked something. Its raw payload
+ * names the question, which is what tells a watching console to show
+ * the question with its choices.
+ */
+async function sayAsked(ctx: AppContext, runId: string, questionId: string, asked: LiveAsk): Promise<void> {
+  const text = asked.questions.length === 1
+    ? `The agent is asking: ${asked.questions[0]!.question}`
+    : `The agent is asking ${asked.questions.length} questions: ${asked.questions.map((q) => q.question).join(" ")}`;
+  await appendRunEvent(ctx, runId, { type: "message", role: "system", text, raw: { bento: "question", questionId } });
 }
 
 /** What this run's role is told to do, before any follow-up message. */
@@ -2309,12 +2498,20 @@ async function finishRun(
     fault?: RunFault | undefined;
   },
   exitCode: number | null,
+  /**
+   * A run a person interrupted and then left: closed as cancelled, with
+   * no error, but billed and recorded like any run that finished,
+   * because the agent did the work it reported before the interrupt.
+   */
+  { stopped = false }: { stopped?: boolean } = {},
 ): Promise<void> {
   // Ending runs belongs to the successor once shutdown starts, and to
   // the adopter once a run was adopted; see the yield checks in the
   // executor loops.
   if (yielded(ctx, runId)) return;
-  const billable = isBillable(outcome);
+  const status = stopped ? "cancelled" : outcome.ok ? "succeeded" : "failed";
+  // A stop the person asked for is billed for the work before it.
+  const billable = stopped || isBillable(outcome);
   /**
    * What this run cost, and how well that is known, worked out before
    * the run is closed and written in the same statement that closes it.
@@ -2347,7 +2544,7 @@ async function finishRun(
   const [closed] = await ctx.db
     .update(agentRuns)
     .set({
-      status: outcome.ok ? "succeeded" : "failed",
+      status,
       endedAt: new Date(),
       billable,
       exitCode,
@@ -2379,7 +2576,8 @@ async function finishRun(
           }
         : {}),
       numTurns: outcome.numTurns ?? null,
-      error: outcome.error ?? null,
+      // No error on a stop: clients render run.error as a failure reason.
+      error: stopped ? null : (outcome.error ?? null),
     })
     .where(and(eq(agentRuns.id, runId), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)))
     .returning({ id: agentRuns.id, swarmId: agentRuns.swarmId, swarmTaskId: agentRuns.swarmTaskId });
@@ -2399,7 +2597,7 @@ async function finishRun(
   // The run is over, so its gateway token is too. Behind the CAS, so it
   // fires exactly once; a failure here never fails the close.
   await revokeRunGrant(ctx, runId);
-  await announceRunFinished(ctx, runId, outcome.ok ? "succeeded" : "failed", billable);
+  await announceRunFinished(ctx, runId, status, billable);
 
   /**
    * The reason goes into the transcript, because the transcript is the
@@ -2416,7 +2614,7 @@ async function finishRun(
    * results left the card reading "no reason reported" while the
    * enriched reason sat in a column nothing rendered.
    */
-  if (!outcome.ok && outcome.error) {
+  if (!outcome.ok && !stopped && outcome.error) {
     const [reported] = await ctx.db
       .select({ payload: runEvents.payload })
       .from(runEvents)
@@ -2449,7 +2647,7 @@ async function finishRun(
   }
 
   // Wakes every open stream for this run so none of them has to poll.
-  ctx.bus.emitRunDone(runId, outcome.ok ? "succeeded" : "failed");
+  ctx.bus.emitRunDone(runId, status);
 
   // Messages the run took but never confirmed go back first, so the
   // delivery below hands them to the next run instead of losing them.
@@ -2458,7 +2656,8 @@ async function finishRun(
   if (closed.swarmId) await requeueUndeliveredNodeMessages(ctx.db, runId);
   await deliverQueuedMessage(ctx, runId);
 
-  await queueRunFinishedSlack(ctx, runId);
+  // A stop is the person's own doing, and a cancel posts nothing either.
+  if (!stopped) await queueRunFinishedSlack(ctx, runId);
 }
 
 /**
@@ -3393,7 +3592,7 @@ async function resumeInterruptedRun(
   const grantServers = adapter.mcp ? await runGrantServerIds(ctx, run.id) : [];
   const mcpArgs = grantServers.length > 0 ? adapter.mcp?.extraArgs?.() ?? [] : [];
 
-  const { argv, live, liveChannel, workdir } = await buildRunCommand(ctx, {
+  const { argv, live, liveChannel, wire, workdir } = await buildRunCommand(ctx, {
     driver,
     subject,
     adapter,
@@ -3506,33 +3705,37 @@ async function resumeInterruptedRun(
     appendRunEvent(ctx, run.id, { type: "message", role: "system", text });
 
   let liveSession: LiveConversationHandle | null = null;
+  let lastTurnInterrupted = false;
   // The same conversation the first life had, for the reason the first
   // run attaches one: it is what ends the process.
-  if (live && liveChannel) {
+  if (live && liveChannel && wire) {
     const conversation = await liveConversationFor(ctx, subject);
     liveSession = attachLiveConversation({
       runId: run.id,
-      live,
+      wire,
       liveChannel,
       conversation: conversation ?? headlessConversation(),
       holdUntil: Date.now() + timeoutMs - HOLD_MARGIN_MS,
       mayEnd: () => confirmRunOwnership(ctx, run.id),
       sayAsUser,
       saySystem,
+      sayAsked: (questionId, asked) => sayAsked(ctx, run.id, questionId, asked),
+      onTurnState: (state) => ctx.bus.emitRunTurn(run.id, state),
     });
     if (conversation) {
       ctx.liveInputs.set(run.id, {
         delivery: live.delivery,
         deliver: liveSession.deliver,
+        ...(interruptible(subject) ? { interrupt: interruptOrStop(ctx, run.id, liveSession) } : {}),
         waiting: liveSession.waiting,
         close: liveSession.dispose,
         pump: liveSession.pump,
       });
     }
   }
-  const onTurnFinished = async (ok: boolean) => {
+  const onTurnFinished = async (ok: boolean, interrupted = false) => {
     if (!liveSession) return;
-    await liveSession.onTurnFinished(ok);
+    await liveSession.onTurnFinished(ok, interrupted);
   };
   // As in executeRun: an adoption elsewhere clears the hold timer here
   // so this side never closes stdin under the new owner.
@@ -3608,6 +3811,7 @@ async function resumeInterruptedRun(
       exec: () => taggedSandboxExec(stream),
       initialEvents: durableEvents,
       onDelta: (delta) => ctx.bus.emitRunDelta(run.id, delta),
+      ...(wire && liveChannel ? { readLine: (line: string) => readLiveLine(ctx, run.id, wire, liveChannel, line, () => liveSession) } : {}),
       onEvent: recordingRun(async (event, cursor) => {
         // A draining process only consumes: its successor has the run.
         // So does one whose run another server adopted.
@@ -3618,9 +3822,10 @@ async function resumeInterruptedRun(
         if (recovery && persisted && isPersisted(recovery, persisted, event)) return;
         await appendRunEvent(ctx, run.id, withDockerCursor(withTrustedCost(profile.cli, profile.model, event), cursor));
         if (event.type === "result") {
+          lastTurnInterrupted = event.interrupted === true;
           await confirmDelivered(ctx.db, run.id);
           if (subject.kind === "swarm") await confirmSwarmMessagesDelivered(ctx.db, run.id);
-          await onTurnFinished(event.ok);
+          await onTurnFinished(event.ok, event.interrupted === true);
         }
         const spoken = runOutputPreview(event);
         if (spoken) subject.emitOutput(spoken);
@@ -3631,6 +3836,7 @@ async function resumeInterruptedRun(
     ctx.liveInputs.delete(run.id);
     liveSession?.dispose();
     endStdinUnlessDisowned(ctx, run.id, liveChannel);
+    await closeQuestions(ctx, run.id, liveSession);
     // The next boot reattaches; this process just leaves quietly. A run
     // another server adopted is that server's to end.
     if (yielded(ctx, run.id)) return;
@@ -3649,6 +3855,7 @@ async function resumeInterruptedRun(
   ctx.liveInputs.delete(run.id);
   liveSession?.dispose();
   endStdinUnlessDisowned(ctx, run.id, liveChannel);
+  await closeQuestions(ctx, run.id, liveSession);
 
   if (yielded(ctx, run.id)) return;
   if (controller.signal.aborted) {
@@ -3669,6 +3876,7 @@ async function resumeInterruptedRun(
     argv,
     result,
     emitBoard,
+    endedInterrupted: lastTurnInterrupted,
   });
 }
 

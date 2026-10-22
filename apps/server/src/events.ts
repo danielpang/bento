@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import type { AgentDelta, AgentEvent } from "@bento/core";
+import type { AgentDelta, AgentEvent, TurnState } from "@bento/core";
 
 export interface RunEventEnvelope {
   runId: string;
@@ -75,6 +75,7 @@ export type BusWirePayload =
   | { kind: "run_event"; runId: string; seq: number }
   | { kind: "run_delta"; runId: string; delta: AgentDelta }
   | { kind: "run_done"; runId: string; status: string }
+  | { kind: "run_turn"; runId: string; state: TurnState }
   | { kind: "run_control"; runId: string; action: RunControlAction }
   | { kind: "board"; event: BoardEvent };
 
@@ -108,7 +109,7 @@ export type BusWirePayload =
  * holder reads, so the wire carries ids and the database stays the
  * one source of what was said.
  */
-export type RunControlAction = "cancel" | "nudge" | "released" | "close" | "tick" | "queued";
+export type RunControlAction = "cancel" | "nudge" | "released" | "close" | "tick" | "queued" | "interrupt";
 
 export interface RunControl {
   runId: string;
@@ -141,6 +142,12 @@ export class EventBus {
    * run.
    */
   private runDrafts = new Map<string, string>();
+  /**
+   * Whether each live run's agent is working or waiting, as its holder
+   * last announced, so a viewer subscribing between announcements
+   * starts from the current state. Cleared when the run ends.
+   */
+  private runTurns = new Map<string, TurnState>();
 
   private publisher: ((payload: BusWirePayload) => void) | undefined;
 
@@ -240,6 +247,29 @@ export class EventBus {
    */
   dropRunDraft(runId: string): void {
     this.runDrafts.delete(runId);
+    this.runTurns.delete(runId);
+  }
+
+  /** The holder of a live run announcing a turn starting or ending. */
+  emitRunTurn(runId: string, state: TurnState): void {
+    this.deliverRunTurn(runId, state);
+    this.publisher?.({ kind: "run_turn", runId, state });
+  }
+
+  deliverRunTurn(runId: string, state: TurnState): void {
+    this.runTurns.set(runId, state);
+    this.emitter.emit(`run_turn:${runId}`, state);
+  }
+
+  onRunTurn(runId: string, listener: (state: TurnState) => void): () => void {
+    const key = `run_turn:${runId}`;
+    this.emitter.on(key, listener);
+    return () => this.emitter.off(key, listener);
+  }
+
+  /** The last announced turn state, for a subscriber arriving between announcements. */
+  runTurn(runId: string): TurnState | undefined {
+    return this.runTurns.get(runId);
   }
 
   /**
@@ -253,6 +283,7 @@ export class EventBus {
 
   deliverRunDone(runId: string, status: string): void {
     this.runDrafts.delete(runId);
+    this.runTurns.delete(runId);
     this.emitter.emit(`run_done:${runId}`, status);
   }
 

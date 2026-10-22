@@ -28,7 +28,6 @@ import { SecretBox } from "./secrets.js";
 import { ensureLocalUser, type AppContext, type Entitlements } from "./context.js";
 import { EventBus } from "./events.js";
 import { loadEnv } from "./env.js";
-import { createFeatureFlags } from "./feature-flags.js";
 import { executeRun, markCancelled } from "./orchestrator/run-executor.js";
 import { SANDBOX_REFUSED_AGENT_PREFIX } from "./infra-failures.js";
 import { tickSwarm } from "./orchestrator/swarm/coordinator.js";
@@ -141,6 +140,8 @@ before(async () => {
   const dataDir = await mkdtemp(path.join(tmpdir(), "bento-swarm-billing-"));
   const env = loadEnv({
     BENTO_MODE: "local",
+    // Swarms are beta: started with beta features on, as the desktop app does.
+    BENTO_BETA_FEATURES: "true",
     DATABASE_URL: testUrl,
     BENTO_DATA_DIR: dataDir,
     BENTO_SANDBOX_DRIVER: "local-process",
@@ -172,7 +173,6 @@ before(async () => {
     liveInputs: new Map(),
     draining: false,
     userId,
-    featureFlags: createFeatureFlags(env),
     entitlements,
   };
   app = createApp(ctx);

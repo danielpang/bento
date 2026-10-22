@@ -599,8 +599,124 @@ and back to queued when the run ends without one
 back by the coordinator instead, which reads how the run ended to decide
 whether they wake another planner.
 
-Both are behind the beta testers flag (`isBetaRun` in
+Both are behind beta features (`isBetaRun` in
 `swarmLiveConversation`), because a held planner is a held machine.
+
+## A live session is a line per message or a protocol, and a reattach never decides again
+
+`LiveSession` has two shapes. A tool that reads one JSON line per user
+message and answers nothing declares `encodeMessage` (the fake agent
+does). Codex (`codex app-server`) and opencode (`opencode acp`) are
+JSON-RPC servers on stdio: a turn names a thread or session id the
+process handed out, and the process sends requests of its own that
+wait for an answer. Claude Code's and pi's messages are lines too, but
+Claude Code's control protocol and pi's extension dialogs need
+replies, so they are protocols as well. pi sends every message after
+the first as a `prompt` with `streamingBehavior: "steer"`, which steers
+a running turn and starts one on an idle agent; a bare `steer` to an
+idle pi is queued and starts nothing. Those adapters return a
+`LiveProtocol` from `connect`, which sees every stdout line before it
+is parsed (`runAgent`'s `readLine`), writes the replies, and holds a
+message until its handshake answers (`held` counts toward the quiet
+check before stdin closes). The executor and the live conversation
+only ever see `openLiveWire`, so neither knows which shape it is
+feeding. Every request from the process gets an answer, even "not
+implemented", because an unanswered one stalls the agent until the run
+limit. What each protocol relies on was verified against the real CLI
+and is written at the top of `codex-app-server.ts` and
+`opencode-acp.ts`, and `claude-code-live.ts`; `live-cli.e2e.test.ts`
+drives all three binaries against stand-in model servers
+(`BENTO_LIVE_CLI_E2E=1`, off by default).
+
+Whether a run goes live depends on the tool, the driver and the
+profile's arguments, and a deploy can change the answer, so the run
+records it as the agent is exec'd (`agent_runs.live_session`), and a
+reattach reads the record instead of asking again: a one-shot process
+fed JSON, or a live one left waiting on a stdin nobody closes, is what
+deciding twice would cost. A run from before the record went live only
+on a tool that was live then; Codex and opencode, whose live modes came
+with it, say so with `liveSinceRecord`.
+
+## An interrupt ends a turn, not a run, and an agent's question is a row
+
+An interrupt (`LiveProtocol.interrupt`) ends the current turn and
+leaves the process up: Claude Code's is a control request, Codex's
+`turn/interrupt` (naming the running turn, whose id arrives in
+`turn/started`), opencode's a `session/cancel` notification, pi's the
+`abort` command (sent only between `agent_start` and `agent_end`,
+since an abort with nothing running ends nothing). Each
+protocol marks the turn's end `interrupted`, and the live
+conversation holds the session open for `holdAfterInterrupt` instead of
+reading the failed turn as the run's end, so the next message
+continues the same session. The interrupt route reaches the run the way every door
+does: the local handle if this process holds it, else a `run_control`
+"interrupt" on the bus (`requestRunInterrupt`), and answers with what
+happened (`InterruptOutcome`, or "requested" when another process holds
+the run), so a Stop on an agent that is already waiting says nothing
+was stopped. Only an adapter whose `live.interrupts` is set offers it,
+only on a run recorded as live, and only on a card's stage run: a
+swarm's agent has nobody waiting to say what to do instead, and a judge
+or a rebase is ended by Stop rather than paused.
+The console has no separate interrupt button, and on such a run Stop
+never ends the run: it interrupts while a turn runs and rests while the
+agent waits (`stop-action.ts`). Which of the two it is comes from the
+process holding the run, which announces each change on the bus
+(`run_turn`, replicated and kept like a draft, forwarded on the run's
+stream); the transcript is read only until a viewer has heard it,
+because it cannot tell. Claude Code ends a turn and then takes what was
+sent during it as one more turn (verified on the real CLI, which opens
+every turn with a system init line), so `LiveProtocol.working` says
+another turn is due, and the live conversation neither holds the
+process nor reports waiting until that turn's result. A protocol answers an interrupt with
+lines to write now, an empty list when a turn was asked for and has
+not announced itself yet (it sends the interrupt from `read` as the
+turn starts, or for opencode right behind the prompt the handshake
+held, which opencode answers with an internal error that is read as the
+stop), or null when it can name no turn. Only that last case,
+a turn that started before this process attached, stops the run
+instead (`interruptOrStop`), because the work would otherwise carry on
+with no way to stop it. Claude Code's turn reads as interrupted only
+when it ends with the interrupt's own `error_during_execution`, so a
+turn that failed for its own reason is never reported as the person's
+stop. An interrupted run that then hears nothing for
+the idle window closes as cancelled, not failed
+(`STOPPED_AFTER_INTERRUPT_MESSAGE`), but only after everything a
+finished run does (its cost and tokens recorded, its artifacts
+captured, its branch published: `finishRun` with `stopped`), because
+the turns before the interrupt did real work. The person stopped the
+work, so the card neither fails nor advances, and the next message
+continues the recorded session in a new run. A turn
+that was interrupted and then followed by another does not fail the
+run: an adapter's `extractOutcome` must not count it (opencode's
+counted any failed turn, and did until the real CLI e2e said so).
+
+A question arrives as a request the agent blocks on, which each
+protocol turns into a `LiveAsk`: Claude Code's AskUserQuestion (behind
+`--permission-prompt-tool stdio`) as a `can_use_tool` control request,
+Codex's `request_user_input` (behind the under-development
+`default_mode_request_user_input` feature outside Plan mode) as an
+`item/tool/requestUserInput` request, and pi's as an extension dialog
+from `ask_user`, a tool Bento ships as a pi extension because pi has
+none (`pi-live.ts`: written to pi's global extensions folder, since `-e`
+does not expand `~`, and registered only when the run sets
+`BENTO_PI_ASK_USER`). opencode has a question tool, but `opencode acp`
+drops `question.asked`, so it is not offered there. It is recorded in `run_questions` (idempotent on
+the agent's request id, so a reattach does not ask twice), a person
+answers it through `POST /api/runs/:id/questions/:questionId/answer`,
+which checks the choice against what was asked (`answersFor`) and
+stores the exact text the agent will read, and the holder is nudged.
+Its `pump` claims answers before messages, in one UPDATE that marks
+them delivered, and puts them back if the write fails. An answer is
+built from the stored request id and tool input alone, so a server
+that adopted the run can answer a question its predecessor saw. The
+agent withdrawing a question (`control_cancel_request`,
+`serverRequest/resolved`), the end of the turn it was asked in (pi
+resolves an aborted dialog and says nothing), or the run's stream
+ending withdraws its rows, each after any insert still in flight. `askUser` turns the tool on only
+for a card stage run started fresh, because a person is there to
+answer; everywhere else the tool stays off, and a question that
+arrives anyway is declined with `NOBODY_TO_ASK` rather than left to
+stall the agent until the run limit.
 
 ## A run belongs to one process, by lease, and requests to it travel over the bus
 
@@ -690,7 +806,7 @@ its news waits for the run to end or be adopted, as before.
 ## Starting a run goes through startRunIfIdle, never a bare insert
 
 One card, one agent. Every door that starts a run (the runs route,
-quick-run, resume, and both auto-start paths in the gate evaluator)
+resume, and both auto-start paths in the gate evaluator)
 calls `startRunIfIdle` in `apps/server/src/orchestrator/start-run.ts`,
 which locks the feature row and refuses when a run is already queued,
 starting, or running. A bare `insert(agentRuns)` reopens the bug where
@@ -879,33 +995,55 @@ anything its sandbox can, so one prompt injection would exfiltrate the
 operator's key. Local mode uses the process environment because there is
 one trusted user and no tenant boundary.
 
-## New product features go behind the beta testers flag
+## Only large features go behind beta features
 
-Unfinished UI and new endpoints that are not ready for every signed-in
-user go behind `beta-testers`, a permanent PostHog flag. Add people by
-putting their email on that flag's release conditions. Local mode is
-always on.
+A large feature, one on the scale of Bento Swarm, goes behind beta
+features while it is unfinished.
+Everything else ships to every signed-in user: a new capability for an
+existing agent, a new control on an existing screen, an endpoint that
+serves one. Do not gate a change because it is new. When it is unclear
+whether a feature is large enough, ask rather than gate it by default.
 
-- Server: `ctx.featureFlags.isBetaTester(userId, { email })`. A beta
-  endpoint that a non-tester must not learn about answers 404 via
-  `getBetaTester`, the same convention as the access helpers.
+What turns beta on depends on the mode, and nothing else turns it on;
+there is no PostHog flag. `hasBetaFeatures` in `feature-flags.ts` is the
+one place that decides:
+
+- Local Bento reads its startup flag, `BENTO_BETA_FEATURES`, which the
+  desktop app sets from the launcher's "Try beta and experimental
+  features" box. Nothing in the database counts, so it changes only by
+  restarting local Bento, and the launcher locks the box while it runs.
+- A hosted server needs two things: the team allows it
+  (`identity.organization.beta_features_allowed`, an owner or admin's
+  setting in Settings, Team) and the person turned it on
+  (`identity.user.beta_features`, Settings, Account). Both are off
+  until someone turns them on. The team asked about is the one the
+  work belongs to: the open team for a page, the project's team for a
+  run, the connection's team for an MCP call. Work in no team is never
+  beta.
+
+When a feature is gated:
+
+- Server: `hasBetaFeatures(ctx, userId, organizationId)`. A beta
+  endpoint that someone without beta must not learn about answers 404
+  via `getBetaTester` (which asks about the open team), the same
+  convention as the access helpers.
 - Console: wrap the UI in `<BetaOnly>` from `apps/web/src/beta.tsx`.
   `useBetaTesters()` is the boolean for lighter checks.
 - Orchestrator: a run has no session, and not always a person. The
   console and the API start one as somebody; the gate evaluator and the
   schedules start one as nobody. `isBetaRun` asks about the acting
   member when there is one and the project's owner when there is not,
-  so a team's auto-started stages behave like the runs it starts by
-  hand. A capability given to an agent belongs behind the same flag as
-  the console that shows what the agent did with it, until both are
+  in the project's team, so a team's auto-started stages behave like
+  the runs it starts by hand. A capability given to an agent belongs behind the same switch
+  as the console that shows what the agent did with it, until both are
   ready. The card tools on the MCP gateway (`create_card`,
   `set_pull_request`, `add_pull_request_comment`) are rolled out to
-  every run; only the board's group view of split cards is still on
-  the flag. The sandbox provider is not a product setting at all: every
+  every run; only the board's group view of split cards is still
+  beta. The sandbox provider is not a product setting at all: every
   project is on `auto`, beta or not, and nothing in the console or the
   API changes it.
 
-Do not mint a second flag for "show this to testers". This is that flag.
+Do not mint a flag for "show this to testers". This switch is that.
 
 ## Verify against something real before calling it done
 
@@ -986,16 +1124,6 @@ to the `test` task:
 
 ```bash
 DATABASE_URL=postgres://postgres:postgres@localhost:5439/app pnpm test
-```
-
-The `mac` package tests need Node 22.15 or newer (the Native SDK refuses
-older), while the default `node` on this VM is 22.14, so those four tests
-fail with a version error and every other package passes. For a fully
-green suite including `mac`, put the nvm-managed Node first on PATH:
-
-```bash
-PATH="$HOME/.nvm/versions/node/v22.22.2/bin:$PATH" \
-  DATABASE_URL=postgres://postgres:postgres@localhost:5439/app pnpm test
 ```
 
 `pnpm lint` is a no-op: no package defines a `lint` script. `pnpm

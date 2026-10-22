@@ -174,6 +174,7 @@ export function runnerRoutes(ctx: AppContext) {
       const customProviderAllowed = !customProvider || (providerProject && await isBetaRun(ctx, {
         actingUserId: candidate.run.startedBy,
         projectOwnerId: providerProject.ownerId,
+        organizationId: candidate.feature.organizationId,
       }));
 
       ctx.bus.emitBoardEvent({

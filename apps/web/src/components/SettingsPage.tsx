@@ -50,7 +50,7 @@ const SECTION_DESCRIPTIONS: Record<Tab, string> = {
   mcp: "Give agents access to the tools and services they need.",
   team: "Manage membership and shared access for your organization.",
   billing: "Manage your plan and workspace billing.",
-  account: "Manage your personal account, onboarding, and organization ownership.",
+  account: "Manage your personal account, onboarding, beta features, and organization ownership.",
 };
 
 export function SettingsPage({ client }: { client: BentoClient }) {

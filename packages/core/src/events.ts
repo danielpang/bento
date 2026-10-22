@@ -39,6 +39,12 @@ export const agentEvent = z.discriminatedUnion("type", [
     outputTokens: z.number().int().optional(),
     numTurns: z.number().int().optional(),
     error: z.string().optional(),
+    /**
+     * The turn ended because a person interrupted it, not because the
+     * agent finished or failed. The session is still open: the person
+     * is about to say what they want instead.
+     */
+    interrupted: z.boolean().optional(),
     raw: z.unknown().optional(),
   }),
 ]);
@@ -70,6 +76,14 @@ export interface AgentDelta {
    */
   offset: number;
 }
+
+/**
+ * Whether a live run's agent is in a turn or waiting for a message,
+ * as the server holding the run sees it. Bus only, like a delta: the
+ * holder announces each change, and a viewer that knows nothing yet
+ * reads it off the transcript instead.
+ */
+export type TurnState = "working" | "waiting";
 
 export interface RunOutcome {
   ok: boolean;

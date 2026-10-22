@@ -1,5 +1,6 @@
 import type { AgentDelta, AgentEvent, RunOutcome } from "@bento/core";
-import { lastResultEvent, providerKeyFor, type AgentAdapter, type BuildCommandInput } from "./adapter.js";
+import { lastResultEvent, providerKeyFor, type AgentAdapter, type BuildCommandInput, type McpFile } from "./adapter.js";
+import { PI_ASK_USER_ENV, PI_ASK_USER_EXTENSION, PI_ASK_USER_PATH, piLiveProtocol } from "./pi-live.js";
 
 /**
  * pi, the open source BYOK coding agent from earendil-works.
@@ -30,9 +31,11 @@ export const piAdapter: AgentAdapter = {
   configPaths: [".pi"],
 
   files(input: BuildCommandInput) {
+    const files: McpFile[] = [];
+    if (input.askUser) files.push({ path: PI_ASK_USER_PATH, content: PI_ASK_USER_EXTENSION });
     const provider = input.customProvider;
-    if (!provider) return [];
-    return [{
+    if (!provider) return files;
+    return [...files, {
       path: "~/.pi/agent/models.json",
       content: JSON.stringify({ providers: {
         [provider.slug]: {
@@ -44,6 +47,15 @@ export const piAdapter: AgentAdapter = {
         },
       } }),
     }];
+  },
+
+  /**
+   * The ask_user extension stays in the sandbox once written, and loads
+   * in every pi run there; it registers its tool only for a run that a
+   * person can answer.
+   */
+  env(input: BuildCommandInput): Record<string, string> {
+    return input.askUser ? { [PI_ASK_USER_ENV]: "1" } : {};
   },
 
   buildCommand(input: BuildCommandInput): string[] {
@@ -59,23 +71,19 @@ export const piAdapter: AgentAdapter = {
    * pi's RPC mode is built for exactly this: JSON commands on stdin,
    * the same event stream on stdout. A mid-task message is a steer,
    * pi's own word: delivered after the in-flight tool call, before the
-   * next model turn.
+   * next model turn. Where a person can answer, Bento's ask_user
+   * extension is there too (see pi-live.ts).
    */
   live: {
     delivery: "steer",
+    interrupts: true,
     buildCommand(input: BuildCommandInput): string[] {
       const argv = ["pi", "--mode", "rpc", ...piModelArgs(input.model)];
       if (input.resumeSessionId) argv.push("--session", input.resumeSessionId);
       if (input.extraArgs?.length) argv.push(...input.extraArgs);
       return argv;
     },
-    encodeMessage(text: string, kind: "initial" | "followUp"): string {
-      // steer rather than follow_up for mid-task messages: reaching
-      // the agent while it works is the point of the live session.
-      return kind === "initial"
-        ? JSON.stringify({ type: "prompt", message: text })
-        : JSON.stringify({ type: "steer", message: text });
-    },
+    connect: () => piLiveProtocol(),
   },
 
   /**
@@ -154,6 +162,11 @@ export const piAdapter: AgentAdapter = {
         const messages = parsed.messages ?? [];
         const assistants = messages.filter((m) => m.role === "assistant");
         const costUsd = assistants.reduce((total, m) => total + (m.usage?.cost?.total ?? 0), 0);
+        // An abort, which only a live session's interrupt sends: the
+        // turn stopped for a person, and the session goes on.
+        if (assistants.at(-1)?.stopReason === "aborted") {
+          return { type: "result", ok: false, interrupted: true, error: "Interrupted.", costUsd, numTurns: assistants.length, raw: parsed };
+        }
         // A message that stopped on an error is how pi reports failure.
         const failed = assistants.find((m) => m.errorMessage);
         return {
@@ -207,6 +220,8 @@ interface PiMessage {
   content?: ({ type?: string; text?: string } | unknown)[];
   usage?: PiUsage;
   errorMessage?: string;
+  /** Why the model call ended; "aborted" when an abort command stopped it. */
+  stopReason?: string;
 }
 
 interface PiLine {

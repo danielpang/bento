@@ -12,9 +12,10 @@ import {
   mcpOAuthRequests,
   pipelines,
   runMigrations,
+  organization,
+  user,
 } from "@bento/db";
 import { sweepExpiredOAuth } from "./mcp/oauth-sweep.js";
-import { clearBetaCache } from "./mcp/connections.js";
 import { LocalProcessDriver, WorktreeManager } from "@bento/sandbox";
 import { singleDriver } from "./orchestrator/sandbox-driver.js";
 import { mkdtemp } from "node:fs/promises";
@@ -29,7 +30,6 @@ import { createAuth } from "./auth.js";
 import type { AppContext } from "./context.js";
 import { EventBus } from "./events.js";
 import { loadEnv } from "./env.js";
-import { FeatureFlags } from "./feature-flags.js";
 
 /**
  * Bento's own MCP server, end to end: a member authorizes a connection
@@ -88,7 +88,6 @@ before(async () => {
     userId: "",
     // Everyone is a beta tester here; the beta refusal has its own test
     // below, which swaps this out and back.
-    featureFlags: new FeatureFlags(null, true),
   };
   const auth = createAuth(env, db);
   assert.ok(auth, "multi mode must construct an auth instance");
@@ -120,7 +119,15 @@ async function signUp(email: string, name: string): Promise<string> {
   });
   const token = res.headers.get("set-auth-token");
   assert.ok(token, `sign-up for ${email} must hand back a session token`);
+  // Bento's own MCP server is beta, so every account here has it on
+  // unless a test turns it off.
+  await setBetaFeatures(email, true);
   return token;
+}
+
+/** Turns beta features on or off for one account, the way its switch would. */
+async function setBetaFeatures(email: string, enabled: boolean) {
+  await ctx.db.update(user).set({ betaFeatures: enabled }).where(eq(user.email, email));
 }
 
 async function makeOrg(token: string, name: string, slug: string): Promise<string> {
@@ -128,6 +135,8 @@ async function makeOrg(token: string, name: string, slug: string): Promise<strin
     id: string;
   };
   await jsonPost("/api/auth/organization/set-active", { organizationId: org.id }, token);
+  // Every team here allows beta; each account's own switch decides.
+  await ctx.db.update(organization).set({ betaFeaturesAllowed: true }).where(eq(organization.id, org.id));
   return org.id;
 }
 
@@ -541,21 +550,16 @@ test("admins govern every connection; members manage only their own", async () =
 test("non-testers hear 404 from the management routes", async () => {
   const token = await signUp("mcp-inbound-nonbeta@bento.test", "Nonbeta");
   await makeOrg(token, "Nonbeta", "mcp-nonbeta");
-  const flags = ctx.featureFlags;
-  ctx.featureFlags = new FeatureFlags(null, false);
-  try {
-    const listed = await app.request("/api/mcp-connections", { headers: { authorization: `Bearer ${token}` } });
-    assert.equal(listed.status, 404, "off the flag, the routes do not exist");
-    const created = await jsonPost("/api/mcp-connections", { name: "X", scope: "organization" }, token);
-    assert.equal(created.status, 404);
-    const consent = await app.request(
-      "/api/mcp-oauth/consent?request=00000000-0000-0000-0000-000000000000",
-      { headers: { authorization: `Bearer ${token}` } },
-    );
-    assert.equal(consent.status, 404, "consent is behind the same flag");
-  } finally {
-    ctx.featureFlags = flags;
-  }
+  await setBetaFeatures("mcp-inbound-nonbeta@bento.test", false);
+  const listed = await app.request("/api/mcp-connections", { headers: { authorization: `Bearer ${token}` } });
+  assert.equal(listed.status, 404, "off the flag, the routes do not exist");
+  const created = await jsonPost("/api/mcp-connections", { name: "X", scope: "organization" }, token);
+  assert.equal(created.status, 404);
+  const consent = await app.request(
+    "/api/mcp-oauth/consent?request=00000000-0000-0000-0000-000000000000",
+    { headers: { authorization: `Bearer ${token}` } },
+  );
+  assert.equal(consent.status, 404, "consent is behind the same flag");
 });
 
 test("a live token stops serving tools when its owner comes off the flag", async () => {
@@ -569,9 +573,7 @@ test("a live token stops serving tools when its owner comes off the flag", async
   const connection = (await created.json()) as { token: string };
   assert.equal((await callTool(connection.token, "list_projects", {})).isError, false);
 
-  const flags = ctx.featureFlags;
-  ctx.featureFlags = new FeatureFlags(null, false);
-  clearBetaCache();
+  await setBetaFeatures("mcp-flagoff@bento.test", false);
   try {
     // The token is still valid and the connection row is untouched, but
     // Bento as an MCP server is not on for this member any more, so
@@ -587,8 +589,7 @@ test("a live token stops serving tools when its owner comes off the flag", async
     });
     assert.equal(stream.status, 404, "the GET and DELETE verbs answer the same way");
   } finally {
-    ctx.featureFlags = flags;
-    clearBetaCache();
+    await setBetaFeatures("mcp-flagoff@bento.test", true);
   }
 
   // Back on the flag, the same token works again: the flag gates the
@@ -600,24 +601,17 @@ test("the flag hides Bento's own MCP server without touching the servers Bento c
   const token = await signUp("mcp-outbound-stays@bento.test", "Outbound");
   await makeOrg(token, "Outbound", "mcp-outbound-stays");
 
-  const flags = ctx.featureFlags;
-  ctx.featureFlags = new FeatureFlags(null, false);
-  clearBetaCache();
-  try {
-    // Inbound: gone.
-    const inbound = await app.request("/api/mcp-connections", { headers: { authorization: `Bearer ${token}` } });
-    assert.equal(inbound.status, 404);
+  await setBetaFeatures("mcp-outbound-stays@bento.test", false);
+  // Inbound: gone.
+  const inbound = await app.request("/api/mcp-connections", { headers: { authorization: `Bearer ${token}` } });
+  assert.equal(inbound.status, 404);
 
-    // Outbound: the registry of servers Bento's own agents call is a
-    // separate, shipped feature and must stay reachable for everyone.
-    const outbound = await app.request("/api/mcp/status", { headers: { authorization: `Bearer ${token}` } });
-    assert.equal(outbound.status, 200, "adding MCP servers to Bento is not behind this flag");
-    const body = (await outbound.json()) as { servers: unknown[] };
-    assert.ok(Array.isArray(body.servers), "and it still answers with the team's registry");
-  } finally {
-    ctx.featureFlags = flags;
-    clearBetaCache();
-  }
+  // Outbound: the registry of servers Bento's own agents call is a
+  // separate, shipped feature and must stay reachable for everyone.
+  const outbound = await app.request("/api/mcp/status", { headers: { authorization: `Bearer ${token}` } });
+  assert.equal(outbound.status, 200, "adding MCP servers to Bento is not behind this flag");
+  const body = (await outbound.json()) as { servers: unknown[] };
+  assert.ok(Array.isArray(body.servers), "and it still answers with the team's registry");
 });
 
 test("the endpoint speaks only stateless Streamable HTTP", async () => {
