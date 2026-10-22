@@ -9,21 +9,15 @@
   <body>
     <div class="titlebar"></div>
     <main>
-      <header><img src="/icon.png" width="52" height="52" alt="" /><div><h1>Bento</h1><p class="muted">A home for your coding agents.</p></div></header>
-      <h2>Where do you want to work?</h2>
-      <form id="connection-form">
-        <fieldset class="modes" aria-label="Connection mode">
-          <label class="mode"><input type="radio" name="mode" value="local" checked /><span><strong>Run locally</strong><small>Projects and agents run locally.</small></span></label>
-          <label class="mode"><input type="radio" name="mode" value="remote" /><span><strong>Connect to a server</strong><small>Use your team's Bento workspace.</small></span></label>
-        </fieldset>
-        <section id="remote-options" hidden>
-          <label class="field">Server address<input id="server-url" type="url" placeholder="https://app.usebento.ai" spellcheck="false" /></label>
-          <p class="muted hint">Sign in through your browser. Your agents run on the server.</p>
-        </section>
-        <section id="local-options">
-          <p class="hint">Start Docker Desktop or OrbStack before connecting. Bento manages its database and agent sandboxes for you.</p>
-          <p class="muted hint">Configure provider keys and CLI login sharing inside Bento.</p>
+      <h1>How should this app run?</h1>
+      <!-- Two cards side by side, each with its own action. Which one was
+           pressed is the mode; there is no separate mode choice. -->
+      <form id="connection-form" class="cards">
+        <section class="card" aria-labelledby="local-title">
+          <h2 id="local-title">Run locally</h2>
+          <p class="muted">Your own database, board, and agents in containers.</p>
           <label class="checkbox"><input id="beta-features" type="checkbox" /><span>Try beta and experimental features<small>Warning beta features can cause issues.</small></span></label>
+          <p class="hint">Start Docker Desktop or OrbStack before connecting. Bento manages its database and agent sandboxes for you.</p>
           <details>
             <summary>Advanced settings</summary>
             <label class="field">Data and worktrees<div class="input-row"><input id="data-dir" spellcheck="false" /><button id="choose-directory" type="button" class="secondary">Choose...</button></div></label>
@@ -32,11 +26,18 @@
             <label class="field">Agent isolation<select id="sandbox"><option value="docker">Docker sandboxes</option><option value="local-process">Local processes (development only)</option></select></label>
             <p id="isolation-note" class="hint warning" hidden>Local processes have access to this Mac without sandbox isolation. Use only for trusted development work. A PostgreSQL URL is still required if Docker is unavailable.</p>
           </details>
+          <div class="card-actions"><button id="start" type="submit" name="mode" value="local" formnovalidate>Start</button></div>
         </section>
-        <section class="status" role="status" aria-live="polite"><span id="status-message">Choose where Bento runs.</span><div id="login" hidden><strong id="user-code"></strong><button id="open-verification" type="button" class="secondary">Open sign-in page</button></div></section>
-        <div class="actions"><button id="connect" type="submit">Open Bento</button><button id="cancel" type="button" class="secondary" hidden>Cancel</button><button id="show-console" type="button" class="secondary" hidden>Return to workspace</button></div>
+        <section class="card" aria-labelledby="server-title">
+          <h2 id="server-title">Use a server</h2>
+          <p class="muted">Your team's board and history live on the server.</p>
+          <label class="field">Server address<input id="server-url" type="url" placeholder="https://app.usebento.ai" spellcheck="false" /></label>
+          <div id="login" hidden><strong id="user-code"></strong><button id="open-verification" type="button" class="secondary">Open sign-in page</button></div>
+          <div class="card-actions"><button id="connect" type="submit" name="mode" value="remote" class="secondary">Connect</button></div>
+        </section>
       </form>
-      <footer>Your projects and history stay with the connection you choose.</footer>
+      <section class="status" role="status" aria-live="polite"><span id="status-message">Choose where Bento runs.</span></section>
+      <div class="actions"><button id="cancel" type="button" class="secondary" hidden>Cancel</button><button id="show-console" type="button" class="secondary" hidden>Return to workspace</button></div>
     </main>
     <script type="module" src="/launcher.js"></script>
   </body>

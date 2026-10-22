@@ -114,7 +114,7 @@ async function prepareShutdown() {
 async function showLauncher() {
   if (launcher && !launcher.isDestroyed()) { launcher.show(); launcher.focus(); return; }
   launcher = new BrowserWindow({
-    title: "Bento", width: 660, height: 760, minWidth: 560, minHeight: 600, show: false,
+    title: "Bento", width: 880, height: 700, minWidth: 560, minHeight: 600, show: false,
     backgroundColor: backgrounds[appearance], titleBarStyle: "hiddenInset", trafficLightPosition: { x: 18, y: 20 },
     webPreferences: { preload: path.join(directory, "launcher-preload.cjs"), sandbox: true, contextIsolation: true, nodeIntegration: false, webviewTag: false },
   });
