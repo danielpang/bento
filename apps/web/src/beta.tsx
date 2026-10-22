@@ -10,9 +10,15 @@ import type { BentoClient } from "@bento/api-client";
  * Hidden until that answer arrives, so unfinished UI cannot flash.
  *
  * Add people in PostHog by putting their email on the `beta-testers`
- * flag's release conditions. Local mode is always on.
+ * flag's release conditions. Each person can also turn beta on for
+ * themselves in Settings, Account, which wins over the flag; local mode
+ * is on until they turn it off there.
  */
-const BetaTestersContext = createContext({ ready: false, enabled: false });
+const BetaTestersContext = createContext<{ ready: boolean; enabled: boolean; set: (enabled: boolean) => void }>({
+  ready: false,
+  enabled: false,
+  set: () => {},
+});
 
 export function BetaTestersProvider({
   client,
@@ -46,7 +52,17 @@ export function BetaTestersProvider({
     };
   }, [client, userId]);
 
-  return <BetaTestersContext.Provider value={{ ready, enabled }}>{children}</BetaTestersContext.Provider>;
+  return (
+    <BetaTestersContext.Provider value={{ ready, enabled, set: setEnabled }}>{children}</BetaTestersContext.Provider>
+  );
+}
+
+/**
+ * Replaces the answer after the person changed their own switch, with
+ * what the server said it now is, so the console follows without a reload.
+ */
+export function useSetBetaTesters(): (enabled: boolean) => void {
+  return useContext(BetaTestersContext).set;
 }
 
 /**
@@ -69,5 +85,5 @@ export function BetaOnly({ children }: { children: ReactNode }) {
  * Tests, and a parent that already knows.
  */
 export function BetaTestersScope({ enabled, children }: { enabled: boolean; children: ReactNode }) {
-  return <BetaTestersContext.Provider value={{ ready: true, enabled }}>{children}</BetaTestersContext.Provider>;
+  return <BetaTestersContext.Provider value={{ ready: true, enabled, set: () => {} }}>{children}</BetaTestersContext.Provider>;
 }

@@ -425,3 +425,80 @@ test("resolve-conflicts stays quiet when GitHub reports no conflict", () => {
 
   assert.ok(!result.commands.some((line) => line.includes("/resolve-conflicts")));
 });
+
+test("a sessions row opens its card on the board", () => {
+  const result = runCore([
+    { kind: "projects_ok", status: 200, body: bytes("project|project-1|Project") },
+    { kind: "pick_project", index: 0 },
+    {
+      kind: "board_ok",
+      status: 200,
+      body: bytes("stage|stage-1|0|Build\nfeature|card-1|stage-1|active|succeeded|run-1|-|-|First card"),
+    },
+    { kind: "open_sessions" },
+    { kind: "sessions_ok", status: 200, body: bytes("session|card-1|1|-|succeeded|-|-|Agent|First card") },
+    { kind: "open_session", index: 0 },
+  ]);
+
+  const model = result.models.at(-1);
+  assert.equal(model.selectedCard, 0);
+  assert.equal(model.panel, "none");
+  assert.ok(result.commands.some((line) => line.includes("/api/features/card-1/gate/plain")));
+});
+
+test("the beta choice is remembered and read back at launch", () => {
+  const result = runCore([
+    { kind: "home_found", value: bytes("/Users/sam") },
+    { kind: "beta_pref_read", body: bytes("on\n") },
+  ]);
+
+  assert.ok(result.commands.some((line) => line.startsWith("cmd read_file") && line.includes("/Users/sam/.bento/mac-beta-features")));
+  assert.equal(result.models.at(-1).betaOptIn, true);
+});
+
+test("ticking beta on the first screen is sent to the local server when it starts", () => {
+  const result = runCore([
+    { kind: "home_found", value: bytes("/Users/sam") },
+    { kind: "beta_pref_failed", reason: bytes("not_found") },
+    { kind: "toggle_beta_opt_in" },
+    { kind: "choose_local" },
+    { kind: "helper_line", line: bytes("bento:ready http://127.0.0.1:4400") },
+  ]);
+
+  const write = result.commands.find((line) => line.startsWith("cmd write_file"));
+  assert.ok(write, "expected the choice to be remembered");
+  assert.match(write, /"\$bytes":"on\\n"/);
+  const patches = result.commands.filter((line) => line.includes("/api/account/beta") && line.includes('method="PATCH"'));
+  assert.equal(patches.length, 1, "nothing to tell before the server is up, then one write");
+  assert.match(patches[0], /\\"enabled\\":true/);
+});
+
+test("an unticked box tells the local server beta is off", () => {
+  const result = runCore([
+    { kind: "choose_local" },
+    { kind: "helper_line", line: bytes("bento:ready http://127.0.0.1:4400") },
+  ]);
+
+  const patch = result.commands.find((line) => line.includes("/api/account/beta") && line.includes('method="PATCH"'));
+  assert.ok(patch);
+  assert.match(patch, /\\"enabled\\":false/);
+});
+
+test("settings turns beta off on a running local server and reads the switch back", () => {
+  const result = runCore([
+    { kind: "home_found", value: bytes("/Users/sam") },
+    { kind: "beta_pref_read", body: bytes("on\n") },
+    { kind: "choose_local" },
+    { kind: "helper_line", line: bytes("bento:ready http://127.0.0.1:4400") },
+    { kind: "open_settings" },
+    { kind: "toggle_beta_opt_in" },
+    { kind: "beta_changed", status: 200, body: bytes('{"enabled":false,"betaTesters":false}') },
+    { kind: "beta_ok", status: 200, body: bytes("beta|off") },
+  ]);
+
+  const patches = result.commands.filter((line) => line.includes("/api/account/beta") && line.includes('method="PATCH"'));
+  assert.match(patches.at(-1), /\\"enabled\\":false/);
+  assert.ok(result.commands.some((line) => line.startsWith("cmd write_file") && line.includes('"$bytes":"off\\n"')));
+  assert.ok(result.commands.some((line) => line.includes("/api/account/beta/plain")));
+  assert.equal(result.models.at(-1).betaOptIn, false);
+});

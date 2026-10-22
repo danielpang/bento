@@ -311,6 +311,17 @@ export function parseErrorMessage(body: Uint8Array): Uint8Array {
   return new Uint8Array(0);
 }
 
+/** This person's beta features switch, for PATCH /api/account/beta. */
+export function betaFeaturesPatch(enabled: boolean): Uint8Array {
+  return enabled ? asciiBytes("{\"enabled\":true}") : asciiBytes("{\"enabled\":false}");
+}
+
+/** `beta|on` from GET /api/account/beta/plain; anything else reads as off. */
+export function parseBetaSwitch(body: Uint8Array): boolean {
+  const lines = body.split(asciiBytes("\n"));
+  return lines.length > 0 && bytesEq(lines[0], asciiBytes("beta|on"));
+}
+
 /** Enable or disable an MCP server. */
 export function mcpEnabledPatch(enabled: boolean): Uint8Array {
   return enabled ? asciiBytes("{\"enabled\":true}") : asciiBytes("{\"enabled\":false}");
@@ -1297,14 +1308,14 @@ export function parseMcpServers(body: Uint8Array): readonly McpServer[] {
     const fields = lines[i].split(asciiBytes("|"));
     if (fields.length < 7 || !bytesEq(fields[0], tag)) continue;
     const enabled = bytesEq(fields[5], trueTag) || bytesEq(fields[5], one);
-    const connected = bytesEq(fields[6], trueTag) || bytesEq(fields[6], one);
+    const isConnected = bytesEq(fields[6], trueTag) || bytesEq(fields[6], one);
     out.push({
       id: fields[1],
       slug: fields[2],
       authType: fields[3],
       scope: fields[4],
       enabled,
-      connected,
+      connected: isConnected,
       isOauth: bytesEq(fields[3], asciiBytes("oauth")),
       name: fields.length > 7 ? joinRest(fields, 7) : fields[2],
       index: out.length,

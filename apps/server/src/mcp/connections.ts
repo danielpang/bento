@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { and, eq, inArray, isNull, sql, type SQL } from "drizzle-orm";
-import { mcpConnections, member, projects, user } from "@bento/db";
+import { mcpConnections, member, projects } from "@bento/db";
+import { betaPerson, isBetaPerson } from "../feature-flags.js";
 import type { AppContext } from "../context.js";
 
 /**
@@ -166,14 +167,16 @@ export async function connectionOwnerIsBetaTester(ctx: AppContext, ownerId: stri
   const cached = betaCache.get(ownerId);
   if (cached && now - cached.at < BETA_TTL_MS) return cached.allowed;
 
-  // Local mode has one trusted user and no allowlist to be off.
-  if (!ctx.featureFlags) return ctx.env.BENTO_MODE !== "multi";
-  const [row] = await ctx.db.select({ email: user.email }).from(user).where(eq(user.id, ownerId)).limit(1);
   // Fails closed, like every other flag read here: a server that cannot
   // reach PostHog serves no tools rather than serving them to everyone.
-  const allowed = await ctx.featureFlags.isBetaTester(ownerId, { email: row?.email ?? null });
+  const allowed = await isBetaPerson(ctx, ownerId, await betaPerson(ctx, ownerId));
   betaCache.set(ownerId, { allowed, at: now });
   return allowed;
+}
+
+/** Drops one owner's cached decision, after they change their beta choice. */
+export function forgetBetaDecision(ownerId: string): void {
+  betaCache.delete(ownerId);
 }
 
 /** Drops the cached decisions. For the tests, which flip the flag. */

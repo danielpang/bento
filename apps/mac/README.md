@@ -6,7 +6,10 @@ Native macOS command centre built with the Native SDK (vercel-labs/native). The 
 
 The same choices the `bento` command offers, picked on first launch:
 
-- **Everything on this machine.** Spawns `bento serve` and polls the address it reports.
+- **Run locally.** Spawns `bento serve` and polls the address it reports. A box
+  under it opts into beta features, such as Bento Swarm. The choice is kept in
+  `~/.bento/mac-beta-features` and written to the local server each time it
+  starts (`PATCH /api/account/beta`); Settings turns it off again.
 - **Use a server, agents on the server.** A thin client: no helper process.
 - **Use a server, agents on this machine.** Spawns `bento runner --server <url>`, so the
   board is shared while agents run in local containers against local checkouts.

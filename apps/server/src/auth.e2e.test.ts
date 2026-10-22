@@ -3244,6 +3244,66 @@ test("the board mascots are on for everyone until dismissed", async () => {
   assert.equal((await app.request("/api/account/mascots")).status, 401);
 });
 
+test("a person who turns on beta features gets them, whatever the beta flag says", async () => {
+  const signup = await jsonPost("/api/auth/sign-up/email", {
+    email: "beta-switch@bento.test",
+    password: "correct-horse-battery",
+    name: "Beta Switch",
+  });
+  const token = signup.headers.get("set-auth-token")!;
+  const headers = { authorization: `Bearer ${token}` };
+  const write = (enabled: boolean) =>
+    app.request("/api/account/beta", {
+      method: "PATCH",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    });
+  const flags = async () => ((await (await app.request("/api/flags", { headers })).json()) as { betaTesters: boolean });
+  const swarms = () => app.request("/api/swarms", { headers });
+
+  // This deployment has no PostHog key, so the flag says no to everyone.
+  assert.deepEqual(await (await app.request("/api/account/beta", { headers })).json(), {
+    enabled: false,
+    betaTesters: false,
+  });
+  assert.equal((await app.request("/api/account/beta/plain", { headers })).status, 200);
+  assert.equal(await (await app.request("/api/account/beta/plain", { headers })).text(), "beta|off");
+  assert.equal((await flags()).betaTesters, false);
+  assert.equal((await swarms()).status, 404, "swarms stay hidden before opting in");
+
+  const on = await write(true);
+  assert.equal(on.status, 200);
+  assert.deepEqual(await on.json(), { enabled: true, betaTesters: true });
+  assert.equal(await (await app.request("/api/account/beta/plain", { headers })).text(), "beta|on");
+  assert.equal((await flags()).betaTesters, true);
+  assert.equal((await swarms()).status, 200, "opting in opens what the flag gates");
+
+  const off = await write(false);
+  assert.deepEqual(await off.json(), { enabled: false, betaTesters: false });
+  assert.equal((await swarms()).status, 404);
+
+  // Off in multi mode leaves the flag to decide, so a beta tester stays one.
+  const previous = ctx.featureFlags;
+  ctx.featureFlags = new FeatureFlags(
+    {
+      async evaluateFlags() {
+        return { isEnabled: () => true };
+      },
+      async shutdown() {},
+    },
+    false,
+  );
+  try {
+    assert.deepEqual(await (await app.request("/api/account/beta", { headers })).json(), {
+      enabled: false,
+      betaTesters: true,
+    });
+  } finally {
+    ctx.featureFlags = previous;
+  }
+  assert.equal((await app.request("/api/account/beta")).status, 401);
+});
+
 /**
  * Guessing a password has to get expensive fast. The limit is stored
  * in Postgres rather than memory so it holds across instances, which

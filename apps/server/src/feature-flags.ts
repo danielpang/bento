@@ -14,14 +14,38 @@ import { actor } from "./middleware/actor.js";
  * whose email is on that flag. Add or remove people in PostHog by
  * editing the flag's release conditions. The key never changes.
  *
- * Local mode is always on. There is one trusted user and no tenant
- * boundary, so a laptop install must not hide the thing being built.
+ * Local mode is on unless the person turned it off. There is one
+ * trusted user and no tenant boundary, so a laptop install must not
+ * hide the thing being built from someone who has not said otherwise.
+ *
+ * Each person can also choose for themselves (`identity.user.beta_features`,
+ * from Settings, Account, or the Mac app's first screen): true turns
+ * beta on in either mode, whatever PostHog says; false turns it off in
+ * local mode and, in multi mode, leaves PostHog to decide. `betaByChoice`
+ * is that rule, and every beta check goes through it.
  */
 export const FLAGS = {
   BETA_TESTERS: "beta-testers",
 } as const;
 
 export type FlagKey = (typeof FLAGS)[keyof typeof FLAGS];
+
+/** Who a beta check is about: what PostHog matches on, and their own choice. */
+export interface BetaPerson {
+  email?: string | null;
+  /** `identity.user.beta_features`: null until they choose. */
+  betaFeatures?: boolean | null;
+}
+
+/**
+ * What a person's own choice decides, or null when it leaves the answer
+ * to PostHog. A choice of true always wins; local mode is on unless
+ * they chose false; multi mode without a true choice asks PostHog.
+ */
+export function betaByChoice(local: boolean, choice: boolean | null | undefined): boolean | null {
+  if (local) return choice !== false;
+  return choice === true ? true : null;
+}
 
 /**
  * The PostHog surface this module needs. Narrower than the SDK so
@@ -55,8 +79,13 @@ export class FeatureFlags {
     return this.evaluator !== null;
   }
 
-  /** Whether this user is on the permanent beta-testers allowlist. */
-  isBetaTester(userId: string, person?: { email?: string | null }): Promise<boolean> {
+  /**
+   * Whether beta is on for this user: their own choice when it decides
+   * (`betaByChoice`), else the permanent beta-testers allowlist.
+   */
+  async isBetaTester(userId: string, person?: BetaPerson): Promise<boolean> {
+    const chosen = betaByChoice(this.alwaysOn, person?.betaFeatures);
+    if (chosen !== null) return chosen;
     return this.isEnabled(FLAGS.BETA_TESTERS, userId, person);
   }
 
@@ -80,7 +109,7 @@ export class FeatureFlags {
     }
   }
 
-  async snapshot(userId: string, person?: { email?: string | null }): Promise<{ betaTesters: boolean }> {
+  async snapshot(userId: string, person?: BetaPerson): Promise<{ betaTesters: boolean }> {
     return { betaTesters: await this.isBetaTester(userId, person) };
   }
 
@@ -123,17 +152,32 @@ export async function getBetaTester(
   c: Context,
 ): Promise<{ userId: string; email: string | null } | null> {
   const userId = actor(c);
+  const person = await betaPerson(ctx, userId);
+  if (!(await isBetaPerson(ctx, userId, person))) return null;
+  return { userId, email: person.email };
+}
+
+/** The email and the beta choice of one user, for a beta check about them. */
+export async function betaPerson(
+  ctx: AppContext,
+  userId: string,
+): Promise<{ email: string | null; betaFeatures: boolean | null }> {
   const [row] = await ctx.db
-    .select({ email: user.email })
+    .select({ email: user.email, betaFeatures: user.betaFeatures })
     .from(user)
     .where(eq(user.id, userId))
     .limit(1);
-  const email = row?.email ?? null;
-  const allowed = ctx.featureFlags
-    ? await ctx.featureFlags.isBetaTester(userId, { email })
-    : ctx.env.BENTO_MODE !== "multi";
-  if (!allowed) return null;
-  return { userId, email };
+  return { email: row?.email ?? null, betaFeatures: row?.betaFeatures ?? null };
+}
+
+/**
+ * Whether beta is on for a user already looked up. Without a flags
+ * object (tests, or a caller that built none) the choice still decides,
+ * and what is left undecided is off in multi mode, as it fails closed.
+ */
+export async function isBetaPerson(ctx: AppContext, userId: string, person: BetaPerson): Promise<boolean> {
+  if (ctx.featureFlags) return ctx.featureFlags.isBetaTester(userId, person);
+  return betaByChoice(ctx.env.BENTO_MODE !== "multi", person.betaFeatures) ?? false;
 }
 
 /**
@@ -154,14 +198,8 @@ export async function isBetaRun(
   ctx: AppContext,
   input: { actingUserId: string | null; projectOwnerId: string },
 ): Promise<boolean> {
-  if (!ctx.featureFlags) return ctx.env.BENTO_MODE !== "multi";
   const userId = input.actingUserId ?? input.projectOwnerId;
-  const [row] = await ctx.db
-    .select({ email: user.email })
-    .from(user)
-    .where(eq(user.id, userId))
-    .limit(1);
-  return ctx.featureFlags.isBetaTester(userId, { email: row?.email ?? null });
+  return isBetaPerson(ctx, userId, await betaPerson(ctx, userId));
 }
 
 function withBudget<T>(promise: Promise<T>, ms: number): Promise<T | null> {

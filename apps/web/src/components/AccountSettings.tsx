@@ -11,6 +11,7 @@ import {
 } from "../auth-client.js";
 import { useToast } from "./Toasts.js";
 import { MASCOT_MAX_CARDS } from "../board-mascots.js";
+import { useSetBetaTesters } from "../beta.js";
 
 /**
  * Whether a membership holds the owner role.
@@ -75,8 +76,8 @@ function ownedAccountMessage(names: string[]): string {
 }
 
 /**
- * The person's own account: the onboarding walkthrough and mascot
- * switches, and the way out.
+ * The person's own account: the onboarding walkthrough, mascot and
+ * beta features switches, and the way out.
  *
  * The two deletions are irreversible and neither is urgent, so they sit
  * on this tab rather than beside the controls people use daily, and
@@ -84,11 +85,11 @@ function ownedAccountMessage(names: string[]): string {
  * account is confirmed a second time by email; deleting an organization
  * takes its boards with it and happens at once, so it is the one that
  * has to be spelled out hardest. Local mode has no sign in and no
- * organizations, so there the tab is only the two switches.
+ * organizations, so there the tab is only the three switches.
  */
 export function AccountSettings({ client, mode }: { client: BentoClient; mode: "local" | "multi" }) {
   // Local mode has one trusted user and no sign in, so the only things
-  // on this tab there are the two switches. Split rather than
+  // on this tab there are the three switches. Split rather than
   // returned early below: the sign in and organization hooks there ask
   // /api/auth, which local mode does not mount, and a hook cannot be
   // skipped once called.
@@ -97,6 +98,7 @@ export function AccountSettings({ client, mode }: { client: BentoClient; mode: "
       <>
         <OnboardingCard client={client} />
         <MascotsCard client={client} />
+        <BetaFeaturesCard client={client} mode="local" />
       </>
     );
   }
@@ -141,6 +143,7 @@ function MultiAccountSettings({ client }: { client: BentoClient }) {
 
       <OnboardingCard client={client} />
       <MascotsCard client={client} />
+      <BetaFeaturesCard client={client} mode="multi" />
 
       <section className="section settings-card">
         <h3 className="settings-title">Signed in as</h3>
@@ -353,6 +356,69 @@ function MascotsCard({ client }: { client: BentoClient }) {
         />
         <span className="gate-check-text">Always show mascots</span>
       </label>
+    </section>
+  );
+}
+
+/**
+ * The person's own switch for unfinished product, such as Bento Swarm.
+ * On wins over the beta-testers flag. Off means off in local mode; in
+ * multi mode it leaves the flag to decide, so a person their team put
+ * on it is told why beta is still on.
+ */
+function BetaFeaturesCard({ client, mode }: { client: BentoClient; mode: "local" | "multi" }) {
+  const toast = useToast();
+  const setBetaTesters = useSetBetaTesters();
+  const [state, setState] = useState<{ enabled: boolean; betaTesters: boolean } | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void client
+      .getBetaFeatures()
+      .then((row) => {
+        if (!cancelled) setState(row);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) toast.fail(err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [client, toast]);
+
+  async function change(next: boolean) {
+    setBusy(true);
+    try {
+      const row = await client.setBetaFeatures(next);
+      setState(row);
+      setBetaTesters(row.betaTesters);
+    } catch (err) {
+      toast.fail(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="section settings-card">
+      <h3 className="settings-title">Beta features</h3>
+      <p className="muted">
+        Try what is still being built, such as Bento Swarm, before it is ready for everyone. Beta features can
+        change or break, and only you see them.
+      </p>
+      <label className="gate-check">
+        <input
+          type="checkbox"
+          checked={state?.enabled === true}
+          disabled={busy || state === null}
+          onChange={(e) => void change(e.target.checked)}
+        />
+        <span className="gate-check-text">Try beta features</span>
+      </label>
+      {mode === "multi" && state && !state.enabled && state.betaTesters && (
+        <p className="muted">Beta features are already on for you as a beta tester.</p>
+      )}
     </section>
   );
 }

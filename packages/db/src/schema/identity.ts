@@ -31,6 +31,14 @@ export const user = identity.table("user", {
    * Account turns it back on. Ours, like the walkthrough flag.
    */
   boardMascots: boolean("board_mascots").notNull().default(true),
+  /**
+   * Whether this person chose to try beta features, or null until they
+   * choose. True turns beta on whatever the PostHog flag says. False
+   * turns it off in local mode, where beta is otherwise on, and in
+   * multi mode leaves the PostHog flag to decide. `betaFeaturesOn` in
+   * the server is the one place that reads it.
+   */
+  betaFeatures: boolean("beta_features"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });

@@ -97,9 +97,21 @@
     <column grow="1" gap="14" padding="24" main="center">
       <text>How should this app run?</text>
       <column gap="10" background="surface" radius="md" padding="14">
-        <text>Everything on this machine</text>
+        <text>Run locally</text>
         <text foreground="text_muted" wrap="true">Your own database, board, and agents in containers. Nothing leaves this computer.</text>
-        <button variant="primary" on-press="choose_local">Run locally</button>
+        <!-- Remembered between launches, and applied to the local server
+             each time it starts. Settings turns it off again. One box per
+             state, each keyed: a checkbox keeps its own tick once drawn,
+             so the remembered choice arriving after the first frame
+             would otherwise never show. -->
+        <if test="{betaOptIn}">
+          <checkbox key="beta-setup-on" checked="true" on-toggle="toggle_beta_opt_in" text="Try beta features, such as Bento Swarm" />
+        </if>
+        <else>
+          <checkbox key="beta-setup-off" checked="false" on-toggle="toggle_beta_opt_in" text="Try beta features, such as Bento Swarm" />
+        </else>
+        <text foreground="text_muted" wrap="true">Unfinished work that can change or break. Turn it off any time in Settings.</text>
+        <button variant="primary" on-press="choose_local">Start</button>
       </column>
 
       <column gap="10" background="surface" radius="md" padding="14">
@@ -391,6 +403,17 @@
             <text foreground="text_muted">Currently: light, Bento orange</text>
           </row>
         </else>
+        <if test="{runsLocally}">
+          <separator />
+          <text>Beta features</text>
+          <text foreground="text_muted" wrap="true">Unfinished work, such as Bento Swarm in the web console and the bento command. It can change or break.</text>
+          <if test="{betaOptIn}">
+            <checkbox key="beta-settings-on" checked="true" on-toggle="toggle_beta_opt_in" text="Try beta features" />
+          </if>
+          <else>
+            <checkbox key="beta-settings-off" checked="false" on-toggle="toggle_beta_opt_in" text="Try beta features" />
+          </else>
+        </if>
         <separator />
         <text>Setup</text>
         <text foreground="text_muted" wrap="true">How this app runs: local, against a server, or as a runner. Changing it walks the first-launch choices again.</text>

@@ -953,7 +953,14 @@ serves one. Do not gate a change because it is new. When it is unclear
 whether a feature is large enough, ask rather than gate it by default.
 
 Add people by putting their email on that flag's release conditions.
-Local mode is always on. When a feature is gated:
+Each person can also choose for themselves (`identity.user.beta_features`,
+from Settings, Account in the console, or the Mac app's first screen
+and Settings): on wins over the flag in both modes; off turns beta off
+in local mode, which is otherwise on, and in multi mode leaves the flag
+to decide. `betaByChoice` in `feature-flags.ts` is that rule, and
+`FeatureFlags.isBetaTester` applies it, so every check below gets it
+as long as it passes the person's `betaFeatures` (`betaPerson` reads
+it with the email). When a feature is gated:
 
 - Server: `ctx.featureFlags.isBetaTester(userId, { email })`. A beta
   endpoint that a non-tester must not learn about answers 404 via

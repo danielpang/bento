@@ -1584,6 +1584,22 @@ export class BentoClient {
     });
   }
 
+  /**
+   * This person's beta features switch, and whether beta is on for them.
+   * In multi mode the beta-testers flag can turn beta on with the switch off.
+   */
+  getBetaFeatures() {
+    return this.request<{ enabled: boolean; betaTesters: boolean }>("/api/account/beta");
+  }
+
+  /** On turns beta on for this person whatever the beta-testers flag says. */
+  setBetaFeatures(enabled: boolean) {
+    return this.request<{ enabled: boolean; betaTesters: boolean }>("/api/account/beta", {
+      method: "PATCH",
+      body: JSON.stringify({ enabled }),
+    });
+  }
+
   createProfile(input: { name: string; cli: string; model: string; skill?: string }) {
     return this.request<AgentProfile>("/api/profiles", { method: "POST", body: JSON.stringify(input) });
   }

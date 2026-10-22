@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createFeatureFlags, FeatureFlags, FLAGS, type FlagEvaluator } from "./feature-flags.js";
+import { betaByChoice, createFeatureFlags, FeatureFlags, FLAGS, type FlagEvaluator } from "./feature-flags.js";
 import { loadEnv } from "./env.js";
 
 function evaluator(
@@ -25,7 +25,7 @@ function evaluator(
   };
 }
 
-test("local mode is always on, even without a PostHog key", async () => {
+test("local mode is on until the person turns it off, even without a PostHog key", async () => {
   const flags = createFeatureFlags(loadEnv({ BENTO_MODE: "local" }));
   assert.equal(await flags.isBetaTester("anyone"), true);
   assert.deepEqual(await flags.snapshot("anyone"), { betaTesters: true });
@@ -90,4 +90,38 @@ test("a slow evaluation fails closed inside the budget", async () => {
   const began = Date.now();
   assert.equal(await flags.isBetaTester("user-1"), false);
   assert.ok(Date.now() - began < 500, "must not wait out a hung evaluator");
+});
+
+test("a person's own choice decides before PostHog does", () => {
+  // Local: on unless they chose off.
+  assert.equal(betaByChoice(true, null), true);
+  assert.equal(betaByChoice(true, true), true);
+  assert.equal(betaByChoice(true, false), false);
+  // Multi: on wins; anything else leaves the flag to decide.
+  assert.equal(betaByChoice(false, true), true);
+  assert.equal(betaByChoice(false, false), null);
+  assert.equal(betaByChoice(false, null), null);
+});
+
+test("opting in overrides a PostHog flag that says no, without asking it", async () => {
+  const stub = evaluator({ [FLAGS.BETA_TESTERS]: false });
+  const flags = new FeatureFlags(stub, false);
+  assert.equal(await flags.isBetaTester("user-1", { email: "a@b.test", betaFeatures: true }), true);
+  assert.equal(stub.calls.length, 0);
+});
+
+test("opting in overrides a multi deployment without a PostHog key", async () => {
+  const flags = createFeatureFlags(loadEnv({ BENTO_MODE: "multi" }));
+  assert.equal(await flags.isBetaTester("user-1", { betaFeatures: true }), true);
+});
+
+test("in multi mode the switch off leaves a beta tester on the flag", async () => {
+  const flags = new FeatureFlags(evaluator({ [FLAGS.BETA_TESTERS]: true }), false);
+  assert.equal(await flags.isBetaTester("user-1", { betaFeatures: false }), true);
+});
+
+test("in local mode the switch off turns beta off", async () => {
+  const flags = createFeatureFlags(loadEnv({ BENTO_MODE: "local" }));
+  assert.equal(await flags.isBetaTester("anyone", { betaFeatures: false }), false);
+  assert.deepEqual(await flags.snapshot("anyone", { betaFeatures: false }), { betaTesters: false });
 });
