@@ -11,11 +11,17 @@
 
 # Bento
 
-Kanban for Agents.
+Orchestrate your coding agents. 
 
-Bento is a platform for running AI coding agents across your software development pipeline. Agents ship code faster than anyone can track by hand. Bento puts every feature on one board and shows you where each one is so you don't lose context or lose track of them.
+Bento is an application for running AI coding agents across your software development pipeline. Engineers are shipping features faster with coding agents. However, engineers are losing track of all their sessions and the quality of PRs are dropping.
 
-You define the stages of your software development process, for example: product investigation, UI/UX design, engineering requirements, implementation, code review, quality engineering. Each stage gets an agent and a model, from Claude Code, Codex CLI, Cursor CLI, opencode, pi, Poolside, DeepSeek Harness, the Antigravity CLI, or Muse Code. Claude Code, opencode, and DeepSeek Harness can also run models on Ollama Cloud or an Ollama server of your own. Cards move across the board as agents work on them, each in its own sandbox.
+With Bento, You define the stages of your software development process, for example: product investigation, UI/UX design, engineering requirements, implementation, code review, and quality engineering. Each stage gets an agent, model and a skill to define what work needs to be done. Features move across each stage as agents work on them, each feature has its own sandbox.
+
+## Mac application
+
+[Download Bento for Mac](https://usebento.ai/download) (Apple Silicon and Intel). The Mac app supports Bento local or a remote server.
+
+See the [Mac application guide](./apps/desktop/README.md) for packaging and setup.
 
 ## CLI
 
@@ -37,12 +43,6 @@ bento setup
 Connect a repository, configure agents and credentials, then return to the board. Run `bento` next time; use `bento update` to upgrade.
 
 See the **[Bento CLI guide](./docs/tui.md)** for settings, shortcuts, and cloud setup (no local Docker required).
-
-## Mac application
-
-[Download Bento for Mac](https://usebento.ai/download) (Apple Silicon and Intel). The Mac app supports Bento local or a remote server.
-
-See the [Mac application guide](./apps/desktop/README.md) for packaging and setup.
 
 ## Web UI
 
