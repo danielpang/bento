@@ -19,8 +19,8 @@ import { mintConnectionToken } from "../mcp/connections.js";
  * and revoke everyone's, the personal-server governance model. The raw
  * token is returned once from the create and never again.
  *
- * Beta: these routes answer 404 to anyone off the beta-testers flag,
- * the getBetaTester convention.
+ * Beta: these routes answer 404 to anyone with beta features off, the
+ * getBetaTester convention.
  */
 
 const createConnection = z.object({

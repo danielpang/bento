@@ -401,7 +401,7 @@ export interface RunArtifact {
 }
 
 export interface FlagSnapshot {
-  /** Whether this user is on the permanent beta-testers allowlist. */
+  /** Whether this user has beta features on. */
   betaTesters: boolean;
 }
 

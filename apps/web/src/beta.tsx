@@ -2,17 +2,12 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from "
 import type { BentoClient } from "@bento/api-client";
 
 /**
- * Whether the signed-in user is on the permanent beta-testers flag.
+ * Whether the signed-in user turned beta features on (Settings, Account).
  *
  * New product that is not ready for every signed-in user renders
- * through `BetaOnly` (or `useBetaTesters` for a lighter check). The
- * server evaluates PostHog; this module only consumes `/api/flags`.
- * Hidden until that answer arrives, so unfinished UI cannot flash.
- *
- * Add people in PostHog by putting their email on the `beta-testers`
- * flag's release conditions. Each person can also turn beta on for
- * themselves in Settings, Account, which wins over the flag; local mode
- * is on until they turn it off there.
+ * through `BetaOnly` (or `useBetaTesters` for a lighter check). This
+ * module only consumes `/api/flags`. Hidden until that answer arrives,
+ * so unfinished UI cannot flash.
  */
 const BetaTestersContext = createContext<{ ready: boolean; enabled: boolean; set: (enabled: boolean) => void }>({
   ready: false,
@@ -74,7 +69,7 @@ export function useBetaTesters(): boolean {
   return ready && enabled;
 }
 
-/** Renders children only for users on the beta-testers flag. */
+/** Renders children only for users with beta features on. */
 export function BetaOnly({ children }: { children: ReactNode }) {
   if (!useBetaTesters()) return null;
   return children;

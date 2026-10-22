@@ -547,7 +547,7 @@ and back to queued when the run ends without one
 back by the coordinator instead, which reads how the run ended to decide
 whether they wake another planner.
 
-Both are behind the beta testers flag (`isBetaRun` in
+Both are behind beta features (`isBetaRun` in
 `swarmLiveConversation`), because a held planner is a held machine.
 
 ## A live session is a line per message or a protocol, and a reattach never decides again
@@ -943,28 +943,24 @@ anything its sandbox can, so one prompt injection would exfiltrate the
 operator's key. Local mode uses the process environment because there is
 one trusted user and no tenant boundary.
 
-## Only large features go behind the beta testers flag
+## Only large features go behind beta features
 
-A large feature, one on the scale of Bento Swarm, goes behind
-`beta-testers`, a permanent PostHog flag, while it is unfinished.
+A large feature, one on the scale of Bento Swarm, goes behind beta
+features while it is unfinished.
 Everything else ships to every signed-in user: a new capability for an
 existing agent, a new control on an existing screen, an endpoint that
 serves one. Do not gate a change because it is new. When it is unclear
 whether a feature is large enough, ask rather than gate it by default.
 
-Add people by putting their email on that flag's release conditions.
-Each person can also choose for themselves (`identity.user.beta_features`,
-from Settings, Account in the console, or the Mac app's first screen
-and Settings): on wins over the flag in both modes; off turns beta off
-in local mode, which is otherwise on, and in multi mode leaves the flag
-to decide. `betaByChoice` in `feature-flags.ts` is that rule, and
-`FeatureFlags.isBetaTester` applies it, so every check below gets it
-as long as it passes the person's `betaFeatures` (`betaPerson` reads
-it with the email). When a feature is gated:
+Beta is each person's own switch, `identity.user.beta_features`: off
+until they turn it on in Settings, Account (or the Mac app's checkbox),
+in both modes. Nothing else turns it on; there is no PostHog flag.
+`hasBetaFeatures` in `feature-flags.ts` reads it. When a feature is
+gated:
 
-- Server: `ctx.featureFlags.isBetaTester(userId, { email })`. A beta
-  endpoint that a non-tester must not learn about answers 404 via
-  `getBetaTester`, the same convention as the access helpers.
+- Server: `hasBetaFeatures(ctx, userId)`. A beta endpoint that someone
+  without beta must not learn about answers 404 via `getBetaTester`,
+  the same convention as the access helpers.
 - Console: wrap the UI in `<BetaOnly>` from `apps/web/src/beta.tsx`.
   `useBetaTesters()` is the boolean for lighter checks.
 - Orchestrator: a run has no session, and not always a person. The
@@ -972,16 +968,16 @@ it with the email). When a feature is gated:
   schedules start one as nobody. `isBetaRun` asks about the acting
   member when there is one and the project's owner when there is not,
   so a team's auto-started stages behave like the runs it starts by
-  hand. A capability given to an agent belongs behind the same flag as
-  the console that shows what the agent did with it, until both are
+  hand. A capability given to an agent belongs behind the same switch
+  as the console that shows what the agent did with it, until both are
   ready. The card tools on the MCP gateway (`create_card`,
   `set_pull_request`, `add_pull_request_comment`) are rolled out to
-  every run; only the board's group view of split cards is still on
-  the flag. The sandbox provider is not a product setting at all: every
+  every run; only the board's group view of split cards is still
+  beta. The sandbox provider is not a product setting at all: every
   project is on `auto`, beta or not, and nothing in the console or the
   API changes it.
 
-Do not mint a second flag for "show this to testers". This is that flag.
+Do not mint a flag for "show this to testers". This switch is that.
 
 ## Verify against something real before calling it done
 

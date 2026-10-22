@@ -5,7 +5,6 @@ import pg from "pg";
 import { createDb, createPool, runMigrations, type Db } from "@bento/db";
 import type { AppContext, Entitlements } from "../../context.js";
 import { loadEnv } from "../../env.js";
-import { FeatureFlags } from "../../feature-flags.js";
 import { actorMiddleware } from "../../middleware/actor.js";
 import { requireSwarms } from "./gate.js";
 
@@ -13,12 +12,11 @@ import { requireSwarms } from "./gate.js";
  * The swarm gate, against a real database and a real request.
  *
  * Two things are worth checking here rather than in a unit test. The
- * order of the two refusals: a person who is not a beta tester has to
+ * order of the two refusals: a person without beta features has to
  * get 404, because 402 would tell them the feature exists. And that
- * both gates collapse in local mode, which is the mode a laptop install
- * runs and the one where nothing may be gated at all: the flag is on
- * and no entitlements module is registered, so a check that reads the
- * plan has to answer "allowed" without one.
+ * local mode, which registers no entitlements module, answers only to
+ * the switch: a check that reads the plan has to answer "allowed"
+ * without one.
  */
 const adminUrl = process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5439/app";
 const testDbName = "swarm_gate_test";
@@ -50,21 +48,12 @@ after(async () => {
   await pool?.end();
 });
 
-/** Flags with the allowlist forced on or off, without reaching PostHog. */
-function flags(enabled: boolean): FeatureFlags {
-  return new FeatureFlags(
-    {
-      evaluateFlags: async () => ({ isEnabled: () => enabled }),
-      shutdown: async () => {},
-    },
-    false,
-  );
+/** Turns one user's beta features switch on or off. */
+async function setBeta(userId: string, enabled: boolean): Promise<void> {
+  await pool.query(`update identity."user" set beta_features = $2 where id = $1`, [userId, enabled]);
 }
 
-function multiCtx(overrides: {
-  featureFlags?: FeatureFlags;
-  entitlements?: Entitlements;
-}): AppContext {
+function multiCtx(overrides: { entitlements?: Entitlements } = {}): AppContext {
   return {
     env: loadEnv({ BENTO_MODE: "multi", DATABASE_URL: testUrl } as NodeJS.ProcessEnv),
     db,
@@ -86,9 +75,6 @@ function localCtx(overrides: { entitlements?: Entitlements } = {}): AppContext {
     env: loadEnv({ BENTO_MODE: "local", DATABASE_URL: testUrl } as NodeJS.ProcessEnv),
     db,
     userId: "local-user",
-    // Local mode always answers yes, which is what createFeatureFlags
-    // builds there.
-    featureFlags: new FeatureFlags(null, true),
     ...overrides,
   } as unknown as AppContext;
 }
@@ -118,7 +104,8 @@ const allowingPlan = {
 } as unknown as Entitlements;
 
 test("a beta tester on a plan that includes swarms is allowed", async () => {
-  const answer = await ask(multiCtx({ featureFlags: flags(true), entitlements: allowingPlan }));
+  await setBeta("u1", true);
+  const answer = await ask(multiCtx({ entitlements: allowingPlan }));
   assert.equal(answer.status, 200);
   assert.deepEqual(answer.body, { allowed: true });
 });
@@ -126,13 +113,15 @@ test("a beta tester on a plan that includes swarms is allowed", async () => {
 test("a non tester is told nothing, even on a plan that would refuse", async () => {
   // Both gates would fire. The flag has to win, or the 402 announces a
   // feature this person is not supposed to know about.
-  const answer = await ask(multiCtx({ featureFlags: flags(false), entitlements: refusingPlan }));
+  await setBeta("u1", false);
+  const answer = await ask(multiCtx({ entitlements: refusingPlan }));
   assert.equal(answer.status, 404, "a non tester must not be able to tell that swarms exist");
   assert.deepEqual(answer.body, { error: "not found" });
 });
 
 test("a tester whose plan does not include swarms gets PLAN_LIMIT", async () => {
-  const answer = await ask(multiCtx({ featureFlags: flags(true), entitlements: refusingPlan }));
+  await setBeta("u1", true);
+  const answer = await ask(multiCtx({ entitlements: refusingPlan }));
   assert.equal(answer.status, 402);
   const body = answer.body as { code: string; error: string; message: string };
   assert.equal(body.code, "PLAN_LIMIT");
@@ -141,12 +130,19 @@ test("a tester whose plan does not include swarms gets PLAN_LIMIT", async () => 
 });
 
 test("multi mode without a billing module has no plan to refuse", async () => {
-  // The open source install: the flag decides, and nothing else does.
-  const answer = await ask(multiCtx({ featureFlags: flags(true) }));
+  // The open source install: the switch decides, and nothing else does.
+  await setBeta("u1", true);
+  const answer = await ask(multiCtx());
   assert.equal(answer.status, 200);
 });
 
-test("local mode is allowed with no flags host and no entitlements", async () => {
+test("local mode is hidden until the person turns beta on", async () => {
+  await setBeta("local-user", false);
+  assert.equal((await ask(localCtx())).status, 404);
+});
+
+test("local mode with beta on is allowed with no entitlements", async () => {
+  await setBeta("local-user", true);
   const answer = await ask(localCtx());
   assert.equal(answer.status, 200);
   assert.deepEqual(answer.body, { allowed: true });
@@ -156,6 +152,7 @@ test("local mode is still allowed if a module somehow refuses", async () => {
   // Nothing registers entitlements locally, so this is belt and braces:
   // there is no organization on a local request, and a plan check with
   // no organization has nobody to ask about.
+  await setBeta("local-user", true);
   const answer = await ask(localCtx({ entitlements: refusingPlan }));
   assert.equal(answer.status, 200, "local mode has one user and no team to bill");
 });

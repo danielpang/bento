@@ -26,6 +26,7 @@ import {
   runMigrations,
   sandboxes,
   stages,
+  user,
 } from "@bento/db";
 import { SseParser } from "@bento/core";
 import {
@@ -48,7 +49,6 @@ import { SANDBOX_PROVISIONED_EVENT, SANDBOX_PROVISION_FAILED_EVENT, SANDBOX_READ
 import { recordingAnalytics } from "./test-analytics.js";
 import { EventBus } from "./events.js";
 import { loadEnv } from "./env.js";
-import { FeatureFlags, createFeatureFlags } from "./feature-flags.js";
 import {
   deliverQueuedMessage,
   markCancelled,
@@ -127,6 +127,9 @@ before(async () => {
   boss.on("error", () => {});
   await boss.start();
   const userId = await ensureLocalUser(db);
+  // The local user has beta features on, as they would after ticking
+  // the box; the tests that need them off turn them off.
+  await db.update(user).set({ betaFeatures: true }).where(eq(user.id, userId));
 
   ctx = {
     env,
@@ -142,7 +145,6 @@ before(async () => {
     liveInputs: new Map(),
     draining: false,
     userId,
-    featureFlags: createFeatureFlags(env),
     analytics: analytics.analytics,
   };
   await registerJobs(ctx);
@@ -153,6 +155,11 @@ after(async () => {
   await ctx.boss.stop({ close: true, timeout: 1000 });
   await ctx.pool.end();
 });
+
+/** Turns beta features on or off for the local user, the way the switch would. */
+async function setLocalBeta(enabled: boolean) {
+  await ctx.db.update(user).set({ betaFeatures: enabled }).where(eq(user.id, ctx.userId));
+}
 
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok && res.status !== 201) {
@@ -568,10 +575,9 @@ test("a card's sandbox wait is measured from queueing, new first and reused afte
     await app.request(`/api/features/${feature.id}`),
   );
   assert.equal(card.runs.find((r) => r.id === first.id)?.sandboxProvider, "local-process", "and so does the card");
-  // Anyone who is not a beta tester gets neither, the way the console
-  // shows it to testers only.
-  const flags = ctx.featureFlags;
-  ctx.featureFlags = new FeatureFlags(null, false);
+  // Anyone without beta features gets neither, the way the console
+  // shows it to them only.
+  await setLocalBeta(false);
   try {
     const hiddenRun = await json<Record<string, unknown>>(await app.request(`/api/runs/${first.id}`));
     assert.equal("sandboxProvider" in hiddenRun, false, "the run route leaves it out");
@@ -581,7 +587,7 @@ test("a card's sandbox wait is measured from queueing, new first and reused afte
     assert.ok(hiddenCard.runs.every((r) => !("sandboxProvider" in r)), "and so does the card");
     assert.ok(hiddenCard.runs.every((r) => !("sandboxExecution" in r)), "card responses also hide recovery identities");
   } finally {
-    ctx.featureFlags = flags;
+    await setLocalBeta(true);
   }
 
   // The same card again. Its sandbox row is still there and the
@@ -2122,8 +2128,7 @@ test("a run records its session id at init, not only at the end", { timeout: 60_
   // No need to sit out the slow run once the point is proven. Cancelled
   // as someone who is not a beta tester, whose answer leaves out the
   // provider the way every whole run row does for them.
-  const flags = ctx.featureFlags;
-  ctx.featureFlags = new FeatureFlags(null, false);
+  await setLocalBeta(false);
   try {
     const cancelled = await json<Record<string, unknown>>(
       await app.request(`/api/runs/${running!.id}/cancel`, { method: "POST" }),
@@ -2131,7 +2136,7 @@ test("a run records its session id at init, not only at the end", { timeout: 60_
     assert.equal(cancelled.id, running!.id);
     assert.equal("sandboxProvider" in cancelled, false, "the cancel route leaves the provider out");
   } finally {
-    ctx.featureFlags = flags;
+    await setLocalBeta(true);
   }
   await waitForRun(running!.id);
 });

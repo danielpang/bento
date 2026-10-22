@@ -46,7 +46,6 @@ import { recordingAnalytics } from "./test-analytics.js";
 import { createDrivers, type AppContext } from "./context.js";
 import { EventBus } from "./events.js";
 import { loadEnv } from "./env.js";
-import { createFeatureFlags, FeatureFlags } from "./feature-flags.js";
 import { resolveAgentEnv } from "./orchestrator/agent-env.js";
 import { customProviderRunEnv } from "./orchestrator/custom-provider.js";
 import { executeRun } from "./orchestrator/run-executor.js";
@@ -102,7 +101,6 @@ before(async () => {
     liveInputs: new Map(),
     draining: false,
     userId: "",
-    featureFlags: createFeatureFlags(env),
   };
   const auth = createAuth(env, db);
   assert.ok(auth, "multi mode must construct an auth instance");
@@ -114,6 +112,13 @@ after(async () => {
   await ctx.boss.stop({ close: true, timeout: 1000 });
   await ctx.pool.end();
 });
+
+/** Turns beta features on or off for these accounts, the way their own switch would. */
+async function setBetaFeatures(emails: string[], enabled: boolean) {
+  for (const email of emails) {
+    await ctx.db.update(user).set({ betaFeatures: enabled }).where(eq(user.email, email));
+  }
+}
 
 function jsonPost(path: string, body: unknown, token?: string) {
   return app.request(path, {
@@ -131,7 +136,7 @@ test("the API refuses unauthenticated requests in multi mode", async () => {
   assert.equal(res.status, 401);
 });
 
-test("feature flags refuse an anonymous caller and follow the beta testers allowlist", async () => {
+test("feature flags refuse an anonymous caller and follow the person's beta switch", async () => {
   const anonymous = await app.request("/api/flags");
   assert.equal(anonymous.status, 401);
 
@@ -147,23 +152,10 @@ test("feature flags refuse an anonymous caller and follow the beta testers allow
   assert.equal(off.status, 200);
   assert.deepEqual(await off.json(), { betaTesters: false });
 
-  const previous = ctx.featureFlags;
-  ctx.featureFlags = new FeatureFlags(
-    {
-      async evaluateFlags(_id, opts) {
-        return { isEnabled: () => opts?.personProperties?.email === "flags-user@bento.test" };
-      },
-      async shutdown() {},
-    },
-    false,
-  );
-  try {
-    const on = await app.request("/api/flags", { headers: { authorization: `Bearer ${token}` } });
-    assert.equal(on.status, 200);
-    assert.deepEqual(await on.json(), { betaTesters: true });
-  } finally {
-    ctx.featureFlags = previous;
-  }
+  await setBetaFeatures(["flags-user@bento.test"], true);
+  const on = await app.request("/api/flags", { headers: { authorization: `Bearer ${token}` } });
+  assert.equal(on.status, 200);
+  assert.deepEqual(await on.json(), { betaTesters: true });
 });
 
 test("sign up returns a bearer token that authenticates API calls", async () => {
@@ -747,36 +739,28 @@ test("a team's swarm and its planner run carry the team, under RLS", async () =>
   ).json()) as { id: string; organizationId: string };
   assert.equal(project.organizationId, org.id);
 
-  const flagsBefore = ctx.featureFlags;
-  ctx.featureFlags = new FeatureFlags(
-    { async evaluateFlags() { return { isEnabled: () => true }; }, async shutdown() {} },
-    false,
+  await setBetaFeatures(["swarm-owner@bento.test"], true);
+  const created = await jsonPost("/api/swarms", { projectId: project.id, title: "Team goal", goal: "ship it" }, token);
+  assert.equal(created.status, 201, await created.clone().text());
+  const swarm = (await created.json()) as { id: string; plannerRunId: string; organizationId: string | null };
+  assert.equal(swarm.organizationId, org.id, "the insert trigger derived the team from the project");
+  assert.ok(swarm.plannerRunId, "and a planner was started");
+
+  const [run] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, swarm.plannerRunId));
+  assert.equal(run?.organizationId, org.id, "the run carries the same team");
+  assert.equal(run?.type, "swarm");
+  assert.equal(run?.role, "planner");
+  assert.equal(run?.featureId, null, "and no card, which is what its shape constraint says");
+
+  const [profile] = await ctx.db
+    .select({ organizationId: agentProfiles.organizationId })
+    .from(agentProfiles)
+    .where(eq(agentProfiles.id, run!.agentProfileId));
+  assert.equal(
+    profile?.organizationId,
+    org.id,
+    "the seeded planner agent belongs to the team too, which the run tenant trigger requires",
   );
-  try {
-    const created = await jsonPost("/api/swarms", { projectId: project.id, title: "Team goal", goal: "ship it" }, token);
-    assert.equal(created.status, 201, await created.clone().text());
-    const swarm = (await created.json()) as { id: string; plannerRunId: string; organizationId: string | null };
-    assert.equal(swarm.organizationId, org.id, "the insert trigger derived the team from the project");
-    assert.ok(swarm.plannerRunId, "and a planner was started");
-
-    const [run] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, swarm.plannerRunId));
-    assert.equal(run?.organizationId, org.id, "the run carries the same team");
-    assert.equal(run?.type, "swarm");
-    assert.equal(run?.role, "planner");
-    assert.equal(run?.featureId, null, "and no card, which is what its shape constraint says");
-
-    const [profile] = await ctx.db
-      .select({ organizationId: agentProfiles.organizationId })
-      .from(agentProfiles)
-      .where(eq(agentProfiles.id, run!.agentProfileId));
-    assert.equal(
-      profile?.organizationId,
-      org.id,
-      "the seeded planner agent belongs to the team too, which the run tenant trigger requires",
-    );
-  } finally {
-    ctx.featureFlags = flagsBefore;
-  }
 });
 
 /**
@@ -888,17 +872,13 @@ test("every entity route refuses a foreign tenant", async () => {
   assert.ok(mcpServer!.id, "the owner's MCP server must exist for the MCP routes to be probed");
 
   /**
-   * Swarms sit behind the beta testers flag, which answers 404 for
-   * everybody without a PostHog key. Turned on for both users here, so
-   * what the matrix measures is the tenant check rather than the flag:
-   * a route that refuses because the feature is hidden proves nothing
-   * about whether it would refuse a foreign tenant once it is not.
+   * Swarms are beta, which answers 404 to anybody with beta features
+   * off. Turned on for both users here, so what the matrix measures is
+   * the tenant check rather than the switch: a route that refuses
+   * because the feature is hidden proves nothing about whether it would
+   * refuse a foreign tenant once it is not.
    */
-  const flagsBefore = ctx.featureFlags;
-  ctx.featureFlags = new FeatureFlags(
-    { async evaluateFlags() { return { isEnabled: () => true }; }, async shutdown() {} },
-    false,
-  );
+  await setBetaFeatures(["matrix-owner@bento.test", "matrix-intruder@bento.test"], true);
   const swarm = (await (
     await asOwner("/api/swarms", { method: "POST", body: JSON.stringify({ projectId: project.id, title: "Mine" }) })
   ).json()) as { id: string; plannerRunId: string };
@@ -1220,9 +1200,9 @@ test("every entity route refuses a foreign tenant", async () => {
     .from(swarms)
     .where(eq(swarms.id, swarm.id));
   assert.equal(settingsAfter?.completionCommand, null, "the intruder must not have set a command on the owner's swarm");
-  ctx.featureFlags = flagsBefore;
+  await setBetaFeatures(["matrix-owner@bento.test", "matrix-intruder@bento.test"], false);
 
-  // The question routes refuse only by tenant: with the beta flag off
+  // The question routes refuse only by tenant: with beta features off
   // again, the owner still reaches them, and the intruder's answer
   // never landed.
   const ownQuestions = await asOwner(`/api/runs/${run.id}/questions`);
@@ -1314,8 +1294,6 @@ test("every entity route refuses a foreign tenant", async () => {
 });
 
 test("custom providers keep definitions and keys inside their organization", async () => {
-  const previous = ctx.featureFlags;
-  ctx.featureFlags = new FeatureFlags(null, true);
   try {
     const first = await jsonPost("/api/auth/sign-up/email", { email: "provider-a@bento.test", password: "correct-horse-battery", name: "Provider A" });
     const second = await jsonPost("/api/auth/sign-up/email", { email: "provider-b@bento.test", password: "correct-horse-battery", name: "Provider B" });
@@ -1323,6 +1301,7 @@ test("custom providers keep definitions and keys inside their organization", asy
     const firstToken = first.headers.get("set-auth-token")!;
     const secondToken = second.headers.get("set-auth-token")!;
     const memberToken = memberSignUp.headers.get("set-auth-token")!;
+    await setBetaFeatures(["provider-a@bento.test", "provider-b@bento.test", "provider-member@bento.test"], true);
     const firstOrg = (await (await jsonPost("/api/auth/organization/create", { name: "Provider A", slug: "provider-a" }, firstToken)).json()) as { id: string };
     const secondOrg = (await (await jsonPost("/api/auth/organization/create", { name: "Provider B", slug: "provider-b" }, secondToken)).json()) as { id: string };
     await jsonPost("/api/auth/organization/set-active", { organizationId: firstOrg.id }, firstToken);
@@ -1484,7 +1463,9 @@ test("custom providers keep definitions and keys inside their organization", asy
     assert.equal(provisioned, false);
     assert.equal(finished?.status, "failed");
     assert.match(finished?.error ?? "", /custom provider is not available/);
-  } finally { ctx.featureFlags = previous; }
+  } finally {
+    await setBetaFeatures(["provider-a@bento.test", "provider-b@bento.test", "provider-member@bento.test"], false);
+  }
 });
 
 /**
@@ -3244,7 +3225,7 @@ test("the board mascots are on for everyone until dismissed", async () => {
   assert.equal((await app.request("/api/account/mascots")).status, 401);
 });
 
-test("a person who turns on beta features gets them, whatever the beta flag says", async () => {
+test("beta features are off until a person turns them on", async () => {
   const signup = await jsonPost("/api/auth/sign-up/email", {
     email: "beta-switch@bento.test",
     password: "correct-horse-battery",
@@ -3260,47 +3241,24 @@ test("a person who turns on beta features gets them, whatever the beta flag says
     });
   const flags = async () => ((await (await app.request("/api/flags", { headers })).json()) as { betaTesters: boolean });
   const swarms = () => app.request("/api/swarms", { headers });
+  const plain = async () => (await app.request("/api/account/beta/plain", { headers })).text();
 
-  // This deployment has no PostHog key, so the flag says no to everyone.
-  assert.deepEqual(await (await app.request("/api/account/beta", { headers })).json(), {
-    enabled: false,
-    betaTesters: false,
-  });
-  assert.equal((await app.request("/api/account/beta/plain", { headers })).status, 200);
-  assert.equal(await (await app.request("/api/account/beta/plain", { headers })).text(), "beta|off");
+  assert.deepEqual(await (await app.request("/api/account/beta", { headers })).json(), { enabled: false });
+  assert.equal(await plain(), "beta|off");
   assert.equal((await flags()).betaTesters, false);
   assert.equal((await swarms()).status, 404, "swarms stay hidden before opting in");
 
   const on = await write(true);
   assert.equal(on.status, 200);
-  assert.deepEqual(await on.json(), { enabled: true, betaTesters: true });
-  assert.equal(await (await app.request("/api/account/beta/plain", { headers })).text(), "beta|on");
+  assert.deepEqual(await on.json(), { enabled: true });
+  assert.equal(await plain(), "beta|on");
   assert.equal((await flags()).betaTesters, true);
-  assert.equal((await swarms()).status, 200, "opting in opens what the flag gates");
+  assert.equal((await swarms()).status, 200, "turning beta on opens what it gates");
 
   const off = await write(false);
-  assert.deepEqual(await off.json(), { enabled: false, betaTesters: false });
+  assert.deepEqual(await off.json(), { enabled: false });
+  assert.equal((await flags()).betaTesters, false);
   assert.equal((await swarms()).status, 404);
-
-  // Off in multi mode leaves the flag to decide, so a beta tester stays one.
-  const previous = ctx.featureFlags;
-  ctx.featureFlags = new FeatureFlags(
-    {
-      async evaluateFlags() {
-        return { isEnabled: () => true };
-      },
-      async shutdown() {},
-    },
-    false,
-  );
-  try {
-    assert.deepEqual(await (await app.request("/api/account/beta", { headers })).json(), {
-      enabled: false,
-      betaTesters: true,
-    });
-  } finally {
-    ctx.featureFlags = previous;
-  }
   assert.equal((await app.request("/api/account/beta")).status, 401);
 });
 

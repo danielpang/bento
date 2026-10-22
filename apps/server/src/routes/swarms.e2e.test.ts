@@ -27,6 +27,7 @@ import {
   swarmTasks,
   swarms,
   type Db,
+  user,
 } from "@bento/db";
 import { LocalProcessDriver, WorktreeManager, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
 import { performTaskStartOver } from "../orchestrator/swarm/start-over.js";
@@ -37,7 +38,6 @@ import { SecretBox } from "../secrets.js";
 import { ensureLocalUser, type AppContext, type Entitlements } from "../context.js";
 import { EventBus } from "../events.js";
 import { loadEnv } from "../env.js";
-import { createFeatureFlags } from "../feature-flags.js";
 import { mintRunGrant } from "../mcp/grants.js";
 import { tickSwarm } from "../orchestrator/swarm/coordinator.js";
 import { takeNodeMessages } from "../orchestrator/swarm/node-messages.js";
@@ -104,6 +104,8 @@ before(async () => {
   };
   db = createDb(pool);
   const userId = await ensureLocalUser(db);
+  // Swarms are beta: the local user has turned beta features on.
+  await db.update(user).set({ betaFeatures: true }).where(eq(user.id, userId));
   queued = [];
 
   ctx = {
@@ -133,7 +135,6 @@ before(async () => {
     liveInputs: new Map(),
     draining: false,
     userId,
-    featureFlags: createFeatureFlags(env),
   };
   app = createApp(ctx);
 
@@ -2262,15 +2263,14 @@ test("a person who is not a beta tester is not told the swarms exist", async () 
   const seen = (await asTester.json()) as { bySwarm: { swarmId: string }[] };
   assert.equal(seen.bySwarm.length, 1, "a tester sees the swarm section");
 
-  const flags = ctx.featureFlags;
-  ctx.featureFlags = { isBetaTester: async () => false } as unknown as typeof flags;
+  await db.update(user).set({ betaFeatures: false }).where(eq(user.id, ctx.userId));
   try {
     const res = await app.request(`/api/projects/${projectId}/usage`);
     assert.equal(res.status, 200, "the cards on this page are not behind the flag");
     const body = (await res.json()) as { bySwarm: unknown[] };
     assert.deepEqual(body.bySwarm, [], "and the swarms are not on it at all");
   } finally {
-    ctx.featureFlags = flags;
+    await db.update(user).set({ betaFeatures: true }).where(eq(user.id, ctx.userId));
   }
 });
 

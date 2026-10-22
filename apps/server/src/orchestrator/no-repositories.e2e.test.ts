@@ -65,7 +65,8 @@ before(async () => {
 
   pool = createPool(testUrl);
   db = createDb(pool);
-  await pool.query(`insert into identity."user" (id,name,email) values ('u1','U','u@x.test')`);
+  // Beta on, because the swarm route is one of the doors checked here.
+  await pool.query(`insert into identity."user" (id,name,email,beta_features) values ('u1','U','u@x.test',true)`);
   await pool.query(`insert into identity.organization (id,name,slug) values ('org-a','A','org-a')`);
   await pool.query(
     `insert into projects (id,owner_id,organization_id,name,default_branch) values ($1,'u1','org-a','P','main')`,

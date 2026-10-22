@@ -258,15 +258,14 @@ const envSchema = z.object({
   AWS_REGION: z.string().optional(),
 
   /**
-   * PostHog: product analytics, error tracking, log export, and the
-   * beta-testers feature flag. All four read the same project token.
+   * PostHog: product analytics, error tracking, and log export. All
+   * three read the same project token.
    * The console also reads it from /api/health to capture browser
    * exceptions. Local mode never sends, even if a leftover key is in
    * the environment: a laptop is not a telemetry source. Multi mode
    * without a key also sends nothing, and the server says so once at
    * boot, because events silently missed are worse than a line of
-   * noise. New product that is not ready for every signed-in user is
-   * gated on `beta-testers`.
+   * noise.
    */
   POSTHOG_API_KEY: z.string().optional(),
   POSTHOG_HOST: z.string().default("https://us.i.posthog.com"),

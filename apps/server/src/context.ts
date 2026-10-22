@@ -13,7 +13,6 @@ import {
 import type PgBoss from "pg-boss";
 import type pg from "pg";
 import type { Analytics } from "./analytics.js";
-import type { FeatureFlags } from "./feature-flags.js";
 import type { ArtifactStore } from "./artifact-store.js";
 import type { Auth } from "./auth.js";
 import type { SecretBox } from "./secrets.js";
@@ -182,12 +181,6 @@ export interface AppContext {
   entitlements?: Entitlements;
   /** PostHog, when a key is configured; absent means nothing is sent. */
   analytics?: Analytics;
-  /**
-   * Permanent feature flags (the beta-testers allowlist). Always
-   * constructed: local mode is on, multi mode without a key is off.
-   * Absent only in tests that never touch flags.
-   */
-  featureFlags?: FeatureFlags;
   /** Encrypts organization secrets at rest. */
   secretBox: SecretBox;
   /**

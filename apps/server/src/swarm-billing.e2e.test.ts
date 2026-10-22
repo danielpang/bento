@@ -19,6 +19,7 @@ import {
   swarmTasks,
   swarms,
   type Db,
+  user,
 } from "@bento/db";
 import { LocalProcessDriver, WorktreeManager } from "@bento/sandbox";
 import { singleDriver } from "./orchestrator/sandbox-driver.js";
@@ -28,7 +29,6 @@ import { SecretBox } from "./secrets.js";
 import { ensureLocalUser, type AppContext, type Entitlements } from "./context.js";
 import { EventBus } from "./events.js";
 import { loadEnv } from "./env.js";
-import { createFeatureFlags } from "./feature-flags.js";
 import { executeRun, markCancelled } from "./orchestrator/run-executor.js";
 import { tickSwarm } from "./orchestrator/swarm/coordinator.js";
 import { SANDBOX_PROVISIONED_EVENT } from "./orchestrator/sandbox-metrics.js";
@@ -148,6 +148,8 @@ before(async () => {
   const pool = createPool(testUrl);
   db = createDb(pool);
   const userId = await ensureLocalUser(db);
+  // Swarms are beta: the local user has turned beta features on.
+  await db.update(user).set({ betaFeatures: true }).where(eq(user.id, userId));
 
   ctx = {
     env,
@@ -171,7 +173,6 @@ before(async () => {
     liveInputs: new Map(),
     draining: false,
     userId,
-    featureFlags: createFeatureFlags(env),
     entitlements,
   };
   app = createApp(ctx);

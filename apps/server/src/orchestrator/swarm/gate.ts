@@ -17,18 +17,17 @@ export type SwarmRefusal =
  *
  * Two gates, in this order and never the other way round:
  *
- * 1. The beta-testers flag, answered as 404. A person who is not on the
- *    allowlist must not be able to tell that swarms exist, and a 402
- *    saying "your plan does not include swarms" would tell them. Same
- *    convention as the access helpers: not yours reads as not there.
+ * 1. The person's beta features switch, answered as 404 when it is off.
+ *    Someone without beta must not be able to tell that swarms exist,
+ *    and a 402 saying "your plan does not include swarms" would tell
+ *    them. Same convention as the access helpers: not yours reads as
+ *    not there.
  * 2. The plan, answered as 402 with PLAN_LIMIT, which is the code the
  *    console already knows how to render.
  *
- * Both collapse by construction where they should. Local mode has one
- * trusted user: the flag is always on, and no entitlements module is
- * registered, so nothing here refuses anything. A multi mode install
- * without a billing module reaches the same place through the optional
- * method being absent.
+ * Local mode registers no entitlements module, so there only the
+ * switch refuses. A multi mode install without a billing module reaches
+ * the same place through the optional method being absent.
  */
 export async function requireSwarms(
   ctx: AppContext,

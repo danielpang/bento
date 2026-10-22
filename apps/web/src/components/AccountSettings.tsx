@@ -360,15 +360,11 @@ function MascotsCard({ client }: { client: BentoClient }) {
   );
 }
 
-/**
- * The person's own switch for unfinished product, such as Bento Swarm.
- * On wins over the beta-testers flag. Off means off in local mode; in
- * multi mode it leaves the flag to decide.
- */
+/** The person's own switch for unfinished product, such as Bento Swarm. */
 function BetaFeaturesCard({ client }: { client: BentoClient }) {
   const toast = useToast();
   const setBetaTesters = useSetBetaTesters();
-  const [state, setState] = useState<{ enabled: boolean; betaTesters: boolean } | null>(null);
+  const [state, setState] = useState<{ enabled: boolean } | null>(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -391,7 +387,7 @@ function BetaFeaturesCard({ client }: { client: BentoClient }) {
     try {
       const row = await client.setBetaFeatures(next);
       setState(row);
-      setBetaTesters(row.betaTesters);
+      setBetaTesters(row.enabled);
     } catch (err) {
       toast.fail(err);
     } finally {
