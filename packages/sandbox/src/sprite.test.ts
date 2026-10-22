@@ -18,7 +18,6 @@ import {
   execUrlBytes,
   launcherScript,
   planExecLaunch,
-  sandboxNeverStartedCommand,
   SPRITE_ACQUIRE_RATE_LIMIT_WAITS,
   SPRITE_ACQUIRE_RETRY_DELAYS_MS,
   SPRITE_DESTROY_RETRY_DELAYS_MS,
@@ -1253,6 +1252,7 @@ test("Sprite exec keeps the credential-bearing exec URL out of error output", as
   assert.match(result.stderr, /ETIMEDOUT/);
   assert.match(result.stderr, /\[sandbox exec url\]/);
   assert.match(result.stderr, /did not accept the exec connection, and it stayed that way through the retries/);
+  assert.equal(result.neverStarted, "refused");
   assert.doesNotMatch(result.stderr, /sk-secret|wss:/);
   // The first upgrade plus one retry per delay. Stopping earlier would
   // turn one blip back into a failed run; continuing would not stop.
@@ -4299,7 +4299,7 @@ test("Sprite exec reports a launcher the sandbox would not take as a command tha
   assert.equal(refused.exitCode, -1);
   assert.match(refused.stderr, /could not take the command, so it was not started: Failed to write file: permission denied/);
   assert.doesNotMatch(refused.stderr, /secret|wss:/);
-  assert.equal(sandboxNeverStartedCommand(refused.stderr), "refused");
+  assert.equal(refused.neverStarted, "refused", "the driver says so on the exit, not only in words");
 
   const gone = await collectExec(
     make(async () => {
@@ -4308,7 +4308,7 @@ test("Sprite exec reports a launcher the sandbox would not take as a command tha
   );
   assert.equal(gone.exitCode, -1);
   assert.match(gone.stderr, /the cloud sandbox bento-x was not found, so the command was not started/);
-  assert.equal(sandboxNeverStartedCommand(gone.stderr), "gone");
+  assert.equal(gone.neverStarted, "gone");
   assert.deepEqual(spawns, [], "nothing is spawned without its launcher");
 });
 
@@ -4380,7 +4380,7 @@ test("Sprite exec does not call a started command refused when its attach fails"
   assert.equal(result.exitCode, 0);
   assert.match(result.stderr, /the command is running but its connection could not be opened \(attach timed out\), reattaching/);
   assert.match(result.stderr, /reattached to the running command/);
-  assert.equal(sandboxNeverStartedCommand(result.stderr), null);
+  assert.equal(result.neverStarted, undefined, "a command that started is not marked as never started");
 });
 
 test("Sprite exec reattaches to a staged command by its launcher's command line", async () => {
@@ -4536,30 +4536,6 @@ test("a launcher exports every value intact and refuses a name no shell can", ()
     ].join("\n"),
   );
   assert.throws(() => launcherScript("claude", [], { "BAD-NAME": "x" }), /not a name a shell can export/);
-});
-
-test("the driver's words for a command that never started are recognizable, by kind", () => {
-  assert.equal(
-    sandboxNeverStartedCommand(
-      "no terminal event (exit code -1): the sandbox did not accept the exec connection, retrying Error: WebSocket error: Received network error or non-101 status code. (url: [sandbox exec url]) the sandbox did not accept the exec connection, and it stayed that way through the retries",
-    ),
-    "refused",
-  );
-  assert.equal(sandboxNeverStartedCommand("the sandbox did not accept the exec connection: Network error: fetch failed"), "refused");
-  assert.equal(sandboxNeverStartedCommand("the sandbox could not take the command, so it was not started: disk full"), "refused");
-  assert.equal(
-    sandboxNeverStartedCommand("the cloud sandbox bento-x was not found, so the command was not started. Start the run again."),
-    "gone",
-  );
-  // A refused upgrade that was then accepted is a retry, not a failure,
-  // and a started command whose connection fails is a reattach.
-  assert.equal(sandboxNeverStartedCommand("the sandbox did not accept the exec connection, retrying"), null);
-  assert.equal(sandboxNeverStartedCommand("the connection to the sandbox dropped, reattaching to the running command"), null);
-  assert.equal(
-    sandboxNeverStartedCommand("the command is running but its connection could not be opened (attach timed out), reattaching"),
-    null,
-  );
-  assert.equal(sandboxNeverStartedCommand("exit code 1"), null);
 });
 
 test("Sprite repository import never starts a merge after upload loses its lease", async () => {

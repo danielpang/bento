@@ -6,6 +6,8 @@ export interface ExecChunk {
   data?: string;
   exitCode?: number;
   cursor?: number;
+  /** On the exit, when the sandbox never started the command at all. */
+  neverStarted?: "refused" | "gone";
 }
 
 export interface RunAgentInput {
@@ -38,6 +40,12 @@ export interface RunAgentResult {
   events: AgentEvent[];
   exitCode: number;
   outcome: ReturnType<AgentAdapter["extractOutcome"]>;
+  /**
+   * Set when the sandbox said it never started the command: it refused
+   * the connection that starts it, or the machine was gone. Taken from
+   * the driver's exit, never from the output, which the agent writes.
+   */
+  neverStarted?: "refused" | "gone";
 }
 
 /**
@@ -58,6 +66,7 @@ export async function runAgent(input: RunAgentInput): Promise<RunAgentResult> {
   const events: AgentEvent[] = [...(input.initialEvents ?? [])];
   let buffer = "";
   let exitCode = -1;
+  let neverStarted: "refused" | "gone" | undefined;
   const textOutput = createBoundedText(256 * 1024);
   /**
    * Whatever the process said outside the event stream: stderr, and
@@ -140,6 +149,7 @@ export async function runAgent(input: RunAgentInput): Promise<RunAgentResult> {
     if (chunk.cursor !== undefined) lastCursor = chunk.cursor;
     if (chunk.kind === "exit") {
       exitCode = chunk.exitCode ?? -1;
+      neverStarted = chunk.neverStarted;
       break;
     }
     if (chunk.kind === "stderr") {
@@ -187,10 +197,11 @@ export async function runAgent(input: RunAgentInput): Promise<RunAgentResult> {
     !explained ||
     /check server logs/i.test(outcome.error ?? "") ||
     /^Claude Code reported /.test(outcome.error ?? "");
+  const started = neverStarted ? { neverStarted } : {};
   if (!outcome.ok && unexplained && tail) {
-    return { events, exitCode, outcome: { ...outcome, error: `${outcome.error ?? "failed"}: ${tail}` } };
+    return { events, exitCode, outcome: { ...outcome, error: `${outcome.error ?? "failed"}: ${tail}` }, ...started };
   }
-  return { events, exitCode, outcome };
+  return { events, exitCode, outcome, ...started };
 }
 
 function createBoundedText(limit: number): { append(text: string): void; value(): string } {

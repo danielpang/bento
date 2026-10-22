@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import test from "node:test";
-import { collectExec, execTimeoutMessage, SandboxImageLost } from "./driver.js";
+import { collectExec, execTimeoutMessage, ProvisionFailure, provisionBlame, SandboxImageLost } from "./driver.js";
 import { BENTO_EXEC_PYTHON, FrameDecoder } from "./modal-exec.js";
 import { adaptProc } from "./modal-client.js";
 import {
@@ -385,6 +385,42 @@ test("a clone failure that cannot be stopped is a provision leak", async () => {
       return true;
     },
   );
+});
+
+test("a checkout git refused is the project's, and one that could not reach the remote is Modal's", async () => {
+  const provisionWith = async (stderr: string): Promise<unknown> => {
+    const env = fake({ running: false });
+    env.box.terminate = async () => {};
+    env.box.exec = async () => textProc(128, "", stderr);
+    return driver(env.api)
+      .provision({ ...spec, repositories: [{ name: "app", cloneUrl: "https://github.com/acme/app.git" }] })
+      .then(() => assert.fail("provision should fail"), (err: unknown) => err);
+  };
+
+  const refused = await provisionWith("remote: Repository not found.\nfatal: repository 'https://github.com/acme/app.git/' not found");
+  assert.ok(refused instanceof ProvisionFailure);
+  assert.equal(refused.phase, "checkout");
+  assert.equal(refused.blame, "project");
+  assert.match(refused.message, /could not prepare app: remote: Repository not found/, "the record keeps git's words");
+
+  const unreachable = await provisionWith("fatal: unable to access 'https://github.com/acme/app.git/': Could not resolve host: github.com");
+  assert.equal(provisionBlame(unreachable), "provider");
+
+  const silent = await provisionWith("");
+  assert.equal(provisionBlame(silent), "provider", "a script that died without git saying why is the machine's");
+});
+
+test("a leaked machine keeps the blame of the checkout that failed", async () => {
+  const env = fake({ running: false });
+  env.box.terminate = async () => {
+    throw new Error("terminate failed");
+  };
+  env.box.exec = async () => textProc(128, "", "fatal: Authentication failed for 'https://github.com/acme/app.git/'");
+  const err = await driver(env.api)
+    .provision({ ...spec, repositories: [{ name: "app", cloneUrl: "https://github.com/acme/app.git" }] })
+    .then(() => assert.fail("provision should fail"), (caught: unknown) => caught);
+  assert.ok(err instanceof ModalProvisionLeak);
+  assert.equal(provisionBlame(err), "project");
 });
 
 test("reusing a running sandbox does not terminate it when clone fails", async () => {

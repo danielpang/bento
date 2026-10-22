@@ -20,7 +20,7 @@ import {
   swarms,
   type Db,
 } from "@bento/db";
-import { LocalProcessDriver, WorktreeManager } from "@bento/sandbox";
+import { LocalProcessDriver, ProvisionFailure, WorktreeManager, type ExecChunk } from "@bento/sandbox";
 import { singleDriver } from "./orchestrator/sandbox-driver.js";
 import { createApp } from "./app.js";
 import { DiskArtifactStore } from "./artifact-store.js";
@@ -29,6 +29,7 @@ import { ensureLocalUser, type AppContext, type Entitlements } from "./context.j
 import { EventBus } from "./events.js";
 import { loadEnv } from "./env.js";
 import { executeRun, markCancelled } from "./orchestrator/run-executor.js";
+import { SANDBOX_REFUSED_AGENT_PREFIX } from "./infra-failures.js";
 import { tickSwarm } from "./orchestrator/swarm/coordinator.js";
 import { SANDBOX_PROVISIONED_EVENT } from "./orchestrator/sandbox-metrics.js";
 import { recordingAnalytics } from "./test-analytics.js";
@@ -434,6 +435,124 @@ test("a Sprite provider failure before the agent starts is neither charged nor a
   assert.equal(Number(uncharged!.spentMeasuredUsd), 0);
   assert.equal(Number(uncharged!.spentEstimatedUsd), 0);
   assert.equal(Number(uncharged!.spentAssumedUsd), 0);
+});
+
+test("a checkout git refused is the project's, so it is billed", async () => {
+  const created = await createSwarm();
+  const swarm = (await created.json()) as { id: string; plannerRunId: string };
+  const workingDrivers = ctx.drivers;
+  const failingDriver = new LocalProcessDriver();
+  failingDriver.provision = async () => {
+    const stderr = "remote: Repository not found.\nfatal: repository 'https://github.com/acme/app.git/' not found";
+    throw new ProvisionFailure(
+      "local-process",
+      "checkout",
+      "project",
+      Object.assign(new Error(`could not prepare app: ${stderr}`), { stderr }),
+    );
+  };
+  ctx.drivers = singleDriver(failingDriver);
+  try {
+    await executeRun(ctx, swarm.plannerRunId);
+  } finally {
+    ctx.drivers = workingDrivers;
+  }
+
+  const [run] = await db.select().from(agentRuns).where(eq(agentRuns.id, swarm.plannerRunId));
+  assert.equal(run!.status, "failed");
+  assert.match(run!.error ?? "", /Repository not found/, "the record says what git said");
+  assert.equal(run!.billable, true, "GitHub refusing the repository is not a sandbox failure");
+  assert.deepEqual(finished, [swarm.plannerRunId]);
+});
+
+test("a sandbox whose stream breaks under the agent is not billed", async () => {
+  const created = await createSwarm();
+  const swarm = (await created.json()) as { id: string; plannerRunId: string };
+  const workingDrivers = ctx.drivers;
+  const breakingDriver = new LocalProcessDriver();
+  const exec = breakingDriver.exec.bind(breakingDriver);
+  breakingDriver.exec = (handle, argv, opts) => {
+    // Only the agent's exec carries the run as its session key.
+    if (opts?.sessionKey !== swarm.plannerRunId) return exec(handle, argv, opts);
+    return (async function* () {
+      throw new Error("the exec socket closed");
+    })();
+  };
+  ctx.drivers = singleDriver(breakingDriver);
+  try {
+    await executeRun(ctx, swarm.plannerRunId);
+  } finally {
+    ctx.drivers = workingDrivers;
+  }
+
+  const [run] = await db.select().from(agentRuns).where(eq(agentRuns.id, swarm.plannerRunId));
+  assert.equal(run!.status, "failed");
+  assert.match(run!.error ?? "", /^exec failed: /);
+  assert.equal(run!.billable, false);
+  assert.deepEqual(finished, [], "the agent-hour meter is not told about a machine that failed");
+});
+
+/**
+ * Runs the swarm's planner against a driver whose agent exec plays
+ * `chunks` instead of starting anything, and returns the closed row.
+ */
+async function runPlannerOn(chunks: ExecChunk[]) {
+  const created = await createSwarm();
+  const swarm = (await created.json()) as { id: string; plannerRunId: string };
+  const workingDrivers = ctx.drivers;
+  const scripted = new LocalProcessDriver();
+  const exec = scripted.exec.bind(scripted);
+  scripted.exec = (handle, argv, opts) => {
+    if (opts?.sessionKey !== swarm.plannerRunId) return exec(handle, argv, opts);
+    return (async function* () {
+      yield* chunks;
+    })();
+  };
+  ctx.drivers = singleDriver(scripted);
+  try {
+    await executeRun(ctx, swarm.plannerRunId);
+  } finally {
+    ctx.drivers = workingDrivers;
+  }
+  const [run] = await db.select().from(agentRuns).where(eq(agentRuns.id, swarm.plannerRunId));
+  return run!;
+}
+
+const REFUSED_WORDS = "the sandbox did not accept the exec connection, and it stayed that way through the retries";
+
+test("a sandbox that says it never started the agent is not billed", async () => {
+  const run = await runPlannerOn([
+    { kind: "stderr", data: REFUSED_WORDS },
+    { kind: "exit", exitCode: -1, neverStarted: "refused" },
+  ]);
+  assert.equal(run.status, "failed");
+  assert.match(run.error ?? "", new RegExp(`^${SANDBOX_REFUSED_AGENT_PREFIX}`));
+  assert.equal(run.billable, false);
+  assert.deepEqual(finished, []);
+});
+
+test("an agent that prints the sandbox's words is still billed", async () => {
+  const run = await runPlannerOn([
+    { kind: "stderr", data: REFUSED_WORDS },
+    { kind: "exit", exitCode: -1 },
+  ]);
+  assert.equal(run.status, "failed");
+  assert.doesNotMatch(run.error ?? "", new RegExp(`^${SANDBOX_REFUSED_AGENT_PREFIX}`));
+  assert.equal(run.billable, true, "only the driver's exit can say the agent never started");
+});
+
+test("a CLI the sandbox does not have is not billed, and an agent that worked and exited 127 is", async () => {
+  const missing = await runPlannerOn([{ kind: "exit", exitCode: 127 }]);
+  assert.match(missing.error ?? "", /is not installed in this sandbox/);
+  assert.equal(missing.billable, false);
+
+  const worked = await runPlannerOn([
+    { kind: "stdout", data: '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Working on it."}]}}\n' },
+    { kind: "stderr", data: "sh: 1: some-tool: not found" },
+    { kind: "exit", exitCode: 127 },
+  ]);
+  assert.doesNotMatch(worked.error ?? "", /is not installed in this sandbox/);
+  assert.equal(worked.billable, true, "the agent ran, so its exit status is the work's");
 });
 
 /**

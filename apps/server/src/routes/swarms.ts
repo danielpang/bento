@@ -746,7 +746,7 @@ export function swarmRoutes(ctx: AppContext) {
           when ${agentRuns.startedAt} is not null
             and (${agentRuns.endedAt} is not null or ${agentRuns.status} = 'running')
             and ${agentRuns.billable} = true
-            and (${agentRuns.error} is null or ${agentRuns.error} not like 'sandbox provisioning failed:%')
+            and not (${agentRuns.status} in ('failed', 'cancelled') and ${agentRuns.agentStartedAt} is null)
           then greatest(0, extract(epoch from (coalesce(${agentRuns.endedAt}, now()) - ${agentRuns.startedAt})) * 1000)
           else 0 end), 0)::double precision` })
         .from(agentRuns)

@@ -1618,7 +1618,7 @@ test(
     const [startingRow] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, starting.id));
     assert.equal(startingRow!.billable, false, "a run whose agent never started is not billed for the restart");
     const [workingRow] = await ctx.db.select().from(agentRuns).where(eq(agentRuns.id, working.id));
-    assert.equal(workingRow!.billable, true, "one whose agent was working is");
+    assert.equal(workingRow!.billable, false, "nor is one whose agent was working: the restart was Bento's");
     assert.ok(
       closed.includes(`${working.id}:failed`) && closed.includes(`${starting.id}:failed`),
       "a stream that reconnected mid-recovery still hears the close",

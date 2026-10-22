@@ -27,7 +27,7 @@ import {
   recoverInterruptedRuns,
   requeueStrandedRuns,
 } from "../run-executor.js";
-import { unbilledReason } from "../../unbilled-reasons.js";
+import { infraFailureReason } from "../../infra-failures.js";
 import {
   enqueueSwarmTick,
   ensureSwarmTickWorker,
@@ -208,7 +208,7 @@ test("a swarm run a restart cut off before its agent started is not billed, and 
   assert.equal(closed!.status, "failed");
   assert.equal(closed!.error, "Bento restarted before the agent started, so no agent ran.");
   assert.equal(closed!.billable, false);
-  assert.equal(unbilledReason(closed!.error)?.id, "restart-before-agent", "so the coordinator restarts it like any sandbox failure");
+  assert.equal(infraFailureReason(closed!.error)?.id, "restart-before-agent", "so the coordinator restarts it like any sandbox failure");
 });
 
 /** A server run that started `minutesAgo`, with these transcript lines, each that long ago too. */
@@ -274,7 +274,7 @@ test("a run that stalled before its agent started is closed, and its swarm is to
   const [row] = await db.select().from(agentRuns).where(eq(agentRuns.id, stalled.id));
   assert.equal(row!.status, "failed");
   assert.match(row!.error!, /^The sandbox stopped responding before the agent started/);
-  assert.equal(unbilledReason(row!.error)?.id, "sandbox-stalled", "and is not billed, so the coordinator restarts it");
+  assert.equal(infraFailureReason(row!.error)?.id, "sandbox-stalled", "and is not billed, so the coordinator restarts it");
   const lines = await db.select().from(runEvents).where(eq(runEvents.runId, stalled.id));
   assert.match(
     (lines.at(-1)!.payload as { text: string }).text,

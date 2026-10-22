@@ -1,21 +1,28 @@
 /**
- * Reasons a failed run is marked not billable.
+ * Failures of the machinery rather than the work, recognised from the
+ * sentence a run record opens with: a machine that never ran the agent,
+ * one that stopped under it, or a restart of this server before it ran.
+ * The swarm coordinator reads this to decide whether a run deserves
+ * another try without the planner hearing about it, and node messages
+ * read it to decide whether a run ever heard what it was handed.
+ *
+ * Billing does not read this list. Whether a run is billed is decided
+ * where its failure is caught, from what threw (run-fault.ts), so a new
+ * row here changes what is restarted, never what is charged.
  *
  * Matches inspect only the first error line. Later lines are command
- * output and must not decide billing. These reasons are restricted to
- * provider failures: a machine that never ran the agent, or one that
- * stopped under it. A failure of the agent or its work stays billable.
+ * output and must not decide anything.
  */
-export type UnbilledMatch =
+export type InfraFailureMatch =
   | { kind: "prefix"; text: string }
   | { kind: "includes"; text: string }
   | { kind: "pattern"; text: string };
 
-export type UnbilledReason = {
+export type InfraFailureReason = {
   id: string;
   summary: string;
-  match: UnbilledMatch;
-  except?: readonly UnbilledMatch[];
+  match: InfraFailureMatch;
+  except?: readonly InfraFailureMatch[];
 };
 
 /**
@@ -68,7 +75,7 @@ export const PREVIOUS_AGENT_RUNNING_PREFIX =
 export const SWARM_BRANCH_LOST_MESSAGE =
   "The swarm's branch was lost with its sandbox and is not on GitHub, so its landed tasks cannot be restored. Start the swarm again.";
 
-export const UNBILLED_REASONS: readonly UnbilledReason[] = [
+export const INFRA_FAILURE_REASONS: readonly InfraFailureReason[] = [
   {
     id: "sandbox-unavailable",
     summary: "No sandbox provider could make the machine before the agent started.",
@@ -133,18 +140,18 @@ export const UNBILLED_REASONS: readonly UnbilledReason[] = [
 ];
 
 type CompiledReason = {
-  reason: UnbilledReason;
+  reason: InfraFailureReason;
   test: (line: string) => boolean;
   except: ((line: string) => boolean)[];
 };
 
-export function unbilledOpeningLine(error: string): string {
+export function infraFailureOpeningLine(error: string): string {
   const breakAt = error.indexOf("\n");
   return breakAt === -1 ? error : error.slice(0, breakAt);
 }
 
-function compileMatch(match: UnbilledMatch, id: string): (line: string) => boolean {
-  if (match.text === "") throw new Error(`unbilled reason ${id} has an empty ${match.kind}`);
+function compileMatch(match: InfraFailureMatch, id: string): (line: string) => boolean {
+  if (match.text === "") throw new Error(`infra failure ${id} has an empty ${match.kind}`);
   if (match.kind === "prefix") return (line) => line.startsWith(match.text);
   if (match.kind === "includes") return (line) => line.includes(match.text);
   let re: RegExp;
@@ -152,7 +159,7 @@ function compileMatch(match: UnbilledMatch, id: string): (line: string) => boole
     re = new RegExp(match.text);
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    throw new Error(`unbilled reason ${id} has an invalid pattern (${detail})`);
+    throw new Error(`infra failure ${id} has an invalid pattern (${detail})`);
   }
   return (line) => {
     re.lastIndex = 0;
@@ -160,7 +167,7 @@ function compileMatch(match: UnbilledMatch, id: string): (line: string) => boole
   };
 }
 
-function compileReason(reason: UnbilledReason): CompiledReason {
+function compileReason(reason: InfraFailureReason): CompiledReason {
   return {
     reason,
     test: compileMatch(reason.match, reason.id),
@@ -168,15 +175,15 @@ function compileReason(reason: UnbilledReason): CompiledReason {
   };
 }
 
-const COMPILED_REASONS: readonly CompiledReason[] = UNBILLED_REASONS.map(compileReason);
+const COMPILED_REASONS: readonly CompiledReason[] = INFRA_FAILURE_REASONS.map(compileReason);
 
-export function unbilledReason(
+export function infraFailureReason(
   error: string | null | undefined,
-  reasons: readonly UnbilledReason[] = UNBILLED_REASONS,
-): UnbilledReason | null {
+  reasons: readonly InfraFailureReason[] = INFRA_FAILURE_REASONS,
+): InfraFailureReason | null {
   if (!error) return null;
-  const line = unbilledOpeningLine(error);
-  const compiled = reasons === UNBILLED_REASONS ? COMPILED_REASONS : reasons.map(compileReason);
+  const line = infraFailureOpeningLine(error);
+  const compiled = reasons === INFRA_FAILURE_REASONS ? COMPILED_REASONS : reasons.map(compileReason);
   for (const row of compiled) {
     if (!row.test(line)) continue;
     if (row.except.some((skip) => skip(line))) continue;
