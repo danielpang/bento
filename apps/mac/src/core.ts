@@ -721,7 +721,7 @@ export function initialModel(): Model {
   return {
     baseUrl: new Uint8Array(0),
     mode: "local",
-    serverEdit: seedEdit(asciiBytes("https://")),
+    serverEdit: seedEdit(asciiBytes("https://app.usebento.ai")),
     setupDone: false,
     helperState: "idle",
     token: new Uint8Array(0),
