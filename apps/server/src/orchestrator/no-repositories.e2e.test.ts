@@ -173,10 +173,6 @@ test("a project with no repositories refuses a new run and cancels one already q
   assert.equal(again.length, 0);
   assert.deepEqual(jobs, [{ name: "gate.evaluate", data: { featureId: FEATURE } }]);
 
-  const quick = await app.request(`/api/features/${FEATURE}/quick-run?cli=claude-code`, { method: "POST" });
-  assert.equal(quick.status, 409, await quick.clone().text());
-  assert.deepEqual(await quick.json(), { error: NO_REPOSITORIES });
-
   const message = await app.request(`/api/features/${FEATURE}/message`, {
     method: "POST",
     headers: { "content-type": "application/json" },

@@ -1029,7 +1029,6 @@ test("every entity route refuses a foreign tenant", async () => {
     ["GET", `/api/features/${feature.id}/pull-request-status`],
     ["POST", `/api/features/${feature.id}/resolve-conflicts`],
     ["POST", `/api/features/${feature.id}/fix-ci-tests`],
-    ["POST", `/api/features/${feature.id}/quick-run?cli=fake`],
     ["GET", `/api/features/${feature.id}/transitions`],
     ["GET", `/api/features/${feature.id}/history`],
     ["GET", `/api/stages/${stageId}`],
@@ -2429,6 +2428,12 @@ test("a run is refused when the plan has no compute left", async () => {
   // win, which would test the wrong door: the card is settled first so
   // the only reason left to refuse is the plan.
   await ctx.db.update(agentRuns).set({ status: "cancelled" }).where(eq(agentRuns.featureId, feature.id));
+  const [settled] = await ctx.db
+    .select({ agentProfileId: agentRuns.agentProfileId })
+    .from(agentRuns)
+    .where(eq(agentRuns.featureId, feature.id))
+    .limit(1);
+  assert.ok(settled?.agentProfileId, "going live started the stage's agent");
 
   const asked: string[] = [];
   ctx.entitlements = {
@@ -2446,9 +2451,10 @@ test("a run is refused when the plan has no compute left", async () => {
     },
   };
   try {
-    const started = await app.request(`/api/features/${feature.id}/quick-run`, {
+    const started = await app.request("/api/runs", {
       method: "POST",
-      headers: { authorization: `Bearer ${token}` },
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({ featureId: feature.id, agentProfileId: settled.agentProfileId }),
     });
     // 402 rather than 409: nothing is busy, and there is something the
     // team can do about it that waiting will not fix.

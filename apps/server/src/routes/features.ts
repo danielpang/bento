@@ -4,8 +4,7 @@ import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { messageAttachments, writeMessageAttachments } from "../message-attachments.js";
 import { z } from "zod";
-import { DEFAULT_MODELS } from "@bento/agents";
-import { agentCli, checkAgentPairing, parentDeleteRefusal } from "@bento/core";
+import { parentDeleteRefusal } from "@bento/core";
 import {
   agentProfiles,
   agentRuns,
@@ -17,10 +16,8 @@ import {
   features,
   gateChecks,
   pipelines,
-  projects,
   repositories,
   sandboxes,
-  stages,
   user,
 } from "@bento/db";
 import type { SandboxDriver, SandboxHandle } from "@bento/sandbox";
@@ -42,7 +39,7 @@ import {
   reopenFeature,
   activationRefusal,
 } from "../orchestrator/gate-evaluator.js";
-import { ACTIVE_RUN_STATUSES, CARD_BUSY, CARD_BUSY_DELETE, NO_REPOSITORIES, projectHasRepositories, startRunIfIdle } from "../orchestrator/start-run.js";
+import { ACTIVE_RUN_STATUSES, CARD_BUSY_DELETE, NO_REPOSITORIES, projectHasRepositories, startRunIfIdle } from "../orchestrator/start-run.js";
 import { enqueueRun } from "../orchestrator/queue.js";
 import { liveDeliveryOf, nudgeAndAwaitSent } from "../orchestrator/remote-live.js";
 import { queueLinearIssueCreate } from "../orchestrator/linear-sync.js";
@@ -1423,88 +1420,6 @@ export function featureRoutes(ctx: AppContext) {
       if (!updated) return c.json({ error: "not found" }, 404);
       await ctx.boss.send("gate.evaluate", { featureId: updated.id });
       return c.json(updated);
-    })
-    /**
-     * Starts a run on the feature's current stage using a shared
-     * "quick" profile for the given cli, creating it on first use.
-     * Exists so line-protocol clients (the Mac app) can start runs
-     * without composing JSON.
-     */
-    .post("/:id/quick-run", async (c) => {
-      const parsedCli = agentCli.safeParse(c.req.query("cli") ?? "claude-code");
-      if (!parsedCli.success) return c.json({ error: `unknown agent "${c.req.query("cli")}"; supported: ${agentCli.options.join(", ")}` }, 400);
-      const cli = parsedCli.data;
-      const model = c.req.query("model") ?? DEFAULT_MODELS[cli];
-      // This route creates a profile of its own, so it needs the same
-      // pairing check the profile route applies. ?model= is the way an
-      // impossible combination would otherwise get in through the back.
-      const pairing = checkAgentPairing(cli, model);
-      if (pairing.status === "impossible") return c.json({ error: pairing.detail, cli, model }, 400);
-
-      const feature = await getAccessibleFeature(ctx, c, c.req.param("id"));
-      if (!feature) return c.json({ error: "not found" }, 404);
-      if (!feature.currentStageId) return c.json({ error: "feature has no current stage; advance it first" }, 400);
-      // A done card keeps the stage it finished in, so the stage check
-      // alone would let an agent run on a card nobody is watching.
-      if (feature.status === "done" || feature.status === "cancelled") {
-        return c.json({ error: `feature is ${feature.status}; reopen it first` }, 409);
-      }
-      if (!(await projectHasRepositories(db(c, ctx), feature.projectId))) {
-        return c.json({ error: NO_REPOSITORIES }, 409);
-      }
-
-      /**
-       * The stage's assigned agent comes first: asking to "run
-       * claude-code" on a stage whose agent IS a claude-code agent
-       * means that agent, with its name and its skill. The nameless
-       * quick-<cli> stand-in exists only for a stage with no matching
-       * assignment, and ?model= opts out of the assigned agent because
-       * it asks for a specific pairing.
-       */
-      const [stageRow] = feature.currentStageId
-        ? await db(c, ctx).select().from(stages).where(eq(stages.id, feature.currentStageId)).limit(1)
-        : [];
-      let profile;
-      if (stageRow?.defaultAgentProfileId && !c.req.query("model")) {
-        const [assigned] = await db(c, ctx)
-          .select()
-          .from(agentProfiles)
-          .where(eq(agentProfiles.id, stageRow.defaultAgentProfileId))
-          .limit(1);
-        if (assigned?.cli === cli) profile = assigned;
-      }
-      if (!profile) {
-        const profileName = `quick-${cli}`;
-        [profile] = await db(c, ctx)
-          .select()
-          .from(agentProfiles)
-          .where(and(eq(agentProfiles.ownerId, actor(c)), eq(agentProfiles.name, profileName)));
-        if (!profile) {
-          [profile] = await db(c, ctx)
-            .insert(agentProfiles)
-            .values({ ownerId: actor(c), name: profileName, cli, model })
-            .returning();
-        }
-      }
-      if (!profile) return c.json({ error: "something went wrong saving the agent; try again" }, 500);
-
-      const [project] = await db(c, ctx).select().from(projects).where(eq(projects.id, feature.projectId));
-      const executor = project?.executor ?? "server";
-
-      const run = await startRunIfIdle(db(c, ctx), {
-        type: "pipeline" as const,
-        featureId: feature.id,
-        stageId: feature.currentStageId,
-        agentProfileId: profile.id,
-        prompt: "",
-        executor,
-        startedBy: actor(c),
-      }, ctx.entitlements, ctx.analytics, (task) => deferAfterCommit(c, async () => task()));
-      if (run === "busy") return c.json({ error: CARD_BUSY }, 409);
-      if (run === "gone") return c.json({ error: "not found" }, 404);
-      if ("outOfCompute" in run) return c.json({ error: run.outOfCompute, code: "PLAN_LIMIT" }, 402);
-      if (executor === "server") await enqueueRun(ctx, run.id);
-      return c.json(run, 201);
     })
     /** Full history: stage moves and status changes, oldest first. */
     .get("/:id/history", async (c) => {

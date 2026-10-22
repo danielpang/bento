@@ -754,7 +754,7 @@ its news waits for the run to end or be adopted, as before.
 ## Starting a run goes through startRunIfIdle, never a bare insert
 
 One card, one agent. Every door that starts a run (the runs route,
-quick-run, resume, and both auto-start paths in the gate evaluator)
+resume, and both auto-start paths in the gate evaluator)
 calls `startRunIfIdle` in `apps/server/src/orchestrator/start-run.ts`,
 which locks the feature row and refuses when a run is already queued,
 starting, or running. A bare `insert(agentRuns)` reopens the bug where

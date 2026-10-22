@@ -2445,36 +2445,6 @@ test("boot recovery delivers a message stranded with no active run", { timeout: 
 });
 
 /**
- * "Run claude-code" on a stage whose assigned agent IS a claude-code
- * agent means that agent, with its name and skill, not a nameless
- * quick-<cli> stand-in. The stand-in is only for unassigned stages.
- */
-test("a quick run uses the stage's assigned agent when the tool matches", async () => {
-  const { project, stages: projectStages } = await setupProject("Quick prefers assigned");
-  const feature = await createFeature(project.id, "Named runs");
-  const assigned = await json<{ id: string }>(
-    await app.request("/api/profiles", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name: "Senior Product Manager", cli: "fake", model: "fake-1" }),
-    }),
-  );
-  await patchStage(projectStages[0]!.id, { defaultAgentProfileId: assigned.id });
-  // Keep the auto-started run out of the way: runner executor leaves it
-  // queued, and we cancel it so quick-run's busy guard lets us through.
-  await ctx.db.execute(sql`update projects set executor = 'runner' where id = ${project.id}`);
-  await app.request(`/api/features/${feature.id}/advance`, { method: "POST" });
-  const { runs: auto } = await json<{ runs: { id: string }[] }>(await app.request(`/api/features/${feature.id}`));
-  for (const r of auto) await app.request(`/api/runs/${r.id}/cancel`, { method: "POST" });
-
-  const quick = await json<{ agentProfileId: string; id: string }>(
-    await app.request(`/api/features/${feature.id}/quick-run?cli=fake`, { method: "POST" }),
-  );
-  assert.equal(quick.agentProfileId, assigned.id, "the assigned agent runs, not quick-fake");
-  await app.request(`/api/runs/${quick.id}/cancel`, { method: "POST" });
-});
-
-/**
  * The skill is the user's lever on agent output: it rides into every
  * stage prompt the agent runs, which is how a team defines what the
  * stage write-up must contain. And the transcript speaks the agent's
@@ -3085,8 +3055,6 @@ test("a done card refuses new work and can be reopened", { timeout: 90_000 }, as
   });
   assert.equal(started.status, 409, "an agent must not start on a done card");
   assert.match(((await started.json()) as { error: string }).error, /reopen it first/);
-  const quick = await app.request(`/api/features/${feature.id}/quick-run?cli=fake`, { method: "POST" });
-  assert.equal(quick.status, 409, "quick-run is the same door");
 
   // Back is the way out: the card returns to the stage it finished in.
   const reopened = await json<{ status: string; currentStageId: string | null }>(
@@ -3292,22 +3260,6 @@ test("full feature lifecycle with fake agent", { timeout: 90_000 }, async () => 
     await app.request(`/api/features/${feature.id}/advance`, { method: "POST" }),
   );
   assert.equal(next.currentStageId, pipeline.stages[1]!.id);
-
-  // quick-run creates its profile on first use and succeeds
-  const quick = await json<{ id: string }>(
-    await app.request(`/api/features/${feature.id}/quick-run?cli=fake`, { method: "POST" }),
-  );
-  let quickStatus = "";
-  const quickDeadline = Date.now() + 60_000;
-  while (Date.now() < quickDeadline) {
-    const current = await json<{ status: string }>(await app.request(`/api/runs/${quick.id}`));
-    if (["succeeded", "failed", "cancelled"].includes(current.status)) {
-      quickStatus = current.status;
-      break;
-    }
-    await new Promise((r) => setTimeout(r, 500));
-  }
-  assert.equal(quickStatus, "succeeded");
 
   // A failing run is reported as failed
   const failing = await json<{ id: string }>(
@@ -3697,16 +3649,6 @@ test("an impossible pairing of coding agent and model is refused", async () => {
   // trails the tools, and refusing a brand new model would be worse.
   const unknown = await post({ name: "next week's model", cli: "claude-code", model: "claude-opus-9" });
   assert.equal(unknown.status, 201, "an unprovable pairing must not be refused");
-
-  // The quick-run shortcut mints its own profile, so it is checked too.
-  const { project } = await setupProject("pairing");
-  const feature = await createFeature(project.id, "pairing");
-  await app.request(`/api/features/${feature.id}/advance`, { method: "POST" });
-  const quick = await app.request(
-    `/api/features/${feature.id}/quick-run?cli=claude-code&model=gpt-5-pro`,
-    { method: "POST" },
-  );
-  assert.equal(quick.status, 400, "quick-run's ?model= must not bypass the check");
 });
 
 /**
@@ -5125,8 +5067,6 @@ test("starting a run on a card that was deleted answers gone, not a foreign key 
     body: JSON.stringify({ featureId: feature.id, agentProfileId: profile.id }),
   });
   assert.equal(created.status, 404);
-  const quick = await app.request(`/api/features/${feature.id}/quick-run?cli=fake`, { method: "POST" });
-  assert.equal(quick.status, 404);
   const message = await app.request(`/api/features/${feature.id}/message`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -6559,9 +6499,6 @@ test("a card with a run in flight refuses a second start", { timeout: 90_000 }, 
   assert.equal(duplicate.status, 409, "a second start must be refused while one run is in flight");
   const refusal = (await duplicate.json()) as { error: string };
   assert.match(refusal.error, /already working/);
-
-  const quick = await app.request(`/api/features/${feature.id}/quick-run?cli=fake`, { method: "POST" });
-  assert.equal(quick.status, 409, "quick-run is the same door");
 
   const detail = await json<{ runs: unknown[] }>(await app.request(`/api/features/${feature.id}`));
   assert.equal(detail.runs.length, 1, "only one run may exist for the card");

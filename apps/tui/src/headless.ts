@@ -8,43 +8,27 @@ import { FileTokenStore } from "./credentials.js";
 import type { CliOptions } from "./cli-options.js";
 import { prepareRepositoryPath, repositoryPathOwnerForMode } from "./repository-path.js";
 
-/**
- * Status lines for a supervising process.
- *
- * The Mac app spawns these commands and reads stdout line by line, so
- * every line is one event with a stable prefix and no formatting. Keep
- * this contract stable: parsing happens in a Native SDK core that has no
- * JSON and works on raw bytes.
- */
-function emit(event: string, detail = ""): void {
-  // A person running `bento login` in a terminal gets sentences; a
-  // supervising app (the Mac helper) reads the machine lines. The
-  // event vocabulary is tiny, so the translation lives here.
-  if (process.stdout.isTTY) {
-    const spoken: Record<string, string> = {
-      verify_url: `Open this page to sign in: ${detail}`,
-      verify_code: `Enter this code: ${detail}`,
-      token: "Signed in. The TUI and runner will use this login.",
-      // Every event needs a sentence here, or a person watching
-      // `bento serve` in their own terminal reads the wire protocol.
-      ready: `Ready. The board and API are at ${detail}`,
-      sandbox: `Agents run in ${detail}.`,
-      stopping: "Stopping. Waiting for the sandboxes to close.",
-      status: detail,
-      error: detail,
-    };
-    const line = spoken[event];
-    if (line !== undefined) {
-      console.log(line);
-      return;
-    }
-  }
-  console.log(detail ? `bento:${event} ${detail}` : `bento:${event}`);
+type HeadlessEvent = "verify_url" | "verify_code" | "token" | "ready" | "sandbox" | "stopping" | "status" | "error";
+
+/** One status line for the person running a headless command. */
+function emit(event: HeadlessEvent, detail = ""): void {
+  const spoken: Record<HeadlessEvent, string> = {
+    verify_url: `Open this page to sign in: ${detail}`,
+    verify_code: `Enter this code: ${detail}`,
+    // Never the token itself: it is in the credentials file.
+    token: "Signed in. The TUI and runner will use this login.",
+    ready: `Ready. The board and API are at ${detail}`,
+    sandbox: `Agents run in ${detail}.`,
+    stopping: "Stopping. Waiting for the sandboxes to close.",
+    status: detail,
+    error: detail,
+  };
+  console.log(spoken[event]);
 }
 
 /**
- * Runs the whole stack with no terminal UI, so another application can
- * supervise it and talk to the API over HTTP.
+ * Runs the whole stack with no terminal UI, for a machine that serves
+ * the API over HTTP without anyone watching a board in it.
  */
 export async function runServe(options: CliOptions): Promise<void> {
   try {
@@ -107,9 +91,7 @@ export async function runRunner(options: CliOptions): Promise<void> {
  *
  * The interactive setup screen can already do this, but a screen cannot
  * be scripted: connecting a project's three repositories in a
- * provisioning script, or in CI, needs a command. Output is plain lines
- * rather than the `bento:` event protocol, because a person reads this
- * one.
+ * provisioning script, or in CI, needs a command.
  */
 export async function runRepos(options: CliOptions): Promise<void> {
   const { BentoClient } = await import("@bento/api-client");
@@ -866,11 +848,8 @@ export async function runAgents(options: CliOptions): Promise<void> {
 /**
  * Signs this machine in.
  *
- * The desktop app spawns this rather than implementing the device flow
- * itself: its core has no JSON parser, and reusing this path means one
- * implementation of the polling contract. The token is written to the
- * shared credentials file, so the TUI and runner pick it up too, and
- * emitted for the supervising app to read.
+ * The token is written to the shared credentials file, so the TUI and
+ * runner pick it up too.
  */
 export async function runLogin(options: CliOptions): Promise<void> {
   if (!options.server) {
@@ -885,7 +864,7 @@ export async function runLogin(options: CliOptions): Promise<void> {
     // one that has been revoked reported "Signed in." while every
     // other command answered 401. One authenticated call settles it.
     if (await stillAccepted(options.server, tokens)) {
-      emit("token", existing);
+      emit("token");
       return;
     }
     emit("status", "The saved login is no longer accepted. Signing in again.");
@@ -898,14 +877,13 @@ export async function runLogin(options: CliOptions): Promise<void> {
       baseUrl: options.server,
       clientId: "bento-desktop",
       onPrompt: (code) => {
-        // Two lines so a supervising UI can show both without parsing.
         emit("verify_url", code.verification_uri_complete ?? code.verification_uri);
         emit("verify_code", code.user_code);
       },
     });
     const token = await flow.login();
     await tokens.set(token);
-    emit("token", token);
+    emit("token");
   } catch (err) {
     emit("error", err instanceof Error ? err.message : String(err));
     process.exit(1);
