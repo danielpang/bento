@@ -45,30 +45,4 @@ Table-level detail: [diagrams/database_schema.md](./diagrams/database_schema.md)
 
 ## Security
 
-Agents read untrusted input (issues, READMEs, web pages, tool output), so Bento assumes any agent can be prompt injected. The sandbox is the boundary: an agent can run any command and read anything in its sandbox. What Bento controls is what the sandbox holds and what it can reach.
-
-### What a sandbox holds
-
-- **Model API keys.** In multi mode, the sandbox holds a run token in place of each key its tool can send through Bento's model proxy. Bento attaches the organization's key on the way to the provider. The token works only while its run is queued or running, and only for the provider's completion, token counting and model listing endpoints. Keys that cannot go through the proxy still reach the sandbox: see [agents.md](./agents.md#model-provider-keys-never-enter-a-hosted-sandbox) for which.
-- **MCP credentials.** Never. The sandbox holds the same run token and Bento's gateway address for each server; the gateway attaches the server's credential. See [mcp.md](./mcp.md).
-- **Git access.** On a hosted server, short lived GitHub App installation tokens, never the host's SSH keys or git config.
-- **Local mode** has one trusted user: keys go to the agent directly, and shared subscription credentials are mounted read only, which the agent can still read.
-
-### What a sandbox can reach
-
-By default, the open internet, so agents can install packages and read docs.
-
-An owner or admin can block that in **Settings, Team**. A blocked team's runs go to Modal, which allows only:
-
-- Bento's own address, where the model proxy and the MCP gateway live
-- the project's git remotes
-- the hosts of model keys that are not proxied
-- the team's **Allowed sites** (each team MCP server's host is added when it is enabled, and can be removed)
-
-**Docker deployments.** With the lock on, Docker sandboxes use a network the operator creates (`BENTO_SANDBOX_RESTRICTED_NETWORK`), and Bento does not manage its rules. That network must let sandboxes reach Bento's address (`BENTO_MCP_GATEWAY_URL`, or `BETTER_AUTH_URL`; a `localhost` address is reached as `host.docker.internal`), because model calls go through the proxy there. Without that route, every locked run fails at its first model call. The Allowed sites list does not apply to Docker, and locked Docker runs attach no MCP servers. Setup: [web-app.md](./web-app.md#network-lock-on-docker).
-
-### Good practice
-
-- Never expose the host Docker socket, host SSH keys, or host git config to a sandbox.
-- Prefer API keys over mounting subscription credential files.
-- Keep a saved provider base URL on public `https`. A plain `http` or private base URL cannot go through the proxy, so its key stays in the sandbox.
+On a hosted server, a sandbox holds a proxy token instead of the organization's model keys, never holds an MCP credential, and can be cut off from the internet by a team owner or admin. See [security.md](./security.md).

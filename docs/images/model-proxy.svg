@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 356" role="img" aria-label="The sandbox holds a proxy token; only Bento holds the key" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13">
+  <title>The sandbox holds a proxy token; only Bento holds the key</title>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#8f8f88"/>
+    </marker>
+  </defs>
+  <rect width="760" height="356" fill="#ffffff"/>
+  <text x="24" y="34" font-size="15" font-weight="600" fill="#1f1f1f">The sandbox holds a proxy token; only Bento holds the key</text>
+
+  <!-- Sandbox -->
+  <rect x="24" y="60" width="220" height="160" rx="8" fill="#f4f3ef" stroke="#8f8f88"/>
+  <text x="40" y="84" font-weight="600" fill="#5c5c58">Sandbox</text>
+  <rect x="40" y="100" width="188" height="88" rx="8" fill="none" stroke="#8f8f88" stroke-width="1.25"/>
+  <text x="56" y="124" font-weight="600" fill="#1f1f1f">Agent CLI</text>
+  <text x="56" y="140" font-size="11.5" fill="#1f1f1f">BASE_URL: Bento proxy</text>
+  <text x="56" y="156" font-size="11.5" fill="#1f1f1f">API_KEY: proxy token</text>
+  <text x="56" y="172" font-size="11.5" fill="#5c5c58">no provider key</text>
+
+  <!-- Bento web app -->
+  <rect x="292" y="60" width="216" height="160" rx="8" fill="#f4f3ef" stroke="#8f8f88"/>
+  <text x="308" y="84" font-weight="600" fill="#5c5c58">Bento web app</text>
+  <rect x="308" y="100" width="184" height="104" rx="8" fill="#2f6fdb" fill-opacity="0.12" stroke="#2f6fdb" stroke-width="2"/>
+  <text x="324" y="124" font-weight="600" fill="#1f1f1f">/api/model-proxy</text>
+  <text x="324" y="140" font-size="11.5" fill="#1f1f1f">1. check the proxy token</text>
+  <text x="324" y="156" font-size="11.5" fill="#1f1f1f">2. decrypt the org key</text>
+  <text x="324" y="172" font-size="11.5" fill="#1f1f1f">3. swap the auth header</text>
+  <text x="324" y="188" font-size="11.5" fill="#1f1f1f">4. pipe the stream back</text>
+
+  <!-- Provider -->
+  <rect x="556" y="60" width="180" height="160" rx="8" fill="#f4f3ef" stroke="#8f8f88"/>
+  <text x="572" y="84" font-weight="600" fill="#5c5c58">Provider</text>
+  <rect x="572" y="100" width="148" height="72" rx="8" fill="none" stroke="#8f8f88" stroke-width="1.25"/>
+  <text x="588" y="124" font-weight="600" fill="#1f1f1f">Model API</text>
+  <text x="588" y="140" font-size="11.5" fill="#1f1f1f">api.anthropic.com</text>
+  <text x="588" y="156" font-size="11.5" fill="#5c5c58">sees the real key</text>
+
+  <!-- Worker -->
+  <rect x="40" y="260" width="188" height="72" rx="8" fill="none" stroke="#8f8f88" stroke-width="1.25"/>
+  <text x="56" y="284" font-weight="600" fill="#1f1f1f">Bento worker</text>
+  <text x="56" y="300" font-size="11.5" fill="#1f1f1f">mints the token at start</text>
+  <text x="56" y="316" font-size="11.5" fill="#1f1f1f">it dies when the run ends</text>
+
+  <!-- Postgres -->
+  <rect x="308" y="260" width="184" height="72" rx="8" fill="none" stroke="#8f8f88" stroke-width="1.25"/>
+  <text x="324" y="284" font-weight="600" fill="#1f1f1f">Postgres</text>
+  <text x="324" y="300" font-size="11.5" fill="#1f1f1f">token hash and its scope</text>
+  <text x="324" y="316" font-size="11.5" fill="#1f1f1f">the org's encrypted keys</text>
+
+  <!-- Connectors -->
+  <g fill="none" stroke="#8f8f88" stroke-width="1.25">
+    <path d="M228 130H308" marker-end="url(#arrow)"/>
+    <path d="M308 170H228" marker-end="url(#arrow)"/>
+    <path d="M492 130H572" marker-end="url(#arrow)"/>
+    <path d="M572 156H492" marker-end="url(#arrow)"/>
+    <path d="M400 204V260" marker-end="url(#arrow)"/>
+    <path d="M228 296H308" marker-end="url(#arrow)"/>
+  </g>
+  <text x="268" y="122" text-anchor="middle" font-size="11.5" fill="#5c5c58">proxy token</text>
+  <text x="268" y="162" text-anchor="middle" font-size="11.5" fill="#5c5c58">stream</text>
+  <text x="532" y="122" text-anchor="middle" font-size="11.5" fill="#5c5c58">org key</text>
+  <text x="532" y="148" text-anchor="middle" font-size="11.5" fill="#5c5c58">stream</text>
+  <text x="408" y="244" font-size="11.5" fill="#5c5c58">read once, then cached</text>
+  <text x="268" y="288" text-anchor="middle" font-size="11.5" fill="#5c5c58">mint</text>
+</svg>
