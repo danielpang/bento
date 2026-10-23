@@ -547,6 +547,12 @@ export class BentoClient {
       body: JSON.stringify({ restrictNetwork }),
     });
   }
+  setTeamAllowedHosts(allowedHosts: string[]) {
+    return this.request<Pick<TeamPolicy, "restrictNetwork" | "allowedHosts">>("/api/team/policy", {
+      method: "PATCH",
+      body: JSON.stringify({ allowedHosts }),
+    });
+  }
   /** Whether this team lets its members turn on beta features, and whether the caller may change that. */
   getTeamBeta() {
     return this.request<{ allowed: boolean; canEdit: boolean }>("/api/team/beta");

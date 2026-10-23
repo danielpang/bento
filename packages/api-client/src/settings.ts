@@ -134,6 +134,12 @@ export interface OrganizationDetails extends Organization {
 }
 export interface TeamPolicy {
   restrictNetwork: boolean;
+  /** Sites a locked team's agents may reach besides what Bento allows itself. */
+  allowedHosts: string[];
+  /** Hosts of the team's enabled MCP servers, always allowed on a locked run. */
+  mcpHosts: string[];
+  /** Whether this deployment honors allowedHosts (it locks through Modal). */
+  customHosts: boolean;
   canEdit: boolean;
   supported: boolean;
 }

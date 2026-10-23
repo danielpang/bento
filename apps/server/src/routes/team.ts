@@ -4,7 +4,9 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { agentRuns, features, invitation, organization, organizationPolicies, projects, user, type Db } from "@bento/db";
 import type { AppContext } from "../context.js";
+import { parseAllowedHosts } from "@bento/core";
 import { allCandidates, candidateDrivers } from "../orchestrator/sandbox-driver.js";
+import { mcpServerHosts } from "../orchestrator/sandbox-network.js";
 import { tenantDb as db } from "../middleware/tenant.js";
 import { actor } from "../middleware/actor.js";
 import { getActiveOrganizationMembership } from "../access.js";
@@ -40,6 +42,14 @@ export function teamRoutes(ctx: AppContext) {
         .limit(1);
       return c.json({
         restrictNetwork: row?.restrictNetwork === true,
+        allowedHosts: row?.allowedHosts ?? [],
+        // Allowed on every locked run whatever the list says, so the
+        // console can show them in it and say so.
+        mcpHosts: await mcpServerHosts(ctx, membership.organizationId, actor(c)),
+        // Only Modal takes a per run allowlist. A Docker deployment
+        // locks through the operator's network, which a list typed
+        // here would not change, so the field is not offered there.
+        customHosts: allCandidates(candidateDrivers(ctx.drivers, "auto")).some((d) => d.provider === "modal"),
         canEdit: membership.role === "owner" || membership.role === "admin",
         // Whether every driver a sandbox in this organization would
         // run on can honour a restricted network, so the control can
@@ -47,26 +57,45 @@ export function teamRoutes(ctx: AppContext) {
         supported: (await restrictedNetworkRefusal(ctx, db(c, ctx), membership.organizationId)) === null,
       });
     })
-    .patch("/policy", zValidator("json", z.object({ restrictNetwork: z.boolean() })), async (c) => {
+    .patch(
+      "/policy",
+      zValidator(
+        "json",
+        z
+          .object({ restrictNetwork: z.boolean().optional(), allowedHosts: z.array(z.string().max(300)).max(500).optional() })
+          .refine((body) => body.restrictNetwork !== undefined || body.allowedHosts !== undefined, "nothing to change"),
+      ),
+      async (c) => {
       const membership = await getActiveOrganizationMembership(ctx, c);
       if (!membership) return c.json({ error: "not found" }, 404);
       if (membership.role !== "owner" && membership.role !== "admin") {
         return c.json({ error: "only organization owners and admins can change this" }, 403);
       }
-      const { restrictNetwork } = c.req.valid("json");
-      if (restrictNetwork) {
-        const error = await restrictedNetworkRefusal(ctx, db(c, ctx), membership.organizationId);
-        if (error) return c.json({ error }, 409);
+      const body = c.req.valid("json");
+      const set: { restrictNetwork?: boolean; allowedHosts?: string[] } = {};
+      if (body.allowedHosts !== undefined) {
+        const parsed = parseAllowedHosts(body.allowedHosts);
+        if ("errors" in parsed) return c.json({ error: parsed.errors.join(" ") }, 400);
+        set.allowedHosts = parsed.hosts;
       }
-      await db(c, ctx)
+      if (body.restrictNetwork !== undefined) {
+        if (body.restrictNetwork) {
+          const error = await restrictedNetworkRefusal(ctx, db(c, ctx), membership.organizationId);
+          if (error) return c.json({ error }, 409);
+        }
+        set.restrictNetwork = body.restrictNetwork;
+      }
+      const [row] = await db(c, ctx)
         .insert(organizationPolicies)
-        .values({ organizationId: membership.organizationId, restrictNetwork })
+        .values({ organizationId: membership.organizationId, ...set })
         .onConflictDoUpdate({
           target: organizationPolicies.organizationId,
-          set: { restrictNetwork, updatedAt: new Date() },
-        });
-      return c.json({ restrictNetwork });
-    })
+          set: { ...set, updatedAt: new Date() },
+        })
+        .returning({ restrictNetwork: organizationPolicies.restrictNetwork, allowedHosts: organizationPolicies.allowedHosts });
+      return c.json({ restrictNetwork: row?.restrictNetwork === true, allowedHosts: row?.allowedHosts ?? [] });
+      },
+    )
     /**
      * Whether members may turn on beta features for this team's work.
      * Read by any member, changed only by an owner or admin, like the

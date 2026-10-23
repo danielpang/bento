@@ -196,7 +196,10 @@ export function modalOutboundAllowlist(spec: Pick<ProvisionSpec, "network" | "al
   if (spec.network !== "restricted") return undefined;
   const domains: string[] = [];
   for (const host of spec.allowedHosts ?? []) {
-    const name = hostnameOf(host);
+    // Modal takes `*.example.com` as every subdomain of example.com.
+    const wildcard = host.trim().startsWith("*.");
+    const bare = hostnameOf(wildcard ? host.trim().slice(2) : host);
+    const name = bare && wildcard ? `*.${bare}` : bare;
     if (!name) {
       throw new Error(
         "This organization requires agents to run without open network access, and a required host could not be named. The run was not started.",

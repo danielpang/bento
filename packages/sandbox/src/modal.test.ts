@@ -657,6 +657,13 @@ test("a restricted run names hosts and refuses when it cannot", () => {
   );
 });
 
+test("a team's wildcard reaches Modal as a wildcard", () => {
+  assert.deepEqual(
+    modalOutboundAllowlist({ network: "restricted", allowedHosts: ["*.example.com", "docs.example.com"] }),
+    ["*.example.com", "docs.example.com"],
+  );
+});
+
 test("sandbox size follows the sprite names with a modal prefix", () => {
   assert.equal(modalSandboxSize(1, 2048), "modal-small");
   assert.equal(modalSandboxSize(2, 4096), "modal-standard");

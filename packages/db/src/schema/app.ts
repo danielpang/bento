@@ -239,6 +239,13 @@ export const organizationPolicies = pgTable("organization_policies", {
    */
   restrictNetwork: boolean("restrict_network").notNull().default(false),
   /**
+   * Sites a restricted run may reach besides the ones Bento names
+   * itself (the gateway, clone remotes, the model provider). Host
+   * names or `*.domain` wildcards, as parseAllowedHosts accepts them.
+   * Honored only on Modal, the one driver that takes a per run list.
+   */
+  allowedHosts: text("allowed_hosts").array().notNull().default(sql`'{}'::text[]`),
+  /**
    * Whether the stage write-ups under docs/bento/ ride along into pull
    * requests. Off, because a reviewer opened a pull request to read a
    * change and found six generated markdown files in the diff. They

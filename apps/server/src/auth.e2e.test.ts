@@ -3071,6 +3071,90 @@ test("network lockdown on a sprite deployment is offered when Modal can take the
 });
 
 /**
+ * A locked team on Modal names the sites its agents may still reach.
+ * The list is validated the way the console validates it, a wildcard
+ * over a whole domain ending is refused, and the team's MCP server
+ * hosts come back beside it so the console can prefill them.
+ */
+test("a locked team stores its allowed sites, refuses *.com, and is shown its MCP hosts", async () => {
+  const signup = await jsonPost("/api/auth/sign-up/email", {
+    email: "allowlist-lock@bento.test",
+    password: "correct-horse-battery",
+    name: "Allowlist Lock",
+  });
+  const token = signup.headers.get("set-auth-token")!;
+  const userId = ((await signup.json()) as { user: { id: string } }).user.id;
+  const org = (await (
+    await jsonPost("/api/auth/organization/create", { name: "Allowlist Lock Co", slug: "allowlist-lock-co" }, token)
+  ).json()) as { id: string };
+  await jsonPost("/api/auth/organization/set-active", { organizationId: org.id }, token);
+  const headers = { "content-type": "application/json", authorization: `Bearer ${token}` };
+  await ctx.db.insert(mcpServers).values([
+    { ownerId: userId, organizationId: org.id, name: "Docs", slug: "docs", url: "https://mcp.docs.example/mcp", authType: "none" },
+    {
+      ownerId: userId,
+      organizationId: org.id,
+      name: "Off",
+      slug: "off",
+      url: "https://off.example/mcp",
+      authType: "none",
+      enabled: false,
+    },
+  ]);
+
+  const previous = ctx.drivers;
+  try {
+    ctx.drivers = createDrivers(
+      loadEnv({
+        BENTO_MODE: "multi",
+        DATABASE_URL: testUrl,
+        BENTO_SANDBOX_DRIVER: "sprite",
+        SPRITES_TOKEN: "test-token",
+        MODAL_TOKEN_ID: "id",
+        MODAL_TOKEN_SECRET: "secret",
+      } as NodeJS.ProcessEnv),
+    );
+    const before = (await (await app.request("/api/team/policy", { headers })).json()) as {
+      allowedHosts: string[];
+      mcpHosts: string[];
+      customHosts: boolean;
+    };
+    assert.deepEqual(before.allowedHosts, [], "nothing allowed until the team says so");
+    assert.deepEqual(before.mcpHosts, ["mcp.docs.example"], "enabled MCP servers only");
+    assert.equal(before.customHosts, true, "Modal takes a per run list");
+
+    const refused = await app.request("/api/team/policy", {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ allowedHosts: ["*.com"] }),
+    });
+    assert.equal(refused.status, 400);
+    assert.match(((await refused.json()) as { error: string }).error, /every site under \.com/);
+
+    const saved = await app.request("/api/team/policy", {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ restrictNetwork: true, allowedHosts: ["https://Registry.npmjs.org/", "*.example.com", "mcp.docs.example"] }),
+    });
+    assert.equal(saved.status, 200);
+    assert.deepEqual(await saved.json(), {
+      restrictNetwork: true,
+      allowedHosts: ["registry.npmjs.org", "*.example.com", "mcp.docs.example"],
+    });
+
+    // Changing only the list leaves the lock where it was.
+    const listOnly = await app.request("/api/team/policy", {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ allowedHosts: ["registry.npmjs.org"] }),
+    });
+    assert.deepEqual(await listOnly.json(), { restrictNetwork: true, allowedHosts: ["registry.npmjs.org"] });
+  } finally {
+    ctx.drivers = previous;
+  }
+});
+
+/**
  * The lock applies to new cards. A card that already has a sprite
  * keeps it, and keeps the sprite's open network, so a live sprite row
  * does not stand in the lock's way. A project pinned to the sprite

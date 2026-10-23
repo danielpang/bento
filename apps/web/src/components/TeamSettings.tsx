@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { ConfirmDialog } from "./PromptDialog.js";
 import { ListRowsSkeleton, SettingsCardSkeleton } from "./Skeleton.js";
-import type { BentoClient } from "@bento/api-client";
+import type { BentoClient, TeamPolicy } from "@bento/api-client";
+import { parseAllowedHosts } from "@bento/core";
 import { authClient, useActiveOrganization, useListOrganizations } from "../auth-client.js";
 import { useToast } from "./Toasts.js";
 import { seatChangeNote, useBillingPlan } from "./billing-plan.js";
@@ -447,19 +448,24 @@ export function TeamSettings({ client }: { client: BentoClient }) {
 }
 
 /**
- * Whether this team's agents may reach the internet.
+ * Whether this team's agents may reach the internet, and which sites
+ * they still may when they cannot.
  *
  * Opt in, and fail closed: an agent can read anything its sandbox can,
  * so a team handling sensitive code may want its runs to have no route
  * out at all. The deployment has to provide that network, and the
  * control says so rather than offering a switch that quietly does
- * nothing.
+ * nothing. The allowlist is offered only where the lock runs on Modal,
+ * the one sandbox that takes a list per run. The team's MCP servers are
+ * allowed on every locked run, so the field starts with their hosts
+ * and says why they are there.
  */
 function NetworkPolicyCard() {
   const toast = useToast();
-  const [state, setState] = useState<{ restrictNetwork: boolean; canEdit: boolean; supported: boolean } | null>(null);
+  const [state, setState] = useState<TeamPolicy | null>(null);
   const [ready, setReady] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [draft, setDraft] = useState<string | null>(null);
 
   useEffect(() => {
     void fetch("/api/team/policy", { credentials: "include" })
@@ -472,22 +478,53 @@ function NetworkPolicyCard() {
   if (!ready) return <SettingsCardSkeleton rows={2} />;
   if (!state) return null;
 
-  async function toggle(next: boolean) {
+  const stored = state.allowedHosts ?? [];
+  const mcpHosts = state.mcpHosts ?? [];
+  // Prefilled with any MCP host the stored list lacks, so what the
+  // field shows is what a locked run is allowed.
+  const prefilled = [...stored, ...mcpHosts.filter((host) => !stored.includes(host))];
+  const text = draft ?? prefilled.join("\n");
+  const parsed = parseAllowedHosts(text.split(/[\n,]/));
+  const unchanged = "hosts" in parsed && parsed.hosts.join("\n") === stored.join("\n");
+
+  async function patch(body: { restrictNetwork?: boolean; allowedHosts?: string[] }): Promise<boolean> {
     setBusy(true);
     try {
       const res = await fetch("/api/team/policy", {
         method: "PATCH",
         credentials: "include",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ restrictNetwork: next }),
+        body: JSON.stringify(body),
       });
-      const body = (await res.json().catch(() => ({}))) as { error?: string };
-      if (!res.ok) throw new Error(body.error ?? "That did not work. Try again.");
-      setState((current) => (current ? { ...current, restrictNetwork: next } : current));
+      const answer = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        restrictNetwork?: boolean;
+        allowedHosts?: string[];
+      };
+      if (!res.ok) throw new Error(answer.error ?? "That did not work. Try again.");
+      setState((current) =>
+        current
+          ? {
+              ...current,
+              restrictNetwork: answer.restrictNetwork ?? current.restrictNetwork,
+              allowedHosts: answer.allowedHosts ?? current.allowedHosts,
+            }
+          : current,
+      );
+      return true;
     } catch (err) {
       toast.fail(err);
+      return false;
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function saveHosts() {
+    if (!("hosts" in parsed)) return;
+    if (await patch({ allowedHosts: parsed.hosts })) {
+      setDraft(null);
+      toast.note("Allowed sites saved");
     }
   }
 
@@ -508,10 +545,46 @@ function NetworkPolicyCard() {
           type="checkbox"
           checked={state.restrictNetwork}
           disabled={busy || !state.canEdit || (!state.supported && !state.restrictNetwork)}
-          onChange={(e) => void toggle(e.target.checked)}
+          onChange={(e) => void patch({ restrictNetwork: e.target.checked })}
         />
         <span className="gate-check-text">Block network access for every agent in this team.</span>
       </label>
+      {state.restrictNetwork && state.customHosts && (
+        <label className="field">
+          <span className="label">Allowed sites</span>
+          <textarea
+            className="input skill-input"
+            rows={4}
+            placeholder={"registry.npmjs.org\n*.example.com"}
+            value={text}
+            disabled={busy || !state.canEdit}
+            onChange={(e) => setDraft(e.target.value)}
+          />
+          <span className="muted">
+            One per line. Use *.example.com for every subdomain of a site. A wildcard over a whole
+            domain ending, like *.com, is not allowed. Your model provider and repositories are
+            always reachable.
+          </span>
+          {mcpHosts.length > 0 && (
+            <span className="muted">
+              Your MCP server endpoints ({mcpHosts.join(", ")}) are added to this list automatically, so
+              agents can still use them.
+            </span>
+          )}
+          {"errors" in parsed && parsed.errors.map((error) => (
+            <span key={error} className="error">
+              {error}
+            </span>
+          ))}
+        </label>
+      )}
+      {state.restrictNetwork && state.customHosts && state.canEdit && (
+        <div className="actions">
+          <button className="btn" disabled={busy || unchanged || "errors" in parsed} onClick={() => void saveHosts()}>
+            Save allowed sites
+          </button>
+        </div>
+      )}
       {!state.canEdit && <p className="muted">Only an owner or admin can change this.</p>}
     </section>
   );
