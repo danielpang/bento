@@ -129,7 +129,7 @@ Bento starts its API and PostgreSQL locally. Run `bento` to reopen the board. Re
 
 State and worktrees live in `~/.bento`. Use `--data-dir <path>` to change this, or `--db <url>` for existing PostgreSQL.
 
-Agents in Docker sandboxes reach their model through Bento's model proxy, so the container holds a run token rather than your provider key. To give sandboxes the raw keys instead, start Bento with `BENTO_MODEL_PROXY=false` in its environment. On Linux, Docker sandboxes usually cannot reach a server on `127.0.0.1`, and those runs keep the raw keys with a note in the transcript. See [security.md](./security.md#model-keys-stay-with-bento).
+Agents in Docker sandboxes reach their model through Bento's model proxy, so the container contains a proxy token rather than your provider key. To give sandboxes the raw keys instead, start Bento with `BENTO_MODEL_PROXY=false` in its environment. On Linux, Docker sandboxes usually cannot reach a server on `127.0.0.1`, and those runs keep the raw keys with a note in the transcript. See [security.md](./security.md#model-keys-stay-encrypted-in-bento).
 
 ### Cloud
 
