@@ -104,7 +104,7 @@ docker build -t bento-sandbox:dev infra/sandbox-image
 
 Use `./scripts/dev-cli.sh` wherever this guide says `bento`. It builds dependencies before launching. Restart after pulling updates.
 
-## Choose where agents run
+## Choose a mode
 
 
 | Mode                       | Board and history                                         | Agents                   |
