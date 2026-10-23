@@ -166,7 +166,15 @@ back, because it holds the swarm's branch and that branch exists
 nowhere else. A team with the network lock on is a Modal team: a
 sprite cannot restrict egress, so `provisionWorkspace` never asks it
 for a locked run and goes straight to Modal, and the Team route
-offers the lock whenever Modal is there to take those runs. The lock
+offers the lock whenever Modal is there to take those runs. A locked
+team names the sites its agents may still reach
+(`organization_policies.allowed_hosts`: host names or `*.domain`, never
+a wildcard over a domain ending like `*.com`; `parseAllowedHosts` in
+`@bento/core` is the one rule, for the console and the route), and
+`modalNetworkForProject` adds that list and the host of every enabled
+MCP server to what Bento allows itself. A locked Modal run attaches MCP
+servers through the gateway as usual; a locked network that is not
+Modal's still attaches none. The lock
 applies to new cards: a card that already has a machine keeps it,
 and a machine that cannot lock keeps the network it was made with,
 which the card's transcript says. A team without the lock keeps the
