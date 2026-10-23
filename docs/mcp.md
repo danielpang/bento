@@ -61,11 +61,10 @@ Claude Code, Cursor, opencode, Codex, Antigravity, Muse Code, and fx consume rem
 
 MCP is not attached when:
 
+- the organization blocks sandbox egress,
 - the run uses the `local-process` driver,
 - a personal server has no credential for the run's starter, or
 - no gateway URL reachable from the sandbox is configured.
-
-The team's network lock (Settings, Team, Agent network access) does not turn MCP off. A locked run gets every server an unlocked run would: Bento's own tools, the team's enabled servers, and the starter's own servers. The sandbox reaches each one only through the gateway, which calls the server from Bento's side, so the sandbox's allowlist names Bento's address and never a server's own host. Adding a server is what allows it, and the sandbox gains no direct route out.
 
 ## Configuration
 

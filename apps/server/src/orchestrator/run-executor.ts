@@ -420,9 +420,8 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       await refreshBaseBranches(repoRows.map((r) => ({ localPath: r.localPath, defaultBranch: r.defaultBranch })));
     }
   }
-  // Read once, for the provision guard and the allowlist. MCP does not
-  // read it: a locked run attaches its servers through the gateway
-  // like any other (see mcp-run.ts).
+  // Hoisted above provisioning because both the provision guard and the
+  // MCP attach after it read this.
   const restrictNetwork = await organizationRestrictsNetwork(ctx, subject.organizationId);
   try {
     // The allowlist is built when Modal may make this machine, which
@@ -657,6 +656,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     driver,
     adapter,
     handle,
+    restrictNetwork,
     mountedConfigPaths: authMounts.map((m) => m.containerPath),
     // Bento's own tools: how a swarm agent acts on the plan, and how a
     // card's agent splits work too large for one branch and says what

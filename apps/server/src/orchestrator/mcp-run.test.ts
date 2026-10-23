@@ -143,6 +143,7 @@ test("prepareRunMcp keeps going when writing the config throws", async () => {
     driver,
     adapter,
     handle: { externalId: "bento-feature", provider: "sprite", workdir: "/workspace" },
+    restrictNetwork: false,
     mountedConfigPaths: [],
     // Bento's own server, which is what this run has to attach: phase 1
     // made that an explicit list rather than a cardTools boolean, and

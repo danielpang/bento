@@ -27,10 +27,6 @@ const KNOWN_MODEL_KEYS = new Set(DEFAULT_MODEL_HOSTS.map((entry) => entry.key));
  * already on the list, and the provider's own host and the base URL
  * the organization saved for it are Bento's to reach, not the
  * sandbox's.
- *
- * MCP servers never appear here, for the same reason: a locked run
- * attaches them through the gateway, which reaches each upstream from
- * Bento's side, so adding a server gives the sandbox no new route out.
  */
 export function modalRunHosts(input: {
   gatewayUrl: string | undefined;
