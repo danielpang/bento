@@ -61,7 +61,7 @@ Claude Code, Cursor, opencode, Codex, Antigravity, Muse Code, and fx consume rem
 
 MCP is not attached when:
 
-- the organization blocks sandbox egress,
+- the organization blocks sandbox egress and the run's sandbox is not on Modal (a locked Modal run attaches MCP servers through the gateway),
 - the run uses the `local-process` driver,
 - a personal server has no credential for the run's starter, or
 - no gateway URL reachable from the sandbox is configured.

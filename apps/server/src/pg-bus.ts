@@ -2,7 +2,7 @@ import pg from "pg";
 import type { AgentEvent } from "@bento/core";
 import type { BusWirePayload, EventBus } from "./events.js";
 
-/** Also named by the grant triggers in migration 0067, which publish onto it. */
+/** Also named by the grant triggers in migration 0068, which publish onto it. */
 const CHANNEL = "bento_bus";
 
 /**

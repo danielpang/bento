@@ -35,6 +35,17 @@ test("only the keys the proxy carries leave the allowlist", () => {
   assert.ok(hosts.includes("https://api2.cursor.sh"));
 });
 
+test("a site the team allowed stays on the list even when the proxy carries its provider's key", () => {
+  const hosts = modalRunHosts({
+    gatewayUrl: "https://bento.example",
+    cloneUrls: [],
+    env: { OPENAI_API_KEY: "secret" },
+    proxiedKeys: ["OPENAI_API_KEY"],
+    extraHosts: ["api.openai.com", "*.openai.com"],
+  });
+  assert.deepEqual(hosts, ["https://bento.example", "api.openai.com", "*.openai.com"]);
+});
+
 test("a base URL a login token still uses stays on the list", () => {
   const hosts = modalRunHosts({
     gatewayUrl: "https://bento.example",

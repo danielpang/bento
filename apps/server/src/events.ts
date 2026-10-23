@@ -322,7 +322,7 @@ export class EventBus {
    * was revoked, re-minted, stamped or cleared, extended, or deleted),
    * or the run left the queued, starting and running statuses. Published
    * by the database itself, from triggers on mcp_run_grants and
-   * agent_runs (migration 0067), onto the channel pg-bus.ts listens on,
+   * agent_runs (migration 0068), onto the channel pg-bus.ts listens on,
    * so every path that ends a run is heard, including a bare update
    * that never calls revokeRunGrant. The model proxy's grant cache is
    * the listener: it drops the run's entries, so the next request reads

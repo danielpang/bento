@@ -542,9 +542,15 @@ export class BentoClient {
     return this.request<TeamPolicy>("/api/team/policy");
   }
   setTeamPolicy(restrictNetwork: boolean) {
-    return this.request<TeamPolicy>("/api/team/policy", {
+    return this.request<Pick<TeamPolicy, "restrictNetwork" | "allowedHosts">>("/api/team/policy", {
       method: "PATCH",
       body: JSON.stringify({ restrictNetwork }),
+    });
+  }
+  setTeamAllowedHosts(allowedHosts: string[]) {
+    return this.request<Pick<TeamPolicy, "restrictNetwork" | "allowedHosts">>("/api/team/policy", {
+      method: "PATCH",
+      body: JSON.stringify({ allowedHosts }),
     });
   }
   /** Whether this team lets its members turn on beta features, and whether the caller may change that. */

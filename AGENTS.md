@@ -166,7 +166,21 @@ back, because it holds the swarm's branch and that branch exists
 nowhere else. A team with the network lock on is a Modal team: a
 sprite cannot restrict egress, so `provisionWorkspace` never asks it
 for a locked run and goes straight to Modal, and the Team route
-offers the lock whenever Modal is there to take those runs. The lock
+offers the lock whenever Modal is there to take those runs. A locked
+team names the sites its agents may still reach
+(`organization_policies.allowed_hosts`: host names or `*.domain`, never
+a wildcard over a domain ending like `*.com`; `parseAllowedHosts` in
+`@bento/core` is the one rule, for the console and the route), and
+`modalNetworkForProject` adds that list, and nothing else, to what Bento
+allows itself; the route also refuses a wildcard over any public suffix,
+private ones like `github.io` included (`tldts`, server side only, to
+keep it out of the console's bundle). Turning the lock on, and adding
+or enabling a team MCP server while it is on, puts that server's host
+on the list (`allowMcpHosts`), where the console says so and a person
+can remove it for good. Personal servers are never added: any member
+may add one, and the lock is an admin's to widen. A locked Modal run
+attaches MCP servers through the gateway as usual; a locked network
+that is not Modal's still attaches none. The lock
 applies to new cards: a card that already has a machine keeps it,
 and a machine that cannot lock keeps the network it was made with,
 which the card's transcript says. A team without the lock keeps the
@@ -1026,9 +1040,11 @@ a 426, which is why the route answers upgrades that way.
 One provider table, `MODEL_PROVIDERS` in `packages/core`
 (`model-providers.ts`), serves the proxy, the Modal allowlist and the
 adapters: opencode and pi keep only their own CLI's provider ids,
-keyed by the shared entry, whose base URL variable they read. A
-proxied key's provider host leaves the allowlist, because the sandbox
-reaches it through the gateway. Each entry lists the inference
+keyed by the shared entry, whose base URL variable they read. On a
+locked Modal run the sandbox reaches the proxy, like the MCP gateway,
+at Bento's own host, which is always on the allowlist, so a proxied
+key's provider host leaves the list; a site the team allowed itself
+stays, even when it is that host. Each entry lists the inference
 endpoints the proxy will call with the key (`endpoints`: completions,
 token counting, model listings), matched on the path the CLI sent after
 `/api/model-proxy/<provider>`; anything else (files, fine tuning,
@@ -1049,7 +1065,7 @@ nothing. The database announces every change that must end an entry
 early: triggers on `agent_runs` (a run leaving the active statuses)
 and `mcp_run_grants` (revoked, re-minted, stamped or cleared, extended,
 deleted) publish `grant_changed` with the run id onto the bus channel
-(migration 0067), so every process evicts, whichever path wrote the
+(migration 0068), so every process evicts, whichever path wrote the
 row. Do not replace that with a publish from each terminal path: the
 paths that forgot to revoke are the reason it is in the database. A
 key the provider answers 401 or 403 is read again on the next call, so

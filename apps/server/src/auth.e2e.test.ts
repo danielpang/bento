@@ -3071,6 +3071,118 @@ test("network lockdown on a sprite deployment is offered when Modal can take the
 });
 
 /**
+ * A locked team on Modal names the sites its agents may still reach.
+ * The list is validated the way the console validates it, plus the
+ * public suffix list the console does not carry, so neither *.com nor
+ * *.github.io is stored. Locking, and adding or enabling a team MCP
+ * server while locked, puts that server's endpoint on the list, and a
+ * person who removes it there has removed it. Personal servers and
+ * disabled ones are never added.
+ */
+test("a locked team's allowed sites refuse public suffix wildcards and pick up team MCP endpoints", async () => {
+  const signup = await jsonPost("/api/auth/sign-up/email", {
+    email: "allowlist-lock@bento.test",
+    password: "correct-horse-battery",
+    name: "Allowlist Lock",
+  });
+  const token = signup.headers.get("set-auth-token")!;
+  const userId = ((await signup.json()) as { user: { id: string } }).user.id;
+  const org = (await (
+    await jsonPost("/api/auth/organization/create", { name: "Allowlist Lock Co", slug: "allowlist-lock-co" }, token)
+  ).json()) as { id: string };
+  await jsonPost("/api/auth/organization/set-active", { organizationId: org.id }, token);
+  const headers = { "content-type": "application/json", authorization: `Bearer ${token}` };
+  const [, off] = await ctx.db
+    .insert(mcpServers)
+    .values([
+      { ownerId: userId, organizationId: org.id, name: "Docs", slug: "docs", url: "https://mcp.docs.example/mcp", authType: "none" },
+      {
+        ownerId: userId,
+        organizationId: org.id,
+        name: "Off",
+        slug: "off",
+        url: "https://off.example/mcp",
+        authType: "none",
+        enabled: false,
+      },
+      {
+        ownerId: userId,
+        organizationId: org.id,
+        userId,
+        name: "Mine",
+        slug: "mine",
+        url: "https://personal.example/mcp",
+        authType: "none",
+      },
+    ])
+    .returning({ id: mcpServers.id });
+  const policy = async () =>
+    ((await (await app.request("/api/team/policy", { headers })).json()) as { allowedHosts: string[] }).allowedHosts;
+  const patch = (body: unknown) =>
+    app.request("/api/team/policy", { method: "PATCH", headers, body: JSON.stringify(body) });
+
+  const previous = ctx.drivers;
+  try {
+    ctx.drivers = createDrivers(
+      loadEnv({
+        BENTO_MODE: "multi",
+        DATABASE_URL: testUrl,
+        BENTO_SANDBOX_DRIVER: "sprite",
+        SPRITES_TOKEN: "test-token",
+        MODAL_TOKEN_ID: "id",
+        MODAL_TOKEN_SECRET: "secret",
+      } as NodeJS.ProcessEnv),
+    );
+    const before = (await (await app.request("/api/team/policy", { headers })).json()) as {
+      allowedHosts: string[];
+      customHosts: boolean;
+    };
+    assert.deepEqual(before.allowedHosts, [], "nothing allowed until the team says so");
+    assert.equal(before.customHosts, true, "Modal takes a per run list");
+
+    const refused = await patch({ allowedHosts: ["*.com"] });
+    assert.equal(refused.status, 400);
+    assert.match(((await refused.json()) as { error: string }).error, /too broad/);
+    assert.equal((await patch({ allowedHosts: ["*.github.io"] })).status, 400, "a private public suffix is as broad as *.com");
+
+    // Locking adds the enabled team server, not the disabled one or the personal one.
+    const locked = await patch({ restrictNetwork: true });
+    assert.deepEqual(await locked.json(), { restrictNetwork: true, allowedHosts: ["mcp.docs.example"] });
+
+    // A person removes it, and it stays removed.
+    const edited = await patch({ allowedHosts: ["https://Registry.npmjs.org/", "*.example.com"] });
+    assert.deepEqual(await edited.json(), { restrictNetwork: true, allowedHosts: ["registry.npmjs.org", "*.example.com"] });
+    assert.deepEqual(await policy(), ["registry.npmjs.org", "*.example.com"]);
+
+    // A team server added while locked joins the list; a personal one does not.
+    const added = await app.request("/api/mcp", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ name: "New", slug: "new", url: "https://mcp.new.example/mcp", authType: "none" }),
+    });
+    assert.equal(added.status, 201);
+    const personal = await app.request("/api/mcp", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ name: "Own", slug: "own", url: "https://own.example/mcp", authType: "none", personal: true }),
+    });
+    assert.equal(personal.status, 201);
+    assert.deepEqual(await policy(), ["registry.npmjs.org", "*.example.com", "mcp.new.example"]);
+
+    // Enabling a team server joins it too.
+    const enabled = await app.request(`/api/mcp/${off!.id}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ enabled: true }),
+    });
+    assert.equal(enabled.status, 200);
+    assert.deepEqual(await policy(), ["registry.npmjs.org", "*.example.com", "mcp.new.example", "off.example"]);
+  } finally {
+    ctx.drivers = previous;
+  }
+});
+
+/**
  * The lock applies to new cards. A card that already has a sprite
  * keeps it, and keeps the sprite's open network, so a live sprite row
  * does not stand in the lock's way. A project pinned to the sprite

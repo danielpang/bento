@@ -13,7 +13,7 @@ import type { ResolvedGrant } from "./grants.js";
  *
  * - its run leaving the active statuses, or its grant row changing
  *   (revoked, re-minted, stamped or cleared, extended, deleted): the
- *   database announces both on the bus (migration 0067, pg-bus.ts) to
+ *   database announces both on the bus (migration 0068, pg-bus.ts) to
  *   every process, and `evictRun` drops every token of that run;
  * - the bus's LISTEN connection dropping and coming back (`clear`),
  *   since announcements may have been missed while it was down;

@@ -17,7 +17,8 @@ const KNOWN_MODEL_KEYS = new Set(DEFAULT_MODEL_HOSTS.map((entry) => entry.key));
  * Hosts a restricted Modal run is allowed to open.
  *
  * The gateway, each repository's clone URL, every `*_BASE_URL` already
- * resolved for the agent, a custom provider's base URL, and the default
+ * resolved for the agent, a custom provider's base URL, the sites the
+ * team allowed itself, and the default
  * host of any API key that has no base URL. Key values are not hosts
  * and are not returned. A key whose host cannot be named throws, so
  * the run fails before a sandbox exists.
@@ -26,7 +27,8 @@ const KNOWN_MODEL_KEYS = new Set(DEFAULT_MODEL_HOSTS.map((entry) => entry.key));
  * sandbox reaches its provider only through the gateway, which is
  * already on the list, and the provider's own host and the base URL
  * the organization saved for it are Bento's to reach, not the
- * sandbox's.
+ * sandbox's. A site the team allowed itself (`extraHosts`) stays even
+ * when it is a proxied provider's host, because a person asked for it.
  */
 export function modalRunHosts(input: {
   gatewayUrl: string | undefined;
@@ -34,6 +36,8 @@ export function modalRunHosts(input: {
   env: Readonly<Record<string, string>>;
   customBaseUrl?: string | undefined;
   proxiedKeys?: readonly string[];
+  /** Already validated by parseAllowedHosts, so `*.domain` passes through. */
+  extraHosts?: readonly string[];
 }): string[] {
   const hosts: string[] = [];
   const push = (value: string | null | undefined) => {
@@ -54,6 +58,7 @@ export function modalRunHosts(input: {
     if (key.endsWith("_BASE_URL") && !proxiedOnly(key)) push(value);
   }
   push(input.customBaseUrl);
+  for (const host of input.extraHosts ?? []) push(host);
 
   for (const entry of DEFAULT_MODEL_HOSTS) {
     if (!input.env[entry.key]?.trim()) continue;

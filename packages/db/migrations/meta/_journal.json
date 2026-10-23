@@ -468,14 +468,21 @@
       "idx": 66,
       "version": "7",
       "when": 1791446560000,
-      "tag": "0066_model_proxy_grants",
+      "tag": "0066_organization_allowed_hosts",
       "breakpoints": true
     },
     {
       "idx": 67,
       "version": "7",
       "when": 1791532960000,
-      "tag": "0067_grant_change_notify",
+      "tag": "0067_model_proxy_grants",
+      "breakpoints": true
+    },
+    {
+      "idx": 68,
+      "version": "7",
+      "when": 1791619360000,
+      "tag": "0068_grant_change_notify",
       "breakpoints": true
     }
   ]

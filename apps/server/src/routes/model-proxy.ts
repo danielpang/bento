@@ -154,7 +154,7 @@ export function modelProxyCacheFor(ctx: AppContext): ModelProxyCache {
   if (!cache) {
     const created = new ModelProxyCache();
     // The database announces a run's end and every change to its grant
-    // (migration 0067), and a bus that reconnects may have missed some.
+    // (migration 0068), and a bus that reconnects may have missed some.
     ctx.bus.onGrantChanged((runId) => created.evictRun(runId));
     ctx.bus.onResync(() => created.clear());
     caches.set(ctx, created);

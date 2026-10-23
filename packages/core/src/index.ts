@@ -16,3 +16,4 @@ export * from "./repository-commands.js";
 export * from "./swarm-limits.js";
 export * from "./plan-files.js";
 export * from "./model-providers.js";
+export * from "./network-allowlist.js";

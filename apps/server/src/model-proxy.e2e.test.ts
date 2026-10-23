@@ -62,7 +62,7 @@ import { SecretBox } from "./secrets.js";
  * the run that bills by it are multi mode only, and switch the mode for
  * their own duration. The bus is replicated through Postgres as in
  * production, because that is how the database's grant announcements
- * (migration 0067) reach the proxy's cache.
+ * (migration 0068) reach the proxy's cache.
  */
 
 const exec = promisify(execFile);

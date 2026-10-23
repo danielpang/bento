@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { ConfirmDialog } from "./PromptDialog.js";
 import { ListRowsSkeleton, SettingsCardSkeleton } from "./Skeleton.js";
-import type { BentoClient } from "@bento/api-client";
+import type { BentoClient, TeamPolicy } from "@bento/api-client";
+import { parseAllowedHosts } from "@bento/core";
 import { authClient, useActiveOrganization, useListOrganizations } from "../auth-client.js";
 import { useToast } from "./Toasts.js";
 import { seatChangeNote, useBillingPlan } from "./billing-plan.js";
@@ -366,7 +367,7 @@ export function TeamSettings({ client }: { client: BentoClient }) {
               )}
             </section>
 
-            <NetworkPolicyCard />
+            <NetworkPolicyCard client={client} />
             <TeamBetaCard client={client} />
 
             {/*
@@ -447,57 +448,69 @@ export function TeamSettings({ client }: { client: BentoClient }) {
 }
 
 /**
- * Whether this team's agents may reach the internet.
+ * Whether this team's agents may reach the internet, and which sites
+ * they still may when they cannot.
  *
  * Opt in, and fail closed: an agent can read anything its sandbox can,
  * so a team handling sensitive code may want its runs to have no route
  * out at all. The deployment has to provide that network, and the
  * control says so rather than offering a switch that quietly does
- * nothing.
+ * nothing. The allowlist is offered only where the lock runs on Modal,
+ * the one sandbox that takes a list per run. The server puts each team
+ * MCP server's endpoint on the list when the lock goes on or the server
+ * is enabled, and the card says so: what the field shows is what a run
+ * may reach, and removing an endpoint here removes it from every run.
  */
-function NetworkPolicyCard() {
+function NetworkPolicyCard({ client }: { client: BentoClient }) {
   const toast = useToast();
-  const [state, setState] = useState<{ restrictNetwork: boolean; canEdit: boolean; supported: boolean } | null>(null);
+  const [state, setState] = useState<TeamPolicy | null>(null);
   const [ready, setReady] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [draft, setDraft] = useState<string | null>(null);
 
   useEffect(() => {
-    void fetch("/api/team/policy", { credentials: "include" })
-      .then((res) => (res.ok ? res.json() : null))
-      .then((body) => setState(body as typeof state))
+    void client
+      .getTeamPolicy()
+      .then(setState)
       .catch(() => setState(null))
       .finally(() => setReady(true));
-  }, []);
+  }, [client]);
 
   if (!ready) return <SettingsCardSkeleton rows={2} />;
   if (!state) return null;
 
-  async function toggle(next: boolean) {
+  const stored = state.allowedHosts ?? [];
+  const text = draft ?? stored.join("\n");
+  const parsed = parseAllowedHosts(text.split(/[\n,]/));
+  const unchanged = "hosts" in parsed && parsed.hosts.join("\n") === stored.join("\n");
+
+  async function save(change: () => Promise<Pick<TeamPolicy, "restrictNetwork" | "allowedHosts">>): Promise<boolean> {
     setBusy(true);
     try {
-      const res = await fetch("/api/team/policy", {
-        method: "PATCH",
-        credentials: "include",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ restrictNetwork: next }),
-      });
-      const body = (await res.json().catch(() => ({}))) as { error?: string };
-      if (!res.ok) throw new Error(body.error ?? "That did not work. Try again.");
-      setState((current) => (current ? { ...current, restrictNetwork: next } : current));
+      const row = await change();
+      setState((current) => (current ? { ...current, ...row } : current));
+      return true;
     } catch (err) {
       toast.fail(err);
+      return false;
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function saveHosts() {
+    if (!("hosts" in parsed)) return;
+    const hosts = parsed.hosts;
+    if (await save(() => client.setTeamAllowedHosts(hosts))) {
+      setDraft(null);
+      toast.note("Saved");
     }
   }
 
   return (
     <section className="section settings-card">
       <h3 className="settings-title">Agent network access</h3>
-      <p className="muted">
-        Agents can reach the internet from the sandbox, so they can install packages and read docs.
-        Block it to run them with no route out.
-      </p>
+      <p className="muted">Agents can reach the internet from their sandbox unless you block it.</p>
       {!state.supported && (
         <p className="muted">
           This cannot be turned on until the server has BENTO_SANDBOX_RESTRICTED_NETWORK.
@@ -508,10 +521,41 @@ function NetworkPolicyCard() {
           type="checkbox"
           checked={state.restrictNetwork}
           disabled={busy || !state.canEdit || (!state.supported && !state.restrictNetwork)}
-          onChange={(e) => void toggle(e.target.checked)}
+          onChange={(e) => {
+            const next = e.target.checked;
+            void save(() => client.setTeamPolicy(next));
+          }}
         />
-        <span className="gate-check-text">Block network access for every agent in this team.</span>
+        <span className="gate-check-text">Block network access for this team's agents.</span>
       </label>
+      {state.restrictNetwork && state.customHosts && (
+        <label className="field">
+          <span className="label">Allowed sites</span>
+          <textarea
+            className="input skill-input"
+            rows={4}
+            placeholder={"registry.npmjs.org\n*.example.com"}
+            value={text}
+            disabled={busy || !state.canEdit}
+            onChange={(e) => setDraft(e.target.value)}
+          />
+          <span className="muted">One per line. *.example.com covers subdomains.</span>
+          <span className="muted">Team MCP servers you enable are added here. Remove any you don't want.</span>
+          {"errors" in parsed &&
+            parsed.errors.map((error) => (
+              <span key={error} className="error">
+                {error}
+              </span>
+            ))}
+        </label>
+      )}
+      {state.restrictNetwork && state.customHosts && state.canEdit && (
+        <div className="actions">
+          <button className="btn" disabled={busy || unchanged || "errors" in parsed} onClick={() => void saveHosts()}>
+            Save
+          </button>
+        </div>
+      )}
       {!state.canEdit && <p className="muted">Only an owner or admin can change this.</p>}
     </section>
   );
