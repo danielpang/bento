@@ -367,7 +367,7 @@ export function TeamSettings({ client }: { client: BentoClient }) {
               )}
             </section>
 
-            <NetworkPolicyCard />
+            <NetworkPolicyCard client={client} />
             <TeamBetaCard client={client} />
 
             {/*
@@ -456,11 +456,11 @@ export function TeamSettings({ client }: { client: BentoClient }) {
  * out at all. The deployment has to provide that network, and the
  * control says so rather than offering a switch that quietly does
  * nothing. The allowlist is offered only where the lock runs on Modal,
- * the one sandbox that takes a list per run. The team's MCP servers are
- * allowed on every locked run, so the field starts with their hosts
- * and says why they are there.
+ * the one sandbox that takes a list per run. MCP servers need no entry,
+ * since agents reach them through Bento's gateway, and the card says so
+ * to a team that has some.
  */
-function NetworkPolicyCard() {
+function NetworkPolicyCard({ client }: { client: BentoClient }) {
   const toast = useToast();
   const [state, setState] = useState<TeamPolicy | null>(null);
   const [ready, setReady] = useState(false);
@@ -468,49 +468,26 @@ function NetworkPolicyCard() {
   const [draft, setDraft] = useState<string | null>(null);
 
   useEffect(() => {
-    void fetch("/api/team/policy", { credentials: "include" })
-      .then((res) => (res.ok ? res.json() : null))
-      .then((body) => setState(body as typeof state))
+    void client
+      .getTeamPolicy()
+      .then(setState)
       .catch(() => setState(null))
       .finally(() => setReady(true));
-  }, []);
+  }, [client]);
 
   if (!ready) return <SettingsCardSkeleton rows={2} />;
   if (!state) return null;
 
   const stored = state.allowedHosts ?? [];
-  const mcpHosts = state.mcpHosts ?? [];
-  // Prefilled with any MCP host the stored list lacks, so what the
-  // field shows is what a locked run is allowed.
-  const prefilled = [...stored, ...mcpHosts.filter((host) => !stored.includes(host))];
-  const text = draft ?? prefilled.join("\n");
+  const text = draft ?? stored.join("\n");
   const parsed = parseAllowedHosts(text.split(/[\n,]/));
   const unchanged = "hosts" in parsed && parsed.hosts.join("\n") === stored.join("\n");
 
-  async function patch(body: { restrictNetwork?: boolean; allowedHosts?: string[] }): Promise<boolean> {
+  async function save(change: () => Promise<Pick<TeamPolicy, "restrictNetwork" | "allowedHosts">>): Promise<boolean> {
     setBusy(true);
     try {
-      const res = await fetch("/api/team/policy", {
-        method: "PATCH",
-        credentials: "include",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      const answer = (await res.json().catch(() => ({}))) as {
-        error?: string;
-        restrictNetwork?: boolean;
-        allowedHosts?: string[];
-      };
-      if (!res.ok) throw new Error(answer.error ?? "That did not work. Try again.");
-      setState((current) =>
-        current
-          ? {
-              ...current,
-              restrictNetwork: answer.restrictNetwork ?? current.restrictNetwork,
-              allowedHosts: answer.allowedHosts ?? current.allowedHosts,
-            }
-          : current,
-      );
+      const row = await change();
+      setState((current) => (current ? { ...current, ...row } : current));
       return true;
     } catch (err) {
       toast.fail(err);
@@ -522,19 +499,17 @@ function NetworkPolicyCard() {
 
   async function saveHosts() {
     if (!("hosts" in parsed)) return;
-    if (await patch({ allowedHosts: parsed.hosts })) {
+    const hosts = parsed.hosts;
+    if (await save(() => client.setTeamAllowedHosts(hosts))) {
       setDraft(null);
-      toast.note("Allowed sites saved");
+      toast.note("Saved");
     }
   }
 
   return (
     <section className="section settings-card">
       <h3 className="settings-title">Agent network access</h3>
-      <p className="muted">
-        Agents can reach the internet from the sandbox, so they can install packages and read docs.
-        Block it to run them with no route out.
-      </p>
+      <p className="muted">Agents can reach the internet from their sandbox unless you block it.</p>
       {!state.supported && (
         <p className="muted">
           This cannot be turned on until the server has BENTO_SANDBOX_RESTRICTED_NETWORK.
@@ -545,9 +520,12 @@ function NetworkPolicyCard() {
           type="checkbox"
           checked={state.restrictNetwork}
           disabled={busy || !state.canEdit || (!state.supported && !state.restrictNetwork)}
-          onChange={(e) => void patch({ restrictNetwork: e.target.checked })}
+          onChange={(e) => {
+            const next = e.target.checked;
+            void save(() => client.setTeamPolicy(next));
+          }}
         />
-        <span className="gate-check-text">Block network access for every agent in this team.</span>
+        <span className="gate-check-text">Block network access for this team's agents.</span>
       </label>
       {state.restrictNetwork && state.customHosts && (
         <label className="field">
@@ -560,28 +538,20 @@ function NetworkPolicyCard() {
             disabled={busy || !state.canEdit}
             onChange={(e) => setDraft(e.target.value)}
           />
-          <span className="muted">
-            One per line. Use *.example.com for every subdomain of a site. A wildcard over a whole
-            domain ending, like *.com, is not allowed. Your model provider and repositories are
-            always reachable.
-          </span>
-          {mcpHosts.length > 0 && (
-            <span className="muted">
-              Your MCP server endpoints ({mcpHosts.join(", ")}) are added to this list automatically, so
-              agents can still use them.
-            </span>
-          )}
-          {"errors" in parsed && parsed.errors.map((error) => (
-            <span key={error} className="error">
-              {error}
-            </span>
-          ))}
+          <span className="muted">One per line. *.example.com covers subdomains.</span>
+          {state.mcpServers && <span className="muted">MCP servers keep working.</span>}
+          {"errors" in parsed &&
+            parsed.errors.map((error) => (
+              <span key={error} className="error">
+                {error}
+              </span>
+            ))}
         </label>
       )}
       {state.restrictNetwork && state.customHosts && state.canEdit && (
         <div className="actions">
           <button className="btn" disabled={busy || unchanged || "errors" in parsed} onClick={() => void saveHosts()}>
-            Save allowed sites
+            Save
           </button>
         </div>
       )}

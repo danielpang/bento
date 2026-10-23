@@ -3072,11 +3072,13 @@ test("network lockdown on a sprite deployment is offered when Modal can take the
 
 /**
  * A locked team on Modal names the sites its agents may still reach.
- * The list is validated the way the console validates it, a wildcard
- * over a whole domain ending is refused, and the team's MCP server
- * hosts come back beside it so the console can prefill them.
+ * The list is validated the way the console validates it, plus the
+ * public suffix list the console does not carry, so neither *.com nor
+ * *.github.io is stored. MCP servers are reported only as a yes or no:
+ * their hosts never join the list, because the agent reaches them
+ * through the gateway.
  */
-test("a locked team stores its allowed sites, refuses *.com, and is shown its MCP hosts", async () => {
+test("a locked team stores its allowed sites, refuses public suffix wildcards, and hears it has MCP servers", async () => {
   const signup = await jsonPost("/api/auth/sign-up/email", {
     email: "allowlist-lock@bento.test",
     password: "correct-horse-battery",
@@ -3116,11 +3118,11 @@ test("a locked team stores its allowed sites, refuses *.com, and is shown its MC
     );
     const before = (await (await app.request("/api/team/policy", { headers })).json()) as {
       allowedHosts: string[];
-      mcpHosts: string[];
+      mcpServers: boolean;
       customHosts: boolean;
     };
     assert.deepEqual(before.allowedHosts, [], "nothing allowed until the team says so");
-    assert.deepEqual(before.mcpHosts, ["mcp.docs.example"], "enabled MCP servers only");
+    assert.equal(before.mcpServers, true, "the enabled server counts");
     assert.equal(before.customHosts, true, "Modal takes a per run list");
 
     const refused = await app.request("/api/team/policy", {
@@ -3129,17 +3131,24 @@ test("a locked team stores its allowed sites, refuses *.com, and is shown its MC
       body: JSON.stringify({ allowedHosts: ["*.com"] }),
     });
     assert.equal(refused.status, 400);
-    assert.match(((await refused.json()) as { error: string }).error, /every site under \.com/);
+    assert.match(((await refused.json()) as { error: string }).error, /too broad/);
+
+    const suffix = await app.request("/api/team/policy", {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ allowedHosts: ["*.github.io"] }),
+    });
+    assert.equal(suffix.status, 400, "a private public suffix is as broad as *.com");
 
     const saved = await app.request("/api/team/policy", {
       method: "PATCH",
       headers,
-      body: JSON.stringify({ restrictNetwork: true, allowedHosts: ["https://Registry.npmjs.org/", "*.example.com", "mcp.docs.example"] }),
+      body: JSON.stringify({ restrictNetwork: true, allowedHosts: ["https://Registry.npmjs.org/", "*.example.com"] }),
     });
     assert.equal(saved.status, 200);
     assert.deepEqual(await saved.json(), {
       restrictNetwork: true,
-      allowedHosts: ["registry.npmjs.org", "*.example.com", "mcp.docs.example"],
+      allowedHosts: ["registry.npmjs.org", "*.example.com"],
     });
 
     // Changing only the list leaves the lock where it was.

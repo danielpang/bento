@@ -6,7 +6,6 @@ test("a host, a wildcard over a domain, and a pasted URL are accepted", () => {
   assert.deepEqual(parseAllowedHost("registry.npmjs.org"), { host: "registry.npmjs.org" });
   assert.deepEqual(parseAllowedHost(" *.Example.com "), { host: "*.example.com" });
   assert.deepEqual(parseAllowedHost("https://api.example.com:8443/v1/mcp?x=1"), { host: "api.example.com" });
-  assert.deepEqual(parseAllowedHost("*.co.uk."), { host: "*.co.uk" });
   assert.deepEqual(parseAllowedHost("localhost"), { host: "localhost" });
 });
 
@@ -14,6 +13,14 @@ test("a wildcard over a top level domain, or anywhere but the front, is refused"
   for (const entry of ["*", "*.com", "*.", "api.*.example.com", "*example.com", "**.example.com"]) {
     assert.ok("error" in parseAllowedHost(entry), entry);
   }
+});
+
+test("a wildcard over a public suffix is refused when the caller can name one", () => {
+  const isPublicSuffix = (name: string) => ["co.uk", "github.io"].includes(name);
+  assert.ok("error" in parseAllowedHost("*.co.uk", { isPublicSuffix }));
+  assert.ok("error" in parseAllowedHost("*.github.io", { isPublicSuffix }));
+  assert.deepEqual(parseAllowedHost("*.example.co.uk", { isPublicSuffix }), { host: "*.example.co.uk" });
+  assert.deepEqual(parseAllowedHost("acme.github.io", { isPublicSuffix }), { host: "acme.github.io" });
 });
 
 test("something that is not a host name is refused", () => {

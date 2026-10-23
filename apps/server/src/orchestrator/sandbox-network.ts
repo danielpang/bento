@@ -1,7 +1,7 @@
-import { and, eq, isNull, or } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import type { AgentCli } from "@bento/core";
 import { getAdapter } from "@bento/agents";
-import { mcpServers, organizationPolicies, repositories } from "@bento/db";
+import { organizationPolicies, repositories } from "@bento/db";
 import type { SandboxHandle } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
 import { resolveAgentEnv } from "./agent-env.js";
@@ -15,11 +15,10 @@ import { modalRunHosts } from "./modal-hosts.js";
  * a checkpoint gets the same allowlist as the one the run started in.
  * Not restricted: an empty object, and the sandbox keeps open egress.
  *
- * On top of what Bento names itself, the team's own allowlist and the
- * host of every MCP server it has enabled. The agent reaches those
- * servers through the gateway, which is already on the list, but the
- * Team settings promise that a locked team's MCP endpoints are allowed,
- * and a harness that opens one directly should find that true.
+ * On top of what Bento names itself, the sites the team allowed. MCP
+ * servers need no entry: the agent reaches them through the gateway,
+ * which is on the list, and adding their hosts would let any member who
+ * can add a personal server widen every locked run in the team.
  */
 export async function modalNetworkForProject(
   ctx: AppContext,
@@ -46,7 +45,7 @@ export async function modalNetworkForProject(
       cloneUrls: repos.map((row) => row.repoUrl),
       env,
       ...(custom?.selection?.baseUrl ? { customBaseUrl: custom.selection.baseUrl } : {}),
-      extraHosts: [...policy.allowedHosts, ...(organizationId ? await mcpServerHosts(ctx, organizationId) : [])],
+      extraHosts: policy.allowedHosts,
     }),
   };
 }
@@ -68,39 +67,4 @@ async function organizationNetworkPolicy(
     .where(eq(organizationPolicies.organizationId, organizationId))
     .limit(1);
   return { restrictNetwork: row?.restrictNetwork === true, allowedHosts: row?.allowedHosts ?? [] };
-}
-
-/**
- * Host names of the organization's enabled MCP servers, sorted and
- * without duplicates. With `userId`, only team servers and that
- * member's own, which is what Settings shows a member; without it,
- * every enabled server, which is what a run allows, since any member
- * may start the run. A URL that does not parse is left out: the
- * gateway refuses it anyway.
- */
-export async function mcpServerHosts(
-  ctx: AppContext,
-  organizationId: string,
-  userId?: string,
-): Promise<string[]> {
-  const rows = await ctx.db
-    .select({ url: mcpServers.url })
-    .from(mcpServers)
-    .where(
-      and(
-        eq(mcpServers.organizationId, organizationId),
-        eq(mcpServers.enabled, true),
-        ...(userId ? [or(isNull(mcpServers.userId), eq(mcpServers.userId, userId))] : []),
-      ),
-    );
-  const hosts = new Set<string>();
-  for (const row of rows) {
-    try {
-      const host = new URL(row.url).hostname.toLowerCase();
-      if (host) hosts.add(host);
-    } catch {
-      // Not a URL, so not a host anyone could allow.
-    }
-  }
-  return [...hosts].sort();
 }

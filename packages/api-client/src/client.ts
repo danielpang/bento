@@ -542,7 +542,7 @@ export class BentoClient {
     return this.request<TeamPolicy>("/api/team/policy");
   }
   setTeamPolicy(restrictNetwork: boolean) {
-    return this.request<TeamPolicy>("/api/team/policy", {
+    return this.request<Pick<TeamPolicy, "restrictNetwork" | "allowedHosts">>("/api/team/policy", {
       method: "PATCH",
       body: JSON.stringify({ restrictNetwork }),
     });

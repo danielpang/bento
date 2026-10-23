@@ -38,7 +38,7 @@ const KNOWN_MODEL_KEYS = new Set(DEFAULT_MODEL_HOSTS.map((entry) => entry.key));
  *
  * The gateway, each repository's clone URL, every `*_BASE_URL` already
  * resolved for the agent, a custom provider's base URL, the sites the
- * team allowed itself and its MCP servers' hosts, and the default
+ * team allowed itself, and the default
  * host of any API key that has no base URL. Key values are not hosts
  * and are not returned. A key whose host cannot be named throws, so
  * the run fails before a sandbox exists.

@@ -2,11 +2,21 @@ import { and, asc, eq, gt, isNotNull, isNull, lt, or } from "drizzle-orm";
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { z } from "zod";
-import { agentRuns, features, invitation, organization, organizationPolicies, projects, user, type Db } from "@bento/db";
+import {
+  agentRuns,
+  features,
+  invitation,
+  mcpServers,
+  organization,
+  organizationPolicies,
+  projects,
+  user,
+  type Db,
+} from "@bento/db";
 import type { AppContext } from "../context.js";
 import { parseAllowedHosts } from "@bento/core";
+import { getPublicSuffix } from "tldts";
 import { allCandidates, candidateDrivers } from "../orchestrator/sandbox-driver.js";
-import { mcpServerHosts } from "../orchestrator/sandbox-network.js";
 import { tenantDb as db } from "../middleware/tenant.js";
 import { actor } from "../middleware/actor.js";
 import { getActiveOrganizationMembership } from "../access.js";
@@ -43,9 +53,10 @@ export function teamRoutes(ctx: AppContext) {
       return c.json({
         restrictNetwork: row?.restrictNetwork === true,
         allowedHosts: row?.allowedHosts ?? [],
-        // Allowed on every locked run whatever the list says, so the
-        // console can show them in it and say so.
-        mcpHosts: await mcpServerHosts(ctx, membership.organizationId, actor(c)),
+        // Whether to tell a locking team its MCP servers keep working.
+        // They do because the agent reaches them through the gateway,
+        // so their hosts never join the list.
+        mcpServers: await hasMcpServers(db(c, ctx), membership.organizationId, actor(c)),
         // Only Modal takes a per run allowlist. A Docker deployment
         // locks through the operator's network, which a list typed
         // here would not change, so the field is not offered there.
@@ -74,7 +85,7 @@ export function teamRoutes(ctx: AppContext) {
       const body = c.req.valid("json");
       const set: { restrictNetwork?: boolean; allowedHosts?: string[] } = {};
       if (body.allowedHosts !== undefined) {
-        const parsed = parseAllowedHosts(body.allowedHosts);
+        const parsed = parseAllowedHosts(body.allowedHosts, { isPublicSuffix });
         if ("errors" in parsed) return c.json({ error: parsed.errors.join(" ") }, 400);
         set.allowedHosts = parsed.hosts;
       }
@@ -216,6 +227,30 @@ export function teamRoutes(ctx: AppContext) {
         .orderBy(asc(invitation.createdAt));
       return c.json(rows);
     });
+}
+
+/**
+ * `co.uk`, `github.io`: a suffix anyone can register under, private
+ * ones included, so `*.github.io` is as broad as `*.com`.
+ */
+function isPublicSuffix(name: string): boolean {
+  return getPublicSuffix(name, { allowPrivateDomains: true }) === name;
+}
+
+/** Any enabled team server, or one of the caller's own, in this team. */
+async function hasMcpServers(handle: Db, organizationId: string, userId: string): Promise<boolean> {
+  const [row] = await handle
+    .select({ id: mcpServers.id })
+    .from(mcpServers)
+    .where(
+      and(
+        eq(mcpServers.organizationId, organizationId),
+        eq(mcpServers.enabled, true),
+        or(isNull(mcpServers.userId), eq(mcpServers.userId, userId)),
+      ),
+    )
+    .limit(1);
+  return Boolean(row);
 }
 
 /**
