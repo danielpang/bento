@@ -4,7 +4,7 @@ Agents read untrusted input (issues, READMEs, web pages, tool output), so Bento 
 
 ## Model keys stay with Bento
 
-On a hosted (multi mode) server, a sandbox never holds the organization's model API keys. It holds a **proxy token** instead: a token minted for one run, under the same variable name as the key it replaces (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and so on). The tool's base URL variable points at Bento's model proxy, so the agent sends its model calls to Bento with the proxy token, and Bento sends them on to the provider with the real key.
+On a hosted (multi mode) server, a sandbox never holds the organization's model API keys, and neither does a local Docker sandbox unless you turn the proxy off (see below). It holds a **proxy token** instead: a token minted for one run, under the same variable name as the key it replaces (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and so on). The tool's base URL variable points at Bento's model proxy, so the agent sends its model calls to Bento with the proxy token, and Bento sends them on to the provider with the real key.
 
 ![The sandbox holds a proxy token; only Bento holds the key](./images/model-proxy.svg)
 
@@ -26,9 +26,15 @@ A request for anything else in the provider's API (files, fine tuning, batches, 
 
 The provider's address comes from Bento's provider table, or from a base URL the organization saved, never from the request. A saved base URL that is plain `http` or a private network address cannot go through the proxy, so that key reaches the sandbox as it would without the proxy, and the run's transcript says so.
 
-Some credentials still reach the sandbox, because their tools have no base URL to point at Bento or the credential works only at the provider: a Claude subscription token, Cursor's credentials, fx's and Muse Code's keys, custom provider keys, and Ollama's. [agents.md](./agents.md#model-provider-keys-never-enter-a-hosted-sandbox) lists which keys each tool sends through the proxy.
+Some credentials still reach the sandbox, because their tools have no base URL to point at Bento or the credential works only at the provider: a Claude subscription token, Cursor's credentials, fx's and Muse Code's keys, custom provider keys, and Ollama's. [agents.md](./agents.md#model-provider-keys-stay-out-of-agent-sandboxes) lists which keys each tool sends through the proxy.
 
-Local mode has one trusted user: keys go to the agent directly, and shared subscription credentials are mounted read only, which the agent can still read.
+**Local mode.** A local server proxies model calls from Docker sandboxes too, by default: the agent in the container holds a proxy token, and Bento, running on your machine, adds your key (from its own environment or from keys saved with `bento setup`) on the way to the provider. Turn it off with `BENTO_MODEL_PROXY=false`, or in the Mac app with **Advanced settings, Keep model API keys out of agent sandboxes**; either takes effect when local Bento next starts. A hosted server cannot turn it off. Three local differences:
+
+- The local process driver is never proxied. Its agent runs as you, on your machine, and can read the same environment and files the key came from.
+- Before a run's keys are swapped, its sandbox asks Bento's proxy for a readiness answer once, with a three second limit. A sandbox that cannot reach it keeps the raw keys for that run, and the transcript says so. Docker Desktop and OrbStack forward `host.docker.internal` to your machine's loopback, where local Bento listens; Docker on Linux does not, so a TUI or source install there falls back to raw keys unless `BENTO_MCP_GATEWAY_URL` names an address the sandbox can reach.
+- A saved base URL that is plain `http` or on your network goes through the proxy, which calls it from your machine. One that names your machine itself (`localhost`, `127.0.0.1`, `host.docker.internal`) means something else inside the container, so that key and its base URL reach the sandbox as before, and the transcript says so.
+
+An agent's model calls go through Bento, so a run left going in its container while local Bento is closed cannot reach its model until Bento starts again. Shared subscription credentials are still mounted read only, which the agent can read.
 
 ## MCP credentials stay with Bento
 

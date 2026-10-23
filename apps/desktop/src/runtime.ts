@@ -86,6 +86,8 @@ async function start(command: Extract<RuntimeCommand, { type: "start" }>): Promi
         BENTO_SANDBOX_IMAGE: settings.sandboxImage,
         // The launcher's beta box, read once at start: the local server's only beta switch.
         BENTO_BETA_FEATURES: settings.betaFeatures ? "true" : "false",
+        // The launcher's model proxy box, read once at start like the beta box.
+        BENTO_MODEL_PROXY: settings.modelProxy ? "true" : "false",
         BENTO_WEB_DIR: path.join(import.meta.dirname, "web"),
       },
     });

@@ -17,15 +17,18 @@
           <h2 id="local-title">Run locally</h2>
           <p class="muted">Your own database, board, and agents in containers.</p>
           <p class="hint">Bento requires OrbStack or Docker Desktop. Bento will run OrbStack or Docker for you.</p>
+          <label class="field">Where agents run<select id="sandbox"><option value="docker">Docker sandbox</option><option value="local-process">Local process</option></select></label>
+          <p id="docker-note" class="hint">Docker isolates each agent in a container.</p>
+          <p id="isolation-note" class="hint warning" hidden>A local process runs the agent directly on your Mac with your permissions and no isolation. Use only for trusted development work. A PostgreSQL URL is still required if Docker is unavailable.</p>
+          <p id="local-lock-note" class="hint" hidden>Local Bento is running. Quit Bento to change these settings.</p>
           <details>
             <summary>Advanced settings</summary>
             <label class="checkbox"><input id="beta-features" type="checkbox" /><span>Try beta and experimental features<small>Warning beta features can cause issues.</small></span></label>
+            <label class="checkbox"><input id="model-proxy" type="checkbox" checked /><span>Keep model API keys out of agent sandboxes<small>Agents call your model through Bento, which adds the key. Turn off if a model provider setup stops working.</small></span></label>
+            <p id="model-proxy-note" class="hint" hidden>Only available with Docker: a local process has no sandbox to keep keys out of.</p>
             <label class="field">Data and worktrees<div class="input-row"><input id="data-dir" spellcheck="false" /><button id="choose-directory" type="button" class="secondary">Choose...</button></div></label>
             <label class="field">PostgreSQL URL <span class="muted">(optional)</span><input id="database-url" type="password" placeholder="Leave empty to manage with Docker" autocomplete="off" /></label>
             <label class="field">Sandbox image<input id="sandbox-image" value="bento-sandbox:dev" spellcheck="false" /></label>
-            <label class="field">Agent isolation<select id="sandbox"><option value="docker">Docker sandboxes</option><option value="local-process">Local processes (development only)</option></select></label>
-            <p id="isolation-note" class="hint warning" hidden>Local processes have access to this Mac without sandbox isolation. Use only for trusted development work. A PostgreSQL URL is still required if Docker is unavailable.</p>
-            <p id="local-lock-note" class="hint" hidden>Local Bento is running. Quit Bento to change these.</p>
           </details>
           <div class="card-actions"><button id="start" type="submit" name="mode" value="local" formnovalidate>Start</button></div>
         </section>
