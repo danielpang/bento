@@ -37,7 +37,8 @@ const KNOWN_MODEL_KEYS = new Set(DEFAULT_MODEL_HOSTS.map((entry) => entry.key));
  * Hosts a restricted Modal run is allowed to open.
  *
  * The gateway, each repository's clone URL, every `*_BASE_URL` already
- * resolved for the agent, a custom provider's base URL, and the default
+ * resolved for the agent, a custom provider's base URL, the sites the
+ * team allowed itself, and the default
  * host of any API key that has no base URL. Key values are not hosts
  * and are not returned. A key whose host cannot be named throws, so
  * the run fails before a sandbox exists.
@@ -47,6 +48,8 @@ export function modalRunHosts(input: {
   cloneUrls: readonly (string | null | undefined)[];
   env: Readonly<Record<string, string>>;
   customBaseUrl?: string | undefined;
+  /** Already validated by parseAllowedHosts, so `*.domain` passes through. */
+  extraHosts?: readonly string[];
 }): string[] {
   const hosts: string[] = [];
   const push = (value: string | null | undefined) => {
@@ -59,6 +62,7 @@ export function modalRunHosts(input: {
     if (key.endsWith("_BASE_URL")) push(value);
   }
   push(input.customBaseUrl);
+  for (const host of input.extraHosts ?? []) push(host);
 
   for (const entry of DEFAULT_MODEL_HOSTS) {
     if (!input.env[entry.key]?.trim()) continue;

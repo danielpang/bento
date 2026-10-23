@@ -26,8 +26,9 @@ import { mintRunGrant, revokeRunGrant } from "../mcp/grants.js";
  * working a card can file the parts of a task too large for one
  * branch. It rides the same grant as everything else, so a harness
  * with no MCP support, an organization that restricts sandbox network
- * access, and the local-process driver each run without it, which is
- * the same limitation their MCP servers already have.
+ * access on a driver other than Modal, and the local-process driver
+ * each run without it, which is the same limitation their MCP servers
+ * already have.
  */
 
 const EXEC_TIMEOUT_MS = 30_000;
@@ -94,7 +95,10 @@ export async function prepareRunMcp(
     }
     return none;
   }
-  if (input.restrictNetwork) {
+  // A locked Modal sandbox has the gateway on its allowlist, so its
+  // servers attach as usual. Any other locked network (Docker's, named
+  // by the operator) is not known to reach the gateway.
+  if (input.restrictNetwork && input.driver.provider !== "modal") {
     if (await hasServers()) {
       await input.say(
         "This organization restricts sandbox network access, so its MCP servers are not attached to this run.",

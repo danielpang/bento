@@ -155,3 +155,62 @@ test("prepareRunMcp keeps going when writing the config throws", async () => {
   assert.match(notes[0] ?? "", /Could not write the MCP configuration/);
   assert.doesNotMatch(notes[0] ?? "", /[—–]/);
 });
+
+/**
+ * A locked Modal sandbox has the gateway on its allowlist, so a locked
+ * team's MCP servers attach there. Any other locked network is not
+ * known to reach the gateway, and the run says why they were left off.
+ */
+test("a locked run attaches MCP servers on Modal and leaves them off elsewhere", async () => {
+  const attempt = async (provider: "modal" | "docker") => {
+    let writes = 0;
+    const notes: string[] = [];
+    const driver = {
+      provider,
+      workspace: provider === "modal" ? "clone" : "host",
+      async *exec() {
+        writes += 1;
+        throw new Error("stop here");
+      },
+    } as unknown as SandboxDriver;
+    const ctx = {
+      env: { BETTER_AUTH_URL: "https://bento.example.com", BENTO_RUN_TIMEOUT_MIN: 30 },
+      drivers: singleDriver(driver),
+      db: {
+        select: () => ({ from: () => ({ where: () => Promise.resolve([]) }) }),
+        insert: () => ({ values: () => ({ onConflictDoUpdate: () => Promise.resolve() }) }),
+        update: () => ({ set: () => ({ where: () => Promise.resolve() }) }),
+      },
+    } as unknown as AppContext;
+    const adapter = {
+      cli: "claude",
+      mcp: {
+        renderConfig: () => [{ path: "/opt/bento/mcp/claude.json", content: "{}" }],
+        extraArgs: () => ["--mcp-config", "/opt/bento/mcp/claude.json"],
+      },
+    } as unknown as AgentAdapter;
+    await prepareRunMcp(ctx, {
+      runId: "run-1",
+      organizationId: "org-1",
+      actingUserId: null,
+      driver,
+      adapter,
+      handle: { externalId: "bento-feature", provider, workdir: "/workspace" },
+      restrictNetwork: true,
+      mountedConfigPaths: [],
+      ownServers: [{ id: BENTO_SERVER_ID, slug: BENTO_SERVER_ID }],
+      say: async (text) => {
+        notes.push(text);
+      },
+    });
+    return { writes, notes };
+  };
+
+  const modal = await attempt("modal");
+  assert.equal(modal.writes, 1, "Modal went on to write the config");
+  assert.equal(modal.notes.some((note) => /restricts sandbox network access/.test(note)), false);
+
+  const docker = await attempt("docker");
+  assert.equal(docker.writes, 0, "Docker's locked network attaches nothing");
+  assert.match(docker.notes[0] ?? "", /restricts sandbox network access/);
+});

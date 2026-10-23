@@ -45,6 +45,16 @@ test("an API key with no base URL allowlists the default model host", () => {
   assert.equal(hosts.some((host) => host.includes("secret-value")), false);
 });
 
+test("the team's allowed sites and MCP hosts join the run's list", () => {
+  const hosts = modalRunHosts({
+    gatewayUrl: "https://bento.example",
+    cloneUrls: [],
+    env: {},
+    extraHosts: ["*.example.com", "mcp.docs.example"],
+  });
+  assert.deepEqual(hosts, ["https://bento.example", "*.example.com", "mcp.docs.example"]);
+});
+
 test("a credential whose model host cannot be named refuses before a sandbox exists", () => {
   assert.throws(
     () =>

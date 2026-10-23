@@ -1,7 +1,7 @@
-import { eq } from "drizzle-orm";
-import type { AgentCli } from "@bento/core";
+import { and, eq, isNull } from "drizzle-orm";
+import { MAX_ALLOWED_HOSTS, parseAllowedHost, type AgentCli } from "@bento/core";
 import { getAdapter } from "@bento/agents";
-import { organizationPolicies, repositories } from "@bento/db";
+import { mcpServers, organizationPolicies, repositories, type Db } from "@bento/db";
 import type { SandboxHandle } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
 import { resolveAgentEnv } from "./agent-env.js";
@@ -14,6 +14,11 @@ import { modalRunHosts } from "./modal-hosts.js";
  * Provision and rollback both call this, so a machine booted to mount
  * a checkpoint gets the same allowlist as the one the run started in.
  * Not restricted: an empty object, and the sandbox keeps open egress.
+ *
+ * On top of what Bento names itself, the sites the team allowed, which
+ * is the stored list and nothing else: a team MCP server's endpoint is
+ * put there when it is enabled (`allowMcpHosts`), so a person who
+ * removes it from the list has removed it from every run.
  */
 export async function modalNetworkForProject(
   ctx: AppContext,
@@ -22,7 +27,8 @@ export async function modalNetworkForProject(
   cli: AgentCli,
   model: string,
 ): Promise<Pick<SandboxHandle, "network" | "allowedHosts">> {
-  if (!(await organizationRestrictsNetwork(ctx, organizationId))) return {};
+  const policy = await organizationNetworkPolicy(ctx, organizationId);
+  if (!policy.restrictNetwork) return {};
   const repos = await ctx.db
     .select({ repoUrl: repositories.repoUrl })
     .from(repositories)
@@ -39,17 +45,71 @@ export async function modalNetworkForProject(
       cloneUrls: repos.map((row) => row.repoUrl),
       env,
       ...(custom?.selection?.baseUrl ? { customBaseUrl: custom.selection.baseUrl } : {}),
+      extraHosts: policy.allowedHosts,
     }),
   };
 }
 
 /** Whether this organization has asked for sandboxes with no egress. */
 export async function organizationRestrictsNetwork(ctx: AppContext, organizationId: string | null): Promise<boolean> {
-  if (!organizationId) return false;
+  return (await organizationNetworkPolicy(ctx, organizationId)).restrictNetwork;
+}
+
+/** The lock and the sites the team added to it. A worker path, so scoped by hand. */
+async function organizationNetworkPolicy(
+  ctx: AppContext,
+  organizationId: string | null,
+): Promise<{ restrictNetwork: boolean; allowedHosts: string[] }> {
+  if (!organizationId) return { restrictNetwork: false, allowedHosts: [] };
   const [row] = await ctx.db
-    .select({ restrictNetwork: organizationPolicies.restrictNetwork })
+    .select({ restrictNetwork: organizationPolicies.restrictNetwork, allowedHosts: organizationPolicies.allowedHosts })
     .from(organizationPolicies)
     .where(eq(organizationPolicies.organizationId, organizationId))
     .limit(1);
-  return row?.restrictNetwork === true;
+  return { restrictNetwork: row?.restrictNetwork === true, allowedHosts: row?.allowedHosts ?? [] };
+}
+
+/**
+ * Adds the hosts of MCP servers to a locked team's allowed sites.
+ *
+ * Called when the lock is turned on and when a team server is added or
+ * enabled while it is on, so the list shows every endpoint the team
+ * turned on and a person can take any of them off again. Team servers
+ * only: an admin adds those, while any member may add a personal one,
+ * and the lock is an admin's to widen. A host the list rules refuse (an
+ * IP literal, a name with an underscore) is left off rather than saved
+ * as something the field would then refuse. No lock, nothing added.
+ */
+export async function allowMcpHosts(handle: Db, organizationId: string, urls?: readonly string[]): Promise<void> {
+  const [policy] = await handle
+    .select({ restrictNetwork: organizationPolicies.restrictNetwork, allowedHosts: organizationPolicies.allowedHosts })
+    .from(organizationPolicies)
+    .where(eq(organizationPolicies.organizationId, organizationId))
+    .limit(1);
+  if (!policy?.restrictNetwork) return;
+  const sources =
+    urls ??
+    (
+      await handle
+        .select({ url: mcpServers.url })
+        .from(mcpServers)
+        .where(
+          and(
+            eq(mcpServers.organizationId, organizationId),
+            eq(mcpServers.enabled, true),
+            isNull(mcpServers.userId),
+          ),
+        )
+    ).map((row) => row.url);
+  const hosts = [...policy.allowedHosts];
+  for (const url of sources) {
+    const parsed = parseAllowedHost(url);
+    if (hosts.length >= MAX_ALLOWED_HOSTS) break;
+    if ("host" in parsed && !hosts.includes(parsed.host)) hosts.push(parsed.host);
+  }
+  if (hosts.length === policy.allowedHosts.length) return;
+  await handle
+    .update(organizationPolicies)
+    .set({ allowedHosts: hosts, updatedAt: new Date() })
+    .where(eq(organizationPolicies.organizationId, organizationId));
 }
