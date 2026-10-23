@@ -15,7 +15,7 @@ Pick **On this Mac** or **Connect to a server**. The choice persists across laun
 
 | Mode | Needs |
 | --- | --- |
-| Local | Docker Desktop or OrbStack. App starts Postgres, migrates, builds sandbox image if missing (first build can take several minutes). Data in `~/.bento` by default; optional custom Postgres, data dir, or sandbox image. The start screen chooses where agents run: a Docker sandbox (default) or a local process (dev-only, no isolation). **Advanced settings, Keep model API keys out of agent sandboxes** (on by default, read at start) sends model calls through Bento so a Docker sandbox holds a run token rather than your key; it is disabled with a local process, which has no sandbox. |
+| Local | Docker Desktop or OrbStack. App starts Postgres, migrates, builds sandbox image if missing (first build can take several minutes). Data in `~/.bento` by default; optional custom Postgres, data dir, or sandbox image. The start screen chooses the **Agent sandbox type**: Docker sandbox (default) or local process (dev-only, no isolation). **Advanced settings, Model proxy** (on by default, read at start) sends model calls through Bento so a Docker sandbox contains a proxy token rather than your key; it is disabled with a local process, which has no sandbox. |
 | Remote | Server URL only. HTTPS except localhost. Sign in via system browser (device flow). Agents run on the server. Remote board + local agents is not supported. |
 
 Everything else (keys, agents, pipelines, repos, team, integrations) is the same shared console as the web, including beta flags.

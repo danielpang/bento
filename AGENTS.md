@@ -1082,7 +1082,7 @@ sandbox with that base URL as before the proxy, and the transcript
 says why in one sentence.
 
 Local mode proxies too, unless `BENTO_MODEL_PROXY` is "false" (the
-Mac launcher's "Keep model API keys out of agent sandboxes" box). Read
+Mac launcher's "Model proxy" box). Read
 it only through `modelProxyEnabled` in `env.ts`, which answers true in
 multi mode whatever the variable says; `loadEnv` refuses "false" there
 at boot rather than ignoring it, because a setting that silently does

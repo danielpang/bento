@@ -229,7 +229,7 @@ const envSchema = z.object({
    * Bento's model proxy for a local server: whether a Docker sandbox's
    * provider keys are swapped for a run token, with Bento adding the
    * real key on the way to the provider. On unless set to "false" (the
-   * desktop launcher's "Keep model API keys out of agent sandboxes"
+   * desktop launcher's "Model proxy"
    * box). Read it through modelProxyEnabled, never directly: multi mode
    * always proxies, and loadEnv refuses "false" there.
    */
