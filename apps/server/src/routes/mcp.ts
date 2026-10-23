@@ -6,6 +6,7 @@ import { mcpCredentials, mcpServers, member, user } from "@bento/db";
 import type { AppContext } from "../context.js";
 import { actor, activeOrg } from "../middleware/actor.js";
 import { tenantDb as db } from "../middleware/tenant.js";
+import { allowMcpHosts } from "../orchestrator/sandbox-network.js";
 import { maskSecret } from "../secrets.js";
 import { pingMcpServer } from "../mcp/client.js";
 import { safeFetchPolicy } from "../mcp/safe-fetch.js";
@@ -302,6 +303,10 @@ export function mcpRoutes(ctx: AppContext) {
           scopes: body.scopes ?? null,
         })
         .returning();
+      // A locked team's list shows every team endpoint it turns on.
+      if (!body.personal && access.organizationId) {
+        await allowMcpHosts(db(c, ctx), access.organizationId, [body.url]);
+      }
       return c.json({ id: row!.id }, 201);
     } catch {
       return c.json({ error: "a server with this slug already exists" }, 409);
@@ -371,6 +376,13 @@ export function mcpRoutes(ctx: AppContext) {
     }
 
     await db(c, ctx).update(mcpServers).set(update).where(eq(mcpServers.id, server.id));
+    // Turning a team server on, or pointing it somewhere new, puts its
+    // endpoint on a locked team's list. Turning it off leaves the entry
+    // for a person to remove: it may have been on the list before.
+    const enabledNow = body.enabled ?? server.enabled;
+    if (!server.userId && server.organizationId && enabledNow && (body.enabled === true || body.url !== undefined)) {
+      await allowMcpHosts(db(c, ctx), server.organizationId, [body.url ?? server.url]);
+    }
     return c.json({ ok: true, reconnectRequired: wipe });
   });
 

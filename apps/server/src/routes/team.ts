@@ -6,7 +6,6 @@ import {
   agentRuns,
   features,
   invitation,
-  mcpServers,
   organization,
   organizationPolicies,
   projects,
@@ -17,6 +16,7 @@ import type { AppContext } from "../context.js";
 import { parseAllowedHosts } from "@bento/core";
 import { getPublicSuffix } from "tldts";
 import { allCandidates, candidateDrivers } from "../orchestrator/sandbox-driver.js";
+import { allowMcpHosts } from "../orchestrator/sandbox-network.js";
 import { tenantDb as db } from "../middleware/tenant.js";
 import { actor } from "../middleware/actor.js";
 import { getActiveOrganizationMembership } from "../access.js";
@@ -53,10 +53,6 @@ export function teamRoutes(ctx: AppContext) {
       return c.json({
         restrictNetwork: row?.restrictNetwork === true,
         allowedHosts: row?.allowedHosts ?? [],
-        // Whether to tell a locking team its MCP servers keep working.
-        // They do because the agent reaches them through the gateway,
-        // so their hosts never join the list.
-        mcpServers: await hasMcpServers(db(c, ctx), membership.organizationId, actor(c)),
         // Only Modal takes a per run allowlist. A Docker deployment
         // locks through the operator's network, which a list typed
         // here would not change, so the field is not offered there.
@@ -104,6 +100,16 @@ export function teamRoutes(ctx: AppContext) {
           set: { ...set, updatedAt: new Date() },
         })
         .returning({ restrictNetwork: organizationPolicies.restrictNetwork, allowedHosts: organizationPolicies.allowedHosts });
+      // Locking puts the team's MCP endpoints on the list, where the
+      // person who locked it sees them and can take any of them off.
+      if (body.restrictNetwork) {
+        await allowMcpHosts(db(c, ctx), membership.organizationId);
+        const [locked] = await db(c, ctx)
+          .select({ allowedHosts: organizationPolicies.allowedHosts })
+          .from(organizationPolicies)
+          .where(eq(organizationPolicies.organizationId, membership.organizationId));
+        return c.json({ restrictNetwork: true, allowedHosts: locked?.allowedHosts ?? [] });
+      }
       return c.json({ restrictNetwork: row?.restrictNetwork === true, allowedHosts: row?.allowedHosts ?? [] });
       },
     )
@@ -235,22 +241,6 @@ export function teamRoutes(ctx: AppContext) {
  */
 function isPublicSuffix(name: string): boolean {
   return getPublicSuffix(name, { allowPrivateDomains: true }) === name;
-}
-
-/** Any enabled team server, or one of the caller's own, in this team. */
-async function hasMcpServers(handle: Db, organizationId: string, userId: string): Promise<boolean> {
-  const [row] = await handle
-    .select({ id: mcpServers.id })
-    .from(mcpServers)
-    .where(
-      and(
-        eq(mcpServers.organizationId, organizationId),
-        eq(mcpServers.enabled, true),
-        or(isNull(mcpServers.userId), eq(mcpServers.userId, userId)),
-      ),
-    )
-    .limit(1);
-  return Boolean(row);
 }
 
 /**

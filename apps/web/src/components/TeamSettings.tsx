@@ -456,9 +456,10 @@ export function TeamSettings({ client }: { client: BentoClient }) {
  * out at all. The deployment has to provide that network, and the
  * control says so rather than offering a switch that quietly does
  * nothing. The allowlist is offered only where the lock runs on Modal,
- * the one sandbox that takes a list per run. MCP servers need no entry,
- * since agents reach them through Bento's gateway, and the card says so
- * to a team that has some.
+ * the one sandbox that takes a list per run. The server puts each team
+ * MCP server's endpoint on the list when the lock goes on or the server
+ * is enabled, and the card says so: what the field shows is what a run
+ * may reach, and removing an endpoint here removes it from every run.
  */
 function NetworkPolicyCard({ client }: { client: BentoClient }) {
   const toast = useToast();
@@ -539,7 +540,7 @@ function NetworkPolicyCard({ client }: { client: BentoClient }) {
             onChange={(e) => setDraft(e.target.value)}
           />
           <span className="muted">One per line. *.example.com covers subdomains.</span>
-          {state.mcpServers && <span className="muted">MCP servers keep working.</span>}
+          <span className="muted">Team MCP servers you enable are added here. Remove any you don't want.</span>
           {"errors" in parsed &&
             parsed.errors.map((error) => (
               <span key={error} className="error">
