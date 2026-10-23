@@ -25,9 +25,16 @@ import { mintRunGrant, revokeRunGrant, setRunGrantServers } from "../mcp/grants.
  * has no row, no upstream and no credential: it is how the agent
  * working a card can file the parts of a task too large for one
  * branch. It rides the same grant as everything else, so a harness
- * with no MCP support, an organization that restricts sandbox network
- * access, and the local-process driver each run without it, which is
- * the same limitation their MCP servers already have.
+ * with no MCP support and the local-process driver each run without
+ * it, which is the same limitation their MCP servers already have.
+ *
+ * The network lock is not one of those limitations. A locked sandbox
+ * still reaches Bento's own address (the Modal allowlist always names
+ * the gateway), and every server is reached through the gateway, which
+ * calls the upstream from Bento's side. So a locked run attaches every
+ * server an unlocked one would, and no server's upstream host ever
+ * joins the sandbox's allowlist: adding a server is what allows it,
+ * and the sandbox's own egress is unchanged.
  */
 
 const EXEC_TIMEOUT_MS = 30_000;
@@ -47,7 +54,6 @@ export interface PrepareRunMcpInput {
   driver: SandboxDriver;
   adapter: AgentAdapter;
   handle: SandboxHandle;
-  restrictNetwork: boolean;
   /** Absolute container paths mounted read-only, from agentAuthMounts. */
   mountedConfigPaths: string[];
   /**
@@ -106,15 +112,6 @@ export async function prepareRunMcp(
     }
     return none;
   }
-  if (input.restrictNetwork) {
-    if (await hasServers()) {
-      await input.say(
-        "This organization restricts sandbox network access, so its MCP servers are not attached to this run.",
-      );
-    }
-    return none;
-  }
-
   const gatewayBase = resolveGatewayBase(ctx, input.driver);
   if (!gatewayBase) {
     if (await hasServers()) {

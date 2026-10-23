@@ -21,13 +21,16 @@ import {
   createPool,
   features,
   mcpRunGrants,
+  mcpServers,
+  organizationPolicies,
   pipelines,
   projects,
+  repositories,
   runMigrations,
   secrets,
   stages,
 } from "@bento/db";
-import { LocalProcessDriver, WorktreeManager, type SandboxDriver } from "@bento/sandbox";
+import { LocalProcessDriver, WorktreeManager, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
 import { createApp } from "./app.js";
 import { DiskArtifactStore } from "./artifact-store.js";
 import { ensureLocalUser, type AppContext } from "./context.js";
@@ -44,11 +47,14 @@ import {
   runHadModelProxyFailure,
   setRunGrantServers,
 } from "./mcp/grants.js";
+import { BENTO_SERVER_ID } from "./mcp/bento-tools.js";
 import { attachPgBus, type PgBus } from "./pg-bus.js";
 import { resolveAgentEnv } from "./orchestrator/agent-env.js";
+import { prepareRunMcp } from "./orchestrator/mcp-run.js";
 import { proxyModelCredentials } from "./orchestrator/model-proxy-env.js";
 import { executeRun } from "./orchestrator/run-executor.js";
 import { singleDriver } from "./orchestrator/sandbox-driver.js";
+import { modalNetworkForProject, organizationRestrictsNetwork } from "./orchestrator/sandbox-network.js";
 import { decodedByFetch, modelProxyCacheFor, resetRefusalReports, upstreamUrl } from "./routes/model-proxy.js";
 import { SecretBox } from "./secrets.js";
 
@@ -91,8 +97,8 @@ const seen: Seen[] = [];
 /** Released by the streaming test once its client has the first chunk. */
 let releaseSecondChunk: () => void = () => {};
 
-/** Every run row hangs off a project in org-a, org-b, or no organization. */
-const projectsByOrg: Record<string, { feature: string; stage: string; profile: string }> = {};
+/** Every run row hangs off a project in one of the test organizations, or in none. */
+const projectsByOrg: Record<string, { project: string; feature: string; stage: string; profile: string }> = {};
 
 before(async () => {
   const admin = new pg.Client({ connectionString: baseUrl });
@@ -176,9 +182,9 @@ before(async () => {
   ctx.env.BETTER_AUTH_URL = bentoUrl;
 
   await pool.query(
-    `insert into identity.organization (id,name,slug) values ('org-a','A','org-a'), ('org-b','B','org-b'), ('org-c','C','org-c')`,
+    `insert into identity.organization (id,name,slug) values ('org-a','A','org-a'), ('org-b','B','org-b'), ('org-c','C','org-c'), ('org-d','D','org-d')`,
   );
-  for (const org of ["org-a", "org-b", "org-c", null]) {
+  for (const org of ["org-a", "org-b", "org-c", "org-d", null]) {
     const [project] = await db
       .insert(projects)
       .values({ ownerId: userId, organizationId: org, name: `p-${org}`, defaultBranch: "main" })
@@ -196,7 +202,7 @@ before(async () => {
       .insert(agentProfiles)
       .values({ ownerId: userId, organizationId: org, name: "a", cli: "claude-code", model: "claude-sonnet-5" })
       .returning({ id: agentProfiles.id });
-    projectsByOrg[org ?? "none"] = { feature: feature!.id, stage: stage!.id, profile: profile!.id };
+    projectsByOrg[org ?? "none"] = { project: project!.id, feature: feature!.id, stage: stage!.id, profile: profile!.id };
   }
 
   await saveSecret("org-a", "ANTHROPIC_API_KEY", "sk-ant-real-a");
@@ -235,7 +241,7 @@ async function saveSecret(org: string | null, name: string, value: string) {
   });
 }
 
-type Org = "org-a" | "org-b" | "org-c";
+type Org = "org-a" | "org-b" | "org-c" | "org-d";
 
 async function newRun(org: Org | "none" = "org-a", status = "running"): Promise<string> {
   const ids = projectsByOrg[org]!;
@@ -753,6 +759,126 @@ test("MCP joins the proxy's grant, and a reattach extends it for either", async 
   const [row] = await ctx.db.select().from(mcpRunGrants).where(eq(mcpRunGrants.runId, runId));
   assert.ok(row!.expiresAt.getTime() > Date.now() + 30 * 60_000);
   assert.equal(env.ANTHROPIC_API_KEY, grantToken);
+});
+
+/**
+ * The network lock restricts the sandbox, not its tools. A locked run
+ * attaches every server an unlocked one would (Bento's own, the team's,
+ * the starter's own) at gateway addresses, and the gateway reaches each
+ * upstream from Bento's side, so the Modal allowlist names the gateway
+ * and none of the servers' own hosts. An upstream on that list would be
+ * a direct route out of a locked sandbox.
+ */
+test("a locked run gets its MCP servers through the gateway, and its allowlist names only the gateway", async () => {
+  const gateway = "https://bento-gateway.example";
+  const teamUpstream = "https://team-mcp.upstream.example";
+  const memberUpstream = "https://member-mcp.upstream.example";
+  const ids = projectsByOrg["org-d"]!;
+  await ctx.db.insert(organizationPolicies).values({ organizationId: "org-d", restrictNetwork: true });
+  await ctx.db.insert(repositories).values({
+    projectId: ids.project,
+    name: "app",
+    localPath: repoDir,
+    repoUrl: "https://github.com/acme/app.git",
+  });
+  await saveSecret("org-d", "ANTHROPIC_API_KEY", "sk-ant-real-d");
+  const [team] = await ctx.db
+    .insert(mcpServers)
+    .values({
+      ownerId: userId,
+      organizationId: "org-d",
+      name: "Team docs",
+      slug: "team-docs",
+      url: `${teamUpstream}/mcp`,
+      authType: "none",
+    })
+    .returning({ id: mcpServers.id });
+  const [mine] = await ctx.db
+    .insert(mcpServers)
+    .values({
+      ownerId: userId,
+      organizationId: "org-d",
+      userId,
+      name: "My notes",
+      slug: "my-notes",
+      url: `${memberUpstream}/sse`,
+      transport: "sse",
+      authType: "none",
+    })
+    .returning({ id: mcpServers.id });
+
+  const written: string[] = [];
+  const modal = {
+    provider: "modal",
+    workspace: "clone",
+    async *exec(_handle: SandboxHandle, argv: string[]) {
+      written.push(argv.join(" "));
+      yield { kind: "exit" as const, exitCode: 0 };
+    },
+  } as unknown as SandboxDriver;
+  const handle: SandboxHandle = { externalId: "modal-locked", provider: "modal", workdir: "/workspace" };
+  const was = ctx.env.BENTO_MCP_GATEWAY_URL;
+  ctx.env.BENTO_MCP_GATEWAY_URL = gateway;
+  try {
+    assert.equal(await organizationRestrictsNetwork(ctx, "org-d"), true);
+    const runId = await newRun("org-d");
+    const proxiedRun = await inMulti(() =>
+      proxyModelCredentials(
+        ctx,
+        proxyInput(runId, { ANTHROPIC_API_KEY: "sk-ant-real-d" }, { organizationId: "org-d", driver: modal }).input,
+      ),
+    );
+    assert.ok(proxiedRun.grantToken);
+
+    const notes: string[] = [];
+    const attached = await inMulti(() =>
+      prepareRunMcp(ctx, {
+        runId,
+        organizationId: "org-d",
+        actingUserId: userId,
+        driver: modal,
+        adapter: claudeCodeAdapter,
+        handle,
+        mountedConfigPaths: [],
+        ownServers: [{ id: BENTO_SERVER_ID, slug: BENTO_SERVER_ID }],
+        grantToken: proxiedRun.grantToken,
+        say: async (text) => {
+          notes.push(text);
+        },
+      }),
+    );
+    assert.deepEqual(attached.extraArgs, claudeCodeAdapter.mcp!.extraArgs!());
+    assert.equal(attached.cardTools, true, "Bento's own tools are attached under the lock");
+    assert.deepEqual(notes, [], "and the transcript says nothing about the lock");
+
+    // The config names every server at the gateway, with the run's
+    // token, and no upstream host at all.
+    assert.equal(written.length, 1);
+    const config = written[0]!;
+    assert.match(config, new RegExp(`${gateway}/api/mcp-gateway/${team!.id}\\b`));
+    assert.match(config, new RegExp(`${gateway}/api/mcp-gateway/${mine!.id}/sse`));
+    assert.match(config, new RegExp(`${gateway}/api/mcp-gateway/${BENTO_SERVER_ID}\\b`));
+    assert.ok(config.includes(`Bearer ${proxiedRun.grantToken}`));
+    assert.ok(!config.includes(teamUpstream) && !config.includes(memberUpstream), "no server is reached directly");
+
+    // The grant the sandbox already holds now pins all three, which is
+    // what a reattach reads its flags from.
+    const grantRow = await resolveGrant(ctx, proxiedRun.grantToken);
+    assert.deepEqual(grantRow?.serverIds.sort(), [team!.id, mine!.id, BENTO_SERVER_ID].sort());
+
+    // And the locked sandbox's allowlist is unchanged by any of it.
+    const network = await inMulti(() =>
+      modalNetworkForProject(ctx, ids.project, "org-d", "claude-code", "claude-sonnet-5"),
+    );
+    assert.equal(network.network, "restricted");
+    assert.ok(network.allowedHosts?.includes(gateway), "the gateway is on the list");
+    assert.ok(network.allowedHosts?.includes("https://github.com/acme/app.git"));
+    for (const host of network.allowedHosts ?? []) {
+      assert.ok(!host.includes("upstream.example"), `${host} is an MCP server's own host`);
+    }
+  } finally {
+    ctx.env.BENTO_MCP_GATEWAY_URL = was;
+  }
 });
 
 /**

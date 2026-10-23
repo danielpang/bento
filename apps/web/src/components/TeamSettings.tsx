@@ -496,7 +496,8 @@ function NetworkPolicyCard() {
       <h3 className="settings-title">Agent network access</h3>
       <p className="muted">
         Agents can reach the internet from the sandbox, so they can install packages and read docs.
-        Block it to run them with no route out.
+        Block it to run them with no direct route out. MCP servers added in Settings still work, because
+        Bento reaches them for the agent.
       </p>
       {!state.supported && (
         <p className="muted">

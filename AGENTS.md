@@ -169,7 +169,9 @@ for a locked run and goes straight to Modal, and the Team route
 offers the lock whenever Modal is there to take those runs. The lock
 applies to new cards: a card that already has a machine keeps it,
 and a machine that cannot lock keeps the network it was made with,
-which the card's transcript says. A team without the lock keeps the
+which the card's transcript says. The lock restricts the sandbox's own
+egress, not its tools: MCP servers still attach, through the gateway
+(see the model proxy section). A team without the lock keeps the
 ordinary auto order. A pinned row is honored for every organization,
 beta or not: a pin ignored for some of them would be no use in the
 emergency it exists for. When the loop walks away from a driver that
@@ -1064,6 +1066,18 @@ it against the same rule before the grant is minted: a key whose saved
 base URL is plain http or private is not proxied at all, reaches the
 sandbox with that base URL as before the proxy, and the transcript
 says why in one sentence.
+
+The network lock leaves MCP on, by the same reasoning. A locked run
+attaches every server an unlocked one would (Bento's own, the team's
+enabled servers, the acting member's own), through the same selection,
+credential checks, grant and config as any run, because the sandbox
+reaches each one only at `/api/mcp-gateway/<id>` and the gateway calls
+the upstream from Bento's side. So the Modal allowlist
+(`modalRunHosts`) names the gateway and never a server's upstream
+host: adding a server is what allows it, and an upstream on the list
+would hand a locked sandbox a direct route out. A reattached run still
+takes its MCP flags from its grant's server ids (`runGrantUses`),
+never from the lock.
 
 Billing follows whose failure it was. When the proxy itself fails (a
 lookup, a decryption, an exception in its own code) it stamps

@@ -137,7 +137,8 @@ export function accountSettings(
             list("Agent network access", [
               choice("status", policy.restrictNetwork ? "Restricted network" : "Unrestricted network", () =>
                 read("Network policy", [
-                  "Restricted agents run with no route to the internet. This can prevent package installs and documentation access.",
+                  "Restricted agents run with no direct route to the internet. This can prevent package installs and documentation access.",
+                  "MCP servers added in Settings still work, because Bento reaches them for the agent.",
                   policy.supported
                     ? "This deployment supports network restrictions."
                     : "This deployment does not support network restrictions.",
