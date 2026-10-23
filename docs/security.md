@@ -6,7 +6,7 @@ Agents read untrusted input (issues, READMEs, web pages, tool output), so Bento 
 
 On hosted Bento (app.usebento.ai), and any other multi mode server, a sandbox never contains the organization's model API keys, and neither does a local Docker sandbox unless you turn the proxy off (see below). It contains a **proxy token** instead: a token minted for one run, under the same variable name as the key it replaces (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and so on). The tool's base URL variable points at Bento's model proxy, so the agent sends its model calls to Bento with the proxy token, and Bento sends them on to the provider with the real key.
 
-![The sandbox contains a proxy token; only Bento holds the key](./images/model-proxy.svg)
+![The sandbox contains a proxy token; only Bento stores the key](./images/model-proxy.svg)
 
 1. Bento mints a proxy token when the run starts, and keeps only its hash, with the list of keys it may use.
 2. The agent calls `/api/model-proxy/<provider>` with the proxy token, in whichever header its tool sends a key in.
