@@ -36,7 +36,7 @@ export async function modalNetworkForProject(
   // Keys the model proxy carries are reached through the gateway, so
   // their providers' hosts stay off the list. The same plan the
   // executor makes, from the same driver and environment.
-  const proxy = custom ? null : planModelProxy(ctx, adapter, driver, resolved);
+  const proxy = custom ? null : await planModelProxy(ctx, adapter, driver, resolved);
   return {
     network: "restricted",
     allowedHosts: modalRunHosts({

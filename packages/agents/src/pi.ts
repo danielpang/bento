@@ -1,6 +1,24 @@
-import type { AgentDelta, AgentEvent, RunOutcome } from "@bento/core";
+import { modelProviderForKey, type AgentDelta, type AgentEvent, type RunOutcome } from "@bento/core";
 import { lastResultEvent, providerBaseUrl, providerKeyFor, type AgentAdapter, type BuildCommandInput, type McpFile } from "./adapter.js";
 import { PI_ASK_USER_ENV, PI_ASK_USER_EXTENSION, PI_ASK_USER_PATH, piLiveProtocol } from "./pi-live.js";
+
+/**
+ * pi's own id for each provider the model proxy carries, keyed by the
+ * provider's entry in @bento/core's MODEL_PROVIDERS (whose base URL
+ * variable each one reads), and the path, if any, pi's built-in models
+ * of it add to that base URL (see piProviderBaseUrls).
+ */
+const PI_PROVIDERS: Readonly<Record<string, { id: string; suffix?: (model: string) => string }>> = {
+  ANTHROPIC_API_KEY: { id: "anthropic" },
+  OPENAI_API_KEY: { id: "openai" },
+  OPENROUTER_API_KEY: {
+    id: "openrouter",
+    suffix: (model) => (model.startsWith("openrouter/anthropic/") ? "/api" : "/api/v1"),
+  },
+  AI_GATEWAY_API_KEY: { id: "vercel-ai-gateway" },
+  GEMINI_API_KEY: { id: "google", suffix: () => "/v1beta" },
+  DEEPSEEK_API_KEY: { id: "deepseek" },
+};
 
 /**
  * pi, the open source BYOK coding agent from earendil-works.
@@ -36,10 +54,7 @@ export const piAdapter: AgentAdapter = {
    * built-in provider through a proxy"). So the proxy's addresses reach
    * pi as that file in the sandbox home.
    */
-  modelProxy: {
-    keys: ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "AI_GATEWAY_API_KEY", "GEMINI_API_KEY", "DEEPSEEK_API_KEY"],
-    homeFile: true,
-  },
+  modelProxy: { keys: Object.keys(PI_PROVIDERS), homeFile: true },
 
   files(input: BuildCommandInput) {
     const files: McpFile[] = [];
@@ -256,36 +271,32 @@ function assistantText(message: PiMessage | undefined): string {
 }
 
 /**
- * pi's first-class Gateway provider is `vercel-ai-gateway`, not
- * `vercel`. The picker writes `vercel/<slug>` so every tool shares one
- * catalog id; this is the rewrite that provider expects.
- */
-/**
  * Built-in providers pointed at the base URLs this run was given, in
  * the shape each one's built-in models use (read off pi 1.4.0's own
  * catalog): Anthropic, DeepSeek and AI Gateway at the origin, OpenAI
- * with /v1, Google with /v1beta. OpenRouter serves its anthropic/
- * models over Anthropic's API at /api and the rest over OpenAI's at
- * /api/v1, and one provider has one base URL, so the run's own model
- * decides which. Nothing for a provider the run was given no base URL
- * for, so pi's own default stands.
+ * with /v1 (which OPENAI_BASE_URL already carries), Google with
+ * /v1beta. OpenRouter serves its anthropic/ models over Anthropic's API
+ * at /api and the rest over OpenAI's at /api/v1, and one provider has
+ * one base URL, so the run's own model decides which. Nothing for a
+ * provider the run was given no base URL for, so pi's own default
+ * stands.
  */
 function piProviderBaseUrls(input: BuildCommandInput): Record<string, { baseUrl: string }> {
   const credentials = input.credentials ?? {};
   const out: Record<string, { baseUrl: string }> = {};
-  const set = (provider: string, name: string, suffix = "") => {
-    if (!credentials[name]?.trim()) return;
-    out[provider] = { baseUrl: `${providerBaseUrl(credentials, name, "")}${suffix}` };
-  };
-  set("anthropic", "ANTHROPIC_BASE_URL");
-  set("openai", "OPENAI_BASE_URL");
-  set("google", "GOOGLE_GEMINI_BASE_URL", "/v1beta");
-  set("deepseek", "DEEPSEEK_BASE_URL");
-  set("vercel-ai-gateway", "AI_GATEWAY_BASE_URL");
-  set("openrouter", "OPENROUTER_BASE_URL", input.model.startsWith("openrouter/anthropic/") ? "/api" : "/api/v1");
+  for (const [key, { id, suffix }] of Object.entries(PI_PROVIDERS)) {
+    const name = modelProviderForKey(key)?.proxy?.baseUrlEnv;
+    if (!name || !credentials[name]?.trim()) continue;
+    out[id] = { baseUrl: `${providerBaseUrl(credentials, name, "")}${suffix?.(input.model) ?? ""}` };
+  }
   return out;
 }
 
+/**
+ * pi's first-class Gateway provider is `vercel-ai-gateway`, not
+ * `vercel`. The picker writes `vercel/<slug>` so every tool shares one
+ * catalog id; this is the rewrite that provider expects.
+ */
 function piModelArgs(model: string): string[] {
   if (model.startsWith("vercel/")) {
     return ["--provider", "vercel-ai-gateway", "--model", model.slice("vercel/".length)];

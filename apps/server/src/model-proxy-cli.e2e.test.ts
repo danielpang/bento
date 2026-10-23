@@ -15,6 +15,7 @@ import {
   type AgentAdapter,
   type BuildCommandInput,
 } from "@bento/agents";
+import { MODEL_PROVIDERS, modelProviderForKey, type ModelProxyRoute } from "@bento/core";
 import { agentProfiles, agentRuns, createDb, createPool, features, pipelines, projects, runMigrations, secrets, stages } from "@bento/db";
 import { LocalProcessDriver } from "@bento/sandbox";
 import { createApp } from "./app.js";
@@ -36,7 +37,15 @@ import { SecretBox } from "./secrets.js";
  * swapping the organization's key in; the provider is a stand-in on
  * loopback that speaks just enough of each API to finish a turn, and
  * says what it was sent. A pass means the CLI put the token where the
- * proxy looks and called a path the provider serves.
+ * proxy looks and called a path the provider serves, and the proxy's
+ * endpoint allowlist refused nothing the CLI sent (every refusal is
+ * reported to error tracking, which this test listens to).
+ *
+ * Beyond one full turn per tool on Anthropic and OpenAI, each tool is
+ * also sent to every other provider it can be routed through
+ * (OpenRouter, AI Gateway, Gemini, DeepSeek), where the test asks only
+ * that its calls got through the proxy, since the stand-in does not
+ * speak every one of those APIs to the end.
  *
  * The CLIs have to be on PATH, so this is off by default:
  *
@@ -53,6 +62,12 @@ const testUrl = baseUrl.replace(/\/[^/]+$/, `/${testDbName}`);
 
 const ANTHROPIC_KEY = "sk-ant-org-key";
 const OPENAI_KEY = "sk-openai-org-key";
+const OTHER_KEYS: Record<string, string> = {
+  OPENROUTER_API_KEY: "sk-or-org-key",
+  AI_GATEWAY_API_KEY: "vck-org-key",
+  GEMINI_API_KEY: "AIza-org-key",
+  DEEPSEEK_API_KEY: "sk-deepseek-org-key",
+};
 
 let ctx: AppContext | undefined;
 let bento: ReturnType<typeof serve> | undefined;
@@ -61,6 +76,10 @@ let provider: Server | undefined;
 let providerUrl = "";
 let runIds: string[] = [];
 const calls: { url: string; method: string; headers: IncomingHttpHeaders }[] = [];
+/** The endpoints the proxy refused, from its reports to error tracking. */
+const refusals: Record<string, unknown>[] = [];
+/** Every proxied provider's default upstream, before the test pointed them at the stand-in. */
+const vendorUpstreams = new Map<ModelProxyRoute, string>();
 
 before(async () => {
   if (skip) return;
@@ -75,16 +94,30 @@ before(async () => {
   const userId = await ensureLocalUser(db);
   const env = loadEnv({ BENTO_MODE: "local", DATABASE_URL: testUrl, BENTO_SANDBOX_DRIVER: "local-process" } as NodeJS.ProcessEnv);
   ctx = { env, db, pool, bus: new EventBus(), secretBox: new SecretBox("test-encryption-key-at-least-32-chars"), userId } as unknown as AppContext;
+  ctx.analytics = {
+    capture() {},
+    captureException(_error, _userId, _organizationId, properties) {
+      if (properties?.source === "model_proxy_endpoint") refusals.push(properties);
+    },
+    async shutdown() {},
+  };
 
   provider = createServer(async (req, res) => {
     let body = "";
     for await (const chunk of req) body += chunk;
     calls.push({ url: req.url ?? "", method: req.method ?? "", headers: req.headers });
-    const request = JSON.parse(body || "{}") as { stream?: boolean; model?: string };
+    let request: { stream?: boolean; model?: string } = {};
+    try {
+      request = JSON.parse(body || "{}") as typeof request;
+    } catch {
+      // Not JSON; the stand-in answers by path alone.
+    }
     if (req.method === "POST" && req.url?.includes("/v1/messages")) return anthropicReply(res, request);
     if (req.method === "POST" && req.url?.includes("/responses")) return responsesReply(res);
+    if (req.method === "POST" && req.url?.includes("/chat/completions")) return chatReply(res, request);
+    if (req.method === "POST" && req.url?.includes("GenerateContent")) return geminiReply(res, req.url);
     res.writeHead(200, { "content-type": "application/json" });
-    res.end("{}");
+    res.end(req.method === "GET" ? JSON.stringify({ data: [], models: [] }) : "{}");
   });
   await new Promise<void>((resolve) => provider!.listen(0, "127.0.0.1", resolve));
   providerUrl = `http://127.0.0.1:${(provider.address() as { port: number }).port}`;
@@ -100,6 +133,16 @@ before(async () => {
   await save("ANTHROPIC_BASE_URL", providerUrl);
   await save("OPENAI_API_KEY", OPENAI_KEY);
   await save("OPENAI_BASE_URL", `${providerUrl}/v1`);
+  for (const [name, value] of Object.entries(OTHER_KEYS)) await save(name, value);
+  await save("GOOGLE_GEMINI_BASE_URL", providerUrl);
+  await save("DEEPSEEK_BASE_URL", providerUrl);
+  // OpenRouter and AI Gateway have no saved base URL: the proxy sends
+  // them to the vendor's own origin, which is the stand-in here.
+  for (const provider of MODEL_PROVIDERS) {
+    if (!provider.proxy) continue;
+    vendorUpstreams.set(provider.proxy, provider.proxy.upstream);
+    (provider.proxy as { upstream: string }).upstream = providerUrl;
+  }
 
   const [project] = await db.insert(projects).values({ ownerId: userId, name: "p", defaultBranch: "main" }).returning();
   const [pipeline] = await db.insert(pipelines).values({ projectId: project!.id, name: "p" }).returning();
@@ -107,7 +150,7 @@ before(async () => {
   const [feature] = await db.insert(features).values({ projectId: project!.id, pipelineId: pipeline!.id, title: "f" }).returning();
   const [profile] = await db.insert(agentProfiles).values({ ownerId: userId, name: "a", cli: "fake", model: "m" }).returning();
   runIds = [];
-  for (let i = 0; i < 8; i++) {
+  for (let i = 0; i < 32; i++) {
     const [run] = await db
       .insert(agentRuns)
       .values({ type: "pipeline", featureId: feature!.id, stageId: stage!.id, agentProfileId: profile!.id, status: "running", prompt: "" })
@@ -117,6 +160,7 @@ before(async () => {
 });
 
 after(async () => {
+  for (const [route, upstream] of vendorUpstreams) (route as { upstream: string }).upstream = upstream;
   bento?.close();
   provider?.close();
   await ctx?.pool.end();
@@ -153,15 +197,51 @@ function responsesReply(res: import("node:http").ServerResponse) {
   res.end();
 }
 
+function chatReply(res: import("node:http").ServerResponse, request: { stream?: boolean; model?: string }) {
+  const text = "Hello from the stand-in provider.";
+  const usage = { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 };
+  if (!request.stream) {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ id: "c1", object: "chat.completion", created: 0, model: request.model, choices: [{ index: 0, message: { role: "assistant", content: text }, finish_reason: "stop" }], usage }));
+    return;
+  }
+  res.writeHead(200, { "content-type": "text/event-stream" });
+  const chunk = (choice: Record<string, unknown>, extra: Record<string, unknown> = {}) =>
+    res.write(`data: ${JSON.stringify({ id: "c1", object: "chat.completion.chunk", created: 0, model: request.model, choices: [{ index: 0, ...choice }], ...extra })}\n\n`);
+  chunk({ delta: { role: "assistant", content: text }, finish_reason: null });
+  chunk({ delta: {}, finish_reason: "stop" }, { usage });
+  res.end("data: [DONE]\n\n");
+}
+
+function geminiReply(res: import("node:http").ServerResponse, url: string) {
+  const reply = {
+    candidates: [{ content: { role: "model", parts: [{ text: "Hello from the stand-in provider." }] }, finishReason: "STOP", index: 0 }],
+    usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 4, totalTokenCount: 14 },
+  };
+  if (url.includes("alt=sse")) {
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.end(`data: ${JSON.stringify(reply)}\n\n`);
+    return;
+  }
+  res.writeHead(200, { "content-type": "application/json" });
+  res.end(url.includes(":streamGenerateContent") ? JSON.stringify([reply]) : JSON.stringify(reply));
+}
+
 /** One one-shot run of a real CLI with the environment a proxied multi mode run gets. */
-async function proxiedRun(adapter: AgentAdapter, model: string, keys: string[], runIndex: number) {
+async function proxiedRun(adapter: AgentAdapter, model: string, keys: string[], runIndex: number, timeoutMs = 120_000) {
   const resolved: Record<string, string> = {
     ANTHROPIC_API_KEY: ANTHROPIC_KEY,
     ANTHROPIC_BASE_URL: providerUrl,
     OPENAI_API_KEY: OPENAI_KEY,
     OPENAI_BASE_URL: `${providerUrl}/v1`,
+    ...OTHER_KEYS,
+    GOOGLE_GEMINI_BASE_URL: providerUrl,
+    DEEPSEEK_BASE_URL: providerUrl,
   };
-  const runEnv = Object.fromEntries(Object.entries(resolved).filter(([name]) => keys.some((key) => name.startsWith(key.split("_")[0]!))));
+  // What resolveAgentEnv would hand the run: each key, and the base URL
+  // the organization saved for it.
+  const names = new Set(keys.flatMap((key) => [key, modelProviderForKey(key)?.baseUrlKey ?? key]));
+  const runEnv = Object.fromEntries(Object.entries(resolved).filter(([name]) => names.has(name)));
   const token = await mintRunGrant(ctx!, {
     runId: runIds[runIndex]!,
     organizationId: null,
@@ -198,6 +278,7 @@ async function proxiedRun(adapter: AgentAdapter, model: string, keys: string[], 
   const driver = new LocalProcessDriver();
   const handle = await driver.provision({ workspaceKey: `proxy-${adapter.cli}`, hostWorkspacePath: cwd } as never);
   calls.length = 0;
+  refusals.length = 0;
   // The local driver layers the run's environment over this process's,
   // and a test started from inside a Claude Code session carries that
   // session's own settings, which a sandbox never has. They are set
@@ -209,7 +290,7 @@ async function proxiedRun(adapter: AgentAdapter, model: string, keys: string[], 
     const result = await runAgent({
       adapter,
       argv,
-      exec: () => driver.exec(handle, argv, { cwd, env, timeoutMs: 120_000 }),
+      exec: () => driver.exec(handle, argv, { cwd, env, timeoutMs }),
       onEvent: async () => {},
     });
     return { result, token, credentials };
@@ -218,11 +299,12 @@ async function proxiedRun(adapter: AgentAdapter, model: string, keys: string[], 
   }
 }
 
-function assertReachedProvider(token: string, key: string, header: "x-api-key" | "authorization") {
+function assertReachedProvider(token: string, key: string, header: "x-api-key" | "authorization" | "x-goog-api-key") {
+  assert.deepEqual(refusals, [], "the proxy refused none of the CLI's requests");
   const modelCalls = calls.filter((call) => call.method === "POST");
   assert.ok(modelCalls.length > 0, "the CLI's model call reached the provider through the proxy");
   for (const call of modelCalls) {
-    const sent = header === "authorization" ? call.headers.authorization : call.headers["x-api-key"];
+    const sent = call.headers[header];
     assert.equal(sent, header === "authorization" ? `Bearer ${key}` : key, `${call.url} carried the organization's key`);
   }
   assert.ok(!calls.some((call) => JSON.stringify(call.headers).includes(token)), "the run token never reached the provider");
@@ -267,3 +349,35 @@ test("opencode reaches OpenAI through the proxy", { skip, timeout: 180_000 }, as
   assert.equal(result.outcome.ok, true, result.outcome.error);
   assertReachedProvider(token, OPENAI_KEY, "authorization");
 });
+
+/**
+ * Every other provider each tool can be routed through. The stand-in
+ * finishes a turn on Anthropic's, OpenAI's, chat completions and
+ * Gemini's APIs; opencode's AI Gateway route speaks the AI SDK's own
+ * protocol, which it does not, so there the test asks only that the
+ * calls got through.
+ */
+const ROUTES: { name: string; adapter: AgentAdapter; model: string; key: string; header: "authorization" | "x-api-key" | "x-goog-api-key"; turn: boolean }[] = [
+  { name: "Codex on OpenRouter", adapter: codexAdapter, model: "openai/gpt-5-mini", key: "OPENROUTER_API_KEY", header: "authorization", turn: true },
+  { name: "Codex on AI Gateway", adapter: codexAdapter, model: "vercel/openai/gpt-5-mini", key: "AI_GATEWAY_API_KEY", header: "authorization", turn: true },
+  { name: "pi on OpenRouter", adapter: piAdapter, model: "openrouter/deepseek/deepseek-chat", key: "OPENROUTER_API_KEY", header: "authorization", turn: true },
+  { name: "pi on OpenRouter's Anthropic models", adapter: piAdapter, model: "openrouter/anthropic/claude-sonnet-4.5", key: "OPENROUTER_API_KEY", header: "authorization", turn: true },
+  { name: "pi on AI Gateway", adapter: piAdapter, model: "vercel/anthropic/claude-sonnet-4.5", key: "AI_GATEWAY_API_KEY", header: "authorization", turn: true },
+  { name: "pi on Gemini", adapter: piAdapter, model: "google/gemini-2.5-flash", key: "GEMINI_API_KEY", header: "x-goog-api-key", turn: true },
+  { name: "pi on DeepSeek", adapter: piAdapter, model: "deepseek/deepseek-v4-pro", key: "DEEPSEEK_API_KEY", header: "authorization", turn: true },
+  { name: "opencode on OpenRouter", adapter: opencodeAdapter, model: "openrouter/openai/gpt-5-mini", key: "OPENROUTER_API_KEY", header: "authorization", turn: true },
+  { name: "opencode on AI Gateway", adapter: opencodeAdapter, model: "vercel/openai/gpt-5-mini", key: "AI_GATEWAY_API_KEY", header: "authorization", turn: false },
+  { name: "opencode on Gemini", adapter: opencodeAdapter, model: "google/gemini-2.5-flash", key: "GEMINI_API_KEY", header: "x-goog-api-key", turn: true },
+  { name: "opencode on DeepSeek", adapter: opencodeAdapter, model: "deepseek/deepseek-v4-pro", key: "DEEPSEEK_API_KEY", header: "authorization", turn: true },
+];
+
+for (const [index, route] of ROUTES.entries()) {
+  test(`${route.name} gets through the proxy`, { skip, timeout: 180_000 }, async (t) => {
+    const { result, token } = await proxiedRun(route.adapter, route.model, [route.key], 8 + index, route.turn ? 120_000 : 45_000);
+    t.diagnostic(`provider saw: ${[...new Set(calls.map((call) => `${call.method} ${call.url}`))].join(", ")}`);
+    if (route.turn) assert.equal(result.outcome.ok, true, `${result.outcome.error}: ${JSON.stringify(calls.map((c) => `${c.method} ${c.url}`))}`);
+    // The OpenRouter and AI Gateway keys have no saved base URL, so the
+    // proxy sent them to the vendor's origin, which is the stand-in.
+    assertReachedProvider(token, OTHER_KEYS[route.key]!, route.header);
+  });
+}

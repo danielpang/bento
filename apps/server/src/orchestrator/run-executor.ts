@@ -2573,9 +2573,11 @@ async function finishRun(
   /**
    * A run the model proxy failed under is Bento's failure, whatever the
    * agent made of the error it was handed: the proxy stamps its grant
-   * when it could not do its part (a lookup, a decryption, a provider
-   * it could not reach), and the stamp is read here rather than any
-   * sentence the run left. A fault the caller already knew stands.
+   * when it could not do its part (a lookup, a decryption, its own
+   * code), clears the stamp when the provider answers a later request,
+   * and the stamp is read here rather than any sentence the run left.
+   * A provider it could not reach is the provider's failure and never
+   * stamped. A fault the caller already knew stands.
    */
   if (!outcome.ok && !stopped && outcome.fault === undefined && (await proxyFailedUnder(ctx, runId))) {
     outcome = { ...outcome, fault: "bento" };

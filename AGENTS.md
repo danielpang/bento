@@ -1019,21 +1019,61 @@ reason written beside it (fx, Muse and Cursor have no base URL to
 point). Check what the real CLI sends before listing a key: the path
 it appends to the base URL and the header the key rides in
 (`model-proxy-cli.e2e.test.ts` drives Claude Code, Codex, pi and
-opencode through the real route). Codex opens each turn with a
-WebSocket upgrade and falls back to HTTP only on a 426, which is why
-the route answers upgrades that way.
+opencode through the real route to every provider each can use). Codex
+opens each turn with a WebSocket upgrade and falls back to HTTP only on
+a 426, which is why the route answers upgrades that way.
 
-The proxy and the Modal allowlist read one provider list,
-`orchestrator/model-providers.ts`; a proxied key's provider host leaves
-the allowlist, because the sandbox reaches it through the gateway. MCP
-joins the proxy's grant (`prepareRunMcp` takes the token) rather than
-minting a second one, because a second mint replaces the token the
+One provider table, `MODEL_PROVIDERS` in `packages/core`
+(`model-providers.ts`), serves the proxy, the Modal allowlist and the
+adapters: opencode and pi keep only their own CLI's provider ids,
+keyed by the shared entry, whose base URL variable they read. A
+proxied key's provider host leaves the allowlist, because the sandbox
+reaches it through the gateway. Each entry lists the inference
+endpoints the proxy will call with the key (`endpoints`: completions,
+token counting, model listings), matched on the path the CLI sent after
+`/api/model-proxy/<provider>`; anything else (files, fine tuning,
+admin) is the same 404 as every refusal, and is reported to error
+tracking as `model_proxy_endpoint` with the provider, method and path,
+so a CLI that starts calling a new endpoint shows up there. A new path
+a CLI needs goes into that list, after the real CLI was seen sending
+it.
+
+A token serves only while its run is queued, starting or running:
+`resolveGrant` joins the run and checks its status in the same query,
+for the MCP gateway and the proxy alike. Many paths end a run with a
+bare update and never call `revokeRunGrant`, so the status is the rule
+and revocation the record. The proxy caches each token's grant and
+decrypted keys per process for five minutes
+(`mcp/model-proxy-cache.ts`), so a run's calls after its first read
+nothing. The database announces every change that must end an entry
+early: triggers on `agent_runs` (a run leaving the active statuses)
+and `mcp_run_grants` (revoked, re-minted, stamped or cleared, extended,
+deleted) publish `grant_changed` with the run id onto the bus channel
+(migration 0067), so every process evicts, whichever path wrote the
+row. Do not replace that with a publish from each terminal path: the
+paths that forgot to revoke are the reason it is in the database. A
+key the provider answers 401 or 403 is read again on the next call, so
+a rotated key takes effect at once.
+
+MCP joins the proxy's grant (`prepareRunMcp` takes the token) rather
+than minting a second one, because a second mint replaces the token the
 sandbox's environment holds; a reattach extends the grant for either
-use. A saved base URL is a tenant-chosen address, so it goes through
-`safeFetch` like an MCP server. When the proxy itself fails (a lookup,
-a decryption, a provider it cannot reach) it stamps
+use. A saved base URL is a tenant-chosen address, so the proxy fetches
+it through `safeFetch` like an MCP server, and `planModelProxy` checks
+it against the same rule before the grant is minted: a key whose saved
+base URL is plain http or private is not proxied at all, reaches the
+sandbox with that base URL as before the proxy, and the transcript
+says why in one sentence.
+
+Billing follows whose failure it was. When the proxy itself fails (a
+lookup, a decryption, an exception in its own code) it stamps
 `mcp_run_grants.proxy_failed_at`, and `finishRun` reads that stamp to
-close a failed run as Bento's fault, never the agent's error text.
+close a failed run as Bento's fault, never the agent's error text. The
+next request the provider answers (any status) clears the stamp, so one
+early failure the agent retried past does not waive the bill for a
+failure of its own. A provider the proxy cannot reach, or that does not
+answer in time, is the provider's failure: a retryable 502
+(`x-should-retry`), no stamp, and billed like any provider outage.
 Login tokens, Cursor, custom providers and Ollama keep their own paths.
 
 ## Only large features go behind beta features

@@ -1,9 +1,10 @@
 import type { AgentAdapter } from "@bento/agents";
+import { MODEL_PROXY_PATH, modelProviderForKey } from "@bento/core";
 import type { SandboxDriver } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
 import { mintRunGrant } from "../mcp/grants.js";
+import { checkFetchable, safeFetchPolicy } from "../mcp/safe-fetch.js";
 import { resolveGatewayBase, runGrantTtlMs } from "./mcp-run.js";
-import { MODEL_PROXY_PATH, modelProviderForKey } from "./model-providers.js";
 
 /**
  * Provider keys reach a multi mode sandbox only as run tokens.
@@ -19,7 +20,11 @@ import { MODEL_PROXY_PATH, modelProviderForKey } from "./model-providers.js";
  *
  * Local mode is left alone: one trusted user, whose keys are theirs.
  * So is anything the proxy does not carry: a subscription login, a
- * Cursor credential, a custom provider, Ollama.
+ * Cursor credential, a custom provider, Ollama. And so is a key whose
+ * saved base URL the proxy could never fetch (plain http, a private
+ * address): the sandbox reached it before the proxy existed, and the
+ * proxy would refuse every request, so that key and its base URL stay
+ * in the sandbox and the transcript says why.
  */
 
 export interface ModelProxyPlan {
@@ -27,28 +32,66 @@ export interface ModelProxyPlan {
   keys: string[];
   /** The gateway base the sandbox reaches the proxy on; null when it cannot reach one. */
   gatewayBase: string | null;
+  /**
+   * Keys the adapter could proxy whose saved base URL Bento's server
+   * will not fetch, each with the variable that holds it. They reach
+   * the sandbox as they did before the proxy.
+   */
+  unreachableBaseUrls: { key: string; baseUrlKey: string }[];
 }
 
 /**
  * Which of a run's resolved keys go through the proxy, and where the
- * sandbox reaches it. Pure, so the Modal allowlist (which is built
- * before any grant exists) and the executor reach the same answer.
+ * sandbox reaches it. The Modal allowlist (which is built before any
+ * grant exists) and the executor both ask this, so they reach the same
+ * answer from the same environment.
+ *
+ * A saved base URL is checked here against the rule the proxy fetches
+ * it by (safeFetch: public https only in multi mode), so a URL the
+ * proxy would refuse on every request is never proxied in the first
+ * place.
  */
-export function planModelProxy(
+export async function planModelProxy(
   ctx: AppContext,
   adapter: Pick<AgentAdapter, "modelProxy">,
   driver: SandboxDriver,
   env: Readonly<Record<string, string>>,
-): ModelProxyPlan {
-  const none = { keys: [], gatewayBase: null };
+): Promise<ModelProxyPlan> {
+  const none = { keys: [], gatewayBase: null, unreachableBaseUrls: [] };
   if (ctx.env.BENTO_MODE !== "multi" || !adapter.modelProxy) return none;
   // The local process driver writes nothing into the home it shares
   // with the operator, so a tool wired through a file there would be
   // handed a token and no address to spend it at.
   if (adapter.modelProxy.homeFile && driver.provider === "local-process") return none;
-  const keys = adapter.modelProxy.keys.filter((key) => env[key]?.trim() && modelProviderForKey(key)?.proxy);
-  if (keys.length === 0) return none;
-  return { keys, gatewayBase: resolveGatewayBase(ctx, driver) };
+  const candidates = adapter.modelProxy.keys.filter((key) => env[key]?.trim() && modelProviderForKey(key)?.proxy);
+  const keys: string[] = [];
+  const unreachableBaseUrls: ModelProxyPlan["unreachableBaseUrls"] = [];
+  const policy = safeFetchPolicy(ctx.env);
+  for (const key of candidates) {
+    const baseUrlKey = modelProviderForKey(key)?.baseUrlKey;
+    const saved = baseUrlKey ? env[baseUrlKey]?.trim() : undefined;
+    if (baseUrlKey && saved && !(await fetchable(saved, policy))) {
+      unreachableBaseUrls.push({ key, baseUrlKey });
+      continue;
+    }
+    keys.push(key);
+  }
+  if (keys.length === 0) return { ...none, unreachableBaseUrls };
+  return { keys, gatewayBase: resolveGatewayBase(ctx, driver), unreachableBaseUrls };
+}
+
+async function fetchable(url: string, policy: ReturnType<typeof safeFetchPolicy>): Promise<boolean> {
+  try {
+    await checkFetchable(url, policy);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The transcript's one sentence for a key left in the sandbox because of its saved base URL. */
+export function unreachableBaseUrlNote(entry: { key: string; baseUrlKey: string }): string {
+  return `${entry.baseUrlKey} is not a public https address that Bento's model proxy can reach, so this run's ${entry.key} is in its sandbox rather than behind the proxy.`;
 }
 
 /**
@@ -114,7 +157,8 @@ export async function proxyModelCredentials(
     say: (text: string) => Promise<void>;
   },
 ): Promise<{ env: Record<string, string>; grantToken: string | null }> {
-  const plan = planModelProxy(ctx, input.adapter, input.driver, input.env);
+  const plan = await planModelProxy(ctx, input.adapter, input.driver, input.env);
+  for (const entry of plan.unreachableBaseUrls) await input.say(unreachableBaseUrlNote(entry));
   if (plan.keys.length === 0) return { env: input.env, grantToken: null };
   if (!plan.gatewayBase) {
     await input.say(

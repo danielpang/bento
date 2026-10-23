@@ -1,7 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
-import { and, eq, isNotNull, lt, sql } from "drizzle-orm";
-import { mcpRunGrants } from "@bento/db";
+import { and, eq, inArray, isNotNull, lt, sql } from "drizzle-orm";
+import { agentRuns, mcpRunGrants } from "@bento/db";
 import type { AppContext } from "../context.js";
+import { ACTIVE_RUN_STATUSES } from "../orchestrator/start-run.js";
 
 /**
  * Run-scoped gateway tokens: the only credential a sandbox ever holds.
@@ -17,9 +18,12 @@ import type { AppContext } from "../context.js";
  * rejects a literal Authorization header), the provider key variables
  * of a proxied run's environment, and the headers of gateway and
  * proxy requests. The row keeps its sha256, so a
- * database read yields nothing replayable. Revocation on the run's
- * terminal paths is what makes exfiltrating one worth so little: the
- * token outlives its run only by the sweep interval.
+ * database read yields nothing replayable. A token serves only while
+ * its run is queued, starting or running (resolveGrant reads the run's
+ * status in the same query), so it dies the moment its run ends by any
+ * path, including the ones that close a run with a bare update and
+ * never call revokeRunGrant. Revocation on the terminal paths is the
+ * record of that, and the TTL the backstop.
  */
 
 const TOKEN_PREFIX = "bmg_";
@@ -172,9 +176,10 @@ export async function runGrantUses(
 
 /**
  * Records that the model proxy itself failed one of this grant's
- * requests. Best effort: the request is already being answered with
- * the proxy's own error, and a stamp that cannot be written must not
- * turn that into something else.
+ * requests (Bento's own failure: a lookup, a decryption, its own code,
+ * never a provider it could not reach). Best effort: the request is
+ * already being answered with the proxy's own error, and a stamp that
+ * cannot be written must not turn that into something else.
  */
 export async function markModelProxyFailed(ctx: AppContext, grantId: string): Promise<void> {
   try {
@@ -185,10 +190,31 @@ export async function markModelProxyFailed(ctx: AppContext, grantId: string): Pr
 }
 
 /**
- * Whether the model proxy failed a request of this run's. A run that
- * then failed failed on Bento, whatever the agent made of the error it
- * was handed, so it is not billed. Read from the grant, which records
- * what the proxy did, never from the run's error text.
+ * Clears the failure stamp once the proxy has carried a request of this
+ * grant's to the provider again. A stamp means the run's model calls
+ * were failing on Bento when it ended; one early failure the agent
+ * retried past says nothing about why the run later failed, and must
+ * not waive the bill for a failure of the work's own. Only a stamp
+ * older than the request that succeeded is cleared, so a failure that
+ * landed while it was in flight stands. Best effort, like the stamp.
+ */
+export async function clearModelProxyFailure(ctx: AppContext, grantId: string, before: Date): Promise<void> {
+  try {
+    await ctx.db
+      .update(mcpRunGrants)
+      .set({ proxyFailedAt: null })
+      .where(and(eq(mcpRunGrants.id, grantId), lt(mcpRunGrants.proxyFailedAt, before)));
+  } catch (err) {
+    console.error(`could not clear the model proxy failure on grant ${grantId}:`, err);
+  }
+}
+
+/**
+ * Whether the model proxy's last word on this run's model calls was a
+ * failure of its own. A run that then failed failed on Bento, whatever
+ * the agent made of the error it was handed, so it is not billed. Read
+ * from the grant, which records what the proxy did, never from the
+ * run's error text.
  */
 export async function runHadModelProxyFailure(ctx: AppContext, runId: string): Promise<boolean> {
   const [row] = await ctx.db
@@ -245,20 +271,34 @@ export interface ResolvedGrant {
   modelCredentials: string[];
   /** The swarm this grant was minted for; null for a card's run. */
   swarmId: string | null;
+  /** When the grant stops serving, whatever its run does. */
+  expiresAt: Date;
+  /** Whether the model proxy's failure stamp is set (see markModelProxyFailed). */
+  proxyFailed: boolean;
 }
 
 /**
- * The gateway's authentication: one indexed read by token hash. Every
- * refusal is the same null, so a probe cannot tell missing from
- * revoked from expired.
+ * The gateway's and the model proxy's authentication: one indexed read
+ * by token hash, joined to the run. Every refusal is the same null, so
+ * a probe cannot tell missing from revoked from expired from a run
+ * that is over.
+ *
+ * The run's status is read in the same query, and a grant serves only
+ * while its run is queued, starting or running. Several paths close a
+ * run with a bare update (a cancel route, a swarm stopping, a stage
+ * agent switched) and never revoke its grant; this one check covers
+ * every one of them, and any written later. A run adopted or reattached
+ * after a restart is still running, so its token keeps working.
  */
 export async function resolveGrant(ctx: AppContext, rawToken: string): Promise<ResolvedGrant | null> {
   if (!rawToken.startsWith(TOKEN_PREFIX)) return null;
-  const [row] = await ctx.db
-    .select()
+  const [found] = await ctx.db
+    .select({ grant: mcpRunGrants })
     .from(mcpRunGrants)
-    .where(eq(mcpRunGrants.tokenHash, hashGrantToken(rawToken)))
+    .innerJoin(agentRuns, eq(agentRuns.id, mcpRunGrants.runId))
+    .where(and(eq(mcpRunGrants.tokenHash, hashGrantToken(rawToken)), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)))
     .limit(1);
+  const row = found?.grant;
   if (!row) return null;
   if (row.revokedAt) return null;
   if (row.expiresAt.getTime() < Date.now()) return null;
@@ -270,6 +310,8 @@ export async function resolveGrant(ctx: AppContext, rawToken: string): Promise<R
     serverIds: row.serverIds,
     modelCredentials: row.modelCredentials ?? [],
     swarmId: row.swarmId,
+    expiresAt: row.expiresAt,
+    proxyFailed: row.proxyFailedAt !== null,
   };
 }
 

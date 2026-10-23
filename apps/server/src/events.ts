@@ -77,7 +77,8 @@ export type BusWirePayload =
   | { kind: "run_done"; runId: string; status: string }
   | { kind: "run_turn"; runId: string; state: TurnState }
   | { kind: "run_control"; runId: string; action: RunControlAction }
-  | { kind: "board"; event: BoardEvent };
+  | { kind: "board"; event: BoardEvent }
+  | { kind: "grant_changed"; runId: string };
 
 /**
  * A request addressed to whichever process is driving a run, in the
@@ -314,6 +315,26 @@ export class EventBus {
   onRunControl(listener: (control: RunControl) => void): () => void {
     this.emitter.on("run_control", listener);
     return () => this.emitter.off("run_control", listener);
+  }
+
+  /**
+   * A run's gateway grant changed in a way its holders must hear (it
+   * was revoked, re-minted, stamped or cleared, extended, or deleted),
+   * or the run left the queued, starting and running statuses. Published
+   * by the database itself, from triggers on mcp_run_grants and
+   * agent_runs (migration 0067), onto the channel pg-bus.ts listens on,
+   * so every path that ends a run is heard, including a bare update
+   * that never calls revokeRunGrant. The model proxy's grant cache is
+   * the listener: it drops the run's entries, so the next request reads
+   * the row again. Run id only; never a token or a key.
+   */
+  deliverGrantChanged(runId: string): void {
+    this.emitter.emit("grant_changed", runId);
+  }
+
+  onGrantChanged(listener: (runId: string) => void): () => void {
+    this.emitter.on("grant_changed", listener);
+    return () => this.emitter.off("grant_changed", listener);
   }
 
   deliverBoardEvent(event: BoardEvent): void {

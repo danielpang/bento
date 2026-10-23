@@ -1,5 +1,5 @@
 import type { AgentDelta, AgentEvent, RunOutcome } from "@bento/core";
-import { hasOllamaCredentials, isOllamaModel, ollamaModelId, ollamaServerUrl } from "@bento/core";
+import { hasOllamaCredentials, isOllamaModel, modelProviderForKey, ollamaModelId, ollamaServerUrl } from "@bento/core";
 import {
   providerBaseUrl,
   providerKeyFor,
@@ -28,24 +28,34 @@ interface OpencodeExport {
 }
 
 /**
- * Each built-in provider's base URL, for a run given one, in the shape
- * that provider's SDK takes (read off opencode 1.19's bundle): the
- * Anthropic, OpenAI and Google SDKs include their API version, while
- * DeepSeek's OpenAI compatible provider and OpenRouter's add their own
- * paths to the origin. Nothing for a provider the run has no base URL
- * for, so opencode's own default stands.
+ * opencode's own id for each provider the model proxy carries, keyed by
+ * the provider's entry in @bento/core's MODEL_PROVIDERS, and the path
+ * that provider's SDK expects on its base URL (read off opencode 1.19's
+ * bundle): the Anthropic, OpenAI and Google SDKs include their API
+ * version, while DeepSeek's OpenAI compatible provider and OpenRouter's
+ * add their own paths to the origin, and the AI SDK gateway takes
+ * /v3/ai. The base URL variable each one reads is the shared entry's.
+ */
+const OPENCODE_PROVIDERS: Readonly<Record<string, { id: string; suffix?: string }>> = {
+  ANTHROPIC_API_KEY: { id: "anthropic", suffix: "/v1" },
+  OPENAI_API_KEY: { id: "openai" },
+  OPENROUTER_API_KEY: { id: "openrouter", suffix: "/api/v1" },
+  AI_GATEWAY_API_KEY: { id: "vercel", suffix: "/v3/ai" },
+  GEMINI_API_KEY: { id: "google", suffix: "/v1beta" },
+  DEEPSEEK_API_KEY: { id: "deepseek" },
+};
+
+/**
+ * Each built-in provider's base URL, for a run given one. Nothing for a
+ * provider the run has no base URL for, so opencode's own default
+ * stands.
  */
 function opencodeBaseUrls(credentials: Readonly<Record<string, string>>): Record<string, string> {
   const out: Record<string, string> = {};
-  const set = (provider: string, name: string, suffix = "") => {
-    if (credentials[name]?.trim()) out[provider] = `${providerBaseUrl(credentials, name, "")}${suffix}`;
-  };
-  set("anthropic", "ANTHROPIC_BASE_URL", "/v1");
-  set("openai", "OPENAI_BASE_URL");
-  set("google", "GOOGLE_GEMINI_BASE_URL", "/v1beta");
-  set("deepseek", "DEEPSEEK_BASE_URL");
-  set("openrouter", "OPENROUTER_BASE_URL", "/api/v1");
-  set("vercel", "AI_GATEWAY_BASE_URL", "/v3/ai");
+  for (const [key, { id, suffix = "" }] of Object.entries(OPENCODE_PROVIDERS)) {
+    const name = modelProviderForKey(key)?.proxy?.baseUrlEnv;
+    if (name && credentials[name]?.trim()) out[id] = `${providerBaseUrl(credentials, name, "")}${suffix}`;
+  }
   return out;
 }
 
@@ -91,9 +101,7 @@ export const opencodeAdapter: AgentAdapter = {
    * opencode's SDKs would otherwise read. Keys stay in the environment
    * under their own names, which is where those SDKs read them.
    */
-  modelProxy: {
-    keys: ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "AI_GATEWAY_API_KEY", "GEMINI_API_KEY", "DEEPSEEK_API_KEY"],
-  },
+  modelProxy: { keys: Object.keys(OPENCODE_PROVIDERS) },
 
   /**
    * opencode ships no provider for an Ollama server, so an ollama/ model

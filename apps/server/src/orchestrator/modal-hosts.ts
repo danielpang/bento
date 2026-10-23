@@ -1,8 +1,9 @@
-import { MODEL_PROVIDERS } from "./model-providers.js";
+import { MODEL_PROVIDERS } from "@bento/core";
 
 /**
  * Where an API key goes when the organization has not set a base URL
- * (see model-providers.ts, which the model proxy reads too).
+ * (see model-providers.ts in @bento/core, which the model proxy and the
+ * adapters read too).
  *
  * A restricted sandbox allowlists these or it does not start. A key
  * with no host in this list, and no base URL, is a refusal: opening

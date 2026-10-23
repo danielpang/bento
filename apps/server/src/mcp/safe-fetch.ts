@@ -63,11 +63,17 @@ export function safeFetchPolicy(env: { BENTO_MODE: "local" | "multi"; BETTER_AUT
   return { mode: env.BENTO_MODE, ownHosts };
 }
 
-export async function safeFetch(
+/**
+ * The address checks safeFetch makes, without fetching: the URL parsed,
+ * and, in multi mode, the addresses it resolved to (every one public).
+ * Throws SafeFetchRefused with the reason. For a caller that has to
+ * decide ahead of time whether a URL will ever be fetched (the model
+ * proxy, at mint, for a saved base URL).
+ */
+export async function checkFetchable(
   url: string,
-  init: SafeFetchInit,
   policy: SafeFetchPolicy,
-): Promise<UndiciResponse> {
+): Promise<{ parsed: URL; addresses: string[] | null }> {
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -81,22 +87,32 @@ export async function safeFetch(
   if (policy.mode === "multi" && parsed.protocol !== "https:") {
     throw new SafeFetchRefused("MCP servers must use https");
   }
+  if (policy.mode !== "multi") return { parsed, addresses: null };
 
   const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (policy.ownHosts.includes(hostname)) {
+    throw new SafeFetchRefused("this server cannot point at Bento itself");
+  }
+  const addresses = await resolveAll(hostname);
+  // Every address must be public. A round-robin answer that mixes a
+  // public address with a private one is exactly the rebinding shape
+  // this exists to refuse.
+  for (const address of addresses) {
+    if (!isPublicAddress(address)) {
+      throw new SafeFetchRefused("this host resolves to a private address");
+    }
+  }
+  return { parsed, addresses };
+}
+
+export async function safeFetch(
+  url: string,
+  init: SafeFetchInit,
+  policy: SafeFetchPolicy,
+): Promise<UndiciResponse> {
+  const { parsed, addresses } = await checkFetchable(url, policy);
   let dispatcher: Agent | undefined;
-  if (policy.mode === "multi") {
-    if (policy.ownHosts.includes(hostname)) {
-      throw new SafeFetchRefused("this server cannot point at Bento itself");
-    }
-    const addresses = await resolveAll(hostname);
-    // Every address must be public. A round-robin answer that mixes a
-    // public address with a private one is exactly the rebinding shape
-    // this exists to refuse.
-    for (const address of addresses) {
-      if (!isPublicAddress(address)) {
-        throw new SafeFetchRefused("this host resolves to a private address");
-      }
-    }
+  if (addresses) {
     dispatcher = pinnedAgent(addresses, init.headersTimeoutMs, init.bodyTimeoutMs);
   } else if (init.headersTimeoutMs || init.bodyTimeoutMs) {
     dispatcher = new Agent({

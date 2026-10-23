@@ -1502,8 +1502,10 @@ export const mcpRunGrants = pgTable(
     modelCredentials: text("model_credentials").array().notNull().default(sql`'{}'::text[]`),
     /**
      * When the model proxy itself failed a request for this run (a
-     * lookup or decryption it could not do, a provider it could not
-     * reach). A run that then fails is Bento's fault and is not billed.
+     * lookup or decryption it could not do, its own code throwing; never
+     * a provider it could not reach). Cleared when the provider answers
+     * a later request. A run that fails while it is set is Bento's
+     * fault and is not billed.
      */
     proxyFailedAt: timestamp("proxy_failed_at", { withTimezone: true }),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
