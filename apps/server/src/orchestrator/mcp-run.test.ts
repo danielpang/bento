@@ -48,9 +48,15 @@ test("a sprite on a loopback base has no reachable gateway", () => {
   assert.equal(resolveGatewayBase(ctx, ctx.drivers.default), null);
 });
 
-test("local-process does not rewrite a loopback base", () => {
+/**
+ * An agent running as a local process is on the server's own host, so
+ * the loopback base is the right one to reach it on, and the model
+ * proxy needs it. MCP still refuses that driver on its own, before it
+ * ever asks for a base.
+ */
+test("local-process uses a loopback base as it is", () => {
   const ctx = fakeCtx({ BETTER_AUTH_URL: "http://localhost:4400" }, "local-process");
-  assert.equal(resolveGatewayBase(ctx, ctx.drivers.default), null);
+  assert.equal(resolveGatewayBase(ctx, ctx.drivers.default), "http://localhost:4400");
 });
 
 test("a trailing slash on the base is normalized away", () => {

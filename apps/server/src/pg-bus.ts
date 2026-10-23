@@ -2,6 +2,7 @@ import pg from "pg";
 import type { AgentEvent } from "@bento/core";
 import type { BusWirePayload, EventBus } from "./events.js";
 
+/** Also named by the grant triggers in migration 0068, which publish onto it. */
 const CHANNEL = "bento_bus";
 
 /**
@@ -114,6 +115,11 @@ export async function attachPgBus(options: PgBusOptions): Promise<PgBus> {
         return;
       case "board":
         bus.deliverBoardEvent(message.event);
+        return;
+      case "grant_changed":
+        // From the database's triggers (origin "database"), so every
+        // process, the one whose write fired them included, hears it.
+        bus.deliverGrantChanged(message.runId);
         return;
     }
   };

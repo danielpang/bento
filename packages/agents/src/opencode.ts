@@ -1,6 +1,7 @@
 import type { AgentDelta, AgentEvent, RunOutcome } from "@bento/core";
-import { hasOllamaCredentials, isOllamaModel, ollamaModelId, ollamaServerUrl } from "@bento/core";
+import { hasOllamaCredentials, isOllamaModel, modelProviderForKey, ollamaModelId, ollamaServerUrl } from "@bento/core";
 import {
+  providerBaseUrl,
   providerKeyFor,
   type AgentAdapter,
   type BuildCommandInput,
@@ -24,6 +25,38 @@ interface OpencodeExport {
     info?: { role?: string; id?: string };
     parts?: OpencodePart[];
   }[];
+}
+
+/**
+ * opencode's own id for each provider the model proxy carries, keyed by
+ * the provider's entry in @bento/core's MODEL_PROVIDERS, and the path
+ * that provider's SDK expects on its base URL (read off opencode 1.19's
+ * bundle): the Anthropic, OpenAI and Google SDKs include their API
+ * version, while DeepSeek's OpenAI compatible provider and OpenRouter's
+ * add their own paths to the origin, and the AI SDK gateway takes
+ * /v3/ai. The base URL variable each one reads is the shared entry's.
+ */
+const OPENCODE_PROVIDERS: Readonly<Record<string, { id: string; suffix?: string }>> = {
+  ANTHROPIC_API_KEY: { id: "anthropic", suffix: "/v1" },
+  OPENAI_API_KEY: { id: "openai" },
+  OPENROUTER_API_KEY: { id: "openrouter", suffix: "/api/v1" },
+  AI_GATEWAY_API_KEY: { id: "vercel", suffix: "/v3/ai" },
+  GEMINI_API_KEY: { id: "google", suffix: "/v1beta" },
+  DEEPSEEK_API_KEY: { id: "deepseek" },
+};
+
+/**
+ * Each built-in provider's base URL, for a run given one. Nothing for a
+ * provider the run has no base URL for, so opencode's own default
+ * stands.
+ */
+function opencodeBaseUrls(credentials: Readonly<Record<string, string>>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, { id, suffix = "" }] of Object.entries(OPENCODE_PROVIDERS)) {
+    const name = modelProviderForKey(key)?.proxy?.baseUrlEnv;
+    if (name && credentials[name]?.trim()) out[id] = `${providerBaseUrl(credentials, name, "")}${suffix}`;
+  }
+  return out;
 }
 
 interface OpencodeLine {
@@ -62,6 +95,13 @@ export const opencodeAdapter: AgentAdapter = {
     "DEEPSEEK_API_KEY",
   ],
   configPaths: [".config/opencode", ".local/share/opencode"],
+  /**
+   * Each provider's base URL arrives as its `options.baseURL` in
+   * OPENCODE_CONFIG_CONTENT (see env), which wins over the variables
+   * opencode's SDKs would otherwise read. Keys stay in the environment
+   * under their own names, which is where those SDKs read them.
+   */
+  modelProxy: { keys: Object.keys(OPENCODE_PROVIDERS) },
 
   /**
    * opencode ships no provider for an Ollama server, so an ollama/ model
@@ -88,20 +128,26 @@ export const opencodeAdapter: AgentAdapter = {
       };
       return { OPENCODE_CONFIG_CONTENT: JSON.stringify(config) };
     }
+    const provider: Record<string, { options: Record<string, string> }> = {};
+    const options = (id: string) => (provider[id] ??= { options: {} }).options;
     // /connect stores the Gateway key in opencode's own auth. A sandbox
     // has none of that, so the built-in vercel provider is pointed at
     // the key Bento already forwarded.
     if (input.model.startsWith("vercel/") && input.credentials?.AI_GATEWAY_API_KEY) {
-      return {
-        OPENCODE_CONFIG_CONTENT: JSON.stringify({
-          $schema: "https://opencode.ai/config.json",
-          provider: {
-            vercel: { options: { apiKey: "{env:AI_GATEWAY_API_KEY}" } },
-          },
-        }),
-      };
+      options("vercel").apiKey = "{env:AI_GATEWAY_API_KEY}";
     }
-    return {};
+    // opencode lists GEMINI_API_KEY for its google provider but never
+    // hands it over: Google's SDK reads only GOOGLE_GENERATIVE_AI_API_KEY,
+    // and stopped at "API key is missing" with GEMINI_API_KEY set
+    // (opencode 1.19.4). Named here, the key Bento saved is the one used.
+    if (/^(google|gemini)\//.test(input.model) && input.credentials?.GEMINI_API_KEY) {
+      options("google").apiKey = "{env:GEMINI_API_KEY}";
+    }
+    for (const [id, baseURL] of Object.entries(opencodeBaseUrls(input.credentials ?? {}))) options(id).baseURL = baseURL;
+    if (Object.keys(provider).length === 0) return {};
+    return {
+      OPENCODE_CONFIG_CONTENT: JSON.stringify({ $schema: "https://opencode.ai/config.json", provider }),
+    };
   },
 
   // The sandbox home carries no opencode config of its own, so the

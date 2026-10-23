@@ -62,6 +62,14 @@ export const claudeCodeAdapter: AgentAdapter = {
   // mints one, and it travels as an env var or a stored secret.
   authAlternatives: ["CLAUDE_CODE_OAUTH_TOKEN"],
   configPaths: [".claude", ".claude.json"],
+  /**
+   * Claude Code reads ANTHROPIC_BASE_URL itself, appends /v1/messages
+   * (and its other paths) to it, and sends ANTHROPIC_API_KEY as
+   * x-api-key, so the proxy's address and token in those two variables
+   * are the whole of the wiring. A login token is not a key and is
+   * never proxied.
+   */
+  modelProxy: { keys: ["ANTHROPIC_API_KEY"] },
 
   /**
    * An ollama/ model runs against Ollama's Anthropic compatible API.

@@ -4,7 +4,7 @@ An organization defines remote MCP servers once. Every supported harness receive
 
 ## What an agent sees
 
-At run start, Bento writes MCP config for the harness, into the harness's own config file under the sandbox user's home (root's in a Docker container, `/home/sprite` on a Fly Sprite). Each enabled server points at the gateway (`/api/mcp-gateway/<serverId>`) with a run-scoped bearer token. The gateway validates the token, attaches the organization or member credential, and proxies upstream. The token is revoked when the run ends.
+At run start, Bento writes MCP config for the harness, into the harness's own config file under the sandbox user's home (root's in a Docker container, `/home/sprite` on a Fly Sprite). Each enabled server points at the gateway (`/api/mcp-gateway/<serverId>`) with the run's proxy token as its bearer token (the same token the model proxy takes; see [security.md](./security.md)). The gateway validates the token, attaches the organization or member credential, and proxies upstream. The token is revoked when the run ends.
 
 Credentials are not exposed in the sandbox config.
 
@@ -61,7 +61,7 @@ Claude Code, Cursor, opencode, Codex, Antigravity, Muse Code, and fx consume rem
 
 MCP is not attached when:
 
-- the organization blocks sandbox egress,
+- the organization blocks sandbox egress and the run's sandbox is not on Modal (a locked Modal run attaches MCP servers through the gateway),
 - the run uses the `local-process` driver,
 - a personal server has no credential for the run's starter, or
 - no gateway URL reachable from the sandbox is configured.
@@ -70,7 +70,7 @@ MCP is not attached when:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `BENTO_MCP_GATEWAY_URL` | `BETTER_AUTH_URL` | Gateway base URL seen by sandboxes |
+| `BENTO_MCP_GATEWAY_URL` | `BETTER_AUTH_URL` | Gateway base URL seen by sandboxes, also where a hosted sandbox reaches the model proxy |
 | `BENTO_MCP_REGISTRY_URL` | public registry | Catalog source |
 
 Set `BENTO_MCP_GATEWAY_URL` explicitly when sandboxes cannot reach `BETTER_AUTH_URL`:

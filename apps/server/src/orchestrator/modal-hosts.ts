@@ -1,35 +1,15 @@
+import { MODEL_PROVIDERS } from "@bento/core";
+
 /**
- * Where an API key goes when the organization has not set a base URL.
+ * Where an API key goes when the organization has not set a base URL
+ * (see model-providers.ts in @bento/core, which the model proxy and the
+ * adapters read too).
  *
  * A restricted sandbox allowlists these or it does not start. A key
  * with no host in this list, and no base URL, is a refusal: opening
  * the network, or starting without the model, both ignore the setting.
  */
-const DEFAULT_MODEL_HOSTS: readonly {
-  key: string;
-  baseUrlKey?: string;
-  hosts: readonly string[];
-}[] = [
-  { key: "ANTHROPIC_API_KEY", baseUrlKey: "ANTHROPIC_BASE_URL", hosts: ["https://api.anthropic.com"] },
-  { key: "ANTHROPIC_AUTH_TOKEN", baseUrlKey: "ANTHROPIC_BASE_URL", hosts: ["https://api.anthropic.com"] },
-  { key: "CLAUDE_CODE_OAUTH_TOKEN", baseUrlKey: "ANTHROPIC_BASE_URL", hosts: ["https://api.anthropic.com"] },
-  { key: "OPENAI_API_KEY", baseUrlKey: "OPENAI_BASE_URL", hosts: ["https://api.openai.com"] },
-  { key: "OPENROUTER_API_KEY", hosts: ["https://openrouter.ai"] },
-  { key: "GEMINI_API_KEY", baseUrlKey: "GOOGLE_GEMINI_BASE_URL", hosts: ["https://generativelanguage.googleapis.com"] },
-  { key: "DEEPSEEK_API_KEY", baseUrlKey: "DEEPSEEK_BASE_URL", hosts: ["https://api.deepseek.com"] },
-  { key: "POOLSIDE_API_KEY", baseUrlKey: "POOLSIDE_STANDALONE_BASE_URL", hosts: ["https://inference.poolside.ai"] },
-  { key: "AI_GATEWAY_API_KEY", hosts: ["https://ai-gateway.vercel.sh"] },
-  { key: "OLLAMA_API_KEY", baseUrlKey: "OLLAMA_BASE_URL", hosts: ["https://ollama.com"] },
-  {
-    key: "CURSOR_API_KEY",
-    hosts: ["https://api2.cursor.sh", "https://api5.cursor.sh", "https://agentn.global.api5.cursor.sh"],
-  },
-  {
-    key: "CURSOR_AUTH_TOKEN",
-    hosts: ["https://api2.cursor.sh", "https://api5.cursor.sh", "https://agentn.global.api5.cursor.sh"],
-  },
-  { key: "META_API_KEY", hosts: ["https://api.meta.ai"] },
-];
+const DEFAULT_MODEL_HOSTS = MODEL_PROVIDERS;
 
 const KNOWN_MODEL_KEYS = new Set(DEFAULT_MODEL_HOSTS.map((entry) => entry.key));
 
@@ -42,12 +22,20 @@ const KNOWN_MODEL_KEYS = new Set(DEFAULT_MODEL_HOSTS.map((entry) => entry.key));
  * host of any API key that has no base URL. Key values are not hosts
  * and are not returned. A key whose host cannot be named throws, so
  * the run fails before a sandbox exists.
+ *
+ * A key the model proxy carries (`proxiedKeys`) needs neither: the
+ * sandbox reaches its provider only through the gateway, which is
+ * already on the list, and the provider's own host and the base URL
+ * the organization saved for it are Bento's to reach, not the
+ * sandbox's. A site the team allowed itself (`extraHosts`) stays even
+ * when it is a proxied provider's host, because a person asked for it.
  */
 export function modalRunHosts(input: {
   gatewayUrl: string | undefined;
   cloneUrls: readonly (string | null | undefined)[];
   env: Readonly<Record<string, string>>;
   customBaseUrl?: string | undefined;
+  proxiedKeys?: readonly string[];
   /** Already validated by parseAllowedHosts, so `*.domain` passes through. */
   extraHosts?: readonly string[];
 }): string[] {
@@ -56,16 +44,25 @@ export function modalRunHosts(input: {
     const trimmed = value?.trim();
     if (trimmed) hosts.push(trimmed);
   };
+  const proxied = new Set(input.proxiedKeys ?? []);
+  // A base URL is the proxy's to reach once every key it serves is
+  // proxied. One that also serves a key that is not (the Anthropic base
+  // URL beside a login token) stays.
+  const proxiedOnly = (baseUrlKey: string) => {
+    const served = DEFAULT_MODEL_HOSTS.filter((entry) => entry.baseUrlKey === baseUrlKey && input.env[entry.key]?.trim());
+    return served.length > 0 && served.every((entry) => proxied.has(entry.key));
+  };
   push(input.gatewayUrl);
   for (const url of input.cloneUrls) push(url);
   for (const [key, value] of Object.entries(input.env)) {
-    if (key.endsWith("_BASE_URL")) push(value);
+    if (key.endsWith("_BASE_URL") && !proxiedOnly(key)) push(value);
   }
   push(input.customBaseUrl);
   for (const host of input.extraHosts ?? []) push(host);
 
   for (const entry of DEFAULT_MODEL_HOSTS) {
     if (!input.env[entry.key]?.trim()) continue;
+    if (proxied.has(entry.key)) continue;
     if (entry.baseUrlKey && input.env[entry.baseUrlKey]?.trim()) continue;
     for (const host of entry.hosts) push(host);
   }

@@ -364,6 +364,29 @@ export interface AgentAdapter {
   files?(input: BuildCommandInput): McpFile[];
   /** Present when the tool can consume remote MCP servers. */
   mcp?: McpCapability;
+  /**
+   * The provider keys this tool can reach through Bento's model proxy.
+   *
+   * In multi mode a proxied key never enters the sandbox: the run is
+   * given a run-scoped token under the key's own name, and the
+   * provider's base URL variable (ANTHROPIC_BASE_URL, OPENAI_BASE_URL,
+   * OPENROUTER_BASE_URL, AI_GATEWAY_BASE_URL, ...) is the proxy's
+   * address for that provider, in `credentials` and in the
+   * environment alike. A key is listed here only once this tool sends
+   * every call for it to that base URL, with the token where its
+   * client puts a key; a key that is not listed reaches the sandbox as
+   * it always did. A new adapter takes its base URLs from
+   * `credentials` and lists its keys here.
+   */
+  modelProxy?: {
+    keys: readonly string[];
+    /**
+     * The base URLs reach the tool through a file in the sandbox home,
+     * which the local process driver does not write (that home is the
+     * operator's own), so a run on it keeps its raw keys.
+     */
+    homeFile?: boolean;
+  };
   /** Present when the tool can hold a live stdin conversation. */
   live?: LiveSession;
   /** Present when the tool's session storage can be read back. */
@@ -425,6 +448,20 @@ export function lastResultEvent(events: AgentEvent[]): Extract<AgentEvent, { typ
     if (ev && ev.type === "result") return ev;
   }
   return undefined;
+}
+
+/**
+ * A provider's base URL, from the run's credentials when the model
+ * proxy (or the organization) set one, else the provider's own.
+ * Trailing slashes are dropped so a path can be appended.
+ */
+export function providerBaseUrl(
+  credentials: Readonly<Record<string, string>> | undefined,
+  name: string,
+  fallback: string,
+): string {
+  const value = credentials?.[name]?.trim();
+  return (value || fallback).replace(/\/+$/, "");
 }
 
 /** The key a provider/model string needs, for provider agnostic tools. */

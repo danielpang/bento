@@ -26,6 +26,7 @@ import { linearRoutes } from "./routes/linear.js";
 import { slackRoutes } from "./routes/slack.js";
 import { mcpRoutes } from "./routes/mcp.js";
 import { mcpGatewayRoutes } from "./routes/mcp-gateway.js";
+import { modelProxyRoutes } from "./routes/model-proxy.js";
 import { mcpConnectionRoutes } from "./routes/mcp-connections.js";
 import { mcpEndpointRoutes } from "./routes/mcp-endpoint.js";
 import { mcpOAuthConsentRoutes, mcpOAuthPublicRoutes } from "./routes/mcp-oauth.js";
@@ -296,6 +297,12 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
   // webhooks and the SSE streams, it sits outside the tenant middleware
   // and holds no database connection across its proxied streams.
   app.route("/api/mcp-gateway", mcpGatewayRoutes(ctx));
+
+  // The model proxy rides the same grant token, for the same caller:
+  // an agent's model calls in multi mode, with the organization's key
+  // swapped in on the way out. Outside actor and tenant middleware, and
+  // no database connection held while a completion streams.
+  app.route("/api/model-proxy", modelProxyRoutes(ctx));
 
   // Bento as an MCP server. Hosts (Claude, Cursor) discover OAuth from
   // a 401 on /mcp, then talk to the well-known documents and

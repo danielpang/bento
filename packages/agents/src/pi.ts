@@ -1,6 +1,24 @@
-import type { AgentDelta, AgentEvent, RunOutcome } from "@bento/core";
-import { lastResultEvent, providerKeyFor, type AgentAdapter, type BuildCommandInput, type McpFile } from "./adapter.js";
+import { modelProviderForKey, type AgentDelta, type AgentEvent, type RunOutcome } from "@bento/core";
+import { lastResultEvent, providerBaseUrl, providerKeyFor, type AgentAdapter, type BuildCommandInput, type McpFile } from "./adapter.js";
 import { PI_ASK_USER_ENV, PI_ASK_USER_EXTENSION, PI_ASK_USER_PATH, piLiveProtocol } from "./pi-live.js";
+
+/**
+ * pi's own id for each provider the model proxy carries, keyed by the
+ * provider's entry in @bento/core's MODEL_PROVIDERS (whose base URL
+ * variable each one reads), and the path, if any, pi's built-in models
+ * of it add to that base URL (see piProviderBaseUrls).
+ */
+const PI_PROVIDERS: Readonly<Record<string, { id: string; suffix?: (model: string) => string }>> = {
+  ANTHROPIC_API_KEY: { id: "anthropic" },
+  OPENAI_API_KEY: { id: "openai" },
+  OPENROUTER_API_KEY: {
+    id: "openrouter",
+    suffix: (model) => (model.startsWith("openrouter/anthropic/") ? "/api" : "/api/v1"),
+  },
+  AI_GATEWAY_API_KEY: { id: "vercel-ai-gateway" },
+  GEMINI_API_KEY: { id: "google", suffix: () => "/v1beta" },
+  DEEPSEEK_API_KEY: { id: "deepseek" },
+};
 
 /**
  * pi, the open source BYOK coding agent from earendil-works.
@@ -29,24 +47,31 @@ export const piAdapter: AgentAdapter = {
     "DEEPSEEK_API_KEY",
   ],
   configPaths: [".pi"],
+  /**
+   * pi takes a built-in provider's base URL only from models.json,
+   * where setting `baseUrl` alone on a built-in provider id re-routes
+   * every model of it and keeps its auth (pi's docs/models.md, "route a
+   * built-in provider through a proxy"). So the proxy's addresses reach
+   * pi as that file in the sandbox home.
+   */
+  modelProxy: { keys: Object.keys(PI_PROVIDERS), homeFile: true },
 
   files(input: BuildCommandInput) {
     const files: McpFile[] = [];
     if (input.askUser) files.push({ path: PI_ASK_USER_PATH, content: PI_ASK_USER_EXTENSION });
+    const providers: Record<string, unknown> = piProviderBaseUrls(input);
     const provider = input.customProvider;
-    if (!provider) return files;
-    return [...files, {
-      path: "~/.pi/agent/models.json",
-      content: JSON.stringify({ providers: {
-        [provider.slug]: {
-          baseUrl: provider.baseUrl,
-          api: provider.protocol === "anthropic" ? "anthropic-messages"
-            : provider.protocol === "openai-responses" ? "openai-responses" : "openai-completions",
-          apiKey: "$BENTO_CUSTOM_PROVIDER_API_KEY",
-          models: provider.models,
-        },
-      } }),
-    }];
+    if (provider) {
+      providers[provider.slug] = {
+        baseUrl: provider.baseUrl,
+        api: provider.protocol === "anthropic" ? "anthropic-messages"
+          : provider.protocol === "openai-responses" ? "openai-responses" : "openai-completions",
+        apiKey: "$BENTO_CUSTOM_PROVIDER_API_KEY",
+        models: provider.models,
+      };
+    }
+    if (Object.keys(providers).length === 0) return files;
+    return [...files, { path: "~/.pi/agent/models.json", content: JSON.stringify({ providers }) }];
   },
 
   /**
@@ -243,6 +268,28 @@ function assistantText(message: PiMessage | undefined): string {
     if (candidate?.type === "text" && candidate.text) parts.push(candidate.text);
   }
   return parts.join("").trim();
+}
+
+/**
+ * Built-in providers pointed at the base URLs this run was given, in
+ * the shape each one's built-in models use (read off pi 1.4.0's own
+ * catalog): Anthropic, DeepSeek and AI Gateway at the origin, OpenAI
+ * with /v1 (which OPENAI_BASE_URL already carries), Google with
+ * /v1beta. OpenRouter serves its anthropic/ models over Anthropic's API
+ * at /api and the rest over OpenAI's at /api/v1, and one provider has
+ * one base URL, so the run's own model decides which. Nothing for a
+ * provider the run was given no base URL for, so pi's own default
+ * stands.
+ */
+function piProviderBaseUrls(input: BuildCommandInput): Record<string, { baseUrl: string }> {
+  const credentials = input.credentials ?? {};
+  const out: Record<string, { baseUrl: string }> = {};
+  for (const [key, { id, suffix }] of Object.entries(PI_PROVIDERS)) {
+    const name = modelProviderForKey(key)?.proxy?.baseUrlEnv;
+    if (!name || !credentials[name]?.trim()) continue;
+    out[id] = { baseUrl: `${providerBaseUrl(credentials, name, "")}${suffix?.(input.model) ?? ""}` };
+  }
+  return out;
 }
 
 /**

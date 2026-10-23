@@ -30,10 +30,16 @@ export interface SafeFetchPolicy {
 export interface SafeFetchInit {
   method?: string;
   headers?: Record<string, string>;
-  body?: string;
+  /**
+   * A string, or a stream passed through as it arrives (the model
+   * proxy forwards an agent's request body without buffering it).
+   */
+  body?: string | ReadableStream<Uint8Array>;
   signal?: AbortSignal;
   /** Time allowed for the upstream to answer with headers. */
   headersTimeoutMs?: number;
+  /** Time allowed between body chunks; undici's own default when unset. */
+  bodyTimeoutMs?: number;
   /**
    * What to do with a redirect. "refuse", the default, throws: MCP
    * JSON-RPC has no legitimate need for one. "return" hands the 3xx
@@ -57,11 +63,17 @@ export function safeFetchPolicy(env: { BENTO_MODE: "local" | "multi"; BETTER_AUT
   return { mode: env.BENTO_MODE, ownHosts };
 }
 
-export async function safeFetch(
+/**
+ * The address checks safeFetch makes, without fetching: the URL parsed,
+ * and, in multi mode, the addresses it resolved to (every one public).
+ * Throws SafeFetchRefused with the reason. For a caller that has to
+ * decide ahead of time whether a URL will ever be fetched (the model
+ * proxy, at mint, for a saved base URL).
+ */
+export async function checkFetchable(
   url: string,
-  init: SafeFetchInit,
   policy: SafeFetchPolicy,
-): Promise<UndiciResponse> {
+): Promise<{ parsed: URL; addresses: string[] | null }> {
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -75,25 +87,38 @@ export async function safeFetch(
   if (policy.mode === "multi" && parsed.protocol !== "https:") {
     throw new SafeFetchRefused("MCP servers must use https");
   }
+  if (policy.mode !== "multi") return { parsed, addresses: null };
 
   const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (policy.ownHosts.includes(hostname)) {
+    throw new SafeFetchRefused("this server cannot point at Bento itself");
+  }
+  const addresses = await resolveAll(hostname);
+  // Every address must be public. A round-robin answer that mixes a
+  // public address with a private one is exactly the rebinding shape
+  // this exists to refuse.
+  for (const address of addresses) {
+    if (!isPublicAddress(address)) {
+      throw new SafeFetchRefused("this host resolves to a private address");
+    }
+  }
+  return { parsed, addresses };
+}
+
+export async function safeFetch(
+  url: string,
+  init: SafeFetchInit,
+  policy: SafeFetchPolicy,
+): Promise<UndiciResponse> {
+  const { parsed, addresses } = await checkFetchable(url, policy);
   let dispatcher: Agent | undefined;
-  if (policy.mode === "multi") {
-    if (policy.ownHosts.includes(hostname)) {
-      throw new SafeFetchRefused("this server cannot point at Bento itself");
-    }
-    const addresses = await resolveAll(hostname);
-    // Every address must be public. A round-robin answer that mixes a
-    // public address with a private one is exactly the rebinding shape
-    // this exists to refuse.
-    for (const address of addresses) {
-      if (!isPublicAddress(address)) {
-        throw new SafeFetchRefused("this host resolves to a private address");
-      }
-    }
-    dispatcher = pinnedAgent(addresses, init.headersTimeoutMs);
-  } else if (init.headersTimeoutMs) {
-    dispatcher = new Agent({ headersTimeout: init.headersTimeoutMs });
+  if (addresses) {
+    dispatcher = pinnedAgent(addresses, init.headersTimeoutMs, init.bodyTimeoutMs);
+  } else if (init.headersTimeoutMs || init.bodyTimeoutMs) {
+    dispatcher = new Agent({
+      ...(init.headersTimeoutMs !== undefined ? { headersTimeout: init.headersTimeoutMs } : {}),
+      ...(init.bodyTimeoutMs !== undefined ? { bodyTimeout: init.bodyTimeoutMs } : {}),
+    });
   }
 
   try {
@@ -101,6 +126,8 @@ export async function safeFetch(
       method: init.method ?? "GET",
       ...(init.headers ? { headers: init.headers } : {}),
       ...(init.body !== undefined ? { body: init.body } : {}),
+      // A stream body is sent as it is read, which fetch only does when told.
+      ...(typeof init.body === "object" ? { duplex: "half" as const } : {}),
       ...(init.signal ? { signal: init.signal } : {}),
       ...(dispatcher ? { dispatcher } : {}),
       // A redirect would escape the address we just validated, so
@@ -134,9 +161,10 @@ async function resolveAll(hostname: string): Promise<string[]> {
 }
 
 /** Connects only to the already-validated addresses, never a fresh lookup. */
-function pinnedAgent(addresses: string[], headersTimeoutMs?: number): Agent {
+function pinnedAgent(addresses: string[], headersTimeoutMs?: number, bodyTimeoutMs?: number): Agent {
   return new Agent({
     ...(headersTimeoutMs !== undefined ? { headersTimeout: headersTimeoutMs } : {}),
+    ...(bodyTimeoutMs !== undefined ? { bodyTimeout: bodyTimeoutMs } : {}),
     connect: {
       lookup: (_hostname, options, callback) => {
         const all = addresses.map((address) => ({ address, family: isIP(address) }));

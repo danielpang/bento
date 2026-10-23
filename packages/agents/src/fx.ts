@@ -47,6 +47,11 @@ export const fxAdapter: AgentAdapter = {
   cli: "fx",
   requiredEnv: ["AI_GATEWAY_API_KEY"],
   configPaths: [".fx"],
+  // No modelProxy: fx's built-in Gateway route documents no base URL to
+  // point elsewhere. Sending it through the proxy would mean swapping
+  // that route for a custom OpenAI-compatible connection, a different
+  // inference path nobody has run against the real CLI, so the key
+  // still reaches the sandbox.
 
   files(input: BuildCommandInput) {
     const provider = input.customProvider;

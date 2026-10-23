@@ -24,6 +24,27 @@ Each stage runs one agent: harness, model, and skill. Tools differ in how you ca
 
 Keys are stored encrypted (per organization in multi mode; local scope in local mode) via the web console, `bento setup`, or the Mac app.
 
+## Model provider keys never enter a hosted sandbox
+
+On a hosted (multi mode) server, an agent's sandbox does not get the organization's provider keys. Each key it would have had is replaced, under the same variable name, by a proxy token that is valid for that one run, and the provider's base URL variable points at Bento's model proxy (`/api/model-proxy/<provider>`). The proxy checks the token, swaps the organization's real key in, and passes the request and the provider's answer through unchanged, streaming included. The token stops working when the run ends, so an agent that a prompt injection talks into printing its environment gives away nothing that outlives the run.
+
+| Tool | Keys sent through the proxy |
+| --- | --- |
+| Claude Code | `ANTHROPIC_API_KEY` |
+| Codex CLI | `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `AI_GATEWAY_API_KEY` |
+| pi, opencode | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `AI_GATEWAY_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY` |
+| Antigravity CLI | `GEMINI_API_KEY` |
+| Poolside (pool) | `POOLSIDE_API_KEY` |
+| DeepSeek Harness | `DEEPSEEK_API_KEY` |
+
+These still reach the sandbox as they are: a Claude subscription token (it is valid only at Anthropic's own API), Cursor's credentials (Cursor's backend is not a model API with a base URL), `META_API_KEY` for Muse Code and `AI_GATEWAY_API_KEY` for fx (neither documents a base URL for its built in route), custom provider keys, and Ollama's.
+
+A base URL saved for a key (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `GOOGLE_GEMINI_BASE_URL`, `DEEPSEEK_BASE_URL`, `POOLSIDE_STANDALONE_BASE_URL`) still decides where the requests go, and when it is a public `https` address, Bento's server makes the call, not the sandbox. A saved base URL that is plain `http` or a private network address cannot be reached by the proxy (the same rule MCP servers follow), so that key is not proxied: the run gets the key and the base URL as it did before the proxy existed, and the transcript says so. With the network lock on, a sandbox whose keys are proxied needs only Bento's own address, not the providers'.
+
+The proxy forwards only what an agent needs from a provider: its completion endpoints, token counting and model listings. A request for anything else in the provider's API (files, fine tuning, batches, account and admin endpoints) is refused, so the proxy token cannot spend the organization's key on them.
+
+The sandbox reaches the proxy at `BENTO_MCP_GATEWAY_URL` (or the server's own URL), the same address MCP servers use. A deployment with no address its sandboxes can use (a remote sandbox and a server on `localhost` with no `BENTO_MCP_GATEWAY_URL`) keeps giving them the keys, and says so in the run's transcript. Bento cannot see whether a network lets the sandbox reach an address it was given, so a Docker deployment with the network lock on must route its restricted network to Bento (see [web-app.md](./web-app.md#network-lock-on-docker)). When the proxy itself fails a request (it cannot read or decrypt the key, or its own code fails), the agent gets an error naming Bento, and a run that fails while that is the latest word on its model calls is not billed; once the provider answers a later request, the run is billed as usual. A provider that is down or does not answer in time is the provider's failure, as it is without the proxy: the agent is told to retry, and the run is billed. Local mode has one trusted user and gives the agent the keys directly.
+
 ## Custom model providers
 
 Beta testers can add a provider in **Settings, Providers**. Enter its API base URL, protocol, and model IDs, then save its API key there or in **Agents, Custom provider keys**. In multi mode, owners and admins manage the definition and key for their organization. An agent model is selected as `provider-id/model-id`.

@@ -47,6 +47,9 @@ export const museAdapter: AgentAdapter = {
   cli: "muse",
   requiredEnv: ["META_API_KEY"],
   configPaths: [".config/muse"],
+  // No modelProxy: Muse Code documents no base URL for its Meta API
+  // route, so there is nowhere to point it, and the key still reaches
+  // the sandbox.
 
   /**
    * Muse reads MCP servers from settings.json rather than a flag, so

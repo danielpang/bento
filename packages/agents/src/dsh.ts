@@ -23,6 +23,13 @@ export const dshAdapter: AgentAdapter = {
   stdoutMode: "text",
   requiredEnv: ["DEEPSEEK_API_KEY"],
   optionalEnv: ["DEEPSEEK_BASE_URL"],
+  /**
+   * dsh's DeepSeek provider reads DEEPSEEK_BASE_URL and DEEPSEEK_API_KEY
+   * from its environment, appends /chat/completions to the one, and
+   * sends the other as a bearer token, so the proxy's address and token
+   * there are the whole of the wiring.
+   */
+  modelProxy: { keys: ["DEEPSEEK_API_KEY"] },
 
   /**
    * DSH_HOME is deliberately unset. The sandbox shim copies the

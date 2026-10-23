@@ -109,7 +109,8 @@ const envSchema = z.object({
   BETTER_AUTH_URL: z.string().default("http://localhost:4400"),
 
   /**
-   * Base URL a sandbox uses to reach the MCP gateway. Defaults to
+   * Base URL a sandbox uses to reach the MCP gateway, and in multi mode
+   * the model proxy its provider keys are swapped in at. Defaults to
    * BETTER_AUTH_URL, which is right when the server is publicly
    * routable. Set it when sandboxes cannot reach that address: a Docker
    * driver on a localhost base rewrites the host to host.docker.internal

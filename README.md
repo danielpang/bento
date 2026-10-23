@@ -102,6 +102,7 @@ Turn on "Create a pull request" for a stage and a successful run there pushes th
 | [Bento CLI](./docs/tui.md)                 | Install, configure, run local or cloud agents, and keyboard shortcuts     |
 | [Pipelines](./docs/pipeline.md)            | Stages, gates, judge agents, the pipeline file, repository commands       |
 | [Coding agents](./docs/agents.md)          | What each tool can do, how each authenticates, talking to a working agent |
+| [Security](./docs/security.md)             | Proxy tokens, the MCP gateway, git access, network access                 |
 | [Pull requests](./docs/pull-requests.md)   | Publishing, what stays out of the diff, connecting GitHub                 |
 | [Web app setup](./docs/web-app.md)         | Running it for a team, multi mode, troubleshooting, contributing          |
 | [macOS app](./apps/desktop/README.md)      | Electron desktop setup, packaging, and verification                       |
@@ -114,6 +115,8 @@ The sandbox is the security model. Agents can run any command they generate but 
 - Never expose the host Docker socket, host SSH keys, or host git config to a sandbox.
 - Git access uses short-lived GitHub App installation tokens, scoped to one repository.
 - Prefer API keys over mounting subscription credential files. A prompt-injected agent can read anything the sandbox can.
+
+What a sandbox holds and can reach, model keys, MCP credentials and the network lock included: [Security](./docs/security.md).
 
 ## Report an issue
 

@@ -1500,6 +1500,21 @@ export const mcpRunGrants = pgTable(
     tokenHash: text("token_hash").notNull(),
     /** Servers pinned at mint; the gateway refuses ids outside this set. */
     serverIds: jsonb("server_ids").$type<string[]>().notNull().default([]),
+    /**
+     * The stored secrets the model proxy may use for this run: the
+     * provider keys the sandbox holds this token in place of, plus the
+     * base URL saved for one when the run would have used it. Empty for
+     * a run whose keys were not proxied.
+     */
+    modelCredentials: text("model_credentials").array().notNull().default(sql`'{}'::text[]`),
+    /**
+     * When the model proxy itself failed a request for this run (a
+     * lookup or decryption it could not do, its own code throwing; never
+     * a provider it could not reach). Cleared when the provider answers
+     * a later request. A run that fails while it is set is Bento's
+     * fault and is not billed.
+     */
+    proxyFailedAt: timestamp("proxy_failed_at", { withTimezone: true }),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     lastUsedAt: timestamp("last_used_at", { withTimezone: true }),

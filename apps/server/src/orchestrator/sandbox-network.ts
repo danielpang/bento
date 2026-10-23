@@ -7,6 +7,7 @@ import type { AppContext } from "../context.js";
 import { resolveAgentEnv } from "./agent-env.js";
 import { customProviderRunEnv } from "./custom-provider.js";
 import { modalRunHosts } from "./modal-hosts.js";
+import { planModelProxy } from "./model-proxy-env.js";
 
 /**
  * The network a Modal sandbox for this project must use.
@@ -38,6 +39,10 @@ export async function modalNetworkForProject(
   const { env: resolved } = await resolveAgentEnv(ctx, organizationId, adapter, model, driver);
   const custom = await customProviderRunEnv(ctx, organizationId, cli, model);
   const env = custom ? custom.env : resolved;
+  // Keys the model proxy carries are reached through the gateway, so
+  // their providers' hosts stay off the list. The same plan the
+  // executor makes, from the same driver and environment.
+  const proxy = custom ? null : await planModelProxy(ctx, adapter, driver, resolved);
   return {
     network: "restricted",
     allowedHosts: modalRunHosts({
@@ -45,6 +50,7 @@ export async function modalNetworkForProject(
       cloneUrls: repos.map((row) => row.repoUrl),
       env,
       ...(custom?.selection?.baseUrl ? { customBaseUrl: custom.selection.baseUrl } : {}),
+      ...(proxy?.gatewayBase ? { proxiedKeys: proxy.keys } : {}),
       extraHosts: policy.allowedHosts,
     }),
   };

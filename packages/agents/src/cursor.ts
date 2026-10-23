@@ -28,6 +28,9 @@ export const cursorAdapter: AgentAdapter = {
   cli: "cursor",
   requiredEnv: ["CURSOR_API_KEY"],
   authAlternatives: ["CURSOR_AUTH_TOKEN"],
+  // No modelProxy: cursor-agent talks to Cursor's own backend, not to a
+  // model API with a base URL, so its credential still reaches the
+  // sandbox.
   // Login discovery only. The server reads the native credential store
   // and shares a token, so Cursor's sandbox home stays writable.
   configPaths: [".cursor", ".config/cursor/auth.json"],
