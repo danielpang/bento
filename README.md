@@ -115,6 +115,8 @@ The sandbox is the security model. Agents can run any command they generate but 
 - Git access uses short-lived GitHub App installation tokens, scoped to one repository.
 - Prefer API keys over mounting subscription credential files. A prompt-injected agent can read anything the sandbox can.
 
+What a sandbox holds and can reach, model keys, MCP credentials and the network lock included: [How Bento works, Security](./docs/concepts.md#security).
+
 ## Report an issue
 
 Found a bug? Open an issue at [github.com/danielpang/bento/issues](https://github.com/danielpang/bento/issues).

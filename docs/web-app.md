@@ -139,6 +139,15 @@ The board loads without a sandbox. Agent runs require one.
 | `local-process`    | No isolation. Development and CI only                            |
 | `sprite`           | Hosted (Fly) deployments                                         |
 
+### Network lock on Docker
+
+A team can block its agents' network access (**Settings, Team**). On Docker, Bento honors that only when the operator provides a network with no route out, named in `BENTO_SANDBOX_RESTRICTED_NETWORK`; without it the setting cannot be turned on. Bento does not manage that network's rules, so it must allow:
+
+- **Bento's own address.** In multi mode, model calls go through Bento's model proxy, so a sandbox that cannot reach Bento cannot reach its model, and every locked run fails at its first model call. The sandbox uses `BENTO_MCP_GATEWAY_URL`, or `BETTER_AUTH_URL` when that is unset; a `localhost` address is rewritten to `host.docker.internal`, which the driver maps to the host gateway in every sandbox, so the network's rules must let traffic reach the host on the server's port.
+- **The project's git remotes**, and the hosts of any model keys that are not proxied (see [agents.md](./agents.md#model-provider-keys-never-enter-a-hosted-sandbox)).
+
+The team's Allowed sites list applies only to Modal, and locked Docker runs attach no MCP servers. See [Security](./concepts.md#security).
+
 
 
 
