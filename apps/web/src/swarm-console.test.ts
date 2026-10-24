@@ -27,7 +27,8 @@ import { modeSurfaces } from "./swarm/plan.js";
 import { memoryStorage } from "./swarm/view-state.js";
 import { canReopen } from "./swarm/status.js";
 import { seedSwarms } from "./swarm/fixtures.js";
-import { buildSwarmModel } from "./swarm/layout.js";
+import { buildSwarmModel, visibleNodes } from "./swarm/layout.js";
+import { searchSwarmNodes } from "./swarm/search.js";
 import type { SwarmDetail, SwarmLanding, SwarmPlannerRun, SwarmStatus, SwarmSummary, SwarmTask } from "./swarm/types.js";
 import { markDoneConfirmText, WORKER_QUIET_HINT_MS, workerQuietMs } from "./components/SwarmNodeDrawer.js";
 import { backoffMinutes } from "./components/MergeQueue.js";
@@ -89,6 +90,51 @@ function tasks(): SwarmTask[] {
 }
 
 const model = buildSwarmModel(tasks(), { now: 60 * 60 * 1000 });
+
+test("tree search reveals and highlights folded matches without changing manual folds", () => {
+  const rows = tasks();
+  const folded = ["root"];
+  const before = buildSwarmModel(rows, { folded, now: 0 });
+  assert.equal(before.byId.get("s1")?.hidden, true);
+  const search = searchSwarmNodes(rows, "line totals");
+  const searched = buildSwarmModel(rows, {
+    expanded: search.revealIds,
+    folded: folded.filter((id) => !search.revealIds.has(id)),
+    now: 0,
+  });
+  assert.equal(searched.byId.get("s1")?.hidden, false);
+  const html = renderToStaticMarkup(createElement(SwarmTree, {
+    model: searched, selectedId: null, onSelect: () => {}, onToggle: () => {},
+    search: { query: "line totals", matchIds: search.matchIds, onChange: () => {} },
+  }));
+  assert.match(html, /role="search"/);
+  assert.match(html, /type="search" aria-label="Search nodes"/);
+  assert.match(html, /aria-label="Match 1 of 1"/);
+  assert.match(html, /aria-label="Previous matching node"/);
+  assert.match(html, /aria-label="Next matching node"/);
+  assert.match(html, /aria-label="Clear node search"/);
+  assert.ok(html.indexOf('aria-label="Search nodes"') < html.indexOf('class="swarm-tree-content"'), "search sits above the transformed canvas");
+  assert.equal((html.match(/data-search-match=""/g) ?? []).length, 1);
+  assert.equal((html.match(/data-search-active=""/g) ?? []).length, 1);
+  assert.equal((html.match(/data-node-id=/g) ?? []).length, visibleNodes(searched).length, "search highlights, not filters");
+  const cleared = searchSwarmNodes(rows, "");
+  const restored = buildSwarmModel(rows, {
+    expanded: cleared.revealIds, folded: folded.filter((id) => !cleared.revealIds.has(id)), now: 0,
+  });
+  assert.deepEqual(visibleNodes(restored).map((node) => node.id), visibleNodes(before).map((node) => node.id));
+  assert.deepEqual(folded, ["root"]);
+});
+
+test("tree search explains no matches and disables result navigation", () => {
+  const search = searchSwarmNodes(tasks(), "nothing-matches");
+  const html = renderToStaticMarkup(createElement(SwarmTree, {
+    model, selectedId: null, onSelect: () => {}, onToggle: () => {},
+    search: { query: "nothing-matches", matchIds: search.matchIds, onChange: () => {} },
+  }));
+  assert.match(html, /No matching nodes/);
+  assert.match(html, /aria-label="Next matching node"[^>]*disabled/);
+  assert.doesNotMatch(html, /data-search-match=/);
+});
 
 function summary(id: string, over: Partial<SwarmSummary> = {}): SwarmSummary {
   return {

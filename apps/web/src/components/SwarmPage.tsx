@@ -3,7 +3,7 @@ import { CompletionRing } from "./CompletionRing.js";
 import { MergeQueue } from "./MergeQueue.js";
 import { OutOfCompute } from "./OutOfCompute.js";
 import { SwarmOutline } from "./SwarmOutline.js";
-import { SwarmTree } from "./SwarmTree.js";
+import { SwarmTree, type SwarmTreeSearch } from "./SwarmTree.js";
 import { canPause, canReopen, canResume, canStop, ceilingAction, pausedWords, swarmTone, swarmWords } from "../swarm/status.js";
 import { idleWords } from "../swarm/waiting.js";
 import { cappedUsd, formatUsd, showSwarmSpend } from "../swarm/money.js";
@@ -245,6 +245,7 @@ export function SwarmPage({
   selectedId,
   onSelect,
   onToggleNode,
+  search,
   actions,
   surfaces,
   busy,
@@ -260,6 +261,7 @@ export function SwarmPage({
   selectedId: string | null;
   onSelect: (taskId: string) => void;
   onToggleNode: (taskId: string) => void;
+  search?: SwarmTreeSearch;
   actions: SwarmActions;
   surfaces: ModeSurfaces;
   busy?: boolean;
@@ -574,7 +576,7 @@ export function SwarmPage({
       </div>
 
       {view === "tree" ? (
-        <SwarmTree model={model} selectedId={selectedId} onSelect={onSelect} onToggle={onToggleNode}
+        <SwarmTree key={detail.swarm.id} model={model} selectedId={selectedId} onSelect={onSelect} onToggle={onToggleNode} search={search}
           plannerRun={detail.plannerRun} onRetryPlanner={actions.onRetryPlanner} onOpenPlannerOutput={onOpenPlannerOutput} canRetryPlanner={!planReady && swarm.status === "planning"} busy={busy} now={now} />
       ) : (
         <SwarmOutline model={model} selectedId={selectedId} onSelect={onSelect}

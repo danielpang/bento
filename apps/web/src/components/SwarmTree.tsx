@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { CompletionRing } from "./CompletionRing.js";
 import { NODE_HEIGHT, NODE_WIDTH, visibleNodes, type SwarmModel, type SwarmNode } from "../swarm/layout.js";
 import { diagramAttentionWords, diagramTaskTone, diagramTaskWords, isAttention } from "../swarm/status.js";
@@ -7,6 +7,12 @@ import { cappedUsd, formatUsd, hasReportedSpend } from "../swarm/money.js";
 import { formatElapsed } from "../swarm/time.js";
 import type { SwarmPlannerRun } from "../swarm/types.js";
 import { SwarmPlannerStep } from "./SwarmPlannerStep.js";
+
+export interface SwarmTreeSearch {
+  query: string;
+  matchIds: ReadonlySet<string>;
+  onChange: (query: string) => void;
+}
 
 type Viewport = { x: number; y: number; scale: number };
 
@@ -42,6 +48,7 @@ export function SwarmTree({
   selectedId,
   onSelect,
   onToggle,
+  search,
   plannerRun,
   onRetryPlanner,
   onOpenPlannerOutput,
@@ -54,6 +61,7 @@ export function SwarmTree({
   onSelect: (taskId: string) => void;
   /** Opening a folded subtree by hand, and folding it away again. */
   onToggle: (taskId: string) => void;
+  search?: SwarmTreeSearch;
   plannerRun?: SwarmPlannerRun | null;
   onRetryPlanner?: () => void;
   onOpenPlannerOutput?: () => void;
@@ -68,10 +76,54 @@ export function SwarmTree({
   const roots = nodes.filter((node) => node.parentId === null);
   const contentWidth = width + pad * 2;
   const stageRef = useRef<HTMLDivElement>(null);
+  const toolbarRef = useRef<HTMLDivElement>(null);
+  const nodeElements = useRef(new Map<string, HTMLDivElement>());
+  const [toolbarHeight, setToolbarHeight] = useState(0);
+  const [searchCursor, setSearchCursor] = useState<{ query: string; id: string } | null>(null);
+  const matches = nodes.filter((node) => search?.matchIds.has(node.id));
+  const cursorIndex = searchCursor?.query === search?.query ? matches.findIndex((node) => node.id === searchCursor?.id) : -1;
+  const matchIndex = matches.length > 0 ? Math.max(0, cursorIndex) : -1;
+  const activeMatchId = matches[matchIndex]?.id ?? null;
   const autoCenter = useRef(true);
   const drag = useRef<{ pointerId: number; clientX: number; clientY: number; x: number; y: number } | null>(null);
   const [view, setView] = useState<Viewport>({ x: 0, y: 16, scale: 1 });
   const [dragging, setDragging] = useState(false);
+
+  useLayoutEffect(() => {
+    const toolbar = toolbarRef.current;
+    if (!toolbar) { setToolbarHeight(0); return; }
+    const measure = () => setToolbarHeight(toolbar.offsetHeight + 28);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(toolbar);
+    return () => observer.disconnect();
+  }, [nodes.length > 0, !!search]);
+
+  const centerOnNode = useCallback((id: string) => {
+    const stage = stageRef.current;
+    const element = nodeElements.current.get(id);
+    if (!stage || !element) return;
+    const stageRect = stage.getBoundingClientRect();
+    const rect = element.getBoundingClientRect();
+    autoCenter.current = false;
+    setView((current) => ({
+      ...current,
+      x: current.x + stageRect.left + stage.clientWidth / 2 - (rect.left + rect.width / 2),
+      y: current.y + stageRect.top + toolbarHeight + (stage.clientHeight - toolbarHeight) / 2 - (rect.top + rect.height / 2),
+    }));
+  }, [toolbarHeight]);
+
+  useLayoutEffect(() => {
+    if (activeMatchId) centerOnNode(activeMatchId);
+  }, [activeMatchId, search?.query, centerOnNode]);
+
+  const nextMatch = (direction: number) => {
+    if (!search || matches.length === 0) return;
+    const next = matches[(matchIndex + direction + matches.length) % matches.length]!;
+    setSearchCursor({ query: search.query, id: next.id });
+    // A single match still needs a way back after panning away.
+    centerOnNode(next.id);
+  };
 
   useLayoutEffect(() => {
     const stage = stageRef.current;
@@ -123,7 +175,7 @@ export function SwarmTree({
     setView({ x: (stage.clientWidth - contentWidth) / 2, y: 16, scale: 1 });
   };
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0 || (event.target as Element).closest("button, a")) return;
+    if (event.button !== 0 || (event.target as Element).closest("button, a, input, .swarm-tree-toolbar")) return;
     autoCenter.current = false;
     drag.current = { pointerId: event.pointerId, clientX: event.clientX, clientY: event.clientY, x: view.x, y: view.y };
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -156,18 +208,35 @@ export function SwarmTree({
       onPointerUp={onPointerEnd}
       onPointerCancel={onPointerEnd}
     >
-      {nodes.length > 0 && <div className="swarm-edge-legend" aria-label="Diagram line meanings">
+      {nodes.length > 0 && <div className="swarm-tree-toolbar" ref={toolbarRef}>
+      <div className="swarm-edge-legend" aria-label="Diagram line meanings">
         <span className="swarm-edge-legend-item"><i className="swarm-edge-legend-line" aria-hidden="true" />Child task</span>
         <span className="swarm-edge-legend-item"><i className="swarm-edge-legend-line" data-live="" aria-hidden="true" />Active or needs attention</span>
         <span className="swarm-edge-legend-item"><i className="swarm-edge-legend-line" data-relation="depends_on" aria-hidden="true" />Depends on task above</span>
+      </div>
+      {search && <div className="swarm-node-search" role="search" aria-label="Find a tree node">
+        <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5" /><path d="m13 13 4 4" /></svg>
+        <input type="search" aria-label="Search nodes" placeholder="Search nodes by title or ID" value={search.query}
+          onChange={(event) => search.onChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") { event.preventDefault(); nextMatch(event.shiftKey ? -1 : 1); }
+            if (event.key === "Escape" && search.query) { event.preventDefault(); event.stopPropagation(); search.onChange(""); }
+          }} />
+        <span className="swarm-node-search-count" role="status" aria-live="polite" aria-atomic="true">
+          {search.query.trim() && <span aria-label={matches.length ? `Match ${matchIndex + 1} of ${matches.length}` : "No matching nodes"}>{matches.length ? `${matchIndex + 1}/${matches.length}` : "No matches"}</span>}
+        </span>
+        <button type="button" aria-label="Previous matching node" title="Previous match (Shift+Enter)" disabled={matches.length === 0} onClick={() => nextMatch(-1)}>↑</button>
+        <button type="button" aria-label="Next matching node" title="Next match (Enter)" disabled={matches.length === 0} onClick={() => nextMatch(1)}>↓</button>
+        {search.query && <button type="button" aria-label="Clear node search" title="Clear search (Esc)" onClick={() => search.onChange("")}>×</button>}
       </div>}
-      {nodes.length > 0 && <div className="swarm-viewport-controls" role="group" aria-label="Tree view controls">
+      <div className="swarm-viewport-controls" role="group" aria-label="Tree view controls">
         <button type="button" aria-label="Zoom out" title="Zoom out" onClick={() => zoomBy(1 / 1.2)}>−</button>
         <span aria-live="off">{Math.round(view.scale * 100)}%</span>
         <button type="button" aria-label="Zoom in" title="Zoom in" onClick={() => zoomBy(1.2)}>+</button>
         <button type="button" className="swarm-viewport-reset" onClick={resetView}>Reset view</button>
+      </div>
       </div>}
-      <div className="swarm-tree-content" style={{ width: `${contentWidth}px`, transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})` }}>
+      <div className="swarm-tree-content" style={{ top: `${toolbarHeight}px`, width: `${contentWidth}px`, transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})` }}>
         {plannerRun && (
           <>
             <div className="swarm-planner-tree-position">
@@ -226,6 +295,12 @@ export function SwarmTree({
             offsetX={pad + shift}
             offsetY={pad}
             selected={node.id === selectedId}
+            searchMatch={search?.matchIds.has(node.id) ?? false}
+            searchActive={node.id === activeMatchId}
+            elementRef={(element) => {
+              if (element) nodeElements.current.set(node.id, element);
+              else nodeElements.current.delete(node.id);
+            }}
             onSelect={onSelect}
             onToggle={onToggle}
           />
@@ -243,6 +318,9 @@ function TreeNode({
   offsetX,
   offsetY,
   selected,
+  searchMatch,
+  searchActive,
+  elementRef,
   onSelect,
   onToggle,
 }: {
@@ -251,6 +329,9 @@ function TreeNode({
   offsetX: number;
   offsetY: number;
   selected: boolean;
+  searchMatch: boolean;
+  searchActive: boolean;
+  elementRef: (element: HTMLDivElement | null) => void;
   onSelect: (taskId: string) => void;
   onToggle: (taskId: string) => void;
 }) {
@@ -261,7 +342,11 @@ function TreeNode({
   const tone = diagramTaskTone(node.status, node.nodeType, node.agentActive, node.landing, node.review);
   return (
     <div
+      ref={elementRef}
       className="swarm-node"
+      data-node-id={node.id}
+      data-search-match={searchMatch ? "" : undefined}
+      data-search-active={searchActive ? "" : undefined}
       style={{
         left: `${node.x + offsetX}px`,
         top: `${node.y + offsetY}px`,
@@ -283,6 +368,7 @@ function TreeNode({
         type="button"
         className="swarm-node-face"
         aria-pressed={selected}
+        aria-description={searchMatch ? "Search match" : undefined}
         onClick={() => onSelect(node.id)}
         title={`${node.title}. ${node.parentRelation === "depends_on" && parentTitle ? `Depends on ${parentTitle}. ` : ""}${words}${note ? `, ${note}` : ""}${spend ? `. Spend estimate ${spend}` : "."}`}
       >
