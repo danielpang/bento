@@ -469,8 +469,67 @@ install_opencode_release() {
   return 1
 }
 
+# Codex comes from its release rather than through its installer, for
+# the same reason as opencode: what the installer adds is state this
+# sandbox does not want. Its script keeps a release directory, a
+# selection link and a history file under ~/.codex, and on Oct 23 a
+# reinstall over that state (the version bump, or a CLI put back after
+# it went missing) began exiting within seconds on every sprite, while
+# a first install on the same machine still worked. The package is the
+# installer's own download, named without a version, so
+# /releases/latest/download serves the newest build with no lookup, and
+# its checksum list is checked here as the installer checks it.
+#
+# The package is unpacked whole into one directory and only bin/codex
+# is linked: the bundled rg and bwrap are found next to the binary, so
+# the tree has to stay together.
+install_codex_release() {
+  case "$(uname -m)" in
+    x86_64|amd64) target=x86_64-unknown-linux-musl ;;
+    aarch64|arm64) target=aarch64-unknown-linux-musl ;;
+    *) return 1 ;;
+  esac
+  asset="codex-package-$target.tar.gz"
+  base=https://github.com/openai/codex/releases/latest/download
+  unpack=/tmp/bento-codex
+  attempt=1
+  while [ "$attempt" -le 3 ]; do
+    rm -rf "$unpack"
+    mkdir -p "$unpack/package"
+    if curl -fsSL "$base/$asset" -o "$unpack/codex.tar.gz" &&
+       curl -fsSL "$base/codex-package_SHA256SUMS" -o "$unpack/SHA256SUMS" &&
+       expected=$(awk -v asset="$asset" '$2 == asset && length($1) == 64 { print tolower($1); exit }' "$unpack/SHA256SUMS") &&
+       [ -n "$expected" ] &&
+       [ "$(sha256sum "$unpack/codex.tar.gz" | awk '{ print $1 }')" = "$expected" ] &&
+       tar -xzf "$unpack/codex.tar.gz" -C "$unpack/package" &&
+       [ -f "$unpack/package/bin/codex" ]; then
+      for helper in bin/codex bin/codex-code-mode-host codex-path/rg codex-resources/bwrap; do
+        if [ -f "$unpack/package/$helper" ]; then chmod 755 "$unpack/package/$helper"; fi
+      done
+      rm -rf /opt/bento/codex
+      mv "$unpack/package" /opt/bento/codex
+      mkdir -p /opt/bento/bin
+      ln -sf /opt/bento/codex/bin/codex /opt/bento/bin/codex
+      rm -rf "$unpack"
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    if [ "$attempt" -le 3 ]; then sleep 5; fi
+  done
+  rm -rf "$unpack"
+  echo "bento: codex release download failed" >&2
+  return 1
+}
+
 if wanted claude; then install_from claude https://claude.ai/install.sh bash || true; fi
-if wanted codex; then install_from codex https://chatgpt.com/codex/install.sh sh || true; fi
+if wanted codex; then
+  install_codex_release || true
+  # Kept for the day the release moves, as opencode's is: a renamed
+  # asset 404s the download above and lands here.
+  if ! publish codex; then
+    install_from codex https://chatgpt.com/codex/install.sh sh || true
+  fi
+fi
 if wanted opencode; then
   install_opencode_release || true
   # The one thing the installer knows better than this script is where

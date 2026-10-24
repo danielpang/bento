@@ -104,7 +104,7 @@ docker build -t bento-sandbox:dev infra/sandbox-image
 
 Use `./scripts/dev-cli.sh` wherever this guide says `bento`. It builds dependencies before launching. Restart after pulling updates.
 
-## Choose where agents run
+## Choose a mode
 
 
 | Mode                       | Board and history                                         | Agents                   |
@@ -128,6 +128,8 @@ bento setup
 Bento starts its API and PostgreSQL locally. Run `bento` to reopen the board. Rebuild the sandbox image after upgrading.
 
 State and worktrees live in `~/.bento`. Use `--data-dir <path>` to change this, or `--db <url>` for existing PostgreSQL.
+
+Agents in Docker sandboxes reach their model through Bento's model proxy, so the container contains a proxy token rather than your provider key. To give sandboxes the raw keys instead, start Bento with `BENTO_MODEL_PROXY=false` in its environment. On Linux, Docker sandboxes usually cannot reach a server on `127.0.0.1`, and those runs keep the raw keys with a note in the transcript. See [security.md](./security.md#model-keys-stay-encrypted-in-bento).
 
 ### Cloud
 

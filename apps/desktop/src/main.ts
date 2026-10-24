@@ -167,8 +167,8 @@ function withLocal(next: DesktopStatus): DesktopStatus {
   const { local: _stale, ...rest } = next;
   const running = connections.get("local")?.settings;
   if (!running) return rest;
-  const { dataDir, databaseUrl, sandbox, sandboxImage, betaFeatures } = running;
-  return { ...rest, local: { dataDir, databaseUrl, sandbox, sandboxImage, betaFeatures } };
+  const { dataDir, databaseUrl, sandbox, sandboxImage, betaFeatures, modelProxy } = running;
+  return { ...rest, local: { dataDir, databaseUrl, sandbox, sandboxImage, betaFeatures, modelProxy } };
 }
 
 /** The connection a new window or a menu command means when none is in focus. */

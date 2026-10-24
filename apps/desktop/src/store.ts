@@ -13,6 +13,7 @@ export class DesktopStore {
     settings: {
       mode: "local", serverUrl: "https://app.usebento.ai", dataDir: path.join(os.homedir(), ".bento"),
       databaseUrl: "", sandbox: "docker", sandboxImage: "bento-sandbox:dev", betaFeatures: false,
+      modelProxy: true,
     },
     tokens: {},
   };

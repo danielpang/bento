@@ -23,7 +23,8 @@ import { TokenBuckets } from "../mcp/rate-limit.js";
 import { safeFetch, SafeFetchRefused, safeFetchPolicy } from "../mcp/safe-fetch.js";
 
 /**
- * The model proxy: what an agent's model calls go to in multi mode.
+ * The model proxy: what an agent's model calls go to in multi mode, and
+ * in local mode on Docker unless BENTO_MODEL_PROXY is "false".
  *
  * The sandbox holds the run's grant token where a provider key would
  * be, and the proxy's address where the provider's base URL would be
@@ -48,7 +49,9 @@ import { safeFetch, SafeFetchRefused, safeFetchPolicy } from "../mcp/safe-fetch.
  * filters by hand, every refusal is the same 404 so a probe learns
  * nothing, and every read happens before the upstream fetch starts, so
  * a stream that runs for minutes holds no database connection (the
- * streams rule). The grant and its decrypted keys are cached per
+ * streams rule). A local server's grant also reads the keys the local
+ * user keeps in this process's environment (readCredentials); a multi
+ * mode server never does. The grant and its decrypted keys are cached per
  * process for a few minutes (mcp/model-proxy-cache.ts), so a run's
  * calls after its first read nothing at all. The writes are the
  * failure stamp, on Bento's own failure, and clearing it on the next
@@ -163,8 +166,18 @@ export function modelProxyCacheFor(ctx: AppContext): ModelProxyCache {
   return cache;
 }
 
+/**
+ * What the readiness route answers. A local run asks for it from inside
+ * its sandbox before its keys are swapped for a token (see
+ * model-proxy-env.ts), and goes on with raw keys when it does not get it.
+ */
+export const MODEL_PROXY_READY = "bento-model-proxy";
+
 export function modelProxyRoutes(ctx: AppContext) {
   const routes = new Hono();
+  // Reads nothing, needs no token, and names no grant or provider: it
+  // says only that this address reaches a Bento model proxy.
+  routes.get("/", (c) => c.json({ service: MODEL_PROXY_READY }));
   // Made on the first request, so a process (or a test's context) that
   // never serves the proxy never subscribes to the bus for it.
   routes.all("/:provider", (c) => proxy(ctx, modelProxyCacheFor(ctx), c));
@@ -344,7 +357,21 @@ async function forward(
   return passBack(upstream, method);
 }
 
-/** The key and saved base URL for one provider, read and decrypted; null when the key was deleted. */
+/**
+ * The key and saved base URL for one provider, read and decrypted; null
+ * when the key was deleted.
+ *
+ * From the grant's organization's stored secrets, and nowhere else,
+ * with one exception: a local server's grant (local mode, no
+ * organization) also reads this process's environment, because that is
+ * where resolveAgentEnv found the local user's keys, and with the same
+ * precedence it uses: a stored secret wins, and the environment's value
+ * stands in when there is none (or it cannot be decrypted, which
+ * resolveAgentEnv reads as missing too). A multi mode server never
+ * reads its environment here, for any grant: those are the operator's
+ * keys, and a tenant's run spending them is exactly what the proxy
+ * exists to prevent.
+ */
 async function readCredentials(
   ctx: AppContext,
   grant: ResolvedGrant,
@@ -360,12 +387,36 @@ async function readCredentials(
         inArray(secrets.name, baseUrlKey ? [provider.key, baseUrlKey] : [provider.key]),
       ),
     );
-  const keyRow = rows.find((row) => row.name === provider.key);
-  if (!keyRow) return null;
-  const key = ctx.secretBox.decrypt(keyRow.ciphertext, { kind: "org_secret", organizationId: grant.organizationId, name: keyRow.name });
-  const baseRow = baseUrlKey ? rows.find((row) => row.name === baseUrlKey) : undefined;
-  const savedBase = baseRow ? ctx.secretBox.decrypt(baseRow.ciphertext, { kind: "org_secret", organizationId: grant.organizationId, name: baseRow.name }).trim() || null : null;
+  const fromEnvironment = localEnvironmentFor(ctx, grant);
+  const read = (name: string): string | null => {
+    const row = rows.find((candidate) => candidate.name === name);
+    const slot = { kind: "org_secret", organizationId: grant.organizationId, name } as const;
+    if (!fromEnvironment) return row ? ctx.secretBox.decrypt(row.ciphertext, slot) : null;
+    if (row) {
+      try {
+        return ctx.secretBox.decrypt(row.ciphertext, slot);
+      } catch (err) {
+        // Missing to resolveAgentEnv as well, so the run started on the
+        // environment's value; with none there, it is Bento's failure.
+        if (!fromEnvironment[name]) throw err;
+      }
+    }
+    return fromEnvironment[name] || null;
+  };
+  const key = read(provider.key);
+  if (!key) return null;
+  const savedBase = baseUrlKey ? read(baseUrlKey)?.trim() || null : null;
   return { key, savedBase };
+}
+
+/**
+ * The process environment a grant may read its keys from: a local
+ * server's own, for a grant with no organization. Null for every other
+ * grant, and always null in multi mode.
+ */
+function localEnvironmentFor(ctx: AppContext, grant: ResolvedGrant): NodeJS.ProcessEnv | null {
+  if (ctx.env.BENTO_MODE !== "local" || grant.organizationId !== null) return null;
+  return process.env;
 }
 
 /**

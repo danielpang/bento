@@ -226,6 +226,19 @@ const envSchema = z.object({
     .optional(),
 
   /**
+   * Bento's model proxy for a local server: whether a Docker sandbox's
+   * provider keys are swapped for a run token, with Bento adding the
+   * real key on the way to the provider. On unless set to "false" (the
+   * desktop launcher's "Model proxy"
+   * box). Read it through modelProxyEnabled, never directly: multi mode
+   * always proxies, and loadEnv refuses "false" there.
+   */
+  BENTO_MODEL_PROXY: z
+    .enum(["true", "false"])
+    .transform((v) => v === "true")
+    .optional(),
+
+  /**
    * SMTP. Without SMTP_HOST, invitation mail is written to the log
    * instead of sent, and the link can be passed along by hand.
    */
@@ -349,7 +362,32 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
       "BENTO_ROLE=web drives no agent runs, so BENTO_MAX_CONCURRENT_RUNS must not be set on it. Set the slot count on the worker (BENTO_ROLE=worker) instead.",
     );
   }
+  /*
+   * Refused rather than ignored. Ignoring would keep tenants' keys out
+   * of their sandboxes just the same, but it would leave an operator
+   * believing a setting took effect that did not, which is how a
+   * deployment ends up misconfigured without anyone noticing. A boot
+   * that fails says so at once, on the deploy that set it, before any
+   * traffic moves, and no value of this variable can put a tenant's key
+   * in a sandbox.
+   */
+  if (env.BENTO_MODE === "multi" && env.BENTO_MODEL_PROXY === false) {
+    throw new Error(
+      "BENTO_MODEL_PROXY=false applies to local mode only. In multi mode provider keys always go through Bento's model proxy, so unset it.",
+    );
+  }
   return env;
+}
+
+/**
+ * Whether provider keys go through Bento's model proxy on this server.
+ * Always in multi mode, whatever BENTO_MODEL_PROXY says: an operator's
+ * switch must never be what puts a tenant's key in its sandbox. In
+ * local mode, unless BENTO_MODEL_PROXY is "false".
+ */
+export function modelProxyEnabled(env: Pick<Env, "BENTO_MODE" | "BENTO_MODEL_PROXY">): boolean {
+  if (env.BENTO_MODE === "multi") return true;
+  return env.BENTO_MODEL_PROXY !== false;
 }
 
 /**
