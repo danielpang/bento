@@ -896,7 +896,7 @@ export function swarmRoutes(ctx: AppContext) {
         activeRuns: runs,
         agentTimeMs,
         plannerRun: plannerRun ? { ...plannerRun, error: plannerError, agent: plannerAgent ?? null } : null,
-        plannerRunIds: plannerRuns.map((run) => run.id).reverse(),
+        plannerRuns: plannerRuns.map(({ id, queuedAt, endedAt }) => ({ id, queuedAt, endedAt })).reverse(),
         landings,
         landingSummary: landingSummary ?? { total: 0, committed: 0 },
         branchCheckout: {

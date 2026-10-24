@@ -854,11 +854,11 @@ test("planner guidance stays inline with replies across runs, not in an earlier-
     id, runId, text, status, taskId: null, source: "person", createdAt: "2026-09-04T12:00:00.000Z",
   });
   const earlier = message("m1", "run-1", "Keep the existing API.");
-  const current = message("m2", "run-2", "Focus on the checkout.");
-  const queued = message("m3", "run-2", "Cover refunds too.", "queued");
+  const current = { ...message("m2", "run-2", "Focus on the checkout."), createdAt: "2026-09-04T12:05:00.000Z" };
+  const queued = { ...message("m3", "run-2", "Cover refunds too.", "queued"), createdAt: "2026-09-04T12:06:00.000Z" };
   const html = renderToStaticMarkup(createElement(SwarmRunOutput, {
     client: {} as BentoClient, runId: "run-2", agentName: "Planner agent",
-    plannerRunIds: ["run-1", "run-2"], plannerMessages: [earlier, current, queued],
+    plannerMessages: [earlier, current, queued],
   }));
   assert.doesNotMatch(html, /Earlier guidance|<details/);
   assert.ok(html.indexOf(earlier.text) < html.indexOf(current.text));
@@ -873,9 +873,9 @@ test("planner guidance stays inline with replies across runs, not in an earlier-
     createElement(RunConversationRows, {
       runId: "run-2", agentName: "Planner agent", messages: [current],
       events: [
-        { type: "message", role: "assistant", text: "The initial plan is ready." },
-        { type: "message", role: "user", text: current.text },
-        { type: "message", role: "assistant", text: "I will update the checkout plan." },
+        { type: "message", role: "assistant", text: "The initial plan is ready.", recordedAt: "2026-09-04T12:04:00.000Z" },
+        { type: "message", role: "user", text: current.text, recordedAt: "2026-09-04T12:05:01.000Z" },
+        { type: "message", role: "assistant", text: "I will update the checkout plan.", recordedAt: "2026-09-04T12:06:00.000Z" },
       ],
     }),
   ));

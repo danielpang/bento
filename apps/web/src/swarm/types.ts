@@ -417,7 +417,7 @@ export interface SwarmDetail {
   /** The planner's latest attempt, shown above the plan in both views. */
   plannerRun?: SwarmPlannerRun | null;
   /** All planner runs, oldest first, for one continuous conversation. */
-  plannerRunIds?: string[];
+  plannerRuns?: SwarmPlannerHistoryRun[];
   landings: SwarmLanding[];
   /** Counts include rows omitted from the short merge queue history. */
   landingSummary?: { total: number; committed: number };
@@ -450,6 +450,13 @@ export interface SwarmDetail {
    * as nothing running.
    */
   activeRunCount?: number;
+}
+
+/** Delivery retries do not change where a message belongs in the timeline. */
+export interface SwarmPlannerHistoryRun {
+  id: string;
+  queuedAt: string;
+  endedAt: string | null;
 }
 
 export interface SwarmPlannerRun {

@@ -524,7 +524,7 @@ export interface SwarmPlanSourceRow {
 /** One swarm with its plan, as the detail route answers. */
 export interface SwarmDetailResponse {
   /** All planner runs, oldest first, for one continuous conversation. */
-  plannerRunIds?: string[];
+  plannerRuns?: { id: string; queuedAt: string; endedAt: string | null }[];
   swarm: SwarmRow;
   tasks: SwarmTaskRow[];
   /** What the person handed the planner, when they handed over anything. */

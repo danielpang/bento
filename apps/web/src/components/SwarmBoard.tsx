@@ -543,7 +543,7 @@ export function SwarmBoard({
           swarmStatus={detail.swarm.status}
           key={selectedId}
           runId={detail.plannerRun.id}
-          plannerRunIds={detail.plannerRunIds}
+          plannerRuns={detail.plannerRuns}
           runStatus={detail.plannerRun.status}
           runError={detail.plannerRun.error}
           agentName={detail.plannerRun.agent?.name ?? "Planner agent"}

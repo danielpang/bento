@@ -134,7 +134,10 @@ test("the strip is this project's swarms, with the server's own counts as the ri
 test("one swarm reads back with its plan, its spend and what is working", async () => {
   const detail: WireDetail = {
     swarm: wireSwarm(),
-    plannerRunIds: ["old-planner", "r2"],
+    plannerRuns: [
+      { id: "old-planner", queuedAt: "2026-09-04T12:00:00.000Z", endedAt: "2026-09-04T12:04:00.000Z" },
+      { id: "r2", queuedAt: "2026-09-04T12:05:00.000Z", endedAt: null },
+    ],
     tasks: [wireTask(), wireTask({ id: "t-2", attention: "question", status: "blocked" })],
     activeRuns: [
       { id: "r1", role: "worker", status: "running", swarmTaskId: "t-1", agentStartedAt: "2026-09-04T12:10:00.000Z" },
@@ -158,7 +161,7 @@ test("one swarm reads back with its plan, its spend and what is working", async 
   assert.deepEqual(read.runningTaskIds, ["t-1"], "only a run whose agent is in the sandbox");
   assert.deepEqual(read.agentStartedAt, { "t-1": "2026-09-04T12:10:00.000Z" }, "the planner is on no node, so its clock is not the root's");
   assert.equal(read.activeRunCount, 4, "every active run, the planner's included");
-  assert.deepEqual(read.plannerRunIds, ["old-planner", "r2"], "the full planner conversation stays in run order");
+  assert.deepEqual(read.plannerRuns, detail.plannerRuns, "the full planner conversation keeps its original time bounds");
 
   // Nothing is invented for the surfaces the routes do not serve.
   assert.deepEqual(read.landings, []);
