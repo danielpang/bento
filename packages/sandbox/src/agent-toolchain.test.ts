@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -315,7 +316,7 @@ test("an installer that fails once is retried on the next provision, and the res
     // Not once and given up on: a blip passes within seconds. Both
     // routes get their three, the release first and the installer only
     // once that has failed.
-    assert.equal(sandbox.fetched().filter((url) => url.includes("releases/latest/download")).length, 3);
+    assert.equal(sandbox.fetched().filter((url) => url.includes("releases/latest/download/opencode-")).length, 3);
     assert.equal(sandbox.fetched().filter((url) => url === "https://opencode.ai/install").length, 3);
 
     // Second provision, with both reachable again. Only the CLI that is
@@ -690,6 +691,21 @@ class ToolchainSandbox {
     mkdirSync(fixtures, { recursive: true });
     writeFileSync(path.join(fixtures, "opencode"), "#!/bin/sh\nprintf '99.0.0\\n'\n");
     spawnSync("tar", ["-czf", path.join(fixtures, "opencode.tar.gz"), "-C", fixtures, "opencode"]);
+    // Codex's package is a tree, not one binary: bin/codex beside the
+    // helpers it finds by its own path. Its checksum list is the real
+    // format, "<sha256>  <asset>", so a download that does not match it
+    // is refused here as it would be on a sprite.
+    const codexPackage = path.join(fixtures, "codex-package");
+    mkdirSync(path.join(codexPackage, "bin"), { recursive: true });
+    mkdirSync(path.join(codexPackage, "codex-path"), { recursive: true });
+    writeFileSync(path.join(codexPackage, "bin/codex"), "#!/bin/sh\nprintf 'codex-cli 99.0.0\\n'\n");
+    writeFileSync(path.join(codexPackage, "codex-path/rg"), "#!/bin/sh\nexit 0\n");
+    spawnSync("tar", ["-czf", path.join(fixtures, "codex-package.tar.gz"), "-C", codexPackage, "."]);
+    const digest = createHash("sha256").update(readFileSync(path.join(fixtures, "codex-package.tar.gz"))).digest("hex");
+    writeFileSync(
+      path.join(fixtures, "codex-package_SHA256SUMS"),
+      ["x86_64", "aarch64"].map((arch) => `${digest}  codex-package-${arch}-unknown-linux-musl.tar.gz\n`).join(""),
+    );
     this.breaks();
 
     // The shared private Node, already unpacked, so the npm stub is all the
@@ -760,6 +776,28 @@ echo "$url" >> ${this.root}/fetched
 case "$url" in
   *nodejs.org/dist/*)
     cp ${this.root}/fixtures/node.tar.xz "$out"
+    exit 0
+    ;;
+  # Codex's release package and the checksum list that vouches for it.
+  # "codex-release" fails the download; "codex-checksum" serves a list
+  # that does not match, which must be refused like a failed download.
+  *openai/codex/releases/latest/download/codex-package_SHA256SUMS)
+    for broken in ${broken.join(" ")}; do
+      if [ "$broken" = codex-release ]; then exit 22; fi
+      if [ "$broken" = codex-checksum ]; then
+        printf '%064d  %s\\n' 0 codex-package-x86_64-unknown-linux-musl.tar.gz > "$out"
+        printf '%064d  %s\\n' 0 codex-package-aarch64-unknown-linux-musl.tar.gz >> "$out"
+        exit 0
+      fi
+    done
+    cp ${this.root}/fixtures/codex-package_SHA256SUMS "$out"
+    exit 0
+    ;;
+  *openai/codex/releases/latest/download/*)
+    for broken in ${broken.join(" ")}; do
+      if [ "$broken" = codex-release ]; then exit 22; fi
+    done
+    cp ${this.root}/fixtures/codex-package.tar.gz "$out"
     exit 0
     ;;
   # The release tarball the opencode fallback fetches, which is a real
@@ -945,6 +983,75 @@ test("pool's install accepts the EULA, and only pool's", () => {
 });
 
 /**
+ * Codex comes from its release package, never its installer, unless the
+ * release cannot be had. The installer keeps its own release state under
+ * ~/.codex, and from Oct 23 a reinstall over that state failed on every
+ * sprite while a first install still worked; the package has no state
+ * to trip over. So this is run the way that failure ran: installed, the
+ * command removed, and installed again.
+ */
+test("codex installs from its release package, checked against its checksum list", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-codex-"));
+  try {
+    const sandbox = new ToolchainSandbox(root);
+    writeFileSync(path.join(root, "stubs/uname"), "#!/bin/sh\nprintf 'x86_64\\n'\n", { mode: 0o755 });
+    const first = sandbox.runFor(["codex"]);
+    assert.equal(first.status, 0, first.stderr);
+    assert.deepEqual(toolchainMissing(first.stdout), []);
+    assert.ok(!sandbox.fetched().includes("https://chatgpt.com/codex/install.sh"), "the installer ran anyway");
+    // The whole tree is kept together, and the command on the PATH is
+    // the package's own binary, which is how it finds the rg beside it.
+    assert.ok(existsSync(path.join(root, "opt/bento/codex/codex-path/rg")), "the package was not unpacked whole");
+    const ran = spawnSync(path.join(root, "usr/local/bin/codex"), ["--version"], { encoding: "utf8" });
+    assert.equal(ran.stdout.trim(), "codex-cli 99.0.0");
+
+    // What the sprite test does before a reinstall: the command goes,
+    // and so does the stamp.
+    rmSync(path.join(root, "usr/local/bin/codex"));
+    rmSync(path.join(root, TOOLCHAIN_STAMPS.replace(/^\//, ""), "codex"));
+    const again = sandbox.runFor(["codex"]);
+    assert.equal(again.status, 0, again.stderr);
+    assert.deepEqual(toolchainMissing(again.stdout), [], "a reinstall left codex missing");
+    assert.deepEqual(sandbox.fetched(), [
+      "https://github.com/openai/codex/releases/latest/download/codex-package-x86_64-unknown-linux-musl.tar.gz",
+      "https://github.com/openai/codex/releases/latest/download/codex-package_SHA256SUMS",
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * A package whose checksum does not match the list is not installed,
+ * however well it unpacks: that is the one check between a sandbox and
+ * whatever answered the download. It is retried, and then the vendor's
+ * installer is the fallback, as it is when the release cannot be had.
+ */
+test("a codex package that fails its checksum is refused, and the installer is the fallback", () => {
+  for (const broken of ["codex-checksum", "codex-release"]) {
+    const root = mkdtempSync(path.join(tmpdir(), `bento-toolchain-${broken}-`));
+    try {
+      const sandbox = new ToolchainSandbox(root);
+      writeFileSync(path.join(root, "stubs/uname"), "#!/bin/sh\nprintf 'x86_64\\n'\n", { mode: 0o755 });
+      sandbox.breaks(broken);
+      const result = sandbox.runFor(["codex"]);
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stderr, /codex release download failed/, broken);
+      assert.ok(!existsSync(path.join(root, "opt/bento/codex")), `${broken}: a refused package was installed`);
+      assert.equal(
+        sandbox.fetched().filter((url) => url.endsWith("codex-package-x86_64-unknown-linux-musl.tar.gz")).length,
+        3,
+        `${broken}: the release was not retried`,
+      );
+      assert.ok(sandbox.fetched().includes("https://chatgpt.com/codex/install.sh"), `${broken}: no fallback`);
+      assert.deepEqual(toolchainMissing(result.stdout), [], `${broken}: the fallback did not install codex`);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+/**
  * The point of the whole change: a card whose pipeline runs two agents
  * waits for two installers, not ten plus a private Node it will never
  * call. Asserted by what the script fetched, because "installed the
@@ -964,8 +1071,9 @@ test("a card's own agents are the only ones installed", () => {
     // matters most here: it is the single largest download in the
     // script, and only pi and dsh ever need it.
     assert.deepEqual(sandbox.fetched().sort(), [
-      "https://chatgpt.com/codex/install.sh",
       "https://claude.ai/install.sh",
+      "https://github.com/openai/codex/releases/latest/download/codex-package-x86_64-unknown-linux-musl.tar.gz",
+      "https://github.com/openai/codex/releases/latest/download/codex-package_SHA256SUMS",
     ]);
     assert.equal(
       sandbox.fetched().filter((url) => url.includes("nodejs.org")).length,
@@ -1159,7 +1267,10 @@ test("a bump reinstalls a card's agents one card at a time", () => {
     // First card after the bump runs codex, so codex reinstalls.
     const codexCard = sandbox.runAfterVersionBump(["codex"]);
     assert.equal(codexCard.status, 0, codexCard.stderr);
-    assert.deepEqual(sandbox.fetched(), ["https://chatgpt.com/codex/install.sh"]);
+    assert.deepEqual(sandbox.fetched(), [
+      "https://github.com/openai/codex/releases/latest/download/codex-package-x86_64-unknown-linux-musl.tar.gz",
+      "https://github.com/openai/codex/releases/latest/download/codex-package_SHA256SUMS",
+    ]);
 
     // A second card on the same machine runs claude. The bump is still
     // owed to claude even though the version has already installed
