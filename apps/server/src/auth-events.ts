@@ -67,7 +67,24 @@ function reportsRefusals(route: string): boolean {
   return route.startsWith("/sign-in/") || route.startsWith("/sign-up/") || route === "/callback/:id" || route === "/verify-email";
 }
 
-/** Counted, but not error tracking issues: the person's own doing, or the product as designed. */
+/**
+ * Counted, but not error tracking issues: the person's own doing, or
+ * the product as designed.
+ *
+ * `state_mismatch` is every OAuth callback whose state would not
+ * verify. better-auth's database strategy throws it when the
+ * verification row is gone (refresh, back button, or the ten minute
+ * window) and also remaps `state_security_mismatch` onto the same
+ * query code when the signed state cookie is missing or belongs to a
+ * different attempt. A second tab, a dropped cookie, and a consent
+ * that outlasted the cookie all look identical from the redirect, so
+ * one of them cannot be told from an outage here. The "sign in failed"
+ * event still records the code. A broken provider, a state cookie that
+ * will not decrypt, and a verification row that cannot be written keep
+ * their own codes (`invalid_code`, `state_invalid`,
+ * `state_generation_error`, `oauth_provider_not_found`,
+ * `unable_to_get_user_info`) and still open an issue.
+ */
 const EXPECTED_REFUSALS = new Set([
   "INVALID_EMAIL_OR_PASSWORD",
   "INVALID_EMAIL",
@@ -80,6 +97,8 @@ const EXPECTED_REFUSALS = new Set([
   "TOKEN_EXPIRED",
   "INVALID_TOKEN",
   "access_denied",
+  "state_mismatch",
+  "state_security_mismatch",
 ]);
 
 /** What the endpoint that just ran means for sign in or sign up, or null. */
