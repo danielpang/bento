@@ -174,17 +174,9 @@ export function reportSandboxProvisionFailed(
 }
 
 /**
- * An agent CLI the sandbox was asked for could not be installed.
- *
- * Error tracking rather than an event, and one exception per CLI so
- * each groups on its own name: a vendor's installer that breaks fails
- * the same way on every sandbox, and grouped by CLI that is one issue
- * whose count climbs, not a row in each affected run's transcript. The
- * message names the CLI and the provider and nothing else, which is
- * what keeps it groupable. `output` carries the installer's last
- * lines, the reason itself; until this the toolchain script's stderr
- * was read by nothing, and a Codex installer that failed every
- * reinstall from one day to the next left no record of why.
+ * An agent CLI could not be installed. One exception per CLI, with a
+ * message naming only the CLI and provider, so a broken vendor
+ * installer groups as one issue rather than one per sandbox.
  */
 export class ToolchainInstallError extends Error {
   constructor(
@@ -198,7 +190,6 @@ export class ToolchainInstallError extends Error {
 
 export interface ToolchainInstallFailed {
   provider: string;
-  /** The CLIs still missing, as the toolchain script names them. */
   missing: readonly string[];
   /** The toolchain script's stderr. */
   output: string;

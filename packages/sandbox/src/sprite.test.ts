@@ -1020,7 +1020,6 @@ test("Sprite provisioning says which agent CLI could not be installed", async ()
   });
 
   assert.equal(handle.provider, "sprite");
-  // Error tracking hears it too, with the installer's own reason.
   assert.deepEqual(reported, [
     { missing: ["opencode"], output: "bento: opencode install failed\nbento: opencode: curl: (22) 403\n" },
   ]);

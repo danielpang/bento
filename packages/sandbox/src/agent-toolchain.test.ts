@@ -982,12 +982,7 @@ test("pool's install accepts the EULA, and only pool's", () => {
   assert.equal(mentions.length, 1);
 });
 
-/**
- * The toolchain script's stderr is what provisioning sends to error
- * tracking when a CLI is still missing, so a failed installer's own
- * words have to be in it, named by the CLI, and a working installer's
- * chatter must not be.
- */
+/** The script's stderr goes to error tracking, so it carries only the failed installer's words. */
 test("an installer that fails for good leaves its last lines on stderr, and one that works leaves none", () => {
   const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-output-"));
   try {
@@ -999,7 +994,6 @@ test("an installer that fails for good leaves its last lines on stderr, and one 
     assert.match(result.stderr, /^bento: cursor install failed$/m);
     assert.match(result.stderr, /^bento: cursor: curl: \(22\) The requested URL returned error: 403$/m);
     assert.doesNotMatch(result.stderr, /bento: claude/);
-    // The logs go once they are read.
     assert.deepEqual(readdirSync(path.join(root, "tmp")).filter((file) => file.endsWith(".log")), []);
   } finally {
     rmSync(root, { recursive: true, force: true });

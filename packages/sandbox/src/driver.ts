@@ -245,22 +245,16 @@ export interface ProvisionSpec {
    */
   onProgress?: (message: string) => void | Promise<void>;
   /**
-   * Called when the toolchain script finished with CLIs it could not
-   * put on the PATH. The provision goes on (the other agents still
-   * run), so without this the failure reached only the run's
-   * transcript, and an installer that broke on every sandbox went
-   * unseen until someone read one. `output` is the script's stderr,
-   * which carries each failed installer's last lines. Best effort: a
-   * throw here does not fail the provision.
+   * Called when the toolchain script left CLIs off the PATH. The
+   * provision goes on, so this is how the failure reaches error
+   * tracking. A throw here does not fail the provision.
    */
   onToolchainMissing?: (failure: ToolchainInstallFailure) => void | Promise<void>;
 }
 
-/** What a toolchain run that left CLIs missing reports. */
 export interface ToolchainInstallFailure {
-  /** The CLIs still absent from the PATH, as the script names them. */
   missing: string[];
-  /** The script's stderr. */
+  /** The toolchain script's stderr. */
   output: string;
 }
 

@@ -396,12 +396,9 @@ if [ -z "$needed" ]; then exit 0; fi
 # actually happens, opencode's GitHub API rate limit, lasts an hour and
 # is handled by not depending on that API at all. See below.
 #
-# What the fetch and the installer print goes to a log rather than to
-# this script's output, and only a failure that outlasts the retries
-# prints the log's last lines, each led by the CLI's name. Provisioning
-# sends this script's stderr to error tracking when a CLI is still
-# missing at the end, so the installer's own reason has to be in it,
-# and not buried under the progress bars of the installers that worked.
+# Output goes to a log, printed only when every attempt failed:
+# provisioning sends this script's stderr to error tracking, so it
+# should hold the reason and not the chatter of installers that worked.
 install_from() {
   name=$1
   url=$2

@@ -307,7 +307,6 @@ test("a CLI that could not be installed is one exception per CLI, carrying the i
     swarm_task_id: "task-1",
   });
 
-  // No analytics client, nothing to do and nothing thrown.
   reportToolchainInstallFailed(null, {
     provider: "sprite",
     missing: ["codex"],
