@@ -390,10 +390,11 @@ async function readCredentials(
   const fromEnvironment = localEnvironmentFor(ctx, grant);
   const read = (name: string): string | null => {
     const row = rows.find((candidate) => candidate.name === name);
-    if (!fromEnvironment) return row ? ctx.secretBox.decrypt(row.ciphertext) : null;
+    const slot = { kind: "org_secret", organizationId: grant.organizationId, name } as const;
+    if (!fromEnvironment) return row ? ctx.secretBox.decrypt(row.ciphertext, slot) : null;
     if (row) {
       try {
-        return ctx.secretBox.decrypt(row.ciphertext);
+        return ctx.secretBox.decrypt(row.ciphertext, slot);
       } catch (err) {
         // Missing to resolveAgentEnv as well, so the run started on the
         // environment's value; with none there, it is Bento's failure.

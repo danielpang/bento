@@ -7,7 +7,9 @@ import type { AppContext } from "../context.js";
 import { actor, activeOrg } from "../middleware/actor.js";
 import { tenantDb as db } from "../middleware/tenant.js";
 import { allowMcpHosts } from "../orchestrator/sandbox-network.js";
+import { randomUUID } from "node:crypto";
 import { maskSecret } from "../secrets.js";
+import { mcpCredentialSlot } from "../mcp/refresh.js";
 import { pingMcpServer } from "../mcp/client.js";
 import { safeFetchPolicy } from "../mcp/safe-fetch.js";
 import { fetchCatalog, featuredEntries, slugFor } from "../mcp/catalog.js";
@@ -282,10 +284,13 @@ export function mcpRoutes(ctx: AppContext) {
     // Adding from the catalog says nothing about auth, because the
     // server itself knows. Ask it rather than making somebody guess.
     const authType = body.authType ?? (await detectAuthType(body.url, body.transport, safeFetchPolicy(ctx.env)));
+    // The id is chosen here so the client secret can be sealed to it.
+    const serverId = randomUUID();
     try {
       const [row] = await db(c, ctx)
         .insert(mcpServers)
         .values({
+          id: serverId,
           ownerId: actor(c),
           organizationId: access.organizationId,
           userId: body.personal ? actor(c) : null,
@@ -298,7 +303,13 @@ export function mcpRoutes(ctx: AppContext) {
           credentialScope: body.personal ? "user" : authType === "oauth" ? body.credentialScope : "org",
           apiKeyHeader: body.apiKeyHeader,
           clientId: body.clientId ?? null,
-          encryptedClientSecret: body.clientSecret ? ctx.secretBox.encrypt(body.clientSecret) : null,
+          encryptedClientSecret: body.clientSecret
+            ? ctx.secretBox.encrypt(body.clientSecret, {
+              kind: "mcp_client_secret",
+              organizationId: access.organizationId,
+              serverId,
+            })
+            : null,
           clientRegistration: body.clientId ? ("manual" as const) : null,
           scopes: body.scopes ?? null,
         })
@@ -355,7 +366,13 @@ export function mcpRoutes(ctx: AppContext) {
       update.clientRegistration = body.clientId ? ("manual" as const) : null;
     }
     if (body.clientSecret !== undefined) {
-      update.encryptedClientSecret = body.clientSecret ? ctx.secretBox.encrypt(body.clientSecret) : null;
+      update.encryptedClientSecret = body.clientSecret
+        ? ctx.secretBox.encrypt(body.clientSecret, {
+          kind: "mcp_client_secret",
+          organizationId: server.organizationId,
+          serverId: server.id,
+        })
+        : null;
     }
     if (body.scopes !== undefined) update.scopes = body.scopes;
     if (wipe) {
@@ -442,7 +459,7 @@ export function mcpRoutes(ctx: AppContext) {
         organizationId: access.organizationId,
         userId: credentialUserId,
         kind: "api_key" as const,
-        encryptedSecret: ctx.secretBox.encrypt(value),
+        encryptedSecret: ctx.secretBox.encrypt(value, mcpCredentialSlot(server, credentialUserId, "access")),
         hint: maskSecret(value),
       };
       const set = {
@@ -581,7 +598,11 @@ export function mcpRoutes(ctx: AppContext) {
           .set({
             clientId: registered.clientId,
             encryptedClientSecret: registered.clientSecret
-              ? ctx.secretBox.encrypt(registered.clientSecret)
+              ? ctx.secretBox.encrypt(registered.clientSecret, {
+                kind: "mcp_client_secret",
+                organizationId: server.organizationId,
+                serverId: server.id,
+              })
               : null,
             clientRegistration: "dynamic",
             updatedAt: new Date(),
@@ -602,7 +623,13 @@ export function mcpRoutes(ctx: AppContext) {
         organizationId: access.organizationId,
         serverId: server.id,
         scope: perUser ? "user" : "org",
-        verifierEnc: ctx.secretBox.encrypt(pkce.verifier),
+        verifierEnc: ctx.secretBox.encrypt(pkce.verifier, {
+          kind: "mcp_oauth_verifier",
+          organizationId: access.organizationId,
+          userId: actor(c),
+          serverId: server.id,
+          scope: perUser ? "user" : "org",
+        }),
         expiresAt: stateExpiry(),
       },
       secret,
@@ -675,7 +702,13 @@ export function mcpRoutes(ctx: AppContext) {
 
     let verifier: string;
     try {
-      verifier = ctx.secretBox.decrypt(state.verifierEnc);
+      verifier = ctx.secretBox.decrypt(state.verifierEnc, {
+        kind: "mcp_oauth_verifier",
+        organizationId: state.organizationId,
+        userId: state.userId,
+        serverId: state.serverId,
+        scope: state.scope,
+      });
     } catch {
       return outcome(c, "invalid");
     }
@@ -687,7 +720,11 @@ export function mcpRoutes(ctx: AppContext) {
           tokenEndpoint: server.tokenEndpoint,
           clientId: server.clientId,
           clientSecret: server.encryptedClientSecret
-            ? ctx.secretBox.decrypt(server.encryptedClientSecret)
+            ? ctx.secretBox.decrypt(server.encryptedClientSecret, {
+              kind: "mcp_client_secret",
+              organizationId: server.organizationId,
+              serverId: server.id,
+            })
             : null,
           redirectUri: callbackUrl(ctx, server.id),
           code,
@@ -715,8 +752,10 @@ export function mcpRoutes(ctx: AppContext) {
       organizationId: state.organizationId,
       userId,
       kind: "oauth" as const,
-      encryptedSecret: ctx.secretBox.encrypt(tokens.accessToken),
-      encryptedRefreshToken: tokens.refreshToken ? ctx.secretBox.encrypt(tokens.refreshToken) : null,
+      encryptedSecret: ctx.secretBox.encrypt(tokens.accessToken, mcpCredentialSlot(server, userId, "access")),
+      encryptedRefreshToken: tokens.refreshToken
+        ? ctx.secretBox.encrypt(tokens.refreshToken, mcpCredentialSlot(server, userId, "refresh"))
+        : null,
       expiresAt: tokens.expiresAt,
       scope: tokens.scope,
       tokenEndpointOrigin: new URL(server.tokenEndpoint).origin,

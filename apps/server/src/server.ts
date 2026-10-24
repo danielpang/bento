@@ -13,6 +13,7 @@ import { createAuth, type AuthHooks } from "./auth.js";
 import { reportAuthEvent } from "./auth-events.js";
 import { createMailer, noticeMessage, type NoticeEmailInput } from "./mail.js";
 import { SecretBox } from "./secrets.js";
+import { upgradeLegacySecrets, type SecretUpgradeResult } from "./secret-upgrade.js";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -236,6 +237,25 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     if (auth) ctx.auth = auth;
     if (analytics) ctx.analytics = analytics;
 
+    /**
+     * Seal every credential written before values were bound to their
+     * row, before anything reads one: from here on a read refuses the
+     * old format. The second pass covers a deploy, where the process
+     * this one replaces can still save a key in the old format for a
+     * minute or two after this boot.
+     */
+    const upgradeSecrets = async (pass: string) => {
+      try {
+        reportSecretUpgrade(await upgradeLegacySecrets(ctx), pass);
+      } catch (err) {
+        console.warn("could not upgrade stored secrets:", err);
+        analytics?.captureException(err, null, null, { source: "secret_upgrade" });
+      }
+    };
+    await upgradeSecrets("boot");
+    const secretUpgradeTimer = setTimeout(() => void upgradeSecrets("after boot"), SECRET_UPGRADE_SECOND_PASS_MS);
+    secretUpgradeTimer.unref();
+
     await registerJobs(ctx);
     // The daily job is the one that keeps the list current. This one
     // covers a deploy that would otherwise wait until 06:17 UTC.
@@ -386,6 +406,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
          * writer.
          */
         ctx.draining = true;
+        clearTimeout(secretUpgradeTimer);
         /**
          * Let go of every run this process was driving and say so on
          * the bus, first: a live server adopts them now rather than
@@ -439,5 +460,18 @@ function withoutUserinfo(url: string): string {
     return parsed.toString();
   } catch {
     return url;
+  }
+}
+
+/** Long enough for the process a deploy replaces to have stopped. */
+const SECRET_UPGRADE_SECOND_PASS_MS = 5 * 60_000;
+
+function reportSecretUpgrade(result: SecretUpgradeResult, pass: string): void {
+  const upgraded = Object.entries(result.upgraded);
+  const unreadable = Object.entries(result.unreadable);
+  const list = (entries: [string, number][]) => entries.map(([label, count]) => `${label} ${count}`).join(", ");
+  if (upgraded.length > 0) console.log(`sealed legacy secrets to their rows (${pass}): ${list(upgraded)}`);
+  if (unreadable.length > 0) {
+    console.warn(`legacy secrets this key cannot read were left as they are (${pass}): ${list(unreadable)}`);
   }
 }

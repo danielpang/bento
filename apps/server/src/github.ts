@@ -3,6 +3,7 @@ import { githubInstallations, secrets, type Db } from "@bento/db";
 import { GitHubTokenClient, type GitHubClient, type GitHubPublisher, type ReviewThread } from "@bento/github";
 import type { GitHubAppClient } from "@bento/github";
 import type { AppContext } from "./context.js";
+import { unreadableReason } from "./secrets.js";
 
 /**
  * Resolves the server-owned GitHub client for one tenant.
@@ -56,9 +57,10 @@ export async function githubConnectionFor(
     .limit(1);
   if (row) {
     try {
-      return new GitHubTokenClient(ctx.secretBox.decrypt(row.ciphertext));
-    } catch {
-      // Encrypted under a rotated key: fall through to the environment,
+      return new GitHubTokenClient(ctx.secretBox.decrypt(row.ciphertext, { kind: "org_secret", organizationId, name: "GITHUB_TOKEN" }));
+    } catch (err) {
+      console.warn(`stored GITHUB_TOKEN (organization ${organizationId ?? "local"}) could not be read: ${unreadableReason(err)}`);
+      // Unreadable (another key, or moved from another row): fall through to the environment,
       // and let publishing report that no connection is configured.
     }
   }

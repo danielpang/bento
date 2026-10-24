@@ -1,6 +1,7 @@
 import { eq, sql } from "drizzle-orm";
 import { mcpCredentials, mcpServers } from "@bento/db";
 import type { AppContext } from "../context.js";
+import type { SecretSlot } from "../secrets.js";
 import { OAuthError, refreshTokens } from "./oauth.js";
 import { safeFetchPolicy } from "./safe-fetch.js";
 
@@ -77,7 +78,7 @@ async function doRefresh(
   if (!claim.won) {
     await delay(400, signal);
     const [row] = await ctx.db.select().from(mcpCredentials).where(eq(mcpCredentials.id, credentialId)).limit(1);
-    return decryptAccess(ctx, row);
+    return decryptAccess(ctx, server, row);
   }
 
   const row = claim.row;
@@ -87,7 +88,7 @@ async function doRefresh(
   // it rather than refreshing again (which would rotate the refresh
   // token a second time). Keyed off the token itself, not the expiry,
   // because a token can be rejected before our clock says it expired.
-  const current = decryptAccess(ctx, row);
+  const current = decryptAccess(ctx, server, row);
   if (current && current !== staleToken) return current;
   // The credential must still belong to the endpoints it was minted
   // against, or a repointed server could send the refresh token
@@ -97,8 +98,14 @@ async function doRefresh(
   let refreshToken: string;
   let clientSecret: string | null = null;
   try {
-    refreshToken = ctx.secretBox.decrypt(row.encryptedRefreshToken);
-    if (server.encryptedClientSecret) clientSecret = ctx.secretBox.decrypt(server.encryptedClientSecret);
+    refreshToken = ctx.secretBox.decrypt(row.encryptedRefreshToken, mcpCredentialSlot(server, row.userId, "refresh"));
+    if (server.encryptedClientSecret) {
+      clientSecret = ctx.secretBox.decrypt(server.encryptedClientSecret, {
+        kind: "mcp_client_secret",
+        organizationId: server.organizationId,
+        serverId: server.id,
+      });
+    }
   } catch {
     return null;
   }
@@ -122,10 +129,10 @@ async function doRefresh(
   await ctx.db
     .update(mcpCredentials)
     .set({
-      encryptedSecret: ctx.secretBox.encrypt(tokens.accessToken),
+      encryptedSecret: ctx.secretBox.encrypt(tokens.accessToken, mcpCredentialSlot(server, row.userId, "access")),
       // Keep the old refresh token when the provider did not rotate it.
       encryptedRefreshToken: tokens.refreshToken
-        ? ctx.secretBox.encrypt(tokens.refreshToken)
+        ? ctx.secretBox.encrypt(tokens.refreshToken, mcpCredentialSlot(server, row.userId, "refresh"))
         : row.encryptedRefreshToken,
       expiresAt: tokens.expiresAt,
       scope: tokens.scope ?? row.scope,
@@ -135,10 +142,27 @@ async function doRefresh(
   return tokens.accessToken;
 }
 
-function decryptAccess(ctx: AppContext, row: typeof mcpCredentials.$inferSelect | undefined): string | null {
+/**
+ * Where an MCP credential is sealed: the server it serves (the server
+ * row's organization, which the credential row inherits) and the member
+ * it belongs to, null for the team's own.
+ */
+export function mcpCredentialSlot(
+  server: Pick<typeof mcpServers.$inferSelect, "id" | "organizationId">,
+  userId: string | null,
+  part: "access" | "refresh",
+): SecretSlot {
+  return { kind: "mcp_credential", organizationId: server.organizationId, serverId: server.id, userId, part };
+}
+
+function decryptAccess(
+  ctx: AppContext,
+  server: typeof mcpServers.$inferSelect,
+  row: typeof mcpCredentials.$inferSelect | undefined,
+): string | null {
   if (!row) return null;
   try {
-    return ctx.secretBox.decrypt(row.encryptedSecret);
+    return ctx.secretBox.decrypt(row.encryptedSecret, mcpCredentialSlot(server, row.userId, "access"));
   } catch {
     return null;
   }

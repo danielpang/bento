@@ -221,7 +221,7 @@ test("a working API key is validated upstream and stored encrypted", async () =>
   assert.equal(row!.userId, null, "an API key is the organization's credential");
   assert.notEqual(row!.encryptedSecret, GOOD_KEY, "the key must not be stored in plaintext");
   assert.ok(!row!.encryptedSecret.includes(GOOD_KEY), "the ciphertext must not contain the key");
-  assert.equal(ctx.secretBox.decrypt(row!.encryptedSecret), GOOD_KEY, "the ciphertext must round-trip");
+  assert.equal(ctx.secretBox.decrypt(row!.encryptedSecret, { kind: "mcp_credential", organizationId: server!.organizationId, serverId: server!.id, userId: null, part: "access" }), GOOD_KEY, "the ciphertext must round-trip");
   assert.ok(row!.hint.endsWith(GOOD_KEY.slice(-4)), "the hint shows only the masked tail");
 
   const status = (await (await app.request("/api/mcp/status")).json()) as {
@@ -429,8 +429,8 @@ test("the callback exchanges the code and stores the tokens encrypted", async ()
   assert.ok(cred, "the credential row exists");
   assert.equal(cred!.kind, "oauth");
   assert.equal(cred!.userId, ctx.userId, "a per-user server stores the credential under the member");
-  assert.equal(ctx.secretBox.decrypt(cred!.encryptedSecret), "flow-access");
-  assert.equal(ctx.secretBox.decrypt(cred!.encryptedRefreshToken!), "flow-refresh");
+  assert.equal(ctx.secretBox.decrypt(cred!.encryptedSecret, { kind: "mcp_credential", organizationId: null, serverId: id, userId: ctx.userId, part: "access" }), "flow-access");
+  assert.equal(ctx.secretBox.decrypt(cred!.encryptedRefreshToken!, { kind: "mcp_credential", organizationId: null, serverId: id, userId: ctx.userId, part: "refresh" }), "flow-refresh");
   assert.equal(cred!.tokenEndpointOrigin, authBase, "the credential is pinned to its token endpoint");
 
   const status = (await (await app.request("/api/mcp/status")).json()) as unknown;
@@ -454,8 +454,8 @@ test("a stored OAuth sign-in stays connected after the access token expires", as
     organizationId: null,
     userId: ctx.userId,
     kind: "oauth",
-    encryptedSecret: ctx.secretBox.encrypt("stale-access"),
-    encryptedRefreshToken: ctx.secretBox.encrypt("refresh-still-good"),
+    encryptedSecret: ctx.secretBox.encrypt("stale-access", { kind: "mcp_credential", organizationId: null, serverId: id, userId: ctx.userId, part: "access" }),
+    encryptedRefreshToken: ctx.secretBox.encrypt("refresh-still-good", { kind: "mcp_credential", organizationId: null, serverId: id, userId: ctx.userId, part: "refresh" }),
     expiresAt: new Date(Date.now() - 60_000),
     hint: "…oken",
   });

@@ -118,8 +118,8 @@ before(async () => {
   await db.insert(linearConnections).values({
     ownerId: userId,
     organizationId: null,
-    encryptedApiKey: ctx.secretBox.encrypt("lin_api_test"),
-    encryptedWebhookSecret: ctx.secretBox.encrypt(webhookSecret),
+    encryptedApiKey: ctx.secretBox.encrypt("lin_api_test", { kind: "linear_api_key", organizationId: null }),
+    encryptedWebhookSecret: ctx.secretBox.encrypt(webhookSecret, { kind: "linear_webhook_secret", organizationId: null }),
     webhookId: "wh-1",
   });
 });
@@ -396,7 +396,7 @@ test("a plan with no room for another live card leaves the import in the backlog
   await ctx.db.insert(linearConnections).values({
     ownerId: ctx.userId,
     organizationId: "org-full",
-    encryptedApiKey: ctx.secretBox.encrypt("lin_api_test"),
+    encryptedApiKey: ctx.secretBox.encrypt("lin_api_test", { kind: "linear_api_key", organizationId: "org-full" }),
   });
   ctx.entitlements = {
     async canAddMember() {

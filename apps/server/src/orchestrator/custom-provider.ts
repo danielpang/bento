@@ -3,6 +3,7 @@ import { supportsCustomProvider } from "@bento/core";
 import type { CustomProviderSelection } from "@bento/agents";
 import { customModelProviders } from "@bento/db";
 import type { AppContext } from "../context.js";
+import { unreadableReason } from "../secrets.js";
 
 export interface CustomProviderRunConfig {
   env: Record<string, string>;
@@ -36,7 +37,13 @@ export async function customProviderRunEnv(
   if (!supportsCustomProvider(cli, row.protocol)) return { env: {}, missingKey: false, unsupported: true };
   let apiKey: string | null = null;
   if (row.encryptedApiKey) {
-    try { apiKey = ctx.secretBox.decrypt(row.encryptedApiKey); } catch { /* rotated key is missing */ }
+    try {
+      apiKey = ctx.secretBox.decrypt(row.encryptedApiKey, { kind: "custom_provider_key", organizationId: row.organizationId, providerId: row.id });
+    } catch (err) {
+      // Read as a missing key, and said in the log so a value this
+      // server cannot read is not mistaken for one never saved.
+      console.warn(`custom provider ${row.id} key could not be read: ${unreadableReason(err)}`);
+    }
   }
   if (!apiKey) return { env: {}, missingKey: true };
   const selection: CustomProviderSelection = {

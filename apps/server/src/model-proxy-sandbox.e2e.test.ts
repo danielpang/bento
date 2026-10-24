@@ -263,7 +263,7 @@ before(async () => {
   // A locked team that allowed itself one site.
   await db.insert(organizationPolicies).values({ organizationId: ORG, restrictNetwork: true, allowedHosts: [ALLOWED_SITE] });
   for (const [name, value] of Object.entries(KEYS)) {
-    await db.insert(secrets).values({ ownerId: userId, organizationId: ORG, name, ciphertext: ctx.secretBox.encrypt(value), hint: "" });
+    await db.insert(secrets).values({ ownerId: userId, organizationId: ORG, name, ciphertext: ctx.secretBox.encrypt(value, { kind: "org_secret", organizationId: ORG, name }), hint: "" });
   }
 });
 
