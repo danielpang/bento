@@ -35,11 +35,26 @@ test("bundled assets cannot escape their root and external links cannot execute 
 
 test("settings reject unrequested runner mode and relative local directories", () => {
   const settings = { mode: "local", serverUrl: "", dataDir: "/tmp/bento", databaseUrl: "", sandbox: "docker", sandboxImage: "bento-sandbox:dev", betaFeatures: true };
-  assert.deepEqual(validateSettings(settings), settings);
+  assert.deepEqual(validateSettings(settings), { ...settings, modelProxy: true });
   // Settings saved before the launcher offered beta features read as off.
   const { betaFeatures: _beta, ...older } = settings;
   assert.equal(validateSettings(older).betaFeatures, false);
   assert.equal(validateSettings({ ...settings, betaFeatures: "yes" }).betaFeatures, false);
+  // The model proxy box: on unless explicitly off, kept as stored whatever the sandbox.
+  assert.equal(validateSettings(settings).modelProxy, true, "settings saved before the box existed read as on");
+  assert.equal(validateSettings({ ...settings, modelProxy: true }).modelProxy, true);
+  assert.equal(validateSettings({ ...settings, modelProxy: false }).modelProxy, false);
+  assert.equal(validateSettings({ ...settings, modelProxy: "false" }).modelProxy, true, "junk reads as on, which keeps keys out");
+  assert.equal(validateSettings({ ...settings, modelProxy: null }).modelProxy, true);
+  for (const modelProxy of [true, false]) {
+    const docker = validateSettings({ ...settings, sandbox: "docker", modelProxy });
+    assert.equal(docker.modelProxy, modelProxy, `docker with the box ${modelProxy ? "on" : "off"}`);
+    // A local process has no sandbox, and the server ignores the box
+    // there; the stored choice is kept so choosing Docker again restores it.
+    const local = validateSettings({ ...settings, sandbox: "local-process", modelProxy });
+    assert.equal(local.modelProxy, modelProxy, `local process keeps the stored ${modelProxy}`);
+    assert.equal(validateSettings({ ...local, sandbox: "docker" }).modelProxy, modelProxy, "and Docker gets it back");
+  }
   assert.throws(() => validateSettings({ ...settings, mode: "runner" }));
   assert.throws(() => validateSettings({ ...settings, dataDir: "relative" }));
   assert.throws(() => validateSettings({ ...settings, sandboxImage: "name; touch /tmp/bad" }));

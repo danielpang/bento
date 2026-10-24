@@ -555,7 +555,7 @@ export function AgentsPanel({
                   accusing a tool that is probably fine. */}
               {missingTool && (
                 <p className="warn">
-                  {missingTool.label} is not installed where agents run here. Install it, then this
+                  {missingTool.label} is not installed in this server's agent sandbox. Install it, then this
                   agent can start:{" "}
                   <a href={missingTool.installUrl} target="_blank" rel="noreferrer">
                     installation guide

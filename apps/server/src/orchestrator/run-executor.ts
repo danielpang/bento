@@ -605,10 +605,12 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   }
 
   /**
-   * In multi mode the provider keys this tool can send through the
-   * model proxy are swapped for the run's grant token here, once the
-   * driver that made the machine is known (it decides the address the
-   * sandbox reaches the proxy on). The grant is minted now, ahead of
+   * The provider keys this tool can send through the model proxy are
+   * swapped for the run's grant token here (multi mode, and local mode
+   * on Docker unless it is turned off), once the driver that made the
+   * machine is known (it decides the address the sandbox reaches the
+   * proxy on) and the machine itself is there for a local run to ask
+   * whether it can reach the proxy at all. The grant is minted now, ahead of
    * MCP, which then joins it rather than minting a token that would
    * replace the one this environment holds.
    *
@@ -626,6 +628,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       ...(subject.kind === "swarm" ? { swarmId: subject.swarm.id } : {}),
       adapter,
       driver,
+      handle,
       env: agentEnv,
       say: saySystem,
     }));

@@ -26,7 +26,8 @@
         "MODAL_TOKEN_SECRET",
         "MODAL_ENVIRONMENT",
         "MODAL_SANDBOX_CPU",
-        "MODAL_SANDBOX_MEMORY_MIB"
+        "MODAL_SANDBOX_MEMORY_MIB",
+        "BENTO_MODEL_PROXY"
       ]
     }
   }

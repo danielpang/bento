@@ -1614,7 +1614,7 @@ export function Setup({
             return (
               <Box flexDirection="column" marginTop={1}>
                 <Text color="yellow">
-                  {selected.label} is not installed where agents run. Install it first:
+                  {selected.label} is not installed in the agent sandbox. Install it first:
                 </Text>
                 <Text color="gray"> {entry.installCommand}</Text>
                 <Text color="gray"> {entry.installUrl}</Text>

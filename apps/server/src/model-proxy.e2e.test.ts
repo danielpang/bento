@@ -27,7 +27,7 @@ import {
   secrets,
   stages,
 } from "@bento/db";
-import { LocalProcessDriver, WorktreeManager, type SandboxDriver } from "@bento/sandbox";
+import { collectExec, LocalProcessDriver, WorktreeManager, type ExecChunk, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
 import { createApp } from "./app.js";
 import { DiskArtifactStore } from "./artifact-store.js";
 import { ensureLocalUser, type AppContext } from "./context.js";
@@ -46,7 +46,11 @@ import {
 } from "./mcp/grants.js";
 import { attachPgBus, type PgBus } from "./pg-bus.js";
 import { resolveAgentEnv } from "./orchestrator/agent-env.js";
-import { proxyModelCredentials } from "./orchestrator/model-proxy-env.js";
+import {
+  MODEL_PROXY_UNREACHABLE_NOTE,
+  namesThisMachine,
+  proxyModelCredentials,
+} from "./orchestrator/model-proxy-env.js";
 import { executeRun } from "./orchestrator/run-executor.js";
 import { singleDriver } from "./orchestrator/sandbox-driver.js";
 import { decodedByFetch, modelProxyCacheFor, resetRefusalReports, upstreamUrl } from "./routes/model-proxy.js";
@@ -694,12 +698,22 @@ test("a saved base URL the proxy could never fetch keeps its key in the sandbox,
   assert.equal(await runHadModelProxyFailure(ctx, late.runId), false, "the organization's setting, not Bento failing");
 });
 
-test("local mode, a login token, and a sandbox with no gateway keep what they had", async () => {
+test("local mode on the local process driver, a login token, and a sandbox with no gateway keep what they had", async () => {
   const keyed = { ANTHROPIC_API_KEY: "sk-ant-real-a" };
 
   const local = proxyInput(await newRun(), keyed);
   const inLocal = await proxyModelCredentials(ctx, local.input);
-  assert.deepEqual(inLocal, { env: keyed, grantToken: null }, "local mode is one trusted user's");
+  assert.deepEqual(inLocal, { env: keyed, grantToken: null }, "a local agent run as a process is the user, on the host");
+  assert.deepEqual(local.notes, [], "and nothing to say about it");
+  for (const setting of [true, false, undefined]) {
+    ctx.env.BENTO_MODEL_PROXY = setting;
+    try {
+      const run = proxyInput(await newRun("none"), keyed, { organizationId: null });
+      assert.deepEqual(await proxyModelCredentials(ctx, run.input), { env: keyed, grantToken: null }, `whatever the setting (${setting})`);
+    } finally {
+      ctx.env.BENTO_MODEL_PROXY = undefined;
+    }
+  }
 
   const login = { CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat-login" };
   const loginRun = await newRun();
@@ -716,6 +730,293 @@ test("local mode, a login token, and a sandbox with no gateway keep what they ha
   const pi = proxyInput(await newRun(), keyed, { adapter: piAdapter });
   const piLocal = await inMulti(() => proxyModelCredentials(ctx, pi.input));
   assert.equal(piLocal.grantToken, null, "pi's addresses travel in a home file, which the local process driver never writes");
+});
+
+/**
+ * A Docker driver as far as the proxy's plan can tell, whose "sandbox"
+ * is this machine, reached the way Docker Desktop and OrbStack reach
+ * the host: host.docker.internal is this host's loopback. Its exec runs
+ * the command for real (the probe is real curl against the real route),
+ * with that one name rewritten, unless `answer` stands in for it.
+ */
+function desktopDocker(answer?: (argv: string[]) => ExecChunk[] | Error) {
+  const calls: string[][] = [];
+  const driver = {
+    provider: "docker",
+    workspace: "host",
+    async *exec(_handle: SandboxHandle, argv: string[]): AsyncIterable<ExecChunk> {
+      calls.push(argv);
+      const stubbed = answer?.(argv);
+      if (stubbed instanceof Error) throw stubbed;
+      if (stubbed) {
+        yield* stubbed;
+        return;
+      }
+      const [cmd, ...args] = argv.map((arg) => arg.replaceAll("host.docker.internal", "127.0.0.1"));
+      const result = await new Promise<{ stdout: string; stderr: string; code: number }>((resolve) => {
+        execFile(cmd!, args, (err, stdout, stderr) => {
+          const code = err ? (typeof (err as { code?: unknown }).code === "number" ? ((err as { code: number }).code) : 1) : 0;
+          resolve({ stdout, stderr, code });
+        });
+      });
+      if (result.stdout) yield { kind: "stdout", data: result.stdout };
+      if (result.stderr) yield { kind: "stderr", data: result.stderr };
+      yield { kind: "exit", exitCode: result.code };
+    },
+  } as unknown as SandboxDriver;
+  return { driver, calls };
+}
+
+const sandboxHandle: SandboxHandle = { externalId: "local-docker-test", provider: "docker", workdir: "/workspace" };
+
+/** Sets process variables for as long as `fn` runs, and puts them back. */
+async function withProcessEnv<T>(vars: Record<string, string | undefined>, fn: () => Promise<T>): Promise<T> {
+  const saved = Object.fromEntries(Object.keys(vars).map((name) => [name, process.env[name]]));
+  for (const [name, value] of Object.entries(vars)) {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+}
+
+/** A grant for the project with no organization: what a local server mints. */
+async function localGrant(modelCredentials: string[]) {
+  const runId = await newRun("none");
+  const token = await mintRunGrant(ctx, { runId, organizationId: null, actingUserId: null, serverIds: [], modelCredentials, ttlMs: 60_000 });
+  return { runId, token };
+}
+
+/** The address a sandbox was given, as this host reaches it. */
+const fromHost = (url: string) => url.replace("host.docker.internal", "127.0.0.1");
+
+test("a local Docker run gets a token once its sandbox reached the proxy, and the key comes from the environment", async () => {
+  await withProcessEnv({ ANTHROPIC_API_KEY: "sk-ant-from-process-env", ANTHROPIC_BASE_URL: undefined }, async () => {
+    const resolved = await resolveAgentEnv(ctx, null, claudeCodeAdapter, "claude-sonnet-5");
+    assert.equal(resolved.env.ANTHROPIC_API_KEY, "sk-ant-from-process-env", "local mode reads the process environment");
+    const runId = await newRun("none");
+    const docker = desktopDocker();
+    const { input, notes } = proxyInput(runId, resolved.env, { organizationId: null, driver: docker.driver, handle: sandboxHandle });
+    const { env, grantToken } = await proxyModelCredentials(ctx, input);
+
+    assert.ok(grantToken?.startsWith("bmg_"), "proxied by default in local mode");
+    assert.equal(env.ANTHROPIC_API_KEY, grantToken);
+    assert.equal(env.ANTHROPIC_BASE_URL, `${bentoUrl.replace("127.0.0.1", "host.docker.internal")}/api/model-proxy/anthropic`);
+    assert.ok(!Object.values(env).some((value) => value.includes("sk-ant-from-process-env")), "the key is nowhere in the sandbox");
+    assert.deepEqual(notes, []);
+    assert.equal(docker.calls.length, 1, "one probe, once per run");
+    assert.match(docker.calls[0]!.join(" "), /curl/);
+
+    // The model call, from a separate process (curl) with exactly the
+    // values the sandbox was given, through the same stand-in exec.
+    seen.length = 0;
+    const call = await withVendorUpstreams(() =>
+      collectExec(
+        docker.driver.exec(sandboxHandle, [
+          "curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}", "-X", "POST",
+          "-H", `x-api-key: ${env.ANTHROPIC_API_KEY}`, "-H", "content-type: application/json",
+          "-d", "{}", `${env.ANTHROPIC_BASE_URL}/v1/messages`,
+        ]),
+      ),
+    );
+    assert.equal(call.stdout, "201", call.stderr);
+    assert.equal(seen[0]!.headers["x-api-key"], "sk-ant-from-process-env", "the proxy added the environment's key");
+    assert.ok(fromHost(env.ANTHROPIC_BASE_URL!).startsWith(bentoUrl));
+  });
+});
+
+test("a local grant reads a key and base URL from the environment, and a stored secret wins as it does for resolveAgentEnv", async () => {
+  await ctx.db.delete(secrets).where(isNull(secrets.organizationId));
+  try {
+    await withProcessEnv(
+      { OPENAI_API_KEY: "sk-openai-from-env", OPENAI_BASE_URL: `${upstreamBase}/env-root/v1` },
+      async () => {
+        const { token } = await localGrant(["OPENAI_API_KEY", "OPENAI_BASE_URL"]);
+        seen.length = 0;
+        const res = await proxied("openai/responses", { method: "POST", headers: { authorization: `Bearer ${token}` }, body: "{}" });
+        assert.equal(res.status, 201);
+        assert.equal(seen[0]!.url, "/env-root/v1/responses", "the environment's base URL, plain http loopback and all");
+        assert.equal(seen[0]!.headers.authorization, "Bearer sk-openai-from-env");
+
+        // A stored secret with no organization stands over the environment,
+        // which is the order resolveAgentEnv layers them in.
+        await saveSecret(null, "OPENAI_API_KEY", "sk-openai-stored-local");
+        const resolved = await resolveAgentEnv(ctx, null, { requiredEnv: ["OPENAI_API_KEY"] });
+        assert.equal(resolved.env.OPENAI_API_KEY, "sk-openai-stored-local");
+        const second = await localGrant(["OPENAI_API_KEY"]);
+        seen.length = 0;
+        const stored = await withVendorUpstreams(() =>
+          proxied("openai/responses", { method: "POST", headers: { authorization: `Bearer ${second.token}` }, body: "{}" }),
+        );
+        assert.equal(stored.status, 201);
+        assert.equal(seen[0]!.headers.authorization, "Bearer sk-openai-stored-local", "the same key the run would have had");
+
+        // A stored secret that cannot be decrypted is missing to
+        // resolveAgentEnv, so the run started on the environment's key.
+        await ctx.db.update(secrets).set({ ciphertext: "broken" }).where(and(isNull(secrets.organizationId), eq(secrets.name, "OPENAI_API_KEY")));
+        const third = await localGrant(["OPENAI_API_KEY"]);
+        seen.length = 0;
+        const fallback = await withVendorUpstreams(() =>
+          proxied("openai/responses", { method: "POST", headers: { authorization: `Bearer ${third.token}` }, body: "{}" }),
+        );
+        assert.equal(fallback.status, 201);
+        assert.equal(seen[0]!.headers.authorization, "Bearer sk-openai-from-env");
+      },
+    );
+  } finally {
+    await ctx.db.delete(secrets).where(isNull(secrets.organizationId));
+  }
+});
+
+test("a multi mode server never reads its environment, for any grant", async () => {
+  await ctx.db.delete(secrets).where(and(isNull(secrets.organizationId), eq(secrets.name, "DEEPSEEK_API_KEY")));
+  await withProcessEnv({ DEEPSEEK_API_KEY: "sk-deepseek-operator", ANTHROPIC_API_KEY: "sk-ant-operator" }, async () => {
+    const withoutOrg = await localGrant(["DEEPSEEK_API_KEY"]);
+    const withOrg = await grant(["DEEPSEEK_API_KEY"], "org-c");
+    // org-b holds no Anthropic key: the operator's must not stand in.
+    const orgB = await grant(ANTHROPIC, "org-b");
+    seen.length = 0;
+    for (const { token, path: where } of [
+      { token: withoutOrg.token, path: "deepseek/chat/completions" },
+      { token: withOrg.token, path: "deepseek/chat/completions" },
+      { token: orgB.token, path: "anthropic/v1/messages" },
+    ]) {
+      const res = await withVendorUpstreams(() =>
+        inMulti(() => proxied(where, { method: "POST", headers: { authorization: `Bearer ${token}`, "x-api-key": token }, body: "{}" })),
+      );
+      assert.equal(res.status, 404, `${where} in multi mode`);
+    }
+    // Nor does a local server, for a grant that names an organization.
+    const orgInLocal = await grant(["DEEPSEEK_API_KEY"], "org-c");
+    const res = await withVendorUpstreams(() =>
+      proxied("deepseek/chat/completions", { method: "POST", headers: { authorization: `Bearer ${orgInLocal.token}` }, body: "{}" }),
+    );
+    assert.equal(res.status, 404, "an organization's grant reads its organization's secrets only");
+    assert.equal(seen.length, 0, "no operator key reached any provider");
+
+    // The control: the same grant with no organization, on a local
+    // server, is served from that environment, so the refusals above are
+    // the mode's and the organization's, not a route that never matched.
+    const res2 = await withVendorUpstreams(() =>
+      proxied("deepseek/chat/completions", { method: "POST", headers: { authorization: `Bearer ${withoutOrg.token}` }, body: "{}" }),
+    );
+    assert.equal(res2.status, 201);
+    assert.equal(seen[0]!.headers.authorization, "Bearer sk-deepseek-operator");
+  });
+});
+
+test("a grant with no organization never spends an organization's secrets, nor the reverse", async () => {
+  // org-a has an Anthropic key stored; nothing without an organization does.
+  await ctx.db.delete(secrets).where(isNull(secrets.organizationId));
+  await withProcessEnv({ ANTHROPIC_API_KEY: undefined, ANTHROPIC_BASE_URL: undefined }, async () => {
+    const none = await localGrant(ANTHROPIC);
+    seen.length = 0;
+    for (const mode of ["local", "multi"] as const) {
+      const call = () => proxied("anthropic/v1/messages", { method: "POST", headers: { "x-api-key": none.token }, body: "{}" });
+      const res = await withVendorUpstreams(() => (mode === "multi" ? inMulti(call) : call()));
+      assert.equal(res.status, 404, `in ${mode} mode`);
+    }
+    // And a key stored with no organization is not org-b's.
+    await saveSecret(null, "ANTHROPIC_API_KEY", "sk-ant-no-org");
+    try {
+      const orgB = await grant(ANTHROPIC, "org-b");
+      for (const mode of ["local", "multi"] as const) {
+        const call = () => proxied("anthropic/v1/messages", { method: "POST", headers: { "x-api-key": orgB.token }, body: "{}" });
+        const res = await withVendorUpstreams(() => (mode === "multi" ? inMulti(call) : call()));
+        assert.equal(res.status, 404, `org-b in ${mode} mode`);
+      }
+    } finally {
+      await ctx.db.delete(secrets).where(isNull(secrets.organizationId));
+    }
+    assert.equal(seen.length, 0);
+  });
+});
+
+test("BENTO_MODEL_PROXY=false keeps a local run's raw keys, and cannot turn the proxy off in multi mode", async () => {
+  const keyed = { ANTHROPIC_API_KEY: "sk-ant-local" };
+  ctx.env.BENTO_MODEL_PROXY = false;
+  try {
+    const docker = desktopDocker();
+    const runId = await newRun("none");
+    const off = proxyInput(runId, keyed, { organizationId: null, driver: docker.driver, handle: sandboxHandle });
+    assert.deepEqual(await proxyModelCredentials(ctx, off.input), { env: keyed, grantToken: null });
+    assert.deepEqual(off.notes, []);
+    assert.equal(docker.calls.length, 0, "nothing asked of the sandbox");
+    assert.equal(await runGrantUses(ctx, runId), null, "and no grant minted");
+
+    const multi = proxyInput(await newRun("org-c"), keyed, { organizationId: "org-c" });
+    const proxiedInMulti = await inMulti(() => proxyModelCredentials(ctx, multi.input));
+    assert.ok(proxiedInMulti.grantToken?.startsWith("bmg_"), "multi mode proxies whatever the variable says");
+    assert.equal(proxiedInMulti.env.ANTHROPIC_API_KEY, proxiedInMulti.grantToken);
+  } finally {
+    ctx.env.BENTO_MODEL_PROXY = undefined;
+  }
+});
+
+test("a local sandbox that cannot reach the proxy keeps its raw keys, and the transcript says so", async () => {
+  const keyed = { ANTHROPIC_API_KEY: "sk-ant-local" };
+  const failures: [string, (argv: string[]) => ExecChunk[] | Error][] = [
+    // curl's own exit for a refused connection, which is what Docker on
+    // Linux gives a server bound to 127.0.0.1.
+    ["refused", () => [{ kind: "stderr", data: "curl: (7) Failed to connect\n" }, { kind: "exit", exitCode: 7 }]],
+    ["no curl or wget", () => [{ kind: "stderr", data: "neither curl nor wget is installed\n" }, { kind: "exit", exitCode: 127 }]],
+    ["something else answered", () => [{ kind: "stdout", data: "<html>not Bento</html>" }, { kind: "exit", exitCode: 0 }]],
+    ["the exec itself failed", () => new Error("container is not running")],
+  ];
+  for (const [why, answer] of failures) {
+    const docker = desktopDocker(answer);
+    const runId = await newRun("none");
+    const { input, notes } = proxyInput(runId, keyed, { organizationId: null, driver: docker.driver, handle: sandboxHandle });
+    assert.deepEqual(await proxyModelCredentials(ctx, input), { env: keyed, grantToken: null }, why);
+    assert.deepEqual(notes, [MODEL_PROXY_UNREACHABLE_NOTE], why);
+    assert.equal(docker.calls.length, 1, `${why}: asked once`);
+    assert.equal(await runGrantUses(ctx, runId), null, `${why}: no grant minted`);
+  }
+
+  // A real probe at an address nothing answers on fails the same way.
+  const saved = ctx.env.BETTER_AUTH_URL;
+  ctx.env.BETTER_AUTH_URL = "http://127.0.0.1:9";
+  try {
+    const docker = desktopDocker();
+    const { input, notes } = proxyInput(await newRun("none"), keyed, { organizationId: null, driver: docker.driver, handle: sandboxHandle });
+    assert.deepEqual(await proxyModelCredentials(ctx, input), { env: keyed, grantToken: null });
+    assert.deepEqual(notes, [MODEL_PROXY_UNREACHABLE_NOTE]);
+  } finally {
+    ctx.env.BETTER_AUTH_URL = saved;
+  }
+});
+
+test("a local base URL is proxied unless it names this machine", async () => {
+  assert.equal(namesThisMachine("http://localhost:4000"), true);
+  assert.equal(namesThisMachine("http://127.0.0.2:4000/v1"), true);
+  assert.equal(namesThisMachine("http://[::1]:4000"), true);
+  assert.equal(namesThisMachine("http://host.docker.internal:11434"), true);
+  assert.equal(namesThisMachine("http://192.168.1.20:4000"), false);
+  assert.equal(namesThisMachine("https://gateway.example.com"), false);
+
+  const docker = desktopDocker();
+  const loopback = { ANTHROPIC_API_KEY: "sk-ant-local", ANTHROPIC_BASE_URL: "http://localhost:4000" };
+  const kept = proxyInput(await newRun("none"), loopback, { organizationId: null, driver: docker.driver, handle: sandboxHandle });
+  assert.deepEqual(await proxyModelCredentials(ctx, kept.input), { env: loopback, grantToken: null });
+  assert.deepEqual(kept.notes, [
+    "ANTHROPIC_BASE_URL names this machine, which is a different address inside the sandbox than it is to Bento, so this run's ANTHROPIC_API_KEY is in its sandbox rather than behind the model proxy.",
+  ]);
+
+  // A gateway on the network, plain http and private, goes through the
+  // proxy: safeFetch's refusals protect tenants, and there are none here.
+  const lan = { ANTHROPIC_API_KEY: "sk-ant-local", ANTHROPIC_BASE_URL: "http://192.168.1.20:4000" };
+  const runId = await newRun("none");
+  const through = proxyInput(runId, lan, { organizationId: null, driver: docker.driver, handle: sandboxHandle });
+  const out = await proxyModelCredentials(ctx, through.input);
+  assert.ok(out.grantToken);
+  assert.deepEqual(through.notes, []);
+  assert.deepEqual((await runGrantUses(ctx, runId))?.modelCredentials.sort(), ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"]);
 });
 
 test("the resolver's login rule is unchanged under the proxy", async () => {

@@ -50,7 +50,7 @@ Team management and stored credentials require multi mode. Local mode has one us
 
 ## Server and agent placement
 
-The terminal separates where the board runs from where agents run:
+The terminal lets the board and the agents run on different machines:
 
 ```bash
 bento                                                     # server and agents on this machine
