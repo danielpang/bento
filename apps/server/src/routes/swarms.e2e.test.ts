@@ -282,6 +282,12 @@ test("a failed planner is visible and can be retried once", async () => {
   const [run] = await db.select().from(agentRuns).where(eq(agentRuns.id, runId));
   assert.equal(run!.status, "queued");
   assert.equal(run!.role, "planner");
+  const afterRetry = (await (await app.request(`/api/swarms/${swarm.id}`)).json()) as {
+    plannerRun: { id: string };
+    plannerRunIds: string[];
+  };
+  assert.equal(afterRetry.plannerRun.id, runId);
+  assert.deepEqual(afterRetry.plannerRunIds, [swarm.plannerRunId, runId], "the chat includes earlier planner runs, oldest first");
   assert.equal((await post(`/api/swarms/${swarm.id}/planner/retry`)).status, 409);
 });
 

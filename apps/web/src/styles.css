@@ -10268,8 +10268,6 @@ a.hours-person-name:hover {
 .swarm-output-task-title { color: var(--text-dim); font-size: 12px; margin: 2px 0 0; }
 .swarm-worker-output-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .swarm-worker-output-head .swarm-output-link { flex: none; }
-.swarm-planner-history { border-bottom: 1px solid var(--line); padding-bottom: 12px; }
-.swarm-planner-history summary { cursor: pointer; color: var(--text-dim); font-size: 11px; margin-bottom: 8px; }
 /* The card conversation's composer dock, at the foot of the drawer. */
 .swarm-planner-compose { padding: 10px 24px 6px; border-top: 1px solid var(--line); background: var(--panel); }
 .swarm-planner-compose .working-row { margin-top: 0; }

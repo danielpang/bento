@@ -12,7 +12,8 @@ import { SwarmTree } from "./components/SwarmTree.js";
 import { SwarmOutline } from "./components/SwarmOutline.js";
 import { SwarmPlannerStep } from "./components/SwarmPlannerStep.js";
 import { SwarmNodeDrawer } from "./components/SwarmNodeDrawer.js";
-import { SwarmRunOutput, SwarmRunOutputDrawer, SwarmWorkerOutputDrawer } from "./components/SwarmRunOutput.js";
+import { RunConversationRows, SwarmRunOutput, SwarmRunOutputDrawer, SwarmWorkerOutputDrawer } from "./components/SwarmRunOutput.js";
+import type { SwarmPlannerMessage } from "./swarm/client.js";
 import { stackedPullRequests, SwarmArtifacts, SwarmPage, SwarmPlanBrief, WorkerStepper } from "./components/SwarmPage.js";
 import { ceilingRefusal, reopenEffectLines } from "./components/ReopenDialog.js";
 import {
@@ -846,6 +847,41 @@ test("the planner conversation has guidance input and worker output stays read-o
   assert.match(activePlanner, /aria-label="Stop the agent"/, "Stop sits beside the field while the planner works, as on a card");
   assert.match(activePlanner, /class="composer"/, "the card conversation's one-line composer");
   assert.doesNotMatch(planner, /aria-label="Stop the agent"/, "a finished planner has no running turn to stop");
+});
+
+test("planner guidance stays inline with replies across runs, not in an earlier-guidance dropdown", () => {
+  const message = (id: string, runId: string | null, text: string, status: SwarmPlannerMessage["status"] = "delivered"): SwarmPlannerMessage => ({
+    id, runId, text, status, taskId: null, source: "person", createdAt: "2026-09-04T12:00:00.000Z",
+  });
+  const earlier = message("m1", "run-1", "Keep the existing API.");
+  const current = message("m2", "run-2", "Focus on the checkout.");
+  const queued = message("m3", "run-2", "Cover refunds too.", "queued");
+  const html = renderToStaticMarkup(createElement(SwarmRunOutput, {
+    client: {} as BentoClient, runId: "run-2", agentName: "Planner agent",
+    plannerRunIds: ["run-1", "run-2"], plannerMessages: [earlier, current, queued],
+  }));
+  assert.doesNotMatch(html, /Earlier guidance|<details/);
+  assert.ok(html.indexOf(earlier.text) < html.indexOf(current.text));
+  assert.ok(html.indexOf(current.text) < html.indexOf(queued.text));
+  assert.equal(html.split(queued.text).length - 1, 1, "a queued message bound to this run appears only once");
+
+  const conversation = renderToStaticMarkup(createElement("div", null,
+    createElement(RunConversationRows, {
+      runId: "run-1", agentName: "Planner agent", messages: [earlier],
+      events: [{ type: "message", role: "assistant", text: "I will preserve the API." }],
+    }),
+    createElement(RunConversationRows, {
+      runId: "run-2", agentName: "Planner agent", messages: [current],
+      events: [
+        { type: "message", role: "assistant", text: "The initial plan is ready." },
+        { type: "message", role: "user", text: current.text },
+        { type: "message", role: "assistant", text: "I will update the checkout plan." },
+      ],
+    }),
+  ));
+  const ordered = [earlier.text, "I will preserve the API.", "The initial plan is ready.", current.text, "I will update the checkout plan."];
+  for (let i = 1; i < ordered.length; i++) assert.ok(conversation.indexOf(ordered[i - 1]!) < conversation.indexOf(ordered[i]!));
+  assert.equal(conversation.split(current.text).length - 1, 1, "a live turn's echoed guidance keeps its place, without a duplicate");
 });
 
 test("a checkout failure offers retry and keeps its error in technical details", () => {

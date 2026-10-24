@@ -541,7 +541,9 @@ export function SwarmBoard({
           api={swarmApi}
           swarmId={selectedId}
           swarmStatus={detail.swarm.status}
+          key={selectedId}
           runId={detail.plannerRun.id}
+          plannerRunIds={detail.plannerRunIds}
           runStatus={detail.plannerRun.status}
           runError={detail.plannerRun.error}
           agentName={detail.plannerRun.agent?.name ?? "Planner agent"}

@@ -416,6 +416,8 @@ export interface SwarmDetail {
   agentTimeMs?: number;
   /** The planner's latest attempt, shown above the plan in both views. */
   plannerRun?: SwarmPlannerRun | null;
+  /** All planner runs, oldest first, for one continuous conversation. */
+  plannerRunIds?: string[];
   landings: SwarmLanding[];
   /** Counts include rows omitted from the short merge queue history. */
   landingSummary?: { total: number; committed: number };
