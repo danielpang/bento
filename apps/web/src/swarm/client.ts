@@ -719,6 +719,7 @@ export interface WireDetail {
     agentStartedAt?: string | null;
   }[];
   plannerRun?: SwarmPlannerRun | null;
+  plannerRuns?: SwarmDetail["plannerRuns"];
   /**
    * Optional, because a detail from a server that predates the merge
    * queue has none and a panel that read undefined.length would take
@@ -1204,6 +1205,7 @@ export function toDetail(detail: WireDetail): SwarmDetail {
     tasks: detail.tasks.map(toTask),
     agentTimeMs: Number(detail.agentTimeMs ?? 0),
     plannerRun: detail.plannerRun ?? null,
+    plannerRuns: detail.plannerRuns,
     landings: (detail.landings ?? []).map(toLanding),
     landingSummary: detail.landingSummary,
     branchCheckout: detail.branchCheckout,
