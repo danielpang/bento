@@ -457,7 +457,7 @@ export class SpriteDriver implements SandboxDriver {
     // in-process test agent asks for none, and "installed ()" reads as
     // a bug in the transcript the person is watching.
     const named = binaries.length > 0 ? ` (${binaries.join(", ")})` : "";
-    let toolchain: { stdout: string };
+    let toolchain: { stdout: string; stderr: string };
     if (toolsPresent) {
       await say(`Agent tools are already installed${named}.`);
       toolchain = await runScript(sprite, agentToolchainScript(binaries));
@@ -481,6 +481,11 @@ export class SpriteDriver implements SandboxDriver {
       await say(
         `Could not install ${missing.join(", ")} in this sandbox. Cards that use those agents will fail to start until an install succeeds, which the next run tries again.`,
       );
+      try {
+        await spec.onToolchainMissing?.({ missing, output: toolchain.stderr });
+      } catch (err) {
+        console.warn(`could not report the missing agent tools on ${name}:`, err);
+      }
     }
     });
 
