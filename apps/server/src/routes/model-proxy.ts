@@ -362,9 +362,9 @@ async function readCredentials(
     );
   const keyRow = rows.find((row) => row.name === provider.key);
   if (!keyRow) return null;
-  const key = ctx.secretBox.decrypt(keyRow.ciphertext);
+  const key = ctx.secretBox.decrypt(keyRow.ciphertext, { kind: "org_secret", organizationId: grant.organizationId, name: keyRow.name });
   const baseRow = baseUrlKey ? rows.find((row) => row.name === baseUrlKey) : undefined;
-  const savedBase = baseRow ? ctx.secretBox.decrypt(baseRow.ciphertext).trim() || null : null;
+  const savedBase = baseRow ? ctx.secretBox.decrypt(baseRow.ciphertext, { kind: "org_secret", organizationId: grant.organizationId, name: baseRow.name }).trim() || null : null;
   return { key, savedBase };
 }
 

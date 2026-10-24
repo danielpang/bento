@@ -1,34 +1,97 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { SecretBox, maskSecret } from "./secrets.js";
+import { createCipheriv, createHash, randomBytes } from "node:crypto";
+import { SecretBox, SecretUnreadable, isLegacySecret, maskSecret, type SecretSlot } from "./secrets.js";
 
-test("a secret round trips and its ciphertext never contains the value", () => {
+const ORG_A: SecretSlot = { kind: "org_secret", organizationId: "org-a", name: "ANTHROPIC_API_KEY" };
+
+/** What the server wrote before values were sealed to their slot. */
+function legacyEncrypt(secret: string, plaintext: string): string {
+  const key = createHash("sha256").update(secret).digest();
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  const data = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
+  return [iv.toString("base64"), cipher.getAuthTag().toString("base64"), data.toString("base64")].join(":");
+}
+
+test("a secret round trips in its slot and its ciphertext never contains the value", () => {
   const box = new SecretBox("a".repeat(32));
   const plaintext = "sk-ant-super-secret-value";
-  const stored = box.encrypt(plaintext);
+  const stored = box.encrypt(plaintext, ORG_A);
 
   assert.doesNotMatch(stored, /super-secret/, "ciphertext must not leak the value");
-  assert.equal(box.decrypt(stored), plaintext);
+  assert.match(stored, /^v2:k0:[^:]+:[^:]+:[^:]*$/, "the versioned format names its key");
+  assert.equal(box.decrypt(stored, ORG_A), plaintext);
 });
 
 test("the same value encrypts differently each time", () => {
   const box = new SecretBox("a".repeat(32));
   // A fresh IV per encryption, so equal keys are not detectable by
   // comparing stored ciphertexts.
-  assert.notEqual(box.encrypt("same"), box.encrypt("same"));
+  assert.notEqual(box.encrypt("same", ORG_A), box.encrypt("same", ORG_A));
+});
+
+test("a value copied to another organization, name, row or member fails to decrypt", () => {
+  const box = new SecretBox("a".repeat(32));
+  const stored = box.encrypt("sk-ant-org-a", ORG_A);
+  const elsewhere: SecretSlot[] = [
+    { ...ORG_A, organizationId: "org-b" },
+    { ...ORG_A, organizationId: null },
+    { ...ORG_A, name: "OPENAI_API_KEY" },
+    { kind: "custom_provider_key", organizationId: "org-a", providerId: "ANTHROPIC_API_KEY" },
+  ];
+  for (const slot of elsewhere) {
+    assert.throws(() => box.decrypt(stored, slot), SecretUnreadable, JSON.stringify(slot));
+  }
+
+  const access: SecretSlot = { kind: "mcp_credential", organizationId: "org-a", serverId: "s1", userId: "u1", part: "access" };
+  const token = box.encrypt("oauth-access", access);
+  assert.equal(box.decrypt(token, access), "oauth-access");
+  assert.throws(() => box.decrypt(token, { ...access, userId: "u2" }), SecretUnreadable, "another member");
+  assert.throws(() => box.decrypt(token, { ...access, userId: null }), SecretUnreadable, "the team's row");
+  assert.throws(() => box.decrypt(token, { ...access, serverId: "s2" }), SecretUnreadable, "another server");
+  assert.throws(() => box.decrypt(token, { ...access, part: "refresh" }), SecretUnreadable, "the other column");
+});
+
+test("a null organization and a string one never encode alike", () => {
+  const box = new SecretBox("a".repeat(32));
+  const local = box.encrypt("v", { kind: "slack_bot_token", organizationId: null });
+  assert.throws(() => box.decrypt(local, { kind: "slack_bot_token", organizationId: "null" }), SecretUnreadable);
+  assert.throws(() => box.decrypt(local, { kind: "slack_bot_token", organizationId: "" }), SecretUnreadable);
 });
 
 test("a tampered secret fails to decrypt rather than returning garbage", () => {
   const box = new SecretBox("a".repeat(32));
-  const [iv, tag, data] = box.encrypt("original").split(":");
+  const [version, keyId, iv, tag, data] = box.encrypt("original", ORG_A).split(":");
   const flipped = Buffer.from(data!, "base64");
   flipped[0] = flipped[0]! ^ 0xff;
-  assert.throws(() => box.decrypt([iv, tag, flipped.toString("base64")].join(":")));
+  assert.throws(() => box.decrypt([version, keyId, iv, tag, flipped.toString("base64")].join(":"), ORG_A), SecretUnreadable);
+  // The key id is authenticated too, so it cannot be rewritten to pass.
+  assert.throws(() => box.decrypt([version, "k1", iv, tag, data].join(":"), ORG_A), SecretUnreadable);
+  assert.throws(() => box.decrypt(`${version}:${keyId}:${iv}:${tag}`, ORG_A), SecretUnreadable, "truncated");
 });
 
 test("a different key cannot read another key's secrets", () => {
-  const stored = new SecretBox("a".repeat(32)).encrypt("value");
-  assert.throws(() => new SecretBox("b".repeat(32)).decrypt(stored));
+  const stored = new SecretBox("a".repeat(32)).encrypt("value", ORG_A);
+  assert.throws(() => new SecretBox("b".repeat(32)).decrypt(stored, ORG_A), SecretUnreadable);
+});
+
+test("a legacy value is never read directly, only upgraded into the slot it is found in", () => {
+  const box = new SecretBox("a".repeat(32));
+  const legacy = legacyEncrypt("a".repeat(32), "sk-ant-legacy");
+  assert.equal(isLegacySecret(legacy), true);
+  // An attacker who can write rows could otherwise plant an unbound value.
+  assert.throws(() => box.decrypt(legacy, ORG_A), /legacy/);
+
+  const upgraded = box.upgradeLegacy(legacy, ORG_A);
+  assert.equal(isLegacySecret(upgraded), false);
+  assert.equal(box.decrypt(upgraded, ORG_A), "sk-ant-legacy");
+  assert.throws(() => box.decrypt(upgraded, { ...ORG_A, organizationId: "org-b" }), SecretUnreadable);
+
+  // A legacy value under another key stays unreadable; nothing is invented.
+  assert.throws(() => box.upgradeLegacy(legacyEncrypt("b".repeat(32), "x"), ORG_A), SecretUnreadable);
+  // And a current value is not "upgraded" again into a new slot.
+  assert.throws(() => box.upgradeLegacy(upgraded, { ...ORG_A, organizationId: "org-b" }), SecretUnreadable);
 });
 
 test("a short encryption key is refused rather than silently weakening", () => {
@@ -48,7 +111,7 @@ test("local mode derives a usable key from any data directory", async () => {
   for (const dataDir of ["/a", "~/.bento", "/very/long/path/to/a/data/directory/somewhere"]) {
     const derived = createHash("sha256").update(`bento-local:${dataDir}`).digest("hex");
     const box = new SecretBox(derived);
-    assert.equal(box.decrypt(box.encrypt("value")), "value");
+    assert.equal(box.decrypt(box.encrypt("value", ORG_A), ORG_A), "value");
   }
 });
 

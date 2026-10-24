@@ -163,7 +163,7 @@ before(async () => {
     slackTeamId: TEAM,
     slackTeamName: "Acme",
     botUserId: BOT,
-    encryptedBotToken: ctx.secretBox.encrypt("xoxb-test"),
+    encryptedBotToken: ctx.secretBox.encrypt("xoxb-test", { kind: "slack_bot_token", organizationId: null }),
     installedBy: userId,
   });
 });

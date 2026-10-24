@@ -101,7 +101,7 @@ export function customProviderRoutes(ctx: AppContext) {
       if (!found.permission.canManage) return c.json({ error: "only owners and admins can manage providers" }, 403);
       const apiKey = c.req.valid("json").apiKey;
       const [updated] = await db(c, ctx).update(customModelProviders)
-        .set({ encryptedApiKey: ctx.secretBox.encrypt(apiKey), keyHint: maskSecret(apiKey), updatedAt: new Date() })
+        .set({ encryptedApiKey: ctx.secretBox.encrypt(apiKey, { kind: "custom_provider_key", organizationId: found.provider.organizationId, providerId: found.provider.id }), keyHint: maskSecret(apiKey), updatedAt: new Date() })
         .where(and(eq(customModelProviders.id, found.provider.id), found.permission.where)).returning();
       return c.json(publicProvider(updated!));
     })

@@ -230,7 +230,7 @@ async function saveSecret(org: string | null, name: string, value: string) {
     ownerId: userId,
     organizationId: org,
     name,
-    ciphertext: ctx.secretBox.encrypt(value),
+    ciphertext: ctx.secretBox.encrypt(value, { kind: "org_secret", organizationId: org, name }),
     hint: "",
   });
 }
@@ -838,7 +838,7 @@ const breakKey = async () => {
 const mendKey = async () => {
   await ctx.db
     .update(secrets)
-    .set({ ciphertext: ctx.secretBox.encrypt("sk-ant-local-org") })
+    .set({ ciphertext: ctx.secretBox.encrypt("sk-ant-local-org", { kind: "org_secret", organizationId: null, name: "ANTHROPIC_API_KEY" }) })
     .where(and(isNull(secrets.organizationId), eq(secrets.name, "ANTHROPIC_API_KEY")));
 };
 

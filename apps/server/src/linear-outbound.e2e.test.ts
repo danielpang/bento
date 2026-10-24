@@ -131,7 +131,7 @@ before(async () => {
   await db.insert(linearConnections).values({
     ownerId: userId,
     organizationId: null,
-    encryptedApiKey: ctx.secretBox.encrypt("lin_api_test"),
+    encryptedApiKey: ctx.secretBox.encrypt("lin_api_test", { kind: "linear_api_key", organizationId: null }),
   });
 
   // Where cards go is the project's own setting: the unmapped project

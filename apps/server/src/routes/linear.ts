@@ -57,7 +57,7 @@ export function linearRoutes(ctx: AppContext) {
     const values = {
       ownerId: actor(c),
       organizationId: access.organizationId,
-      encryptedApiKey: ctx.secretBox.encrypt(apiKey),
+      encryptedApiKey: ctx.secretBox.encrypt(apiKey, { kind: "linear_api_key", organizationId: access.organizationId }),
       hint: maskSecret(apiKey),
       updatedAt: new Date(),
     };
@@ -80,7 +80,7 @@ export function linearRoutes(ctx: AppContext) {
         const webhookId = await client.webhookCreate({ url, secret });
         await db(c, ctx)
           .update(linearConnections)
-          .set({ webhookId, encryptedWebhookSecret: ctx.secretBox.encrypt(secret), updatedAt: new Date() })
+          .set({ webhookId, encryptedWebhookSecret: ctx.secretBox.encrypt(secret, { kind: "linear_webhook_secret", organizationId: access.organizationId }), updatedAt: new Date() })
           .where(orgFilter(linearConnections.organizationId, access.organizationId));
         webhook = true;
       } catch {

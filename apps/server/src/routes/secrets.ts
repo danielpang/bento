@@ -69,15 +69,16 @@ export function secretRoutes(ctx: AppContext) {
         return c.json({ error: "only organization owners and admins can manage credentials" }, 403);
       }
       const body = c.req.valid("json");
+      const slot = { kind: "org_secret" as const, organizationId: resolved.organizationId, name: body.name };
       const values = {
         ownerId: actor(c),
         organizationId: resolved.organizationId,
         name: body.name,
-        ciphertext: ctx.secretBox.encrypt(body.value),
+        ciphertext: ctx.secretBox.encrypt(body.value, slot),
         hint: maskSecret(body.value),
       };
       const update = {
-        ciphertext: ctx.secretBox.encrypt(body.value),
+        ciphertext: ctx.secretBox.encrypt(body.value, slot),
         hint: maskSecret(body.value),
         updatedAt: new Date(),
       };

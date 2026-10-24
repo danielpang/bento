@@ -105,7 +105,7 @@ export function slackRoutes(ctx: AppContext) {
       slackTeamId: exchanged.teamId,
       slackTeamName: exchanged.teamName,
       botUserId: exchanged.botUserId,
-      encryptedBotToken: ctx.secretBox.encrypt(exchanged.botToken),
+      encryptedBotToken: ctx.secretBox.encrypt(exchanged.botToken, { kind: "slack_bot_token", organizationId: state.organizationId }),
       installedBy: actor(c),
       updatedAt: new Date(),
     };
