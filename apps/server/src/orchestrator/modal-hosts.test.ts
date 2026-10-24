@@ -72,26 +72,24 @@ test("every proxied provider has its own segment and an https upstream", () => {
   }
 });
 
-function fakeCtx(mode: "local" | "multi", base = "https://bento.example"): AppContext {
+function fakeCtx(mode: "local" | "multi", base = "https://bento.example", modelProxy?: boolean): AppContext {
   return {
-    env: { BENTO_MODE: mode, BETTER_AUTH_URL: base },
+    env: { BENTO_MODE: mode, BETTER_AUTH_URL: base, BENTO_MODEL_PROXY: modelProxy },
     drivers: singleDriver({ provider: "modal", workspace: "clone" } as SandboxDriver),
   } as unknown as AppContext;
 }
 
-test("the plan proxies the keys an adapter can send through it, in multi mode only", async () => {
+test("the plan proxies the keys an adapter can send through it, in local mode unless turned off", async () => {
   const modal = { provider: "modal", workspace: "clone" } as SandboxDriver;
   const env = { ANTHROPIC_API_KEY: "sk", CLAUDE_CODE_OAUTH_TOKEN: "" };
-  assert.deepEqual(await planModelProxy(fakeCtx("multi"), claudeCodeAdapter, modal, env), {
-    keys: ["ANTHROPIC_API_KEY"],
-    gatewayBase: "https://bento.example",
-    unreachableBaseUrls: [],
-  });
-  assert.deepEqual(await planModelProxy(fakeCtx("local"), claudeCodeAdapter, modal, env), {
-    keys: [],
-    gatewayBase: null,
-    unreachableBaseUrls: [],
-  });
+  const proxied = { keys: ["ANTHROPIC_API_KEY"], gatewayBase: "https://bento.example", unreachableBaseUrls: [] };
+  const none = { keys: [], gatewayBase: null, unreachableBaseUrls: [] };
+  assert.deepEqual(await planModelProxy(fakeCtx("multi"), claudeCodeAdapter, modal, env), proxied);
+  assert.deepEqual(await planModelProxy(fakeCtx("multi", undefined, false), claudeCodeAdapter, modal, env), proxied, "multi mode cannot turn it off");
+  assert.deepEqual(await planModelProxy(fakeCtx("local"), claudeCodeAdapter, modal, env), proxied, "on by default in local mode");
+  assert.deepEqual(await planModelProxy(fakeCtx("local", undefined, false), claudeCodeAdapter, modal, env), none);
+  const host = { provider: "local-process", workspace: "host" } as SandboxDriver;
+  assert.deepEqual(await planModelProxy(fakeCtx("local", undefined, true), claudeCodeAdapter, host, env), none, "a local process is never proxied in local mode");
   assert.deepEqual((await planModelProxy(fakeCtx("multi"), cursorAdapter, modal, { CURSOR_API_KEY: "c" })).keys, []);
   assert.deepEqual((await planModelProxy(fakeCtx("multi"), claudeCodeAdapter, modal, { CLAUDE_CODE_OAUTH_TOKEN: "t" })).keys, []);
   const local = { provider: "local-process", workspace: "host" } as SandboxDriver;

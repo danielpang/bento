@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { drivesRuns, loadEnv, logExportTarget, parseOtlpHeaders, posthogApiKey, runSlots } from "./env.js";
+import { drivesRuns, loadEnv, logExportTarget, modelProxyEnabled, parseOtlpHeaders, posthogApiKey, runSlots } from "./env.js";
 
 test("posthogApiKey is null when the key is unset", () => {
   assert.equal(posthogApiKey(loadEnv({ BENTO_MODE: "multi" })), null);
@@ -110,4 +110,25 @@ test("a web process that sets a slot count is refused at boot", () => {
     () => loadEnv({ DATABASE_URL: "postgres://x", BENTO_MAX_CONCURRENT_RUNS: "0" } as NodeJS.ProcessEnv),
     /BENTO_MAX_CONCURRENT_RUNS/,
   );
+});
+
+test("the model proxy is on in local mode unless BENTO_MODEL_PROXY is false", () => {
+  assert.equal(modelProxyEnabled(loadEnv({ BENTO_MODE: "local" })), true, "on by default");
+  assert.equal(modelProxyEnabled(loadEnv({ BENTO_MODE: "local", BENTO_MODEL_PROXY: "true" })), true);
+  assert.equal(modelProxyEnabled(loadEnv({ BENTO_MODE: "local", BENTO_MODEL_PROXY: "" })), true, "empty reads as unset");
+  assert.equal(modelProxyEnabled(loadEnv({ BENTO_MODE: "local", BENTO_MODEL_PROXY: "false" })), false);
+  assert.throws(() => loadEnv({ BENTO_MODE: "local", BENTO_MODEL_PROXY: "off" }), "a value it does not know is refused");
+});
+
+test("BENTO_MODEL_PROXY cannot turn the proxy off in multi mode", () => {
+  assert.throws(
+    () => loadEnv({ BENTO_MODE: "multi", BENTO_MODEL_PROXY: "false" }),
+    /local mode only/,
+    "refused at boot rather than quietly ignored",
+  );
+  assert.equal(modelProxyEnabled(loadEnv({ BENTO_MODE: "multi" })), true);
+  assert.equal(modelProxyEnabled(loadEnv({ BENTO_MODE: "multi", BENTO_MODEL_PROXY: "true" })), true);
+  // And an environment that got past loadEnv some other way (a test
+  // switching modes, a context built by hand) is still always proxied.
+  assert.equal(modelProxyEnabled({ BENTO_MODE: "multi", BENTO_MODEL_PROXY: false }), true);
 });

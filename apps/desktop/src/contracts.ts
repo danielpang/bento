@@ -15,6 +15,12 @@ export interface DesktopSettings {
   sandboxImage: string;
   /** The local user's beta features switch, written to the local server on each start. */
   betaFeatures: boolean;
+  /**
+   * Whether local Bento keeps model API keys out of agent sandboxes, by
+   * sending their model calls through its model proxy. Written to the
+   * local server on each start; on unless the user turned it off.
+   */
+  modelProxy: boolean;
 }
 
 export interface DesktopStatus {
@@ -28,7 +34,7 @@ export interface DesktopStatus {
    * shows them and locks Advanced settings, since Start reopens the
    * running local Bento rather than restarting it.
    */
-  local?: Pick<DesktopSettings, "dataDir" | "databaseUrl" | "sandbox" | "sandboxImage" | "betaFeatures">;
+  local?: Pick<DesktopSettings, "dataDir" | "databaseUrl" | "sandbox" | "sandboxImage" | "betaFeatures" | "modelProxy">;
 }
 
 export type RuntimeCommand =

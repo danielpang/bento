@@ -80,6 +80,9 @@ services:
       - BENTO_WEB_DIR=/app/apps/web/dist
       - BENTO_SANDBOX_DRIVER=${BENTO_SANDBOX_DRIVER:-docker}
       - BENTO_SANDBOX_IMAGE=${BENTO_SANDBOX_IMAGE:-bento-sandbox:dev}
+      # Local mode's model proxy, on unless set to false. Named without a
+      # value, so it reaches the server only when .env sets it.
+      - BENTO_MODEL_PROXY
       # Worktrees live here. The path is identical inside and out, which
       # is what makes the sandbox mounts below resolve.
       - BENTO_DATA_DIR=${BENTO_STATE_DIR:-/var/tmp/bento}

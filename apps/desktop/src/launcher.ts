@@ -11,8 +11,18 @@ const actions: Record<DesktopMode, { id: string; label: string }> = {
 let pressed: DesktopMode = "local";
 let runningLocal: DesktopStatus["local"];
 
+/**
+ * The sandbox choice decides what the model proxy box means: a local
+ * process has no sandbox to keep keys out of, so the box is disabled
+ * there with a note, and its checked state is left alone, so choosing
+ * Docker again brings back what the user had.
+ */
 function renderIsolation() {
-  element("isolation-note").hidden = element<HTMLSelectElement>("sandbox").value !== "local-process";
+  const local = element<HTMLSelectElement>("sandbox").value === "local-process";
+  element("isolation-note").hidden = !local;
+  element("docker-note").hidden = local;
+  element("model-proxy-note").hidden = !local;
+  field("model-proxy").disabled = local || Boolean(runningLocal);
 }
 
 function renderStatus(status: DesktopStatus) {
@@ -33,7 +43,8 @@ function renderStatus(status: DesktopStatus) {
 /**
  * While local Bento runs, Advanced settings show what it runs with and
  * cannot be changed: Start opens another window on it, it does not
- * restart it, and the beta box is read only when it starts.
+ * restart it, and the beta and model proxy boxes are read only when it
+ * starts.
  */
 function renderLocal(local: DesktopStatus["local"]) {
   runningLocal = local;
@@ -44,11 +55,13 @@ function renderLocal(local: DesktopStatus["local"]) {
     field("sandbox-image").value = local.sandboxImage;
     element<HTMLSelectElement>("sandbox").value = local.sandbox;
     field("beta-features").checked = local.betaFeatures;
+    field("model-proxy").checked = local.modelProxy;
     renderIsolation();
   }
   for (const id of ["beta-features", "data-dir", "choose-directory", "database-url", "sandbox-image", "sandbox"]) {
     element<HTMLInputElement>(id).disabled = locked;
   }
+  renderIsolation();
   element("local-lock-note").hidden = !locked;
 }
 
@@ -62,6 +75,7 @@ async function start() {
   field("sandbox-image").value = settings.sandboxImage;
   element<HTMLSelectElement>("sandbox").value = settings.sandbox;
   field("beta-features").checked = settings.betaFeatures;
+  field("model-proxy").checked = settings.modelProxy;
   pressed = settings.mode;
   element("sandbox").addEventListener("change", renderIsolation);
   renderIsolation();
@@ -76,6 +90,7 @@ async function start() {
       databaseUrl: field("database-url").value, sandboxImage: field("sandbox-image").value,
       sandbox: element<HTMLSelectElement>("sandbox").value === "local-process" ? "local-process" : "docker",
       betaFeatures: field("beta-features").checked,
+      modelProxy: field("model-proxy").checked,
     };
     void bridge.connect(next).catch(showError);
   });

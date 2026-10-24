@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 
 /**
- * Where the board data lives, and where agents run. These are separate
+ * Where the board data lives, and which machine runs the agents. These are separate
  * choices, which is what gives the three useful combinations:
  *
  *   client  server data,  server agents   thin client
@@ -166,7 +166,7 @@ Commands
 Options
   --server <url>       Server holding your organization, projects, and history.
                        Without it, bento runs its own server on this machine.
-  --run-agents <where> Where agents run: local or server.
+  --run-agents <host>  Which machine runs agents: local or server.
                        Defaults to local without --server, server with it.
   --sandbox <driver>   How local agents are isolated: docker (default) or
                        local-process. local-process gives agents no isolation,

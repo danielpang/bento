@@ -1016,8 +1016,8 @@ one trusted user and no tenant boundary.
 
 ## Provider keys reach a hosted sandbox only as run tokens
 
-In multi mode a provider key an adapter can send through the model
-proxy never enters the sandbox. `proxyModelCredentials`
+In multi mode (and in local mode on Docker, below) a provider key an
+adapter can send through the model proxy never enters the sandbox. `proxyModelCredentials`
 (`orchestrator/model-proxy-env.ts`) replaces each one, under its own
 name, with the run's grant token (the MCP gateway's `bmg_` grant, one
 row and one token per run, its `model_credentials` naming the secrets
@@ -1085,6 +1085,43 @@ it against the same rule before the grant is minted: a key whose saved
 base URL is plain http or private is not proxied at all, reaches the
 sandbox with that base URL as before the proxy, and the transcript
 says why in one sentence.
+
+Local mode proxies too, unless `BENTO_MODEL_PROXY` is "false" (the
+Mac launcher's "Model proxy" box). Read
+it only through `modelProxyEnabled` in `env.ts`, which answers true in
+multi mode whatever the variable says; `loadEnv` refuses "false" there
+at boot rather than ignoring it, because a setting that silently does
+not take effect is how a deployment ends up misconfigured. Three local
+rules, all in `planModelProxy` and `proxyModelCredentials`:
+
+- The local process driver is never proxied: its agent is the user, on
+  the host, and reads the environment and files the key came from.
+- A local run asks its sandbox to reach the proxy's readiness route
+  (`GET /api/model-proxy`, `probeModelProxy`: one curl or wget, three
+  seconds) before any key is swapped, once per run, and keeps its raw
+  keys with one transcript sentence (`MODEL_PROXY_UNREACHABLE_NOTE`)
+  when it cannot. A local server binds 127.0.0.1, which Docker Desktop
+  and OrbStack forward `host.docker.internal` to and Linux Docker does
+  not, and the proxy must never be what leaves a local run without its
+  model. Do not widen the bind address to make the probe pass. Multi
+  mode is not probed and never falls back.
+- A saved base URL that names this machine (`namesThisMachine`:
+  loopback, `host.docker.internal`) is not proxied, because it is a
+  different machine inside the sandbox than it is to the server. Any
+  other local base URL, plain http and private included, is proxied:
+  `safeFetch`'s refusals protect tenants, and in local mode it allows
+  them already.
+
+The proxy reads a key from the process environment in exactly one
+case: the server is in local mode and the grant has no organization
+(`localEnvironmentFor` in `routes/model-proxy.ts`), with resolveAgentEnv's
+precedence (a stored secret with no organization wins, the environment
+stands in when there is none or it cannot be decrypted). A multi mode
+server never reads `process.env` for any grant, with or without an
+organization: those are the operator's keys, and "Agent credentials
+belong to the organization" holds for the proxy as for the sandbox. A
+grant with no organization reads only rows with no organization, and an
+organization's grant only its own.
 
 Billing follows whose failure it was. When the proxy itself fails (a
 lookup, a decryption, an exception in its own code) it stamps

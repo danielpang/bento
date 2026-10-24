@@ -367,7 +367,8 @@ export interface AgentAdapter {
   /**
    * The provider keys this tool can reach through Bento's model proxy.
    *
-   * In multi mode a proxied key never enters the sandbox: the run is
+   * In multi mode (and in local mode on Docker, unless the user turned
+   * the proxy off) a proxied key never enters the sandbox: the run is
    * given a run-scoped token under the key's own name, and the
    * provider's base URL variable (ANTHROPIC_BASE_URL, OPENAI_BASE_URL,
    * OPENROUTER_BASE_URL, AI_GATEWAY_BASE_URL, ...) is the proxy's

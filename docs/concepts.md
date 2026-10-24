@@ -45,4 +45,4 @@ Table-level detail: [diagrams/database_schema.md](./diagrams/database_schema.md)
 
 ## Security
 
-On a hosted server, a sandbox holds a proxy token instead of the organization's model keys, never holds an MCP credential, and can be cut off from the internet by a team owner or admin. See [security.md](./security.md).
+On hosted Bento, a sandbox contains a proxy token instead of the organization's model keys, never stores an MCP credential, and can be cut off from the internet by a team owner or admin. See [security.md](./security.md).
