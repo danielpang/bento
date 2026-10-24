@@ -395,15 +395,23 @@ if [ -z "$needed" ]; then exit 0; fi
 # all this is: it covers a blip, and nothing longer. The failure that
 # actually happens, opencode's GitHub API rate limit, lasts an hour and
 # is handled by not depending on that API at all. See below.
+#
+# What the fetch and the installer print goes to a log rather than to
+# this script's output, and only a failure that outlasts the retries
+# prints the log's last lines, each led by the CLI's name. Provisioning
+# sends this script's stderr to error tracking when a CLI is still
+# missing at the end, so the installer's own reason has to be in it,
+# and not buried under the progress bars of the installers that worked.
 install_from() {
   name=$1
   url=$2
   runner=$3
   script=/tmp/bento-install-$name
+  log=/tmp/bento-install-$name.log
   attempt=1
   while [ "$attempt" -le 3 ]; do
-    if curl -fsSL "$url" -o "$script" && "$runner" "$script"; then
-      rm -f "$script"
+    if { curl -fsSL "$url" -o "$script" && "$runner" "$script"; } >"$log" 2>&1; then
+      rm -f "$script" "$log"
       return 0
     fi
     attempt=$((attempt + 1))
@@ -411,6 +419,8 @@ install_from() {
   done
   rm -f "$script"
   echo "bento: $name install failed" >&2
+  tail -n 20 "$log" 2>/dev/null | sed "s|^|bento: $name: |" >&2 || true
+  rm -f "$log"
   return 1
 }
 

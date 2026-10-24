@@ -174,6 +174,71 @@ export function reportSandboxProvisionFailed(
 }
 
 /**
+ * An agent CLI the sandbox was asked for could not be installed.
+ *
+ * Error tracking rather than an event, and one exception per CLI so
+ * each groups on its own name: a vendor's installer that breaks fails
+ * the same way on every sandbox, and grouped by CLI that is one issue
+ * whose count climbs, not a row in each affected run's transcript. The
+ * message names the CLI and the provider and nothing else, which is
+ * what keeps it groupable. `output` carries the installer's last
+ * lines, the reason itself; until this the toolchain script's stderr
+ * was read by nothing, and a Codex installer that failed every
+ * reinstall from one day to the next left no record of why.
+ */
+export class ToolchainInstallError extends Error {
+  constructor(
+    readonly cli: string,
+    readonly provider: string,
+  ) {
+    super(`Could not install ${cli} in a ${provider} sandbox`);
+    this.name = "ToolchainInstallError";
+  }
+}
+
+export interface ToolchainInstallFailed {
+  provider: string;
+  /** The CLIs still missing, as the toolchain script names them. */
+  missing: readonly string[];
+  /** The toolchain script's stderr. */
+  output: string;
+  projectId: string;
+  organizationId: string | null;
+  userId: string | null;
+  owner: SandboxOwner;
+  run?: SandboxRun | null;
+}
+
+/** The end of a script's output, short enough to ride on an exception. */
+export function toolchainOutputTail(output: string): string {
+  const tail = output.trim().split("\n").slice(-60).join("\n");
+  return tail.length > 6_000 ? tail.slice(-6_000) : tail;
+}
+
+export function reportToolchainInstallFailed(
+  analytics: Analytics | null | undefined,
+  info: ToolchainInstallFailed,
+): void {
+  const output = toolchainOutputTail(info.output);
+  for (const cli of info.missing) {
+    try {
+      analytics?.captureException(new ToolchainInstallError(cli, info.provider), info.userId, info.organizationId, {
+        source: "agent_toolchain_install",
+        provider: info.provider,
+        cli,
+        missing: info.missing.join(" "),
+        ...(output ? { output } : {}),
+        project_id: info.projectId,
+        ...runProperties(info.run),
+        ...runOwnerProperties(info.owner),
+      });
+    } catch (err) {
+      console.warn(`could not record a failed ${cli} install on ${info.provider}:`, err);
+    }
+  }
+}
+
+/**
  * A run's sandbox was provisioned and its agent has come up in it.
  *
  * One event per run whose agent started, timed from the moment the

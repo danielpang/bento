@@ -4,10 +4,12 @@ import { recordingAnalytics } from "../test-analytics.js";
 import {
   reportSandboxProvisioned,
   reportSandboxReady,
+  reportToolchainInstallFailed,
   runOwnerProperties,
   sandboxOrigin,
   SANDBOX_PROVISIONED_EVENT,
   SANDBOX_READY_EVENT,
+  ToolchainInstallError,
 } from "./sandbox-metrics.js";
 
 test("a provisioned sandbox is one PostHog event naming the provider and whether it was a fallback", () => {
@@ -268,4 +270,51 @@ test("a clock that went backwards never reports a negative wait, and a throw sta
       },
     ),
   );
+});
+
+test("a CLI that could not be installed is one exception per CLI, carrying the installer's output", () => {
+  const { analytics, events, exceptions } = recordingAnalytics();
+  reportToolchainInstallFailed(analytics, {
+    provider: "sprite",
+    missing: ["codex", "opencode"],
+    output: "bento: codex install failed\nbento: codex: error: release metadata unreadable\n",
+    projectId: "project-1",
+    organizationId: "org-1",
+    userId: "user-1",
+    owner: { swarmId: "swarm-1", swarmTaskId: "task-1" },
+    run: { id: "run-1", role: "worker", type: "swarm" },
+  });
+
+  assert.equal(events.length, 0);
+  assert.equal(exceptions.length, 2);
+  const [codex, opencode] = exceptions;
+  assert.ok(codex?.error instanceof ToolchainInstallError);
+  // The message names the CLI and the provider only, so each groups as one issue.
+  assert.equal(codex?.error.message, "Could not install codex in a sprite sandbox");
+  assert.equal(opencode?.error.message, "Could not install opencode in a sprite sandbox");
+  assert.equal(codex?.userId, "user-1");
+  assert.deepEqual(codex?.properties, {
+    source: "agent_toolchain_install",
+    provider: "sprite",
+    cli: "codex",
+    missing: "codex opencode",
+    output: "bento: codex install failed\nbento: codex: error: release metadata unreadable",
+    project_id: "project-1",
+    run_id: "run-1",
+    role: "worker",
+    run_type: "swarm",
+    swarm_id: "swarm-1",
+    swarm_task_id: "task-1",
+  });
+
+  // No analytics client, nothing to do and nothing thrown.
+  reportToolchainInstallFailed(null, {
+    provider: "sprite",
+    missing: ["codex"],
+    output: "",
+    projectId: "project-1",
+    organizationId: null,
+    userId: null,
+    owner: { featureId: "feature-1" },
+  });
 });
