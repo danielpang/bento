@@ -158,7 +158,11 @@ async function exchangeCode(ctx: AppContext, c: Context, params: Record<string, 
 
   let bundle: { access: string; refresh: string };
   try {
-    bundle = JSON.parse(ctx.secretBox.decrypt(row.tokenBundle)) as { access: string; refresh: string };
+    bundle = JSON.parse(ctx.secretBox.decrypt(row.tokenBundle, {
+      kind: "mcp_oauth_code",
+      organizationId: row.organizationId,
+      connectionId: row.connectionId,
+    })) as { access: string; refresh: string };
   } catch {
     await ctx.db.delete(mcpOAuthCodes).where(eq(mcpOAuthCodes.id, row.id));
     return c.json({ error: "invalid_grant" }, 400);
@@ -370,7 +374,11 @@ export function mcpOAuthConsentRoutes(ctx: AppContext) {
         resource: request.resource,
         connectionId: row.id,
         organizationId: access.organizationId,
-        tokenBundle: ctx.secretBox.encrypt(JSON.stringify({ access: accessToken.raw, refresh: refreshToken.raw })),
+        tokenBundle: ctx.secretBox.encrypt(JSON.stringify({ access: accessToken.raw, refresh: refreshToken.raw }), {
+          kind: "mcp_oauth_code",
+          organizationId: row.organizationId,
+          connectionId: row.id,
+        }),
         expiresAt: new Date(Date.now() + AUTH_TTL_MS),
       });
       await tx.delete(mcpOAuthRequests).where(eq(mcpOAuthRequests.id, request.id));

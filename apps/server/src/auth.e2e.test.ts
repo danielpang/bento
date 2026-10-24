@@ -1767,7 +1767,7 @@ test("removing a member deletes their per-user MCP credentials", async () => {
     organizationId: org.id,
     userId: leaverRow!.id,
     kind: "oauth",
-    encryptedSecret: ctx.secretBox.encrypt("leaver-token"),
+    encryptedSecret: ctx.secretBox.encrypt("leaver-token", { kind: "mcp_credential", organizationId: org.id, serverId: server.id, userId: leaverRow!.id, part: "access" }),
   });
 
   await jsonPost(
@@ -3587,8 +3587,8 @@ test("the Linear webhook demands a valid signature", async () => {
   await ctx.db.insert(linearConnections).values({
     ownerId: hookUser.id,
     organizationId: null,
-    encryptedApiKey: ctx.secretBox.encrypt("lin_api_test"),
-    encryptedWebhookSecret: ctx.secretBox.encrypt(secret),
+    encryptedApiKey: ctx.secretBox.encrypt("lin_api_test", { kind: "linear_api_key", organizationId: null }),
+    encryptedWebhookSecret: ctx.secretBox.encrypt(secret, { kind: "linear_webhook_secret", organizationId: null }),
     webhookId: "wh-1",
   });
   try {

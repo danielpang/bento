@@ -33,7 +33,7 @@ export function webhookRoutes(ctx: AppContext) {
 
       let secret: string;
       try {
-        secret = ctx.secretBox.decrypt(connection.encryptedWebhookSecret);
+        secret = ctx.secretBox.decrypt(connection.encryptedWebhookSecret, { kind: "linear_webhook_secret", organizationId: connection.organizationId });
       } catch {
         return c.json({ error: "webhooks not configured" }, 503);
       }

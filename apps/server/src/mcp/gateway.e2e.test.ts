@@ -171,7 +171,7 @@ async function makeServer(authType: "none" | "api_key", secret: string | null) {
       organizationId: null,
       userId: null,
       kind: "api_key",
-      encryptedSecret: ctx.secretBox.encrypt(secret),
+      encryptedSecret: ctx.secretBox.encrypt(secret, { kind: "mcp_credential", organizationId: null, serverId: server!.id, userId: null, part: "access" }),
       hint: "••••",
     });
   }
@@ -301,7 +301,7 @@ test("a personal server serves only its owner's run, with the owner's own creden
     organizationId: null,
     userId: ctx.userId,
     kind: "api_key",
-    encryptedSecret: ctx.secretBox.encrypt(SECRET),
+    encryptedSecret: ctx.secretBox.encrypt(SECRET, { kind: "mcp_credential", organizationId: null, serverId: server!.id, userId: ctx.userId, part: "access" }),
     hint: "••••",
   });
 
@@ -413,7 +413,7 @@ test("a per-user server with a null acting user is refused, even with an org row
     organizationId: null,
     userId: null, // an org row that must not be used for a user-scoped server
     kind: "oauth",
-    encryptedSecret: ctx.secretBox.encrypt(SECRET),
+    encryptedSecret: ctx.secretBox.encrypt(SECRET, { kind: "mcp_credential", organizationId: null, serverId: server!.id, userId: null, part: "access" }),
   });
   const token = await mintRunGrant(ctx, {
     runId,
@@ -475,8 +475,8 @@ test("an upstream 401 triggers one refresh and a retry, and the rotated refresh 
     }).returning();
     const [cred] = await ctx.db.insert(mcpCredentials).values({
       serverId: server!.id, organizationId: null, userId: null, kind: "oauth",
-      encryptedSecret: ctx.secretBox.encrypt("access-1"), // stale from the upstream's view after it rotates
-      encryptedRefreshToken: ctx.secretBox.encrypt("refresh-1"),
+      encryptedSecret: ctx.secretBox.encrypt("access-1", { kind: "mcp_credential", organizationId: null, serverId: server!.id, userId: null, part: "access" }), // stale from the upstream's view after it rotates
+      encryptedRefreshToken: ctx.secretBox.encrypt("refresh-1", { kind: "mcp_credential", organizationId: null, serverId: server!.id, userId: null, part: "refresh" }),
       // Not yet expired by our clock, so the gateway attaches it and
       // learns it is stale only from the upstream's 401. This exercises
       // the on-401 retry path specifically.
@@ -497,8 +497,8 @@ test("an upstream 401 triggers one refresh and a retry, and the rotated refresh 
     assert.equal(refreshCalls, 1, "exactly one refresh happened");
 
     const [after] = await ctx.db.select().from(mcpCredentials).where(eq(mcpCredentials.id, cred!.id));
-    assert.equal(ctx.secretBox.decrypt(after!.encryptedSecret), "access-2", "the new access token is stored");
-    assert.equal(ctx.secretBox.decrypt(after!.encryptedRefreshToken!), "refresh-rotated", "the rotated refresh token is stored");
+    assert.equal(ctx.secretBox.decrypt(after!.encryptedSecret, { kind: "mcp_credential", organizationId: null, serverId: server!.id, userId: null, part: "access" }), "access-2", "the new access token is stored");
+    assert.equal(ctx.secretBox.decrypt(after!.encryptedRefreshToken!, { kind: "mcp_credential", organizationId: null, serverId: server!.id, userId: null, part: "refresh" }), "refresh-rotated", "the rotated refresh token is stored");
   } finally {
     rotating.close();
     tokenEndpoint.close();
@@ -535,8 +535,8 @@ test("two concurrent 401s do a single refresh (advisory lock)", async () => {
     }).returning();
     await ctx.db.insert(mcpCredentials).values({
       serverId: server!.id, organizationId: null, userId: null, kind: "oauth",
-      encryptedSecret: ctx.secretBox.encrypt("conc-1"),
-      encryptedRefreshToken: ctx.secretBox.encrypt("conc-refresh-1"),
+      encryptedSecret: ctx.secretBox.encrypt("conc-1", { kind: "mcp_credential", organizationId: null, serverId: server!.id, userId: null, part: "access" }),
+      encryptedRefreshToken: ctx.secretBox.encrypt("conc-refresh-1", { kind: "mcp_credential", organizationId: null, serverId: server!.id, userId: null, part: "refresh" }),
       // Already expired, so both concurrent requests proactively refresh
       // in resolveTarget: the in-process single flight must still collapse
       // them to one token call.

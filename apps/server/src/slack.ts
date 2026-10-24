@@ -44,7 +44,7 @@ export async function slackClientFor(
   connection: SlackConnectionRow,
 ): Promise<SlackClient | null> {
   try {
-    return new SlackClient(ctx.secretBox.decrypt(connection.encryptedBotToken));
+    return new SlackClient(ctx.secretBox.decrypt(connection.encryptedBotToken, { kind: "slack_bot_token", organizationId: connection.organizationId }));
   } catch {
     return null;
   }

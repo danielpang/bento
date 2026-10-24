@@ -4,6 +4,7 @@ import { missingOllamaCredentials, ollamaCredentialsOnly, ollamaUrlFromSandbox }
 import { secrets } from "@bento/db";
 import type { SandboxDriver } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
+import { unreadableReason } from "../secrets.js";
 
 /**
  * The environment an agent runs with.
@@ -64,10 +65,13 @@ export async function resolveAgentEnv(
     );
   for (const row of rows) {
     try {
-      env[row.name] = ctx.secretBox.decrypt(row.ciphertext);
-    } catch {
-      // A secret encrypted with a rotated key is treated as missing,
-      // which surfaces as a clear error rather than a broken agent.
+      env[row.name] = ctx.secretBox.decrypt(row.ciphertext, { kind: "org_secret", organizationId: row.organizationId, name: row.name });
+    } catch (err) {
+      // A secret this server cannot read (another key, or a value that
+      // was moved from another row) is treated as missing, which
+      // surfaces as a clear error rather than a broken agent. Said in
+      // the log, so a moved value is not mistaken for a key never saved.
+      console.warn(`stored secret ${row.name} (organization ${row.organizationId ?? "local"}) could not be read: ${unreadableReason(err)}`);
     }
   }
 

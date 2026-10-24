@@ -6,7 +6,7 @@ import { BENTO_SERVER_ID, handleBentoRpc } from "../mcp/bento-tools.js";
 import { credentialHeader } from "../mcp/client.js";
 import { resolveGrant, recordGrantUse, type ResolvedGrant } from "../mcp/grants.js";
 import { BENTO_SWARM_SERVER_ID, handleSwarmMcp, resolveSwarmCaller } from "../mcp/swarm-server.js";
-import { refreshCredential } from "../mcp/refresh.js";
+import { mcpCredentialSlot, refreshCredential } from "../mcp/refresh.js";
 import { safeFetch, SafeFetchRefused, safeFetchPolicy } from "../mcp/safe-fetch.js";
 import { TokenBuckets } from "../mcp/rate-limit.js";
 
@@ -169,7 +169,7 @@ export function mcpGatewayRoutes(ctx: AppContext) {
     if (!row) return null;
     let secret: string;
     try {
-      secret = ctx.secretBox.decrypt(row.encryptedSecret);
+      secret = ctx.secretBox.decrypt(row.encryptedSecret, mcpCredentialSlot(server, row.userId, "access"));
     } catch {
       // A rotated master key reads as "not connected" everywhere else;
       // here that is a 404 like any other missing credential.

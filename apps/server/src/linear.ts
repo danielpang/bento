@@ -36,7 +36,7 @@ export async function linearConnectionFor(
   const connection = await linearConnectionRow(ctx, organizationId);
   if (!connection) return null;
   try {
-    return { client: new LinearClient(ctx.secretBox.decrypt(connection.encryptedApiKey)), connection };
+    return { client: new LinearClient(ctx.secretBox.decrypt(connection.encryptedApiKey, { kind: "linear_api_key", organizationId: connection.organizationId })), connection };
   } catch {
     // Encrypted under a rotated key: treat as not connected and let the
     // UI ask for the key again.

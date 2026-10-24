@@ -128,7 +128,7 @@ before(async () => {
   });
 
   const save = (name: string, value: string) =>
-    db.insert(secrets).values({ ownerId: userId, organizationId: null, name, ciphertext: ctx!.secretBox.encrypt(value), hint: "" });
+    db.insert(secrets).values({ ownerId: userId, organizationId: null, name, ciphertext: ctx!.secretBox.encrypt(value, { kind: "org_secret", organizationId: null, name }), hint: "" });
   await save("ANTHROPIC_API_KEY", ANTHROPIC_KEY);
   await save("ANTHROPIC_BASE_URL", providerUrl);
   await save("OPENAI_API_KEY", OPENAI_KEY);
