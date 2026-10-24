@@ -1,0 +1,72 @@
+diff --git a/lib/index.js b/lib/index.js
+index 53ba7b5f31ce3d4a5569212083ae1e4fd773192f..dca4739e94d97de9731cb776f14a82ae712d9ef9 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -38,14 +38,51 @@ function notarize(_a) {
+         if (otherOptions.tool === 'legacy') {
+             throw new Error('Notarization with the legacy altool system was decommisioned as of November 2023');
+         }
+-        yield (0, check_signature_1.checkSignatures)({ appPath });
++        console.info(`Checking signatures: ${appPath}`);
++        try {
++            yield (0, check_signature_1.checkSignatures)({ appPath });
++        } catch (error) {
++            console.error(`Signature verification failed: ${appPath}`);
++            throw error;
++        }
++        console.info(`Signatures verified: ${appPath}`);
+         d('notarizing using notarytool');
+         if (!(yield (0, notarytool_1.isNotaryToolAvailable)())) {
+             throw new Error('notarytool is not available, you must be on at least Xcode 13 or provide notarytoolPath');
+         }
+-        yield (0, notarytool_1.notarizeAndWaitForNotaryTool)(Object.assign({ appPath }, otherOptions));
+-        yield (0, promise_retry_1.default)(() => (0, staple_1.stapleApp)({ appPath }), {
++        const submissionStarted = Date.now();
++        console.info(`Notarization submission starting: ${appPath}`);
++        try {
++            yield (0, notarytool_1.notarizeAndWaitForNotaryTool)(Object.assign({ appPath }, otherOptions));
++        } catch (error) {
++            console.error(`Notarization submission failed after ${Date.now() - submissionStarted}ms: ${appPath}`);
++            throw error;
++        }
++        // Retry ticket downloads only, never resubmit an accepted notarization.
++        console.info(`Notarization accepted; stapling ${appPath}`);
++        yield (0, promise_retry_1.default)((retry, attempt) => {
++            const started = Date.now();
++            console.info(`Stapling attempt ${attempt}/4 starting: ${appPath}`);
++            return (0, staple_1.stapleApp)({ appPath }).then(() => {
++                console.info(`Stapling attempt ${attempt}/4 succeeded after ${Date.now() - started}ms: ${appPath}`);
++            }).catch((error) => {
++            // Error 68 alone also covers permanent failures. Require a transient
++            // network error from Apple's ticket lookup before trying again.
++            const message = String(error.message);
++            const transient = message.startsWith('Failed to staple your application with code: 68\n') &&
++                /NSURLErrorDomain Code=-(1001|1003|1004|1005|1009)\b/.test(message);
++            if (!transient || attempt > 3) {
++                console.error(`Stapling attempt ${attempt}/4 failed after ${Date.now() - started}ms (${transient ? 'retries exhausted' : 'not retryable'}): ${appPath}\n${message}`);
++                throw error;
++            }
++            console.warn(`Stapling attempt ${attempt}/4 failed; retrying in ${15 * 2 ** (attempt - 1)}s. ${message}`);
++            return retry(error);
++            });
++        }, {
+             retries: 3,
++            factor: 2,
++            minTimeout: 15000,
++            maxTimeout: 60000,
+         });
+     });
+ }
+diff --git a/lib/notarytool.js b/lib/notarytool.js
+index 6328fae1185159bfc97c75b61a8776d700c489bc..877b65ab267f85d778e1950b47066130dfc6a094 100644
+--- a/lib/notarytool.js
++++ b/lib/notarytool.js
+@@ -140,6 +140,8 @@ function notarizeAndWaitForNotaryTool(opts) {
+             catch (err) {
+                 throw new Error(`Failed to notarize via notarytool.  Failed with unexpected result: \n\n${rawOut}`);
+             }
++            // Log only response metadata, never the authentication arguments.
++            console.info(`Apple notarization response: app=${opts.appPath} submission=${parsed.id ?? 'unknown'} status=${parsed.status ?? 'unknown'} exitCode=${result.code}`);
+             let logOutput;
+             if (typeof parsed.id === 'string') {
+                 logOutput = yield getNotarizationLogs(opts, parsed.id);
