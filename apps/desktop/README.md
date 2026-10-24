@@ -83,6 +83,19 @@ Configure these repository Actions secrets before running the Desktop or Release
 
 Incomplete credentials, signing errors, or notarization errors fail the build. The workflow verifies the Developer ID signature, expected team, notarization staple, and Gatekeeper acceptance on both architectures, then checks every updater asset's size and SHA-512 checksum before upload. An Apple Development or Mac App Store certificate is not a substitute for Developer ID Application.
 
+The pnpm patch for `@electron/notarize@2.5.0` fixes its ineffective `promise-retry`
+callback. After Apple accepts a submission, transient stapler network failures
+(error 68 with NSURLErrorDomain codes -1001, -1003, -1004, -1005 or -1009)
+retry only the ticket download after 15, 30 and 60 seconds. Each retry logs the
+attempt and Apple's full stapler error. Other failures stop immediately; exhausted
+retries still fail the release. The submission is never repeated by this retry.
+Logs identify signature verification, submission duration, Apple's submission ID,
+status and exit code, and each stapling attempt's start, success or final failure.
+Final failures distinguish exhausted retries from errors that are not retryable.
+Authentication arguments are not logged.
+Recheck this patch when upgrading the dependency. Run its regression tests with
+`node --test apps/desktop/scripts/notarize.test.mjs` after installing dependencies.
+
 Signing and notarization remove the unidentified-developer and unverified-malware blocks. macOS can still display its normal first-launch confirmation for an app downloaded from the internet. See [Apple's Gatekeeper guidance](https://support.apple.com/en-us/102445).
 
 Run the **Desktop** workflow on a tag first to validate signing and notarization without publishing a release. Keep the application ID and signing team consistent across releases so macOS can verify the replacement. An existing unsigned app must be replaced manually with the first signed release; later signed releases can update automatically. [electron-builder requires macOS signing and the ZIP update target](https://www.electron.build/v26/docs/features/auto-update/).
