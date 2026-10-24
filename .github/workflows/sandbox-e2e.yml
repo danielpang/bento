@@ -63,6 +63,13 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # A failed test step ends with a recap of every failing test (file,
+      # line, name, error), so the last lines of the log, where GitHub
+      # mobile opens it, say what failed. See scripts/test-failures-reporter.mjs.
+      - name: Record failing tests for the recap
+        run: |
+          echo "BENTO_TEST_FAILURES_DIR=$RUNNER_TEMP/test-failures" >> "$GITHUB_ENV"
+          echo "BENTO_TEST_REPORTERS=--test-reporter=spec --test-reporter-destination=stdout --test-reporter=$GITHUB_WORKSPACE/scripts/test-failures-reporter.mjs --test-reporter-destination=stderr" >> "$GITHUB_ENV"
 
       # tsx runs the sandbox sources directly, but a workspace
       # dependency resolves through its package exports, which point at
@@ -102,7 +109,9 @@ jobs:
       - name: Provision a sprite and install the agent CLIs
         if: ${{ env.SPRITES_TOKEN != '' }}
         working-directory: packages/sandbox
-        run: node --test --import tsx src/sprite.e2e.test.ts
+        env:
+          NODE_OPTIONS: ${{ env.BENTO_TEST_REPORTERS }}
+        run: node --test --import tsx src/sprite.e2e.test.ts || { node "$GITHUB_WORKSPACE/scripts/test-failures-summary.mjs"; exit 1; }
 
       # The test deletes its own machine and asserts that it went, so
       # this is for the paths where the test never got the chance: a

@@ -16,7 +16,12 @@
       // suites fall back to the docker-compose port when DATABASE_URL is
       // missing, which is why dropping it failed only on CI: every
       // database test connected to a port nothing was listening on.
-      "env": ["DATABASE_URL"]
+      "env": ["DATABASE_URL"],
+      // CI's failure recap: the reporter it adds through NODE_OPTIONS and
+      // the directory it records failing tests in (see
+      // scripts/test-failures-reporter.mjs). Passed through rather than
+      // hashed, because neither changes what a test does.
+      "passThroughEnv": ["NODE_OPTIONS", "BENTO_TEST_FAILURES_DIR"]
     },
     "dev": {
       "cache": false,

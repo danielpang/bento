@@ -84,6 +84,13 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # A failed test step ends with a recap of every failing test (file,
+      # line, name, error), so the last lines of the log, where GitHub
+      # mobile opens it, say what failed. See scripts/test-failures-reporter.mjs.
+      - name: Record failing tests for the recap
+        run: |
+          echo "BENTO_TEST_FAILURES_DIR=$RUNNER_TEMP/test-failures" >> "$GITHUB_ENV"
+          echo "BENTO_TEST_REPORTERS=--test-reporter=spec --test-reporter-destination=stdout --test-reporter=$GITHUB_WORKSPACE/scripts/test-failures-reporter.mjs --test-reporter-destination=stderr" >> "$GITHUB_ENV"
 
       # tsx runs the server's sources, but its workspace dependencies
       # resolve through their package exports, which point at dist.
@@ -113,12 +120,15 @@ jobs:
           "$RUNNER_TEMP/cloudflared" --version
           echo "BENTO_CLOUDFLARED=$RUNNER_TEMP/cloudflared" >> "$GITHUB_ENV"
 
-      # The spec reporter, because it prints the test's own lines as
-      # they are, which is what lets the test mask its run tokens.
+      # The spec reporter (in BENTO_TEST_REPORTERS), because it prints
+      # the test's own lines as they are, which is what lets the test
+      # mask its run tokens.
       - name: Call the proxy from a sprite
         if: ${{ env.SPRITES_TOKEN != '' }}
         working-directory: apps/server
-        run: node --test --test-reporter=spec --import tsx src/model-proxy-sandbox.e2e.test.ts
+        env:
+          NODE_OPTIONS: ${{ env.BENTO_TEST_REPORTERS }}
+        run: node --test --import tsx src/model-proxy-sandbox.e2e.test.ts || { node "$GITHUB_WORKSPACE/scripts/test-failures-summary.mjs"; exit 1; }
 
       # The test deletes its own sprite and asserts it went. This is for
       # a cancelled job, the timeout above, or a runner that died: a
@@ -165,6 +175,13 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # A failed test step ends with a recap of every failing test (file,
+      # line, name, error), so the last lines of the log, where GitHub
+      # mobile opens it, say what failed. See scripts/test-failures-reporter.mjs.
+      - name: Record failing tests for the recap
+        run: |
+          echo "BENTO_TEST_FAILURES_DIR=$RUNNER_TEMP/test-failures" >> "$GITHUB_ENV"
+          echo "BENTO_TEST_REPORTERS=--test-reporter=spec --test-reporter-destination=stdout --test-reporter=$GITHUB_WORKSPACE/scripts/test-failures-reporter.mjs --test-reporter-destination=stderr" >> "$GITHUB_ENV"
       - run: pnpm turbo run build --filter=@bento/server^...
 
       - name: Note that a fork cannot provision a Modal sandbox
@@ -192,7 +209,9 @@ jobs:
       - name: Call the proxy from a restricted Modal sandbox
         if: ${{ env.MODAL_TOKEN_ID != '' && env.MODAL_TOKEN_SECRET != '' }}
         working-directory: apps/server
-        run: node --test --test-reporter=spec --import tsx src/model-proxy-sandbox.e2e.test.ts
+        env:
+          NODE_OPTIONS: ${{ env.BENTO_TEST_REPORTERS }}
+        run: node --test --import tsx src/model-proxy-sandbox.e2e.test.ts || { node "$GITHUB_WORKSPACE/scripts/test-failures-summary.mjs"; exit 1; }
 
       # The test terminates its own sandbox. This covers a cancelled
       # job, the timeout above, or a runner that died.
