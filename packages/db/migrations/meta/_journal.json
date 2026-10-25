@@ -484,6 +484,13 @@
       "when": 1791619360000,
       "tag": "0068_grant_change_notify",
       "breakpoints": true
+    },
+    {
+      "idx": 69,
+      "version": "7",
+      "when": 1791705760000,
+      "tag": "0069_agent_runs_swarm_task_idx",
+      "breakpoints": true
     }
   ]
 }

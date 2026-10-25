@@ -759,6 +759,7 @@ export const agentRuns = pgTable(
     // The same question asked of a swarm, which reads its runs by
     // swarm rather than by card.
     index("agent_runs_swarm_queued_idx").on(t.swarmId, t.queuedAt),
+    index("agent_runs_swarm_task_queued_idx").on(t.swarmTaskId, t.queuedAt),
     // The runs in flight, which the orphan sweep, the stalled reaper
     // and boot recovery ask for every few minutes. Partial: a handful
     // of rows at any moment, out of every run ever made.

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildPlannerPrompt, plannerWakeMessage, quoteUntrusted, type StartBranchState } from "./planner-prompt.js";
+import { buildPlannerPrompt, buildSubPlannerPrompt, plannerWakeMessage, quoteUntrusted, type StartBranchState } from "./planner-prompt.js";
 
 /**
  * The quoting the planner's whole safety story rests on.
@@ -357,4 +357,25 @@ test("a PDF, an image and a scan are described by what they are, and the planner
     planSources: [{ id: "b", position: 0, kind: "file", name: "mockup.png", url: null, mime: "image/png", media: "image", size: 0, content: null, storageKey: "k2", byteSize: 4096, path: null }],
   });
   assert.match(nowhere, /could not be copied into this workspace/);
+});
+
+test("the planner is told to find out why a leaf failed before retrying it", () => {
+  const prompt = buildPlannerPrompt({
+    swarm: { title: "T", goal: "G", branchName: "swarm/t" } as never,
+    repositories: [{ name: "app", mountPath: "/workspace/app" }],
+  });
+  assert.match(prompt, /read_task_runs says how each run ended[\s\S]*read_transcript_tail[\s\S]*read_task_messages/);
+  assert.match(prompt, /the sandbox failed was already restarted by Bento[\s\S]*ask_user instead/);
+  assert.match(prompt, /cancelled before its agent started was stopped, not broken/, "a cancel is not read as a sandbox failure");
+  const sub = buildSubPlannerPrompt({
+    swarm: { title: "T", goal: "G", branchName: "swarm/t" } as never,
+    node: { id: "n1", title: "Part", description: "" },
+    repositories: [{ name: "app", mountPath: "/workspace/app" }],
+  });
+  assert.match(sub, /read_task_runs says how each run ended[\s\S]*read_transcript_tail[\s\S]*read_task_messages/, "a sub planner is told too");
+
+  const failed = plannerWakeMessage([{ kind: "task", taskId: "t1", title: "Build", status: "failed", report: null }]);
+  assert.match(failed, /A task failed: find out why/);
+  const finished = plannerWakeMessage([{ kind: "task", taskId: "t1", title: "Build", status: "working", report: "done" }]);
+  assert.doesNotMatch(finished, /A task failed/, "only when something failed");
 });
