@@ -1,3 +1,5 @@
+import { isSandboxCapacityError } from "@bento/core";
+import { CapacityNotice } from "./CapacityNotice.js";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as Menu from "@radix-ui/react-dropdown-menu";
 import { ThinkingOrb } from "thinking-orbs";
@@ -929,6 +931,7 @@ export function ChatRow({ item, showDetail }: { item: ChatItem; showDetail: bool
   if (item.kind === "tools") {
     return <ToolActivityGroup calls={item.calls} showDetail={showDetail} />;
   }
+  if (!item.ok && !item.interrupted && isSandboxCapacityError(item.error)) return <CapacityNotice />;
   if (item.interrupted) {
     return (
       <div className="chat-row chat-row-system">

@@ -1,3 +1,5 @@
+import { isSandboxCapacityError } from "@bento/core";
+import { CapacityNotice } from "./CapacityNotice.js";
 import type { SwarmPlannerRun } from "../swarm/types.js";
 import { elapsedSince, formatElapsed } from "../swarm/time.js";
 import { plannerFailure } from "../swarm/failures.js";
@@ -56,7 +58,7 @@ export function SwarmPlannerStep({
           </span>
         )}
       </div>
-      {run.status === "failed" && <p className="swarm-planner-step-summary" role="status">{failure.summary}</p>}
+      {run.status === "failed" && (isSandboxCapacityError(run.error) ? <CapacityNotice context="planner" busy={busy} onRetry={canRetry ? onRetry : undefined} /> : <p className="swarm-planner-step-summary" role="status">{failure.summary}</p>)}
       {onOpenOutput
         ? <button type="button" className="swarm-output-link" onClick={onOpenOutput}>{run.status === "failed" ? "Open details" : "Message planner"} <span aria-hidden="true">↗</span></button>
         : run.status === "failed" && canRetry && <button className="btn btn-primary" disabled={busy} onClick={onRetry}>Retry planner</button>}

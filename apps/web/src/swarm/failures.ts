@@ -1,5 +1,7 @@
+import { isSandboxCapacityError, SANDBOX_CAPACITY_TITLE } from "@bento/core";
 /** Short, actionable labels for failures whose raw logs belong in a drawer. */
 export function plannerFailure(error: string | null): { title: string; summary: string; beforeAgent: boolean } {
+  if (isSandboxCapacityError(error)) return { title: SANDBOX_CAPACITY_TITLE, summary: "We’re adding more capacity. Please try again in a few minutes.", beforeAgent: true };
   if (error && /sandbox provisioning failed|repository path .* does not exist|fatal: not a git repository/i.test(error)) {
     return {
       title: "Could not start",

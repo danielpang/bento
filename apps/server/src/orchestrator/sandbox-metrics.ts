@@ -340,3 +340,31 @@ export function reportSandboxReady(analytics: Analytics | null | undefined, info
     console.warn(`could not record the sandbox wait for run ${info.run.id}:`, err);
   }
 }
+
+/** `provider` counts a full provider; `exhausted` counts a blocked provision after all eligible attempts. */
+export const SANDBOX_CAPACITY_EVENT = "sandbox capacity reached";
+
+export function reportSandboxCapacity(
+  analytics: Analytics | null | undefined,
+  info: Omit<SandboxProvisionFailed, "kind"> & { kind: "provider" | "exhausted"; providers: string[] },
+): void {
+  try {
+    analytics?.capture({
+      event: SANDBOX_CAPACITY_EVENT,
+      userId: info.userId,
+      organizationId: info.organizationId,
+      properties: {
+        kind: info.kind,
+        provider: info.provider,
+        providers: info.providers,
+        selection: info.selection,
+        attempts: info.attempts,
+        project_id: info.projectId,
+        ...runProperties(info.run),
+        ...runOwnerProperties(info.owner),
+      },
+    });
+  } catch (err) {
+    console.warn("could not record sandbox capacity:", err);
+  }
+}
