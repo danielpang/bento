@@ -2,7 +2,8 @@ import { SketchMascot } from "./SketchMascot.js";
 import { sketchMascot } from "../mascot-sketch.js";
 import { SANDBOX_CAPACITY_TITLE } from "@bento/core";
 
-const MASCOT = sketchMascot("orange", 80, 76, 0.8, 1);
+const ORANGE = sketchMascot("orange", 70, 76, 0.8, 1, "sitting");
+const BLUE = sketchMascot("blue", 178, 76, 0.8, 2, "sitting");
 
 /** A recoverable service limit, shown in the work that could not start. */
 export function CapacityNotice({ onRetry, busy = false, context = "run" }: {
@@ -19,12 +20,16 @@ export function CapacityNotice({ onRetry, busy = false, context = "run" }: {
   return (
     <section className="capacity-notice" role="status" aria-label="Bento is at capacity">
       <div className="capacity-notice-art" aria-hidden="true">
-        <svg viewBox="0 0 160 132" width="160" height="132" focusable="false">
-          <g transform="rotate(-8 80 110)"><SketchMascot m={MASCOT} dizzy /></g>
+        <svg viewBox="0 0 260 132" width="260" height="132" focusable="false">
+          <path className="board-mascots-ground" d="M20 117q42 4 88 0m15 1q54 4 112-1" />
+          <g transform="rotate(-7 70 110)"><SketchMascot m={ORANGE} dizzy /></g>
+          <g transform="rotate(6 178 110)"><SketchMascot m={BLUE} dizzy /></g>
           <g className="capacity-notice-stars">
             <path d="m43 14 2 5 5 2-5 2-2 5-2-5-5-2 5-2Z" />
             <path d="m112 18 2 4 4 2-4 2-2 4-2-4-4-2 4-2Z" />
             <path d="M58 20q22-12 40 0M108 38l5 3M31 41l5-3" />
+            <path d="m155 30 2 5 5 2-5 2-2 5-2-5-5-2 5-2Zm58 3 2 4 4 2-4 2-2 4-2-4-4-2 4-2Z" />
+            <path d="M166 35q18-10 35 0M230 53l4 3M138 52l-4 3" />
           </g>
         </svg>
       </div>
