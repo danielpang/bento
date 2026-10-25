@@ -4,13 +4,13 @@ Agents read untrusted input (issues, READMEs, web pages, tool output), so Bento 
 
 ## Model keys stay encrypted in Bento
 
-On hosted Bento (app.usebento.ai), and any other multi mode server, a sandbox never contains the organization's model API keys, and neither does a local Docker sandbox unless you turn the proxy off (see below). It contains a **proxy token** instead: a token minted for one agent session, under the same variable name as the key it replaces (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and so on). The tool's base URL variable points at Bento's model proxy, so the agent sends its model calls to Bento with the proxy token, and Bento sends them on to the provider with the real key.
+For supported providers on hosted Bento (app.usebento.ai) and other multi mode servers, the model proxy keeps personal API keys and shared organization keys out of the sandbox. Local Docker sandboxes also use the proxy by default, with the exceptions described below. The sandbox contains a **proxy token** instead: a token minted for one agent session, under the same variable name as the key it replaces (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and so on). The tool's base URL variable points at Bento's model proxy, so the agent sends its model calls to Bento with the proxy token, and Bento sends them on to the provider with the real key.
 
 ![The sandbox contains a proxy token; only Bento stores the key](./images/model-proxy.svg)
 
 1. Bento mints a proxy token when the agent session starts, and keeps only its hash, with the list of keys it may use.
 2. The agent calls `/api/model-proxy/<provider>` with the proxy token, in whichever header its tool sends a key in.
-3. The proxy checks the token, decrypts the organization's key, swaps it in, and streams the request and the provider's answer through unchanged.
+3. The proxy checks the token, decrypts the selected personal API key or shared organization key, swaps it in, and streams the request and the provider's answer through unchanged.
 4. The proxy token stops working as soon as its agent session ends, however it ends.
 
 A proxy token can do much less than a key:
@@ -31,7 +31,7 @@ A few setups still put a credential in the sandbox:
 - harnesses with no base URL to point at Bento (Cursor, fx, Muse Code)
 - custom provider keys and Ollama
 - a saved base URL that is plain `http` or a private network address, which the proxy will not call on a multi mode server, so that key reaches the sandbox as it would without the proxy, and the run's transcript says so
-- in local mode only, a Claude subscription login (hosted Bento does not offer subscription logins)
+- legacy local machine login sharing, including a Claude subscription login; personal account connections use the proxy in local and hosted Bento
 
 [agents.md](./agents.md#model-provider-keys-stay-out-of-agent-sandboxes) lists which keys each tool sends through the proxy.
 
@@ -41,7 +41,17 @@ A few setups still put a credential in the sandbox:
 - Before a run's keys are swapped, its sandbox asks Bento's proxy for a readiness answer once, with a three second limit. A sandbox that cannot reach Bento keeps its keys for that agent session, and its transcript says so. Docker Desktop and OrbStack forward `host.docker.internal` to your machine's loopback, where local Bento listens; Docker on Linux does not, so a TUI or source install there falls back to raw keys unless `BENTO_MCP_GATEWAY_URL` names an address the sandbox can reach.
 - A saved base URL that is plain `http` or on your network goes through the proxy, which calls it from your machine. One that names your machine itself (`localhost`, `127.0.0.1`, `host.docker.internal`) means something else inside the container, so that key and its base URL reach the sandbox as before, and the transcript says so.
 
-An agent's model calls go through Bento, so a run left going in its container while local Bento is closed cannot reach its model until Bento starts again. Shared subscription credentials are still mounted read only and are never proxied, so the agent can read them.
+An agent's model calls go through Bento, so a run left going in its container while local Bento is closed cannot reach its model until Bento starts again. Legacy local machine login sharing can still mount credentials read only, so the agent can read them. Personal account connections instead keep subscription tokens on the server and use the proxy.
+
+## Personal and shared API keys
+
+New model API keys are personal by default. Only owners and admins can enable **Shared organization key** before saving; otherwise the field is labeled **Personal API key**. Existing shared keys retain their scope. Personal keys are encrypted and isolated by user, including from organization owners and admins. Custom provider definitions remain managed by owners and admins, while each member can save their own key.
+
+Explicitly started server stage runs and stage follow-ups use the initiating user's personal keys before shared keys. A personal key never uses an organization's endpoint override. Teammates cannot steer a run using someone else's personal key. Background stages, judges, conflict resolution, swarms, and remote runners retain their shared or machine credential paths. GitHub integration tokens remain shared.
+
+The proxy rechecks the user's organization membership and the pinned personal key on each request. Removing the key or losing membership blocks subsequent requests, without falling back to a shared key. Recreating a deleted key does not revive an old run; start a new run. Replacing the value of an existing key rotates it for subsequent proxy requests. Removing a key cannot revoke a raw value already handed to an agent through an integration outside proxy coverage.
+
+See [API key setup and scope changes](./agents.md#personal-and-shared-api-keys). Personal subscription connections remain individual and cannot be shared with an organization.
 
 ## MCP credentials stay with Bento
 
@@ -73,5 +83,5 @@ A run is billed unless Bento or its sandbox failed it. If the proxy itself fails
 ## Good practice
 
 - Never expose the host Docker socket, host SSH keys, or host git config to a sandbox.
-- In local mode (hosted Bento offers no subscription logins), prefer API keys over mounting subscription credential files, so the key can go through the proxy.
+- Prefer proxied API keys or personal account connections over legacy local machine login sharing, so provider credentials stay outside the sandbox.
 - Keep a saved provider base URL on public `https`, for the same reason.

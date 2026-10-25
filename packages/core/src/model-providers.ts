@@ -91,6 +91,18 @@ const geminiModels = (version: string): ModelEndpoint[] => [
 
 export const MODEL_PROVIDERS: readonly ModelProvider[] = [
   {
+    key: "BENTO_PERSONAL_ANTHROPIC", hosts: ["https://api.anthropic.com"],
+    proxy: { segment: "subscription-anthropic", baseUrlEnv: "ANTHROPIC_BASE_URL",
+      upstream: "https://api.anthropic.com", auth: "bearer",
+      endpoints: [...anthropicMessages(""), get("/v1/models"), get("/v1/models/{id}")] },
+  },
+  {
+    key: "BENTO_PERSONAL_CODEX", hosts: ["https://chatgpt.com"],
+    proxy: { segment: "subscription-codex", baseUrlEnv: "OPENAI_BASE_URL",
+      upstream: "https://chatgpt.com/backend-api/codex", auth: "bearer",
+      endpoints: [post("/responses"), post("/responses/compact"), websocket("/responses"), post("/codex/responses"), websocket("/codex/responses")] },
+  },
+  {
     key: "ANTHROPIC_API_KEY",
     baseUrlKey: "ANTHROPIC_BASE_URL",
     hosts: ["https://api.anthropic.com"],

@@ -10,6 +10,7 @@ import { featureRoutes } from "./routes/features.js";
 import { profileRoutes } from "./routes/profiles.js";
 import { projectRoutes } from "./routes/projects.js";
 import { runnerRoutes } from "./routes/runner.js";
+import { agentAccountRoutes } from "./routes/agent-accounts.js";
 import { secretRoutes } from "./routes/secrets.js";
 import { customProviderRoutes } from "./routes/custom-providers.js";
 import { settingsRoutes } from "./routes/settings.js";
@@ -358,6 +359,7 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
     .route("/runs", runRoutes(ctx))
     .route("/runner", runnerRoutes(ctx))
     .route("/secrets", secretRoutes(ctx))
+    .route("/agent-accounts", agentAccountRoutes(ctx))
     .route("/custom-providers", customProviderRoutes(ctx))
     .route("/github", githubRoutes(ctx))
     .route("/linear", linearRoutes(ctx))

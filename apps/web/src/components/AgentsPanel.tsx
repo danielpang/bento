@@ -8,6 +8,7 @@ type MachineSettings = Awaited<ReturnType<BentoClient["getMachineSettings"]>>;
 import { Modal } from "./Modal.js";
 import { ConfirmDialog } from "./PromptDialog.js";
 import { ContactDialog } from "./ContactDialog.js";
+import { PersonalAgentAccounts } from "./PersonalAgentAccounts.js";
 import { ProviderKeysCard } from "./Credentials.js";
 import { CustomProviderKeys } from "./CustomProviders.js";
 import { BetaOnly, useBetaTesters } from "../beta.js";
@@ -386,6 +387,7 @@ export function AgentsPanel({
         </section>
 
         <div hidden={beta && section !== "connections"}>
+        <PersonalAgentAccounts client={client} />
         {machine && (
           <section className="section settings-card">
             <h3 className="settings-title">Claude subscription</h3>

@@ -2,6 +2,7 @@ import { and, eq, isNull } from "drizzle-orm";
 import { supportsCustomProvider } from "@bento/core";
 import type { CustomProviderSelection } from "@bento/agents";
 import { customModelProviders } from "@bento/db";
+import { credentialRows, customKeyName, type PersonalCredentialIds } from "../agent-accounts/credentials.js";
 import type { AppContext } from "../context.js";
 
 export interface CustomProviderRunConfig {
@@ -19,6 +20,8 @@ export async function customProviderRunEnv(
   organizationId: string | null,
   cli: string,
   model: string,
+  actingUserId: string | null = null,
+  personalCredentialIds: PersonalCredentialIds = {},
 ): Promise<CustomProviderRunConfig | null> {
   // An old organization-less project on a multi-tenant server must
   // never receive a key that was saved in local mode.
@@ -35,7 +38,12 @@ export async function customProviderRunEnv(
   if (!row.models.some((entry) => entry.id === modelId)) return { env: {}, missingKey: false, missingModel: true };
   if (!supportsCustomProvider(cli, row.protocol)) return { env: {}, missingKey: false, unsupported: true };
   let apiKey: string | null = null;
-  if (row.encryptedApiKey) {
+  const personalName = customKeyName(row.id);
+  if (Object.hasOwn(personalCredentialIds, personalName)) {
+    if (personalCredentialIds[`custom-endpoint:${row.id}`] !== row.baseUrl) throw new Error("The custom provider endpoint changed. Start a new run after checking Providers.");
+    const [own] = await credentialRows(ctx, organizationId, [personalName], actingUserId, personalCredentialIds);
+    if (own) apiKey = ctx.secretBox.decrypt(own.ciphertext);
+  } else if (row.encryptedApiKey) {
     try { apiKey = ctx.secretBox.decrypt(row.encryptedApiKey); } catch { /* rotated key is missing */ }
   }
   if (!apiKey) return { env: {}, missingKey: true };

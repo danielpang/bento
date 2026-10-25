@@ -784,10 +784,11 @@ export function featureRoutes(ctx: AppContext) {
        */
       const conversation = await latestConversationRun(db(c, ctx), feature.id);
       const resumeFrom = await resolveFollowUpRun(db(c, ctx), feature, conversation ?? latest);
-      // Everything parked rides along, oldest first: the card is idle,
-      // so this message and any it queued behind become one follow-up
-      // run. Tools with a session resume it; pool gets fresh context.
-      const claimed = await claimQueuedMessages(db(c, ctx), feature.id);
+      // Only this person's messages may spend this person's connection.
+      // Legacy local messages have no author, but local mode has one user.
+      const claimed = await claimQueuedMessages(db(c, ctx), feature.id, {
+        userId: actor(c), includeAnonymous: ctx.env.BENTO_MODE !== "multi",
+      });
       if (claimed.length === 0) {
         // A terminal path claimed it in the same instant; its run
         // carries the message.
@@ -804,7 +805,7 @@ export function featureRoutes(ctx: AppContext) {
         // The person sending the message owns the hours the resumed
         // run spends, not whoever started the conversation.
         startedBy: actor(c),
-      }, ctx.entitlements, ctx.analytics, (task) => deferAfterCommit(c, async () => task()));
+      }, ctx.entitlements, ctx.analytics, (task) => deferAfterCommit(c, async () => task()), ctx.env.BENTO_MODE);
       // A run started in the gap between the read and the insert; the
       // messages wait for it like any other mid-run message.
       if (run === "busy") {

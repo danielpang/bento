@@ -60,6 +60,17 @@ export const piAdapter: AgentAdapter = {
     const files: McpFile[] = [];
     if (input.askUser) files.push({ path: PI_ASK_USER_PATH, content: PI_ASK_USER_EXTENSION });
     const providers: Record<string, unknown> = piProviderBaseUrls(input);
+    const personal = input.credentials?.BENTO_PERSONAL_PROVIDER;
+    const home = input.credentials?.BENTO_PI_HOME;
+    if (personal && home) {
+      const base = input.credentials!.BENTO_PERSONAL_BASE_URL!;
+      providers[personal === "anthropic" ? "anthropic" : "openai-codex"] = {
+        baseUrl: personal === "anthropic" ? base : `${base}/codex/responses`,
+        apiKey: input.credentials!.BENTO_PERSONAL_RUN_TOKEN!,
+      };
+      return [...files.map((file) => ({ ...file, path: file.path.replace("~/.pi/agent", home) })),
+        { path: `${home}/models.json`, content: JSON.stringify({ providers }) }];
+    }
     const provider = input.customProvider;
     if (provider) {
       providers[provider.slug] = {
@@ -84,7 +95,7 @@ export const piAdapter: AgentAdapter = {
   },
 
   buildCommand(input: BuildCommandInput): string[] {
-    const argv = ["pi", "--mode", "json", "--print", ...piModelArgs(input.model)];
+    const argv = ["pi", "--mode", "json", "--print", ...piModelArgs(personalPiModel(input))];
     // A partial id is accepted, so the stored session id works as is.
     if (input.resumeSessionId) argv.push("--session", input.resumeSessionId);
     if (input.extraArgs?.length) argv.push(...input.extraArgs);
@@ -103,7 +114,7 @@ export const piAdapter: AgentAdapter = {
     delivery: "steer",
     interrupts: true,
     buildCommand(input: BuildCommandInput): string[] {
-      const argv = ["pi", "--mode", "rpc", ...piModelArgs(input.model)];
+      const argv = ["pi", "--mode", "rpc", ...piModelArgs(personalPiModel(input))];
       if (input.resumeSessionId) argv.push("--session", input.resumeSessionId);
       if (input.extraArgs?.length) argv.push(...input.extraArgs);
       return argv;
@@ -302,4 +313,9 @@ function piModelArgs(model: string): string[] {
     return ["--provider", "vercel-ai-gateway", "--model", model.slice("vercel/".length)];
   }
   return ["--model", model];
+}
+
+function personalPiModel(input: BuildCommandInput): string {
+  if (input.credentials?.BENTO_PERSONAL_PROVIDER === "openai-codex") return `openai-codex/${input.model.replace(/^(openai|openai-codex)\//, "")}`;
+  return input.model;
 }

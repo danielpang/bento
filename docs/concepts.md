@@ -38,11 +38,11 @@ Multi mode: projects belong to an organization. All members of that organization
 Three isolation layers:
 
 - Route checks re-read membership on every request.
-- Row-level security confines queries to the caller's organization.
+- Row-level security confines organization data to the caller's organization and personal API keys to the caller's user.
 - Insert triggers derive `organization_id` from the parent row.
 
 Table-level detail: [diagrams/database_schema.md](./diagrams/database_schema.md).
 
 ## Security
 
-On hosted Bento, a sandbox contains a proxy token instead of the organization's model keys, never stores an MCP credential, and can be cut off from the internet by a team owner or admin. See [security.md](./security.md).
+On hosted Bento, a sandbox contains a proxy token instead of personal or shared organization model keys for supported providers, never stores an MCP credential, and can be cut off from the internet by a team owner or admin. See [security.md](./security.md).

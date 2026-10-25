@@ -708,6 +708,9 @@ export const agentRuns = pgTable(
    * question the ledger asks is what this run actually used. Local mode
    * only; multi mode never shares a login.
    */
+  /** Pins a personal connection at queue time. Kept after disconnect for ownership. */
+  personalAccountId: uuid("personal_account_id"),
+  personalCredentialIds: jsonb("personal_credential_ids").$type<Record<string, string | null>>().notNull().default({}),
   sharedAgentAuth: boolean("shared_agent_auth").notNull().default(false),
   numTurns: integer("num_turns"),
   error: text("error"),
@@ -1078,6 +1081,16 @@ export const gateChecks = pgTable("gate_checks", {
   lastEvaluatedAt: timestamp("last_evaluated_at", { withTimezone: true }),
   ...timestamps,
 });
+
+/** Personal API credentials, isolated by authenticated user RLS. */
+export const userSecrets = pgTable("user_secrets", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  ciphertext: text("ciphertext").notNull(),
+  hint: text("hint").notNull().default(""),
+  ...timestamps,
+}, (t) => [uniqueIndex("user_secrets_user_name_idx").on(t.userId, t.name)]);
 
 /**
  * Agent credentials, encrypted at rest. Scoped to an organization so a
@@ -2354,3 +2367,24 @@ export const sandboxUsageLeases = pgTable("sandbox_usage_leases", {
   purpose: text("purpose").notNull(),
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
 }, (t) => [index("sandbox_usage_leases_sandbox_idx").on(t.sandboxId, t.expiresAt)]);
+
+/** Personal subscription credentials. Never owned by an organization. */
+export const agentAccounts = pgTable("agent_accounts", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+  provider: text("provider", { enum: ["anthropic", "openai-codex"] }).notNull(),
+  ciphertext: text("ciphertext").notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  reconnectRequired: boolean("reconnect_required").notNull().default(false),
+  ...timestamps,
+}, (t) => [uniqueIndex("agent_accounts_user_provider_idx").on(t.userId, t.provider)]);
+
+/** Login state is encrypted and scoped to the initiating user, across replicas. */
+export const agentAccountLogins = pgTable("agent_account_logins", {
+  userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+  provider: text("provider", { enum: ["anthropic", "openai-codex"] }).notNull(),
+  id: uuid("id").primaryKey().defaultRandom(),
+  ciphertext: text("ciphertext").notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  nextPollAt: timestamp("next_poll_at", { withTimezone: true }).notNull(),
+}, (t) => [uniqueIndex("agent_account_logins_user_provider_idx").on(t.userId, t.provider)]);

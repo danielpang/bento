@@ -438,7 +438,7 @@ export function cardConversation(
   input: { featureId: string; runId: string; role: string; gateType: string; idleSec: number },
 ): LiveConversation {
   return {
-    claim: () => claimQueuedMessages(ctx.db, input.featureId),
+    claim: () => claimQueuedMessages(ctx.db, input.featureId, { runId: input.runId }),
     markSent: (ids) => markMessagesSent(ctx.db, ids, input.runId),
     requeue: (ids) => requeueMessages(ctx.db, ids),
     holdFor: async (ok) =>

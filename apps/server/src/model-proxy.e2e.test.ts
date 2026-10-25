@@ -1,3 +1,5 @@
+import { personalKey, personalMarker } from "./agent-accounts/store.js";
+import { subscriptionRunToken } from "./agent-accounts/run.js";
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
@@ -15,6 +17,8 @@ import PgBoss from "pg-boss";
 import { claudeCodeAdapter, piAdapter } from "@bento/agents";
 import { MODEL_PROVIDERS, type ModelProxyRoute } from "@bento/core";
 import {
+  agentAccounts,
+  member,
   agentProfiles,
   agentRuns,
   createDb,
@@ -1019,14 +1023,14 @@ test("a local base URL is proxied unless it names this machine", async () => {
   assert.deepEqual((await runGrantUses(ctx, runId))?.modelCredentials.sort(), ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"]);
 });
 
-test("the resolver's login rule is unchanged under the proxy", async () => {
+test("the resolver refuses organization subscription tokens", async () => {
   await saveSecret("org-b", "CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-org-b");
   try {
     const resolved = await inMulti(() => resolveAgentEnv(ctx, "org-b", claudeCodeAdapter, "claude-sonnet-5"));
-    assert.deepEqual(resolved.missing, []);
+    assert.deepEqual(resolved.missing, ["ANTHROPIC_API_KEY"]);
     const runId = await newRun("org-b");
     const proxiedEnv = await inMulti(() => proxyModelCredentials(ctx, proxyInput(runId, resolved.env, { organizationId: "org-b" }).input));
-    assert.deepEqual(proxiedEnv.env, { CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat-org-b" });
+    assert.deepEqual(proxiedEnv.env, {});
   } finally {
     await ctx.db.delete(secrets).where(eq(secrets.name, "CLAUDE_CODE_OAUTH_TOKEN"));
   }
@@ -1215,7 +1219,7 @@ test("a cached grant costs no database read, and ends with its run's grant", asy
 
 test("the proxy calls only the inference endpoints its providers list", async () => {
   await withVendorUpstreams(async () => {
-    const keys = MODEL_PROVIDERS.filter((provider) => provider.proxy).map((provider) => provider.key);
+    const keys = MODEL_PROVIDERS.filter((provider) => provider.proxy && !provider.key.startsWith("BENTO_PERSONAL_")).map((provider) => provider.key);
     await ctx.db.delete(secrets).where(eq(secrets.organizationId, "org-c"));
     for (const key of keys) await saveSecret("org-c", key, `${key.toLowerCase()}-real-c`);
     const { token } = await grant(keys, "org-c");
@@ -1223,7 +1227,7 @@ test("the proxy calls only the inference endpoints its providers list", async ()
 
     // Every listed endpoint passes, to the provider's own path.
     for (const provider of MODEL_PROVIDERS) {
-      if (!provider.proxy) continue;
+      if (!provider.proxy || provider.key.startsWith("BENTO_PERSONAL_")) continue;
       for (const endpoint of provider.proxy.endpoints) {
         const asked = endpoint.path.replaceAll("{id}", "some-model-1");
         const where = `${provider.proxy.segment}${asked}`;
@@ -1306,4 +1310,101 @@ test("Expect and Accept-Encoding stay with the agent, and a compressed answer re
   assert.equal(decodedByFetch("HEAD", 200, "gzip"), false);
   assert.equal(decodedByFetch("POST", 204, "gzip"), false);
   assert.equal(decodedByFetch("POST", 200, null), false);
+});
+
+test("personal subscriptions cannot be borrowed, survive disconnect, or outlive membership", async () => {
+  await withVendorUpstreams(async () => {
+    const [account] = await ctx.db.insert(agentAccounts).values({ userId, provider: "openai-codex",
+      ciphertext: ctx.secretBox.encrypt(JSON.stringify({ access: "personal-access", refresh: "private-refresh", accountId: "real-account", expires: Date.now() + 3600_000 })),
+      expiresAt: new Date(Date.now() + 3600_000) }).returning();
+    const runId = await newRun("org-a");
+    await ctx.db.update(agentRuns).set({ startedBy: userId, personalAccountId: account!.id }).where(eq(agentRuns.id, runId));
+    const token = await mintRunGrant(ctx, { runId, organizationId: "org-a", actingUserId: userId, serverIds: [],
+      modelCredentials: [personalKey("openai-codex"), personalMarker(account!.id)], ttlMs: 60_000 });
+    const request = () => fetch(`${bentoUrl}/api/model-proxy/subscription-codex/codex/responses`, { method: "POST",
+      headers: { authorization: `Bearer ${subscriptionRunToken(token, "openai-codex")}`, "chatgpt-account-id": "attacker-account" }, body: "{}" });
+    assert.equal((await request()).status, 201);
+    assert.equal(seen.at(-1)?.headers.authorization, "Bearer personal-access");
+    assert.equal(seen.at(-1)?.headers["chatgpt-account-id"], "real-account");
+    assert.ok(seen.at(-1)?.url.endsWith("/responses"));
+    assert.ok(!seen.at(-1)?.url.includes("/codex/responses"));
+    const previousMode = ctx.env.BENTO_MODE;
+    ctx.env.BENTO_MODE = "multi";
+    try {
+      assert.equal((await request()).status, 401, "no membership, even after a successful request");
+      await ctx.db.insert(member).values({ id: crypto.randomUUID(), organizationId: "org-a", userId, role: "member" });
+      assert.equal((await request()).status, 201);
+      await ctx.db.delete(member).where(and(eq(member.userId, userId), eq(member.organizationId, "org-a")));
+      assert.equal((await request()).status, 401, "removal takes effect immediately");
+    } finally { ctx.env.BENTO_MODE = previousMode; }
+    await ctx.db.update(agentRuns).set({ startedBy: null }).where(eq(agentRuns.id, runId));
+    assert.equal((await request()).status, 401, "a grant cannot borrow another starter's account");
+    await ctx.db.update(agentRuns).set({ startedBy: userId }).where(eq(agentRuns.id, runId));
+    await ctx.db.delete(agentAccounts).where(eq(agentAccounts.id, account!.id));
+    assert.equal((await request()).status, 401, "disconnect is immediate, with no cached token or API fallback");
+    await ctx.db.insert(agentAccounts).values({ userId, provider: "openai-codex", ciphertext: "new connection", expiresAt: new Date(Date.now() + 3600_000) });
+    assert.equal((await request()).status, 401, "reconnecting does not authorize an old grant");
+    await ctx.db.delete(agentAccounts).where(eq(agentAccounts.userId, userId));
+  });
+});
+
+test("concurrent personal requests rotate a refresh token only once", async () => {
+  const { personalCredentials } = await import("./agent-accounts/store.js");
+  const [account] = await ctx.db.insert(agentAccounts).values({ userId, provider: "anthropic",
+    ciphertext: ctx.secretBox.encrypt(JSON.stringify({ access: "expired-access", refresh: "rotate-once", expires: 0 })), expiresAt: new Date(0) }).returning();
+  const runId = await newRun("none");
+  await ctx.db.update(agentRuns).set({ startedBy: userId, personalAccountId: account!.id }).where(eq(agentRuns.id, runId));
+  const token = await mintRunGrant(ctx, { runId, organizationId: null, actingUserId: userId, serverIds: [],
+    modelCredentials: [personalKey("anthropic"), personalMarker(account!.id)], ttlMs: 60_000 });
+  const resolved = await resolveGrant(ctx, token);
+  let refreshes = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, init) => {
+    refreshes++;
+    assert.equal(JSON.parse(String(init?.body)).refresh_token, "rotate-once");
+    return Response.json({ access_token: "fresh-access", refresh_token: "rotated-refresh", expires_in: 3600 });
+  };
+  try {
+    const results = await Promise.all([personalCredentials(ctx, resolved!, "anthropic"), personalCredentials(ctx, resolved!, "anthropic")]);
+    assert.equal(refreshes, 1);
+    assert.ok(results.every((result) => result?.access === "fresh-access"));
+    const [stored] = await ctx.db.select().from(agentAccounts).where(eq(agentAccounts.id, account!.id));
+    assert.ok(!stored!.ciphertext.includes("fresh-access"));
+    assert.equal(JSON.parse(ctx.secretBox.decrypt(stored!.ciphertext)).refresh, "rotated-refresh");
+  } finally {
+    globalThis.fetch = originalFetch;
+    await ctx.db.delete(agentAccounts).where(eq(agentAccounts.id, account!.id));
+  }
+});
+
+test("personal API keys use the existing proxy without leaking to shared endpoints or caching revocation", async () => {
+  const { userSecrets } = await import("@bento/db");
+  const { pinPersonalCredentials, PERSONAL_KEYS_MARKER } = await import("./agent-accounts/credentials.js");
+  await withVendorUpstreams(async () => {
+    const [own] = await ctx.db.insert(userSecrets).values({ userId, name: "ANTHROPIC_API_KEY", ciphertext: ctx.secretBox.encrypt("private-model-key") }).returning();
+    await ctx.db.insert(secrets).values({ ownerId: userId, organizationId: "org-a", name: "ANTHROPIC_BASE_URL", ciphertext: ctx.secretBox.encrypt("https://not-the-persons-endpoint.example.test") })
+      .onConflictDoUpdate({ target: [secrets.organizationId, secrets.name], set: { ciphertext: ctx.secretBox.encrypt("https://not-the-persons-endpoint.example.test") } });
+    const bindings = await pinPersonalCredentials(ctx.db, userId, "org-a", "claude-code", "claude-sonnet-5");
+    const runId = await newRun("org-a");
+    await ctx.db.update(agentRuns).set({ startedBy: userId, personalCredentialIds: bindings }).where(eq(agentRuns.id, runId));
+    const token = await mintRunGrant(ctx, { runId, organizationId: "org-a", actingUserId: userId, serverIds: [], modelCredentials: ["ANTHROPIC_API_KEY", PERSONAL_KEYS_MARKER], ttlMs: 60_000 });
+    const request = () => fetch(`${bentoUrl}/api/model-proxy/anthropic/v1/messages`, { method: "POST", headers: { "x-api-key": token }, body: "{}" });
+    assert.equal((await request()).status, 201);
+    assert.equal(seen.at(-1)?.headers["x-api-key"], "private-model-key");
+    await ctx.db.update(userSecrets).set({ ciphertext: ctx.secretBox.encrypt("rotated-private-key") }).where(eq(userSecrets.id, own!.id));
+    assert.equal((await request()).status, 201);
+    assert.equal(seen.at(-1)?.headers["x-api-key"], "rotated-private-key");
+    const calls = seen.length;
+    const mode = ctx.env.BENTO_MODE;
+    ctx.env.BENTO_MODE = "multi";
+    try {
+      assert.notEqual((await request()).status, 201, "membership is rechecked even after a successful call");
+    } finally { ctx.env.BENTO_MODE = mode; }
+    await ctx.db.delete(userSecrets).where(eq(userSecrets.id, own!.id));
+    assert.notEqual((await request()).status, 201, "removal never falls back to the shared key");
+    assert.equal(seen.length, calls);
+    await ctx.db.insert(userSecrets).values({ userId, name: "ANTHROPIC_API_KEY", ciphertext: ctx.secretBox.encrypt("replacement-key") });
+    assert.notEqual((await request()).status, 201, "recreating a personal key cannot revive a previous run");
+    await ctx.db.delete(userSecrets).where(eq(userSecrets.userId, userId));
+  });
 });

@@ -2,19 +2,20 @@
 
 Each stage runs one agent: harness, model, and skill. Tools differ in how you can talk to them while they work, and in what they report.
 
-| Tool | Model format | Steer | Interrupt | Questions | Cost |
-| --- | --- | --- | --- | --- | --- |
-| Claude Code | `claude-sonnet-5` | Queued: runs as one more turn after the current one | Yes | Yes: one or several choices, or your own words | Yes |
-| pi | `anthropic/claude-sonnet-5` | Yes, after the current tool call | Yes | Yes: one or several choices, or your own words | Yes |
-| Codex CLI | `gpt-5-codex`, `openai/gpt-5-mini`, or `vercel/moonshotai/kimi-k3` | Yes, at the next model call | Yes | Yes: one choice, or your own words | Tokens only |
-| opencode | `anthropic/claude-sonnet-5` | Yes, at the next model call | Yes | No | Tokens only |
-| Cursor CLI | `claude-sonnet-5`, `composer-2.5`, `grok-4.6` | No: next run (session resume) | No | No | No |
-| Antigravity CLI | `gemini-3.1-pro-high` | No: next run (conversation resume) | No | No | No |
-| Muse Code | `muse-spark-1.3` | No: next run (session resume) | No | No | No |
-| fx | `moonshotai/kimi-k3` | No: next run (session resume) | No | No | No |
-| Poolside (pool) | `poolside/laguna-s-2.1` | No: next run (new session) | No | No | No |
-| DeepSeek Harness (dsh, preview) | `deepseek-v4-pro` | No: next run (new session) | No | No | No |
+| Tool | Model format | Personal subscription | Steer | Interrupt | Questions | Cost |
+| --- | --- | --- | --- | --- | --- | --- |
+| Claude Code | `claude-sonnet-5` | Claude | Queued: runs as one more turn after the current one | Yes | Yes: one or several choices, or your own words | Yes |
+| pi | `anthropic/claude-sonnet-5` | Claude or ChatGPT | Yes, after the current tool call | Yes | Yes: one or several choices, or your own words | Yes |
+| Codex CLI | `gpt-5-codex`, `openai/gpt-5-mini`, or `vercel/moonshotai/kimi-k3` | ChatGPT | Yes, at the next model call | Yes | Yes: one choice, or your own words | Tokens only |
+| opencode | `anthropic/claude-sonnet-5` | No | Yes, at the next model call | Yes | No | Tokens only |
+| Cursor CLI | `claude-sonnet-5`, `composer-2.5`, `grok-4.6` | No | No: next run (session resume) | No | No | No |
+| Antigravity CLI | `gemini-3.1-pro-high` | No | No: next run (conversation resume) | No | No | No |
+| Muse Code | `muse-spark-1.3` | No | No: next run (session resume) | No | No | No |
+| fx | `moonshotai/kimi-k3` | No | No: next run (session resume) | No | No | No |
+| Poolside (pool) | `poolside/laguna-s-2.1` | No | No: next run (new session) | No | No | No |
+| DeepSeek Harness (dsh, preview) | `deepseek-v4-pro` | No | No: next run (new session) | No | No | No |
 
+- **Personal subscription**: account connections through **Agents → Your personal subscriptions** in local and hosted Bento. Applies to matching models on stage runs you start; see [setup and limits](#personal-account-connections). Other local login-sharing options are described in the per-tool notes.
 - **Steer**: what happens to a message you send while the agent works. Yes means it reaches the turn already running. Queued means it waits in the same session for the current turn to end. "Next run" means it waits for the run to end and starts a new one, resuming the conversation where the tool can.
 - **Interrupt**: Stop ends only the current turn, and the agent waits for your next message in the same session. Where it is No, Stop ends the run.
 - **Questions**: the agent can ask you a question on the card and wait for your answer.
@@ -22,11 +23,21 @@ Each stage runs one agent: harness, model, and skill. Tools differ in how you ca
 - Interrupt and questions apply to a card's stage runs (see [Talking to a working agent](#talking-to-a-working-agent)). A Codex profile with `codex exec` flags, or an opencode profile with extra arguments, runs the one-shot command: no steering, interrupt or questions, messages wait for the next run, and opencode reports no tokens.
 - Credentials for each tool are set under **Agents** in the web console.
 
-Keys are stored encrypted (per organization in multi mode; local scope in local mode) via the web console, `bento setup`, or the Mac app.
+Keys are encrypted and **personal by default**, including keys saved through the web console or `bento setup`. Existing shared keys keep their scope. See [Personal and shared API keys](#personal-and-shared-api-keys).
+
+## Personal and shared API keys
+
+Open **Agents → Model provider keys**, select the provider, paste the key, and save. New keys and endpoint settings belong to you. You can also save your own key for a custom provider under **Agents → Custom provider keys** after an owner or admin defines the provider.
+
+Owners and admins can turn on **Shared organization key** before saving. With the toggle off, the field is labeled **Personal API key**. Enabling the toggle shares that credential with the current team. The toggle selects where the next save goes; it does not move an existing key. To change an existing key's scope, save it in the desired scope and remove the old copy. Members can always manage their own keys, but cannot manage shared keys or anyone else's personal keys. Only share credentials licensed for team use; a subscription key intended for one person must remain personal.
+
+Your explicitly started stage runs and stage follow-ups use your personal keys before shared keys. A personal key uses only your own endpoint override for that provider, never an organization endpoint. Save a custom base URL in the same scope as its key. An active personal-key run cannot be steered by teammates. Background stages, judges, conflict resolution, swarms, and remote runners keep their existing shared or machine credential paths; they never borrow the project owner's personal key. GitHub's integration token remains shared.
+
+Deleting a personal key stops subsequent proxied requests using it. Recreating the key does not revive an old run or switch that run to a shared key; start a new run. Replacing the value of an existing personal key rotates it for subsequent proxy requests. Keys for providers that cannot use the model proxy still reach the agent using their existing integration, so removing those keys from Bento cannot revoke a value already handed to a running agent.
 
 ## Model provider keys stay out of agent sandboxes
 
-On a hosted (multi mode) server, an agent's sandbox does not get the organization's provider keys, and on a local server a Docker sandbox does not get yours unless you turn the proxy off. Each key it would have had is replaced, under the same variable name, by a proxy token that is valid for that one run, and the provider's base URL variable points at Bento's model proxy (`/api/model-proxy/<provider>`). The proxy checks the token, swaps the organization's real key in, and passes the request and the provider's answer through unchanged, streaming included. The token stops working when the run ends, so an agent that a prompt injection talks into printing its environment gives away nothing that outlives the run.
+For supported providers, hosted (multi mode) servers and local Docker sandboxes use proxy tokens instead of personal API keys or shared organization keys. The local proxy can be turned off; exceptions are described below. Each key it would have had is replaced, under the same variable name, by a proxy token that is valid for that one run, and the provider's base URL variable points at Bento's model proxy (`/api/model-proxy/<provider>`). The proxy checks the token, swaps the selected personal or organization key in, and passes the request and the provider's answer through unchanged, streaming included. The token stops working when the run ends, so an agent that a prompt injection talks into printing its environment gives away nothing that outlives the run.
 
 | Tool | Keys sent through the proxy |
 | --- | --- |
@@ -37,17 +48,17 @@ On a hosted (multi mode) server, an agent's sandbox does not get the organizatio
 | Poolside (pool) | `POOLSIDE_API_KEY` |
 | DeepSeek Harness | `DEEPSEEK_API_KEY` |
 
-These still reach the sandbox as they are: a Claude subscription token (it is valid only at Anthropic's own API), Cursor's credentials (Cursor's backend is not a model API with a base URL), `META_API_KEY` for Muse Code and `AI_GATEWAY_API_KEY` for fx (neither documents a base URL for its built in route), custom provider keys, and Ollama's.
+These still reach the sandbox as they are: a legacy local Claude setup token (personal account connections use the proxy), Cursor's credentials (Cursor's backend is not a model API with a base URL), `META_API_KEY` for Muse Code and `AI_GATEWAY_API_KEY` for fx (neither documents a base URL for its built in route), custom provider keys, and Ollama's.
 
 A base URL saved for a key (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `GOOGLE_GEMINI_BASE_URL`, `DEEPSEEK_BASE_URL`, `POOLSIDE_STANDALONE_BASE_URL`) still decides where the requests go, and when it is a public `https` address, Bento's server makes the call, not the sandbox. A saved base URL that is plain `http` or a private network address cannot be reached by the proxy (the same rule MCP servers follow), so that key is not proxied: the run gets the key and the base URL as it did before the proxy existed, and the transcript says so. With the network lock on, a sandbox whose keys are proxied needs only Bento's own address, not the providers'.
 
-The proxy forwards only what an agent needs from a provider: its completion endpoints, token counting and model listings. A request for anything else in the provider's API (files, fine tuning, batches, account and admin endpoints) is refused, so the proxy token cannot spend the organization's key on them.
+The proxy forwards only what an agent needs from a provider: its completion endpoints, token counting and model listings. A request for anything else in the provider's API (files, fine tuning, batches, account and admin endpoints) is refused, so the proxy token cannot spend the selected key on them.
 
 The sandbox reaches the proxy at `BENTO_MCP_GATEWAY_URL` (or the server's own URL), the same address MCP servers use. A deployment with no address its sandboxes can use (a remote sandbox and a server on `localhost` with no `BENTO_MCP_GATEWAY_URL`) keeps giving them the keys, and says so in the run's transcript. Bento cannot see whether a network lets the sandbox reach an address it was given, so a Docker deployment with the network lock on must route its restricted network to Bento (see [web-app.md](./web-app.md#network-lock-on-docker)). When the proxy itself fails a request (it cannot read or decrypt the key, or its own code fails), the agent gets an error naming Bento, and a run that fails while that is the latest word on its model calls is not billed; once the provider answers a later request, the run is billed as usual. A provider that is down or does not answer in time is the provider's failure, as it is without the proxy: the agent is told to retry, and the run is billed. Local mode proxies Docker sandboxes too, reading the key from Bento's own environment or the keys saved with `bento setup`, unless `BENTO_MODEL_PROXY=false` (the Mac app's **Model proxy** box). There a local base URL on your network goes through the proxy, one naming your machine itself (`localhost`, `host.docker.internal`) stays in the sandbox, a sandbox that cannot reach the proxy keeps its keys for that run, and the local process driver always gets the keys directly. See [security.md](./security.md#model-keys-stay-encrypted-in-bento).
 
 ## Custom model providers
 
-Beta testers can add a provider in **Settings, Providers**. Enter its API base URL, protocol, and model IDs, then save its API key there or in **Agents, Custom provider keys**. In multi mode, owners and admins manage the definition and key for their organization. An agent model is selected as `provider-id/model-id`.
+Beta testers can add a provider in **Settings, Providers**. Enter its API base URL, protocol, and model IDs, then save its API key there or in **Agents, Custom provider keys**. In multi mode, owners and admins manage provider definitions. Each user can save a personal key; only owners and admins can save a shared key. An agent model is selected as `provider-id/model-id`.
 
 | Protocol | Harnesses |
 | --- | --- |
@@ -98,7 +109,7 @@ If the session is unavailable (sandbox recreated or CLI session lost), Bento sta
 
 ## Claude Code on a subscription
 
-Local mode only. Not supported on [usebento.ai](https://usebento.ai).
+Use **Your personal subscriptions** in Agents for browser login in local or hosted mode (see [Personal account connections](#personal-account-connections)). The older setup-token option below is local mode only.
 
 ```bash
 claude setup-token
@@ -141,11 +152,11 @@ Bare model ids (`claude-sonnet-5`, `claude-opus-5`). Reports cost. Mid-run inter
 
 ### pi
 
-Provider-agnostic (`provider/id` format). Keys: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `AI_GATEWAY_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY` as required by model. Prefix with `vercel/` to bill through Vercel AI Gateway. Reports cost.
+Provider-agnostic (`provider/id` format). Claude and ChatGPT connections can cover eligible personal runs (see [Personal account connections](#personal-account-connections)). Otherwise, keys: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `AI_GATEWAY_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY` as required by model. Prefix with `vercel/` to bill through Vercel AI Gateway. Reports cost.
 
 ### Codex CLI
 
-Bare OpenAI ids (`gpt-5-codex`) use `OPENAI_API_KEY`. When OpenRouter is the selected provider, the model is an OpenRouter slug (`openai/gpt-5-mini`) and Bento passes `-c model_provider=openrouter` so Codex reads `OPENROUTER_API_KEY`. When Vercel AI Gateway is selected, the model is `vercel/` plus a Gateway slug (`vercel/moonshotai/kimi-k3`) and Bento passes `-c model_provider=vercel` so Codex reads `AI_GATEWAY_API_KEY`. You do not set `OPENAI_BASE_URL` for either route.
+Bare OpenAI ids (`gpt-5-codex`) use your connected ChatGPT subscription for eligible personal runs, or `OPENAI_API_KEY` otherwise (see [Personal account connections](#personal-account-connections)). When OpenRouter is the selected provider, the model is an OpenRouter slug (`openai/gpt-5-mini`) and Bento passes `-c model_provider=openrouter` so Codex reads `OPENROUTER_API_KEY`. When Vercel AI Gateway is selected, the model is `vercel/` plus a Gateway slug (`vercel/moonshotai/kimi-k3`) and Bento passes `-c model_provider=vercel` so Codex reads `AI_GATEWAY_API_KEY`. You do not set `OPENAI_BASE_URL` for either route.
 
 Codex 0.153 ignores `OPENAI_API_KEY` for its built in provider. Bento hands the saved OpenAI key over as `CODEX_API_KEY`. `OPENAI_BASE_URL` is still honored for other OpenAI compatible gateways, as `-c openai_base_url=...`. Does not report cost.
 
@@ -199,8 +210,54 @@ MCP servers attach through `~/.config/muse/settings.json`, which Bento rewrites 
 
 Vercel's `fx`, run headlessly (`fx ask --json --full-access`). Gateway slugs, vendor prefix included: `moonshotai/kimi-k3`, `openai/gpt-5.4`. Unlisted slugs may be typed manually. `fx ask` has no `--model` flag; Bento sets `FX_MODEL`.
 
-Gateway authentication is `AI_GATEWAY_API_KEY`. A custom Chat Completions connection instead reads its own encrypted organization key through `BENTO_CUSTOM_PROVIDER_API_KEY`, with its endpoint and model selected in Settings. Bento installs an fx [custom connections preview](https://fx.sh/docs/configure-fx/custom-model-connections) build in sandboxes. fx can also sign in with Vercel, or with a Codex or Grok subscription, which no sandbox can do. Local mode can share this machine's `~/.fx` (Agents, "Use this machine's logins"), with the same risk that sharing any login carries.
+Gateway authentication is `AI_GATEWAY_API_KEY`. A custom Chat Completions connection instead reads the selected encrypted personal API key or shared organization key through `BENTO_CUSTOM_PROVIDER_API_KEY`, with its endpoint and model selected in Settings. Bento installs an fx [custom connections preview](https://fx.sh/docs/configure-fx/custom-model-connections) build in sandboxes. fx can also sign in with Vercel, or with a Codex or Grok subscription, which no sandbox can do. Local mode can share this machine's `~/.fx` (Agents, "Use this machine's logins"), with the same risk that sharing any login carries.
 
 `--full-access` disables fx's own permission checks: Bento's sandbox is the boundary. `fx ask --json` prints one object when the process exits (no streamed tool or thinking events). Runs resume by session id (`--resume`). Headless mode accepts no mid-run input. Does not report cost: the JSON carries token counts, not a dollar figure.
 
 MCP servers attach through `~/.fx/mcp.json`, which Bento rewrites before every run. fx refuses a literal Authorization header, so the run grant travels as `BENTO_MCP_GRANT` and the file names that variable.
+
+## Personal account connections
+
+Connect your own Claude or ChatGPT subscription under **Agents → Your personal subscriptions**. Setup is the same in local and hosted Bento. On hosted Bento, sign in with your own Bento user account before connecting. Each person connects separately; companies and teams must not share subscription logins.
+
+| Connection | Coding agents | Matching models |
+| --- | --- | --- |
+| Claude | Claude Code, pi | Bare Claude model IDs in Claude Code; `anthropic/` models in pi |
+| ChatGPT | Codex, pi | Bare OpenAI model IDs in Codex; `openai/` or `openai-codex/` models in pi that are available through Codex |
+
+### Connect Claude
+
+1. Open **Agents → Your personal subscriptions** and click **Connect Claude**.
+2. Open the **Claude sign in** link, sign in to your own Claude account, and authorize the connection.
+3. Copy the complete authorization code, including the `#` and the text after it (`code#state`).
+4. Paste it into **Paste the complete authorization code** in Bento and click **Finish connection**.
+5. Wait for Claude to show **Connected to your account**.
+
+This one connection supports both Claude Code and pi with Anthropic models.
+
+### Connect ChatGPT
+
+1. Open **Agents → Your personal subscriptions** and click **Connect ChatGPT**.
+2. Open the **ChatGPT sign in** link and sign in to your own ChatGPT account.
+3. Enter the device code shown in Bento and approve the connection. If the provider refuses device-code login, enable it in your account's security settings and start again.
+4. Keep Bento open while it checks for approval. When complete, ChatGPT shows **Connected to your account**; there is no authorization code to paste back into Bento.
+
+This one connection supports both Codex and pi with models available through Codex.
+
+### Start a run
+
+Choose a matching agent and model, then explicitly start a card's stage run or send a follow-up message. A connected subscription takes priority for matching models, so you do not need a separate provider API key for those runs. In Codex, a provider-prefixed model such as `openai/gpt-5-mini` selects OpenRouter, not your ChatGPT subscription.
+
+Custom provider endpoints keep using their API keys. Background stages, judges, conflict resolution, swarms, and remote runners keep their existing credentials. They do not borrow your subscription or the project owner's login.
+
+Your connection belongs to you, even inside a team. Other members, including owners and admins, cannot list, change, or use it. They cannot steer, answer questions on, or change your card while your personal subscription run is active. Follow-ups from different people are handled in separate runs.
+
+### Reconnect or disconnect
+
+Return to **Agents → Your personal subscriptions** and click **Reconnect** if Bento asks you to sign in again. For an expired device code, start a new connection. For an invalid Claude authorization code, paste the complete `code#state` from the current login attempt. **Cancel connection** cancels a pending login.
+
+Click **Disconnect** to stop using a connection. Its next model request is refused; start a new run to use your configured API credentials. A running subscription task never silently switches to paid API credentials. Reconnecting creates a new connection, so start a new run after reconnecting rather than trying to revive an old task. Automatic retries retain the original user and connection.
+
+Bento encrypts your provider tokens and refreshes them on the server. Agents receive only a temporary Bento run token through the model proxy. Provider subscription limits and Bento hosting charges still apply; a reported subscription model cost is a notional list price, not an API charge.
+
+For a remote sandbox, set `BENTO_MCP_GATEWAY_URL` to a Bento server address the sandbox can reach. Personal connections always use the model proxy, including local mode. The proxy checks the initiating user, current team membership, and original connection on each request. Provider access and refresh tokens never enter the sandbox, and subscription requests use fixed vendor endpoints.

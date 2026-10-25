@@ -1,4 +1,5 @@
-import { and, eq, inArray, isNull } from "drizzle-orm";
+import { credentialRows, PERSONAL_KEYS_MARKER } from "../agent-accounts/credentials.js";
+import { and, eq } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { Agent, fetch as undiciFetch, type Response as UndiciResponse } from "undici";
 import {
@@ -8,7 +9,9 @@ import {
   type ModelProxyAuth,
   type ProxiedModelProvider,
 } from "@bento/core";
-import { secrets } from "@bento/db";
+import { agentAccounts, agentRuns } from "@bento/db";
+import { AccountLoginError } from "../agent-accounts/oauth.js";
+import { personalCredentials } from "../agent-accounts/store.js";
 import type { AppContext } from "../context.js";
 import {
   clearModelProxyFailure,
@@ -194,7 +197,8 @@ async function proxy(ctx: AppContext, cache: ModelProxyCache, c: Context): Promi
   const started = new Date();
 
   const tokenHash = hashGrantToken(token);
-  let cached = cache.get(tokenHash);
+  const personal = provider.key.startsWith("BENTO_PERSONAL_");
+  let cached = personal ? undefined : cache.get(tokenHash);
   if (!cached) {
     const generation = cache.generation;
     let resolved: ResolvedGrant | null;
@@ -206,7 +210,7 @@ async function proxy(ctx: AppContext, cache: ModelProxyCache, c: Context): Promi
       return c.json(BENTO_FAILURE, 502);
     }
     if (!resolved) return c.json(NOT_FOUND, 404);
-    cached = cache.put(tokenHash, resolved, generation);
+    cached = personal || resolved.modelCredentials.includes(PERSONAL_KEYS_MARKER) ? { grant: resolved, credentials: new Map() } : cache.put(tokenHash, resolved, generation);
   }
   const entry = cached;
   const grant = entry.grant;
@@ -270,7 +274,19 @@ async function forward(
   // The key, and the base URL the organization saved when the grant
   // says the run would have used it: from the cache, or read and
   // decrypted now and kept there for the rest of its life.
-  let credentials = entry.credentials.get(provider.key);
+  const personal = provider.key.startsWith("BENTO_PERSONAL_");
+  let account: Awaited<ReturnType<typeof personalCredentials>> = null;
+  if (personal) {
+    try {
+      account = await personalCredentials(ctx, grant, provider.key === "BENTO_PERSONAL_ANTHROPIC" ? "anthropic" : "openai-codex");
+    } catch (error) {
+      if (!(error instanceof AccountLoginError)) throw error;
+      c.header("x-should-retry", "true");
+      return c.json(PROVIDER_UNREACHABLE, 502);
+    }
+    if (!account) return c.json({ error: "Your personal account is disconnected or needs reconnecting." }, 401);
+  }
+  let credentials = account ? { key: account.access, savedBase: null } : entry.credentials.get(provider.key);
   if (!credentials) {
     const generation = cache.generation;
     let read: ProviderCredentials | null;
@@ -289,9 +305,18 @@ async function forward(
     cache.putCredentials(entry, provider.key, read, generation);
   }
 
-  const target = upstreamUrl(credentials.savedBase ?? provider.proxy.upstream, url, segment);
+  const upstreamRequest = new URL(url);
+  if (provider.key === "BENTO_PERSONAL_CODEX") upstreamRequest.pathname = upstreamRequest.pathname.replace(/\/codex\/responses$/, "/responses");
+  const target = upstreamUrl(credentials.savedBase ?? provider.proxy.upstream, upstreamRequest, segment);
   if (!target) return c.json(NOT_FOUND, 404);
   const headers = upstreamHeaders(c.req.raw.headers, provider.proxy.auth, credentials.key);
+  // A sandbox cannot choose the subscription account or organization.
+  if (personal) {
+    delete headers["chatgpt-account-id"];
+    delete headers["openai-organization"];
+    delete headers["openai-project"];
+    if (account?.accountId) headers["chatgpt-account-id"] = account.accountId;
+  }
   const body = method === "GET" || method === "HEAD" ? undefined : (c.req.raw.body ?? undefined);
 
   let upstream: UndiciResponse;
@@ -353,7 +378,13 @@ async function forward(
   }
   // A key the provider refuses may have been rotated since it was
   // cached; the next request reads it again.
-  if (upstream.status === 401 || upstream.status === 403) entry.credentials.delete(provider.key);
+  if (upstream.status === 401 || upstream.status === 403) {
+    entry.credentials.delete(provider.key);
+    if (personal && account) {
+      const id = grant.modelCredentials.find((v) => v.startsWith("personal-account:"))?.slice(17);
+      if (id) await ctx.db.update(agentAccounts).set({ expiresAt: new Date(0) }).where(and(eq(agentAccounts.id, id), eq(agentAccounts.userId, grant.actingUserId!)));
+    }
+  }
   return passBack(upstream, method);
 }
 
@@ -361,7 +392,7 @@ async function forward(
  * The key and saved base URL for one provider, read and decrypted; null
  * when the key was deleted.
  *
- * From the grant's organization's stored secrets, and nowhere else,
+ * From the run's pinned personal keys or the organization's stored secrets,
  * with one exception: a local server's grant (local mode, no
  * organization) also reads this process's environment, because that is
  * where resolveAgentEnv found the local user's keys, and with the same
@@ -378,19 +409,17 @@ async function readCredentials(
   provider: ProxiedModelProvider,
 ): Promise<ProviderCredentials | null> {
   const baseUrlKey = provider.baseUrlKey && grant.modelCredentials.includes(provider.baseUrlKey) ? provider.baseUrlKey : null;
-  const rows = await ctx.db
-    .select({ name: secrets.name, ciphertext: secrets.ciphertext })
-    .from(secrets)
-    .where(
-      and(
-        grant.organizationId ? eq(secrets.organizationId, grant.organizationId) : isNull(secrets.organizationId),
-        inArray(secrets.name, baseUrlKey ? [provider.key, baseUrlKey] : [provider.key]),
-      ),
-    );
+  let personalCredentialIds = {};
+  if (grant.modelCredentials.includes(PERSONAL_KEYS_MARKER)) {
+    const [run] = await ctx.db.select({ startedBy: agentRuns.startedBy, ids: agentRuns.personalCredentialIds }).from(agentRuns).where(eq(agentRuns.id, grant.runId));
+    if (!run || run.startedBy !== grant.actingUserId) return null;
+    personalCredentialIds = run.ids;
+  }
+  const rows = await credentialRows(ctx, grant.organizationId, baseUrlKey ? [provider.key, baseUrlKey] : [provider.key], grant.actingUserId, personalCredentialIds);
   const fromEnvironment = localEnvironmentFor(ctx, grant);
   const read = (name: string): string | null => {
     const row = rows.find((candidate) => candidate.name === name);
-    if (!fromEnvironment) return row ? ctx.secretBox.decrypt(row.ciphertext) : null;
+    if (!fromEnvironment || Object.hasOwn(personalCredentialIds, name)) return row ? ctx.secretBox.decrypt(row.ciphertext) : null;
     if (row) {
       try {
         return ctx.secretBox.decrypt(row.ciphertext);
@@ -469,7 +498,9 @@ export function runToken(headers: Headers, url: URL): string | null {
     headers.get("x-goog-api-key"),
     url.searchParams.get("key"),
   ];
-  const present = candidates.map((value) => value?.trim()).filter((value): value is string => Boolean(value));
+  const present = candidates.map((value) => value?.trim()
+    .replace(/^sk-ant-oat01-bento-/, "")
+    .replace(/^(bmg_[A-Za-z0-9_-]+)\.[A-Za-z0-9_=-]+\.bento$/, "$1")).filter((value): value is string => Boolean(value));
   // A client that also sends some other credential beside the token
   // (a placeholder key it was configured with) is still recognized.
   return present.find((value) => value.startsWith("bmg_")) ?? present[0] ?? null;

@@ -1,3 +1,4 @@
+import { pinPersonalCredentials } from "./agent-accounts/credentials.js";
 import { after, before, mock, test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
@@ -305,7 +306,7 @@ test("local mode reports the acting user as a beta tester", async () => {
   assert.deepEqual(await res.json(), { betaTesters: true });
 });
 
-test("local mode can manage machine credentials", async () => {
+test("local mode defaults to personal credentials", async () => {
   const created = await json<{ id: string }>(
     await app.request("/api/secrets", {
       method: "POST",
@@ -336,7 +337,7 @@ test("local mode can manage machine credentials", async () => {
 
   const removed = await app.request(`/api/secrets/${rotated.id}`, { method: "DELETE" });
   assert.equal(removed.status, 200);
-  assert.deepEqual(await json(await app.request("/api/secrets")), { secrets: [], canManage: true });
+  assert.deepEqual(await json(await app.request("/api/secrets")), { secrets: [], canManage: true, canManagePersonal: true, canManageOrg: true, canShareWithOrg: false });
 });
 
 test("a saved GitHub token lets local mode publish", async () => {
@@ -1271,6 +1272,7 @@ test("a resume against a lost conversation restarts fresh instead of failing for
     status: string;
     cliSessionId: string | null;
     error: string | null;
+    startedBy: string | null;
   }
   // The failed resume and its fresh replacement, which must succeed.
   let failed: RunRow | undefined;
@@ -1288,6 +1290,8 @@ test("a resume against a lost conversation restarts fresh instead of failing for
   assert.equal(failed.cliSessionId, null, "the dead session id is wiped, so nothing resumes it again");
   assert.ok(retried && retried.id !== failed.id, "a fresh run with the same prompt starts by itself");
   assert.equal(retried.status, "succeeded");
+  assert.equal(failed.startedBy, ctx.userId);
+  assert.equal(retried.startedBy, failed.startedBy, "automatic retry retains the initiating user");
 
   const transcript = await (await app.request(`/api/runs/${failed.id}/transcript`)).text();
   assert.match(transcript, /cannot be resumed/, "the transcript says what happened and what happens next");
@@ -2621,7 +2625,8 @@ test("a pasted Gemini key is what reaches an Antigravity run", async () => {
   );
   try {
     await withEnv({ GEMINI_API_KEY: null, GOOGLE_GEMINI_BASE_URL: null }, async () => {
-      const { env, missing } = await resolveAgentEnv(ctx, null, antigravityAdapter, "gemini-3.1-pro-high");
+      const pinned = await pinPersonalCredentials(ctx.db, ctx.userId, null, antigravityAdapter.cli, "gemini-3.1-pro-high");
+      const { env, missing } = await resolveAgentEnv(ctx, null, antigravityAdapter, "gemini-3.1-pro-high", ctx.drivers.default, ctx.userId, pinned);
       assert.deepEqual(missing, [], "the key is the credential, so nothing is missing");
       assert.equal(env.GEMINI_API_KEY, "AIza-pasted-by-the-user");
     });
@@ -2658,7 +2663,8 @@ test("a pasted Meta key is what reaches a Muse Code run", async () => {
   );
   try {
     await withEnv({ META_API_KEY: null }, async () => {
-      const { env, missing } = await resolveAgentEnv(ctx, null, museAdapter, "muse-spark-1.3");
+      const pinned = await pinPersonalCredentials(ctx.db, ctx.userId, null, museAdapter.cli, "muse-spark-1.3");
+      const { env, missing } = await resolveAgentEnv(ctx, null, museAdapter, "muse-spark-1.3", ctx.drivers.default, ctx.userId, pinned);
       assert.deepEqual(missing, [], "the key is the credential, so nothing is missing");
       assert.equal(env.META_API_KEY, "meta-pasted-by-the-user");
     });
@@ -2690,7 +2696,8 @@ test("a pasted AI Gateway key is what reaches an fx run", async () => {
   );
   try {
     await withEnv({ AI_GATEWAY_API_KEY: null }, async () => {
-      const { env, missing } = await resolveAgentEnv(ctx, null, fxAdapter, "moonshotai/kimi-k3");
+      const pinned = await pinPersonalCredentials(ctx.db, ctx.userId, null, fxAdapter.cli, "moonshotai/kimi-k3");
+      const { env, missing } = await resolveAgentEnv(ctx, null, fxAdapter, "moonshotai/kimi-k3", ctx.drivers.default, ctx.userId, pinned);
       assert.deepEqual(missing, [], "the key is the credential, so nothing is missing");
       assert.equal(env.AI_GATEWAY_API_KEY, "vck_pasted-by-the-user");
     });
@@ -2722,7 +2729,8 @@ test("a pasted OpenRouter key is what reaches a Codex OpenRouter run", async () 
   );
   try {
     await withEnv({ OPENROUTER_API_KEY: null, OPENAI_API_KEY: null, OPENAI_BASE_URL: null }, async () => {
-      const { env, missing } = await resolveAgentEnv(ctx, null, codexAdapter, "openai/gpt-5-mini");
+      const pinned = await pinPersonalCredentials(ctx.db, ctx.userId, null, codexAdapter.cli, "openai/gpt-5-mini");
+      const { env, missing } = await resolveAgentEnv(ctx, null, codexAdapter, "openai/gpt-5-mini", ctx.drivers.default, ctx.userId, pinned);
       assert.deepEqual(missing, [], "the OpenRouter key is the credential, so nothing is missing");
       assert.equal(env.OPENROUTER_API_KEY, "sk-or-pasted-by-the-user");
       assert.equal(env.OPENAI_API_KEY, undefined, "an OpenRouter run does not take the OpenAI key with it");
@@ -6416,7 +6424,7 @@ test("a claimed OpenCode run receives its custom provider configuration and key"
   assert.equal(createProvider.status, 201);
   const provider = (await createProvider.json()) as { id: string };
   await app.request(`/api/custom-providers/${provider.id}/key`, {
-    method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ apiKey: "sk-runner-test-key" }),
+    method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ apiKey: "sk-runner-test-key", scope: "org" }),
   });
   const profile = await json<{ id: string }>(await app.request("/api/profiles", {
     method: "POST", headers: { "content-type": "application/json" },

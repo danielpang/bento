@@ -4,6 +4,7 @@ import { getAdapter } from "@bento/agents";
 import { mcpServers, organizationPolicies, repositories, type Db } from "@bento/db";
 import type { SandboxHandle } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
+import type { PersonalCredentialIds } from "../agent-accounts/credentials.js";
 import { resolveAgentEnv } from "./agent-env.js";
 import { customProviderRunEnv } from "./custom-provider.js";
 import { modalRunHosts } from "./modal-hosts.js";
@@ -27,6 +28,8 @@ export async function modalNetworkForProject(
   organizationId: string | null,
   cli: AgentCli,
   model: string,
+  actingUserId: string | null = null,
+  personalCredentialIds: PersonalCredentialIds = {},
 ): Promise<Pick<SandboxHandle, "network" | "allowedHosts">> {
   const policy = await organizationNetworkPolicy(ctx, organizationId);
   if (!policy.restrictNetwork) return {};
@@ -36,8 +39,8 @@ export async function modalNetworkForProject(
     .where(eq(repositories.projectId, projectId));
   const adapter = getAdapter(cli);
   const driver = ctx.drivers.get("modal") ?? ctx.drivers.default;
-  const { env: resolved } = await resolveAgentEnv(ctx, organizationId, adapter, model, driver);
-  const custom = await customProviderRunEnv(ctx, organizationId, cli, model);
+  const { env: resolved } = await resolveAgentEnv(ctx, organizationId, adapter, model, driver, actingUserId, personalCredentialIds);
+  const custom = await customProviderRunEnv(ctx, organizationId, cli, model, actingUserId, personalCredentialIds);
   const env = custom ? custom.env : resolved;
   // Keys the model proxy carries are reached through the gateway, so
   // their providers' hosts stay off the list. The same plan the

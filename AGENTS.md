@@ -1004,9 +1004,48 @@ run twice.
 A dedicated `pg.Client` (the LISTEN connection in `pg-bus.ts`) is
 outside this and has to handle its own reconnect.
 
-## Agent credentials belong to the organization, never the server
+## Personal subscription connections are never organization credentials
 
-`resolveAgentEnv` reads keys from the organization's encrypted secrets.
+`agent_accounts` and `agent_account_logins` use user RLS (`bento.user_id`),
+not organization RLS or the organization inheritance trigger. Their secrets
+never enter a sandbox. Explicit stage runs pin `personal_account_id` when
+queued, and the model proxy checks that id and `started_by` on every request,
+with current membership and no credential cache. Refresh takes a row lock so
+replicas cannot rotate the same token twice. Reconnect replaces the row id,
+which must not revive old grants. The native-looking tokens Pi receives contain
+only the opaque Bento run token and a placeholder account id, never a vendor
+credential. The proxy unwraps these before normal grant authentication.
+
+Queueing and execution use `personalEndpointRedirected` for the same
+provider-specific endpoint decision, including process environment overrides
+only in local mode. Automatic lost-session retries preserve `started_by` and
+the original `personal_account_id`, including null; they must never select a
+new connection or silently change to API-key billing.
+
+A colleague cannot steer or mutate an active personal run's card. Queue claims
+for live runs filter by the starter; new follow-up runs claim one sender at a
+time. Background work must never borrow a project owner's subscription.
+
+## API keys are personal by default; sharing is explicit
+
+`user_secrets` uses user RLS. `secrets` retains existing shared keys and the
+GitHub integration token. New model keys (including custom-provider keys)
+default to the authenticated user. Only live owners and admins can save or
+remove organization keys. A personal write never converts, overwrites, or
+exposes a teammate's key. The console's sharing toggle selects the scope for
+the next save; it does not migrate existing keys.
+
+Explicit server stage runs pin `personal_credential_ids` at queue time, with
+null entries for absent endpoint/key partners so a personal key cannot go to a
+shared endpoint. Custom-provider bindings also pin the endpoint. Retries keep
+these bindings. Other team work and remote runners keep their existing paths.
+`credentialRows` is shared by execution and the model proxy. Personal grants
+skip credential caching and recheck the starter's current membership; deleting
+and recreating a key must not revive an old grant or fall back to a shared key.
+Personal runs cannot accept another member's steering or queued messages.
+
+`resolveAgentEnv` reads the initiating user's pinned keys before the
+organization's explicitly shared keys.
 Do not fall back to `process.env` in multi mode: an agent can read
 anything its sandbox can, so one prompt injection would exfiltrate the
 operator's key. Local mode uses the process environment because there is
@@ -1021,7 +1060,7 @@ name, with the run's grant token (the MCP gateway's `bmg_` grant, one
 row and one token per run, its `model_credentials` naming the secrets
 the proxy may read), and points the provider's base URL variable at
 `/api/model-proxy/<provider>`. The route (`routes/model-proxy.ts`)
-checks the token, decrypts the organization's key, and sends the
+checks the token, decrypts the run's selected key, and sends the
 request on with that key in place of the token, to the base URL the
 organization saved or the provider's own host. Nothing in the request
 names the host. Why: resolveAgentEnv used to put the decrypted keys in

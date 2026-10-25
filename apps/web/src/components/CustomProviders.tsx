@@ -28,34 +28,44 @@ export function CustomProviderKeyField({ client, provider, canManage, onChanged 
   const [key, setKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [remove, setRemove] = useState(false);
+  const [shareWithOrg, setShareWithOrg] = useState(false);
+  const scope = shareWithOrg && canManage && provider.organizationId ? "org" : "user";
+  const keyLabel = scope === "user" ? "Personal API key" : "Shared organization key";
+  const saved = scope === "user" ? provider.hasPersonalApiKey : provider.hasApiKey;
+  const hint = scope === "user" ? provider.personalKeyHint : provider.keyHint;
   async function save() {
     setBusy(true);
     try {
-      await client.saveCustomProviderKey(provider.id, key.trim());
+      await client.saveCustomProviderKey(provider.id, key.trim(), scope);
       setKey("");
       onChanged();
-      toast.note("API key saved");
+      toast.note(`${keyLabel} saved`);
     } catch (err) { toast.fail(err); } finally { setBusy(false); }
   }
   async function deleteKey() {
     setBusy(true);
     try {
-      await client.deleteCustomProviderKey(provider.id);
+      await client.deleteCustomProviderKey(provider.id, scope);
       onChanged();
       setRemove(false);
     } catch (err) { toast.fail(err); } finally { setBusy(false); }
   }
   return <div className="field">
-    <h4 className="field-heading">{provider.name} API key</h4>
-    {provider.hasApiKey ? <div className="criterion">
-      <span className="criterion-cmd">Saved {provider.keyHint ?? ""}</span>
-      {canManage && <button className="btn btn-ghost" disabled={busy} onClick={() => setRemove(true)}>Remove</button>}
+    <h4 className="field-heading">{provider.name}: {keyLabel}</h4>
+    {canManage && provider.organizationId && <label className="gate-check">
+      <input type="checkbox" checked={shareWithOrg} disabled={busy} onChange={(e) => setShareWithOrg(e.target.checked)} />
+      <span>Shared organization key</span>
+    </label>}
+    <p className="muted">{scope === "user" ? "This key is private to you. Your stage runs use it before a shared key." : "This key is shared with the current organization. Only share credentials licensed for team use."}</p>
+    {scope === "user" && provider.hasApiKey && <p className="muted">A shared organization key is also available.</p>}
+    {saved ? <div className="criterion">
+      <span className="criterion-cmd">Saved {hint ?? ""}</span>
+      {(scope === "user" || canManage) && <button className="btn btn-ghost" disabled={busy} onClick={() => setRemove(true)}>Remove</button>}
     </div> : <p className="muted">Not set. Runs using this provider need a key.</p>}
-    {canManage && <SecretField value={key} onChange={setKey} onSubmit={() => void save()}
-      label={`${provider.name} API key`} placeholder="Paste the key" submitLabel={provider.hasApiKey ? "Replace" : "Save"}
+    {(scope === "user" || canManage) && <SecretField value={key} onChange={setKey} onSubmit={() => void save()}
+      label={`${provider.name}: ${keyLabel}`} placeholder="Paste the key" submitLabel={saved ? "Replace" : "Save"}
       busy={busy} secret />}
-    {!canManage && <p className="muted">Only owners and admins can change this key.</p>}
-    {remove && <ConfirmDialog title={`Remove ${provider.name} API key?`}
+    {remove && <ConfirmDialog title={`Remove ${provider.name} ${keyLabel.toLowerCase()}?`}
       description="Agents using this provider stop running until a key is saved again."
       confirmLabel="Remove" destructive onClose={() => setRemove(false)} onConfirm={() => void deleteKey()} />}
   </div>;
@@ -121,7 +131,7 @@ export function CustomProvidersSettings({ client }: { client: BentoClient }) {
   return <>
     <section className="section settings-card">
       <h3 className="settings-title">Custom model providers</h3>
-      <p className="muted">Add an OpenAI Chat Completions, OpenAI Responses, or Anthropic Messages endpoint. OpenCode, pi, and dsh can use all three. Claude Code uses Anthropic, Codex uses Responses, and fx uses Chat Completions. Keys are stored encrypted for this workspace.</p>
+      <p className="muted">Add an OpenAI Chat Completions, OpenAI Responses, or Anthropic Messages endpoint. OpenCode, pi, and dsh can use all three. Claude Code uses Anthropic, Codex uses Responses, and fx uses Chat Completions. Keys are encrypted and personal by default.</p>
       {providers.length === 0 && <p className="muted">No custom providers yet.</p>}
       {providers.map((provider) => <div className="criterion" key={provider.id}>
         <div><strong>{provider.name}</strong> <span className="muted">({provider.slug}, {provider.protocol})</span>
@@ -148,7 +158,7 @@ export function CustomProvidersSettings({ client }: { client: BentoClient }) {
         <div><button className="btn" disabled={busy} onClick={() => void save()}>{editing ? "Save changes" : "Add provider"}</button>
           {editing && <button className="btn btn-ghost" onClick={reset}>Cancel</button>}</div>
       </>}
-      {!canManage && <p className="muted">Only organization owners and admins can manage providers and keys.</p>}
+      {!canManage && <p className="muted">Only organization owners and admins can manage provider definitions and shared keys. You can manage your own keys below.</p>}
     </section>
     {providers.map((provider) => <section className="section settings-card" key={provider.id}>
       <CustomProviderKeyField client={client} provider={provider} canManage={canManage} onChanged={() => void reload()} />

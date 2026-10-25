@@ -113,7 +113,7 @@ Console: [http://localhost:4400](http://localhost:4400).
 | Mode              | Behavior                                           |
 | ----------------- | -------------------------------------------------- |
 | `local` (default) | Single user, no auth, no organizations             |
-| `multi`           | Auth, organizations, encrypted per-org credentials |
+| `multi`           | Auth, organizations, encrypted personal and shared organization credentials |
 
 
 Multi mode requires:

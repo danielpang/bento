@@ -1,3 +1,4 @@
+import { hasPersonalKeys } from "../agent-accounts/credentials.js";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import { and, asc, desc, eq, inArray, isNull, lt, ne, sql } from "drizzle-orm";
@@ -101,6 +102,8 @@ import { isSafeBranchName, taskTrailer } from "./swarm/branches.js";
 import { confirmSwarmMessagesDelivered, requeueUndeliveredNodeMessages, takeNodeMessages } from "./swarm/node-messages.js";
 import { exportSwarmBranch, swarmBranchName } from "./swarm/sandbox.js";
 import { applyRunCharge, chargeForRun } from "./swarm/ledger.js";
+import { accountForRun, personalEndpointRedirected, personalProvider } from "../agent-accounts/store.js";
+import { proxyPersonalAccount } from "../agent-accounts/run.js";
 import { resolveAgentEnv } from "./agent-env.js";
 import { drivesRuns, runSlots } from "../env.js";
 import { customProviderRunEnv } from "./custom-provider.js";
@@ -289,22 +292,49 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   // Never for an ollama/ model: the run goes to Ollama, and a shared
   // Claude login would be sent to whatever server OLLAMA_BASE_URL names.
   //
-  // Credentials come from the owning organization, never from the
-  // server's own environment: see resolveAgentEnv. Resolved here, ahead
+  // Hosted credentials come from personal or organization storage,
+  // never from the server's own environment: see resolveAgentEnv. Resolved here, ahead
   // of the logins, because it decides whether the run goes to Ollama.
-  const { env: resolvedEnv, missing, ollama: onOllama } = await resolveAgentEnv(
-    ctx,
-    project.organizationId,
-    adapter,
-    profile.model,
-    driver,
-  );
-  const customProvider = await customProviderRunEnv(ctx, project.organizationId, profile.cli, profile.model);
+  let resolvedCredentials: Awaited<ReturnType<typeof resolveAgentEnv>>;
+  let customProvider: Awaited<ReturnType<typeof customProviderRunEnv>>;
+  try {
+    resolvedCredentials = await resolveAgentEnv(
+      ctx,
+      project.organizationId,
+      adapter,
+      profile.model,
+      driver,
+      run.startedBy,
+      run.personalCredentialIds,
+    );
+    customProvider = await customProviderRunEnv(ctx, project.organizationId, profile.cli, profile.model, run.startedBy, run.personalCredentialIds);
+  } catch {
+    await finishRun(ctx, runId, { ok: false, fault: "bento", error: hasPersonalKeys(run.personalCredentialIds)
+      ? "Your personal API key or provider configuration changed. Check Agents and start a new run."
+      : "Bento could not read this run's model credentials. Please try again." }, null);
+    emitBoard("failed");
+    await subject.settle(ctx);
+    return;
+  }
+  const { env: resolvedEnv, missing, ollama: onOllama } = resolvedCredentials;
   // A custom provider key is sufficient. Forwarding every other
   // provider key would give this sandbox credentials it does
   // not need, and a shared local login can mount read-only state.
-  const agentEnv = customProvider ? {} : resolvedEnv;
-  const sharesLogin = !onOllama && !customProvider;
+  const subscriptionProvider = run.personalAccountId && personalProvider(profile.cli, profile.model);
+  const redirectedSubscription = subscriptionProvider && await personalEndpointRedirected(
+    ctx.db, project.organizationId, subscriptionProvider, ctx.env.BENTO_MODE, run.personalCredentialIds,
+  );
+  const personalAccount = run.personalAccountId && subject.kind === "pipeline" && !customProvider && !onOllama && !redirectedSubscription
+    ? await accountForRun(ctx, run.startedBy, project.organizationId, profile.cli, profile.model) : null;
+  // A pinned subscription never silently falls back to billed API calls.
+  if (run.personalAccountId && (!personalAccount || personalAccount.id !== run.personalAccountId || personalAccount.reconnectRequired)) {
+    await finishRun(ctx, runId, { ok: false, error: "Your personal account connection changed or needs reconnecting. Start a new run after checking Agents." }, null);
+    emitBoard("failed");
+    await subject.settle(ctx);
+    return;
+  }
+  const agentEnv = customProvider || personalAccount ? {} : resolvedEnv;
+  const sharesLogin = !onOllama && !customProvider && !personalAccount && !hasPersonalKeys(run.personalCredentialIds);
   const authEnv = sharesLogin ? await agentAuthEnv(ctx, adapter) : {};
   /**
    * When the login arrives as an env token, the config mounts are not
@@ -329,7 +359,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
    * deployment with sharing on but no login on disk gives the agent an
    * API key, and that run's spend is as real as any other.
    */
-  const sharedAgentAuth = authMounts.length > 0 || Object.keys(authEnv).length > 0;
+  const sharedAgentAuth = Boolean(personalAccount) || authMounts.length > 0 || Object.keys(authEnv).length > 0;
   if (sharedAgentAuth) {
     await ctx.db.update(agentRuns).set({ sharedAgentAuth: true }).where(eq(agentRuns.id, runId));
   }
@@ -429,7 +459,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     // honor the restriction and so is never asked.
     const modalNetwork =
       restrictNetwork && allCandidates(chosenDrivers).some((d) => d.provider === "modal")
-        ? await modalNetworkForProject(ctx, project.id, subject.organizationId, profile.cli, profile.model)
+        ? await modalNetworkForProject(ctx, project.id, subject.organizationId, profile.cli, profile.model, run.startedBy, run.personalCredentialIds)
         : {};
     // The workspace, from the function both boards provision through.
     // Modal restore, the restricted-host list, and the sandboxes row
@@ -621,7 +651,11 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   let runEnv: Record<string, string>;
   let grantToken: string | null;
   try {
-    ({ env: runEnv, grantToken } = await proxyModelCredentials(ctx, {
+    ({ env: runEnv, grantToken } = personalAccount ? await proxyPersonalAccount(ctx, {
+      runId, organizationId: subject.organizationId, actingUserId: run.startedBy,
+      ...(subject.kind === "swarm" ? { swarmId: subject.swarm.id } : {}),
+      driver, cli: profile.cli, account: personalAccount, sessionKey: subject.kind === "pipeline" ? subject.feature.id : runId,
+    }) : await proxyModelCredentials(ctx, {
       runId,
       organizationId: subject.organizationId,
       actingUserId: run.startedBy,
@@ -630,6 +664,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       driver,
       handle,
       env: agentEnv,
+      personalCredentialIds: run.personalCredentialIds,
       say: saySystem,
     }));
   } catch (err) {
@@ -685,7 +720,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   // here and to an enterprise endpoint when one is stored.
   // A shared login is a credential, whether it arrives as a mount or an
   // env var. Only when none of the three exists does the run stop here.
-  if (!customProvider && missing.length > 0 && authMounts.length === 0 && Object.keys(authEnv).length === 0) {
+  if (!customProvider && !personalAccount && missing.length > 0 && authMounts.length === 0 && Object.keys(authEnv).length === 0) {
     // The pointer has to name a door that exists where the reader is.
     // Multi mode stores keys under Agents, Model provider keys. Local
     // mode stores them through bento setup, or shares this machine's
@@ -805,6 +840,12 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     }
     const written = await collectExec(driver.exec(handle, writeFileCommand(file), { timeoutMs: 60_000 }));
     if (written.exitCode !== 0) {
+      if (personalAccount) {
+        await finishRun(ctx, runId, { ok: false, error: "Bento could not write the personal account proxy configuration. Please try again.", fault: "bento" }, null);
+        emitBoard("failed");
+        await subject.settle(ctx);
+        return;
+      }
       await saySystem(`Could not write ${file.path} into the sandbox, so ${profile.cli} starts without it.`);
     }
   }
@@ -1385,7 +1426,10 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
           agentProfileId: runRow.agentProfileId,
           prompt: runRow.prompt,
           executor: runRow.executor,
-        }, ctx.entitlements, ctx.analytics);
+          startedBy: runRow.startedBy,
+          personalAccountId: runRow.personalAccountId,
+          personalCredentialIds: runRow.personalCredentialIds,
+        }, ctx.entitlements, ctx.analytics, undefined, ctx.env.BENTO_MODE);
         if (next !== "busy" && next !== "gone" && !("outOfCompute" in next)) {
           ctx.bus.emitBoardEvent({
             type: "run_updated",
@@ -2812,7 +2856,7 @@ export async function deliverQueuedMessage(ctx: AppContext, runId: string): Prom
     cliSessionId: source.cliSessionId,
     executor: source.executor,
     startedBy: author ?? priorStarter,
-  }, ctx.entitlements, ctx.analytics);
+  }, ctx.entitlements, ctx.analytics, undefined, ctx.env.BENTO_MODE);
   if (next === "busy") {
     // Another run started in the gap; the messages wait for its end.
     await requeueMessages(ctx.db, ids);
@@ -3684,6 +3728,8 @@ async function resumeInterruptedRun(
     // be told exactly what its first life was told, or the two halves
     // of one session disagree about what tools exist.
     cardTools: grantServers.includes(BENTO_SERVER_ID),
+    ...(run.personalAccountId && profile.cli === "pi" && grantUses?.modelCredentials.includes("BENTO_PERSONAL_CODEX")
+      ? { credentials: { BENTO_PERSONAL_PROVIDER: "openai-codex" } } : {}),
   });
 
   // What is left of the run's budget, not a fresh one: the agent has

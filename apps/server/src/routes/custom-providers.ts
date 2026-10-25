@@ -3,12 +3,13 @@ import { and, eq, isNull } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
 import { CUSTOM_PROVIDER_PROTOCOLS, MODEL_CATALOG } from "@bento/core";
-import { customModelProviders } from "@bento/db";
+import { customModelProviders, userSecrets } from "@bento/db";
 import { getAccessibleCustomProvider, getActiveOrganizationMembership } from "../access.js";
 import type { AppContext } from "../context.js";
 import { getBetaTester } from "../feature-flags.js";
 import { actor, activeOrg } from "../middleware/actor.js";
 import { tenantDb as db } from "../middleware/tenant.js";
+import { customKeyName } from "../agent-accounts/credentials.js";
 import { maskSecret } from "../secrets.js";
 
 const slug = z.string().regex(/^[a-z][a-z0-9-]{1,39}$/, "Use 2 to 40 lowercase letters, numbers, or hyphens");
@@ -23,7 +24,7 @@ const providerInput = z.object({
   }, "Use an HTTP or HTTPS base URL without credentials or query parameters"),
   models: z.array(model).min(1).max(100).refine((models) => new Set(models.map((m) => m.id)).size === models.length, "Model IDs must be unique"),
 });
-const keyInput = z.object({ apiKey: z.string().min(1).max(8192) });
+const keyInput = z.object({ apiKey: z.string().min(1).max(8192), scope: z.enum(["user", "org"]).default("user") });
 const reservedSlug = (value: string) => MODEL_CATALOG.some((provider) =>
   provider.id === value || provider.models.some((entry) => entry.id.startsWith(`${value}/`)));
 
@@ -57,7 +58,10 @@ export function customProviderRoutes(ctx: AppContext) {
       const permission = await scope(c);
       if (!permission) return c.json({ error: "not found" }, 404);
       const rows = await db(c, ctx).select().from(customModelProviders).where(and(permission.where, isNull(customModelProviders.deletedAt)));
-      return c.json({ providers: rows.map(publicProvider), canManage: permission.canManage });
+      return c.json({ providers: await Promise.all(rows.map(async (row) => {
+        const [own] = await db(c, ctx).select({ hint: userSecrets.hint }).from(userSecrets).where(and(eq(userSecrets.userId, actor(c)), eq(userSecrets.name, customKeyName(row.id))));
+        return { ...publicProvider(row), personalKeyHint: own?.hint ?? null, hasPersonalApiKey: Boolean(own) };
+      })), canManage: permission.canManage });
     })
     .post("/", zValidator("json", providerInput), async (c) => {
       const permission = await scope(c);
@@ -98,6 +102,13 @@ export function customProviderRoutes(ctx: AppContext) {
     .put("/:id/key", zValidator("json", keyInput), async (c) => {
       const found = await accessible(c);
       if (!found) return c.json({ error: "not found" }, 404);
+      if (c.req.valid("json").scope === "user") {
+        const apiKey = c.req.valid("json").apiKey;
+        const encrypted = { ciphertext: ctx.secretBox.encrypt(apiKey), hint: maskSecret(apiKey) };
+        await db(c, ctx).insert(userSecrets).values({ userId: actor(c), name: customKeyName(found.provider.id), ...encrypted })
+          .onConflictDoUpdate({ target: [userSecrets.userId, userSecrets.name], set: { ...encrypted, updatedAt: new Date() } });
+        return c.json({ ...publicProvider(found.provider), hasPersonalApiKey: true, personalKeyHint: encrypted.hint });
+      }
       if (!found.permission.canManage) return c.json({ error: "only owners and admins can manage providers" }, 403);
       const apiKey = c.req.valid("json").apiKey;
       const [updated] = await db(c, ctx).update(customModelProviders)
@@ -108,6 +119,12 @@ export function customProviderRoutes(ctx: AppContext) {
     .delete("/:id/key", async (c) => {
       const found = await accessible(c);
       if (!found) return c.json({ error: "not found" }, 404);
+      const requestedScope = c.req.query("scope") ?? "user";
+      if (requestedScope !== "user" && requestedScope !== "org") return c.json({ error: "invalid credential scope" }, 400);
+      if (requestedScope === "user") {
+        await db(c, ctx).delete(userSecrets).where(and(eq(userSecrets.userId, actor(c)), eq(userSecrets.name, customKeyName(found.provider.id))));
+        return c.json({ ok: true });
+      }
       if (!found.permission.canManage) return c.json({ error: "only owners and admins can manage providers" }, 403);
       await db(c, ctx).update(customModelProviders).set({ encryptedApiKey: null, keyHint: null, updatedAt: new Date() })
         .where(and(eq(customModelProviders.id, found.provider.id), found.permission.where));

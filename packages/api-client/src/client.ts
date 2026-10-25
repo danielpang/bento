@@ -85,6 +85,8 @@ export interface CustomModelProvider extends CustomModelProviderInput {
   organizationId: string | null;
   keyHint: string | null;
   hasApiKey: boolean;
+  hasPersonalApiKey?: boolean;
+  personalKeyHint?: string | null;
 }
 
 export interface RunStreamHandlers {
@@ -1451,10 +1453,33 @@ export class BentoClient {
     });
   }
 
+  listAgentAccounts() {
+    return this.request<{ accounts: { id: string; provider: "anthropic" | "openai-codex"; reconnectRequired: boolean; updatedAt: string }[] }>("/api/agent-accounts");
+  }
+
+  connectAgentAccount(provider: "anthropic" | "openai-codex") {
+    return this.request<{ id: string; url: string; userCode: string | null; interval: number; expiresAt: string }>(`/api/agent-accounts/${provider}/login`, { method: "POST", body: "{}" });
+  }
+
+  completeAgentAccount(provider: "anthropic" | "openai-codex", id: string, code?: string) {
+    return this.request<{ status: "pending" | "connected" }>(`/api/agent-accounts/${provider}/complete`, { method: "POST", body: JSON.stringify({ id, code }) });
+  }
+
+  cancelAgentAccountLogin(provider: "anthropic" | "openai-codex", id: string) {
+    return this.request<{ ok: boolean }>(`/api/agent-accounts/${provider}/login/${id}`, { method: "DELETE" });
+  }
+
+  disconnectAgentAccount(provider: "anthropic" | "openai-codex") {
+    return this.request<{ ok: boolean }>(`/api/agent-accounts/${provider}`, { method: "DELETE" });
+  }
+
   listSecrets() {
     return this.request<{
-      secrets: { id: string; name: string; hint: string }[];
+      secrets: { id: string; name: string; hint: string; scope: "user" | "org" }[];
       canManage: boolean;
+      canManagePersonal: boolean;
+      canManageOrg: boolean;
+      canShareWithOrg: boolean;
     }>("/api/secrets");
   }
 
@@ -1474,16 +1499,16 @@ export class BentoClient {
     return this.request<{ ok: boolean }>(`/api/custom-providers/${id}`, { method: "DELETE" });
   }
 
-  saveCustomProviderKey(id: string, apiKey: string) {
-    return this.request<CustomModelProvider>(`/api/custom-providers/${id}/key`, { method: "PUT", body: JSON.stringify({ apiKey }) });
+  saveCustomProviderKey(id: string, apiKey: string, scope: "user" | "org" = "user") {
+    return this.request<CustomModelProvider>(`/api/custom-providers/${id}/key`, { method: "PUT", body: JSON.stringify({ apiKey, scope }) });
   }
 
-  deleteCustomProviderKey(id: string) {
-    return this.request<{ ok: boolean }>(`/api/custom-providers/${id}/key`, { method: "DELETE" });
+  deleteCustomProviderKey(id: string, scope: "user" | "org" = "user") {
+    return this.request<{ ok: boolean }>(`/api/custom-providers/${id}/key?scope=${scope}`, { method: "DELETE" });
   }
 
   /** Values are write only: nothing reads a secret back. */
-  createSecret(input: { name: string; value: string }) {
+  createSecret(input: { name: string; value: string; scope?: "user" | "org" }) {
     return this.request<{ id: string; name: string; hint: string }>("/api/secrets", {
       method: "POST",
       body: JSON.stringify(input),
