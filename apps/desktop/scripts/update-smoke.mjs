@@ -141,9 +141,10 @@ try {
     assert.equal(Math.round(viewportHeight - box.y - box.height), 16);
 
     // A newly opened console receives the existing notice through trusted IPC.
-    await launcher.locator("#server-url").fill(`http://${host}`);
     const consoleOpened = desktop.waitForEvent("window");
-    await launcher.locator("#connect").click();
+    await launcher.evaluate(async (serverUrl) => {
+      await window.bentoLauncher.connect({ ...await window.bentoLauncher.settings(), mode: "remote", serverUrl });
+    }, `http://${host}`);
     const consolePage = await consoleOpened;
     const consoleToast = consolePage.locator("#bento-update-toast");
     await consoleToast.waitFor({ state: "visible" });

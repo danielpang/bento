@@ -6,7 +6,7 @@ const field = (id: string) => element<HTMLInputElement>(id);
 // One action per card: the button pressed is the mode.
 const actions: Record<DesktopMode, { id: string; label: string }> = {
   local: { id: "start", label: "Start" },
-  remote: { id: "connect", label: "Connect" },
+  remote: { id: "connect", label: "Sign in or sign up" },
 };
 let pressed: DesktopMode = "local";
 let runningLocal: DesktopStatus["local"];
@@ -69,7 +69,6 @@ function showError(error: unknown) { renderStatus({ phase: "error", message: err
 
 async function start() {
   const settings = await bridge.settings();
-  field("server-url").value = settings.serverUrl;
   field("data-dir").value = settings.dataDir;
   field("database-url").value = settings.databaseUrl;
   field("sandbox-image").value = settings.sandboxImage;
@@ -86,19 +85,13 @@ async function start() {
     pressed = (event as SubmitEvent).submitter?.id === actions.remote.id ? "remote" : "local";
     const next: DesktopSettings = {
       mode: pressed,
-      serverUrl: field("server-url").value, dataDir: field("data-dir").value,
+      serverUrl: "https://app.usebento.ai", dataDir: field("data-dir").value,
       databaseUrl: field("database-url").value, sandboxImage: field("sandbox-image").value,
       sandbox: element<HTMLSelectElement>("sandbox").value === "local-process" ? "local-process" : "docker",
       betaFeatures: field("beta-features").checked,
       modelProxy: field("model-proxy").checked,
     };
     void bridge.connect(next).catch(showError);
-  });
-  // Enter in the address means Connect, not the form's first button (Start).
-  field("server-url").addEventListener("keydown", (event) => {
-    if (event.key !== "Enter" || event.isComposing) return;
-    event.preventDefault();
-    element<HTMLButtonElement>(actions.remote.id).click();
   });
   element("choose-directory").addEventListener("click", () => void bridge.chooseDirectory().then((directory) => { if (directory) field("data-dir").value = directory; }).catch(showError));
   element("cancel").addEventListener("click", () => void bridge.cancel().catch(showError));

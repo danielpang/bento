@@ -53,8 +53,10 @@ try {
   await post("/api/auth/organization/set-active", { organizationId: organization.id }, token);
   desktop = await launch();
   let launcher = await desktop.firstWindow();
-  await launcher.locator("#server-url").fill(origin);
-  await launcher.getByRole("button", { name: "Connect", exact: true }).click();
+  // Connect the auth fixture directly; the launcher UI always uses hosted Bento.
+  await launcher.evaluate(async (serverUrl) => {
+    void window.bentoLauncher.connect({ ...await window.bentoLauncher.settings(), mode: "remote", serverUrl });
+  }, origin);
   await launcher.locator("#user-code").waitFor({ state: "visible" });
   const code = (await launcher.locator("#user-code").innerText()).trim();
   assert.ok(code.length > 3);
