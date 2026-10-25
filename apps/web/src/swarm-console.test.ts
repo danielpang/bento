@@ -2087,6 +2087,23 @@ test("a retried planner leaves the capacity launch screen as soon as it is queue
 });
 
 
+for (const status of ["cancelled", "done", "landed"] as const) {
+  test(`a ${status} worker does not show an old capacity failure as its current status`, () => {
+    const task = { ...tasks().find((task) => task.nodeType === "leaf")!, status };
+    const model = buildSwarmModel([task], { now: NOW });
+    const html = renderToStaticMarkup(createElement(SwarmNodeDrawer, {
+      task, node: model.byId.get(task.id)!, onClose() {}, onRetry() {}, swarmStatus: "running",
+      detail: { taskId: task.id, commits: [], events: [], runs: [{
+        id: "capacity-worker", status: "failed", error: `sandbox provisioning failed: ${SANDBOX_CAPACITY_MESSAGE}`,
+        queuedAt: new Date(NOW).toISOString(), startedAt: null, endedAt: new Date(NOW).toISOString(),
+      }] },
+    }));
+    assert.doesNotMatch(html, /Waiting for capacity|Retry this worker when capacity is available|>Retry worker</);
+    assert.equal((html.match(/class="capacity-notice"/g) ?? []).length, 1, "only the historical attempt keeps its notice");
+    assert.ok(html.indexOf('class="capacity-notice"') > html.indexOf("Worker attempts"));
+  });
+}
+
 test("a worker capacity failure explains that the worker never started and offers a non-destructive retry", () => {
   const task = { ...tasks().find((task) => task.nodeType === "leaf")!, status: "failed" as const, attention: "failed" as const };
   const model = buildSwarmModel([task], { now: NOW });

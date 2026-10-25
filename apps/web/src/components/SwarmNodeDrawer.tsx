@@ -173,7 +173,8 @@ export function SwarmNodeDrawer({
   const [confirmingStartOver, setConfirmingStartOver] = useState(false);
   const [tab, setTab] = useState("overview");
   const runs = detail?.runs ?? [];
-  const capacityBlocked = !node.agentActive && runs[0]?.status === "failed" && isSandboxCapacityError(runs[0].error);
+  const capacityBlocked = !["cancelled", "done", "landed"].includes(task.status) &&
+    !node.agentActive && runs[0]?.status === "failed" && isSandboxCapacityError(runs[0].error);
   const mergeQueueFailure = task.nodeType === "leaf" && typeof task.flags.landingError === "string";
   // A conflict the resolver could not settle fails the leaf with the
   // conflict on it and no landing error: the resolver already had its
