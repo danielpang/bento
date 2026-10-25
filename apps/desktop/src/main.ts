@@ -9,6 +9,7 @@ import { createUpdates } from "./update-service.js";
 import type { DesktopUpdates } from "./updates.js";
 import { isTrustedConsoleUrl, LAUNCHER_ORIGIN, normalizeServerUrl, safeExternalUrl, validateSettings } from "./security.js";
 import type { DesktopSettings, DesktopStatus } from "./contracts.js";
+import { localSettings, localSettingsChanged } from "./local-settings.js";
 
 const directory = import.meta.dirname;
 app.setName("Bento");
@@ -166,9 +167,7 @@ function consoleConnection(event: IpcMainInvokeEvent): Connection {
 function withLocal(next: DesktopStatus): DesktopStatus {
   const { local: _stale, ...rest } = next;
   const running = connections.get("local")?.settings;
-  if (!running) return rest;
-  const { dataDir, databaseUrl, sandbox, sandboxImage, betaFeatures, modelProxy } = running;
-  return { ...rest, local: { dataDir, databaseUrl, sandbox, sandboxImage, betaFeatures, modelProxy } };
+  return running ? { ...rest, local: localSettings(running) } : rest;
 }
 
 /** The connection a new window or a menu command means when none is in focus. */
@@ -256,10 +255,23 @@ async function connect(settings: DesktopSettings): Promise<void> {
   connectionTask = (async () => {
     let startedLocal = false;
     try {
-      await store.saveSettings(settings);
       const key = connectionKey(settings);
+      let existing = connections.get(key);
+      const runningLocal = connections.get("local")?.settings;
+      // Local Bento reads its settings only as it starts, so new ones restart it.
+      const restart = settings.mode === "local" && existing !== undefined && localSettingsChanged(existing.settings, settings);
+      if (restart && !await confirmRestart()) return;
+      // Signing in elsewhere keeps the settings local Bento runs with.
+      await store.saveSettings(settings.mode === "remote" && runningLocal ? { ...settings, ...localSettings(runningLocal) } : settings);
+      if (restart) {
+        publish({ phase: "starting", message: "Restarting Bento with your new settings..." });
+        try { await runtime.stop(); }
+        catch { throw new Error("Bento could not restart with your new settings. Please try again."); }
+        closeLocal();
+        controller.signal.throwIfAborted();
+        existing = undefined;
+      }
       // Already connected there: another window, and nothing restarts.
-      const existing = connections.get(key);
       if (existing) {
         lastUsed = existing;
         publish({ phase: "ready", message: settings.mode === "local" ? "Bento is running on this Mac." : "Connected to your Bento server.", serverUrl: existing.origin });
@@ -307,6 +319,13 @@ async function connect(settings: DesktopSettings): Promise<void> {
     }
   })();
   try { await connectionTask; } finally { connectionTask = undefined; }
+}
+
+async function confirmRestart(): Promise<boolean> {
+  const options: Electron.MessageBoxOptions = { type: "warning", buttons: ["Restart", "Cancel"], defaultId: 0, cancelId: 1, message: "Restart local Bento?",
+    detail: "Your new settings take effect after a restart. Agents that are working now are interrupted." };
+  const { response } = launcher && !launcher.isDestroyed() ? await dialog.showMessageBox(launcher, options) : await dialog.showMessageBox(options);
+  return response === 0;
 }
 
 /** One local Bento, and one connection per server address. */

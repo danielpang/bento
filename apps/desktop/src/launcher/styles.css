@@ -31,7 +31,7 @@ button.secondary { background: var(--panel); border-color: var(--line); color: i
 button:disabled { opacity: .5; cursor: wait; }
 /* Advanced settings while local Bento runs: shown, not editable. */
 details :is(input, select, button):disabled { opacity: .55; cursor: not-allowed; }
-#local-lock-note { margin-top: 12px; }
+#local-running-note { margin-top: 12px; }
 button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .status { margin: 20px 0 12px; line-height: 1.5; color: var(--muted); font-size: 13px; text-align: center; }
 .status.error, .warning { color: #aa3528; }
