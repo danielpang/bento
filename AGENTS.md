@@ -1236,7 +1236,9 @@ flag (403 `SWARM_WAITLIST`, and the tab offers the waitlist). The
 console gates the page on both. The server asks the plan on every swarm
 route (`requireSwarms`) but the flag only on the routes that start
 agents (`requireSwarmCompute`: create, start, reopen, a message, a
-retry, a split, a reassign, done, a planner retry), because those are
+retry, a split, a reassign, done, a planner retry, and any change to
+a swarm's budget, limits, agents or settings, since a raised ceiling
+resumes a paused swarm), because those are
 what spend sandbox time; reading, stopping, archiving and deleting
 never wait on PostHog, and a person taken off the flag can still stop
 what they started. `swarmAccessFor` in `apps/server/src/swarm-access.ts`

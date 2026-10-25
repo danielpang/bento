@@ -1001,9 +1001,15 @@ export function swarmRoutes(ctx: AppContext) {
     .patch("/:id", zValidator("json", updateSwarm), async (c) => {
       const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
       if (!swarm) return c.json({ error: "not found" }, 404);
-      const refusal = await requireSwarms(ctx, c, swarm.organizationId);
-      if (refusal) return c.json(refusal.body, refusal.status);
       const body = c.req.valid("json");
+      // A new ceiling, agent or setting can put agents back to work (a
+      // raised budget resumes a paused swarm), so only a rename or an
+      // archive is spared the waitlist.
+      const startsWork = Object.keys(body).some((key) => key !== "title" && key !== "archived");
+      const refusal = startsWork
+        ? await requireSwarmCompute(ctx, c, swarm.organizationId)
+        : await requireSwarms(ctx, c, swarm.organizationId);
+      if (refusal) return c.json(refusal.body, refusal.status);
       for (const profileId of [body.plannerProfileId, body.workerProfileId, body.judgeProfileId]) {
         if (profileId && !(await canUseProfile(ctx, c, swarm.organizationId, profileId))) {
           return c.json({ error: "agent not found" }, 404);

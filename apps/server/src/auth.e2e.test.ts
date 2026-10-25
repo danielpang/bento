@@ -183,6 +183,20 @@ test("hosted swarms refuse to start for the waitlist through the whole app, what
   asked = 0;
   assert.equal((await hosted.request("/api/swarms", { headers })).status, 200);
   assert.equal(asked, 0, "a read does not ask PostHog");
+  // A swarm they already have: renaming it is fine, but a new budget can
+  // put agents back to work, so the waitlist is asked.
+  const [existing] = await ctx.db
+    .insert(swarms)
+    .values({ workerIsolation: "worktree", projectId: project.id, slug: "waitlisted", title: "Old", status: "paused", branchName: "swarm/old" })
+    .returning();
+  const patch = (body: Record<string, unknown>) =>
+    hosted.request(`/api/swarms/${existing!.id}`, {
+      method: "PATCH",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  assert.equal((await patch({ title: "Renamed" })).status, 200);
+  assert.equal((await patch({ budgetUsd: 50 })).status, 403);
 
   letIn.push(email);
   forgetSwarmAccess();
