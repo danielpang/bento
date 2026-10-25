@@ -323,7 +323,7 @@ async function connect(settings: DesktopSettings): Promise<void> {
 
 async function confirmRestart(): Promise<boolean> {
   const options: Electron.MessageBoxOptions = { type: "warning", buttons: ["Restart", "Cancel"], defaultId: 0, cancelId: 1, message: "Restart local Bento?",
-    detail: "Your new settings take effect after a restart. Agents that are working now are interrupted and continue after Bento starts again." };
+    detail: "Your new settings take effect after a restart. Agents that are working now are interrupted." };
   const { response } = launcher && !launcher.isDestroyed() ? await dialog.showMessageBox(launcher, options) : await dialog.showMessageBox(options);
   return response === 0;
 }
