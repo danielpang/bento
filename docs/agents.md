@@ -2,19 +2,20 @@
 
 Each stage runs one agent: harness, model, and skill. Tools differ in how you can talk to them while they work, and in what they report.
 
-| Tool | Model format | Steer | Interrupt | Questions | Cost |
-| --- | --- | --- | --- | --- | --- |
-| Claude Code | `claude-sonnet-5` | Queued: runs as one more turn after the current one | Yes | Yes: one or several choices, or your own words | Yes |
-| pi | `anthropic/claude-sonnet-5` | Yes, after the current tool call | Yes | Yes: one or several choices, or your own words | Yes |
-| Codex CLI | `gpt-5-codex`, `openai/gpt-5-mini`, or `vercel/moonshotai/kimi-k3` | Yes, at the next model call | Yes | Yes: one choice, or your own words | Tokens only |
-| opencode | `anthropic/claude-sonnet-5` | Yes, at the next model call | Yes | No | Tokens only |
-| Cursor CLI | `claude-sonnet-5`, `composer-2.5`, `grok-4.6` | No: next run (session resume) | No | No | No |
-| Antigravity CLI | `gemini-3.1-pro-high` | No: next run (conversation resume) | No | No | No |
-| Muse Code | `muse-spark-1.3` | No: next run (session resume) | No | No | No |
-| fx | `moonshotai/kimi-k3` | No: next run (session resume) | No | No | No |
-| Poolside (pool) | `poolside/laguna-s-2.1` | No: next run (new session) | No | No | No |
-| DeepSeek Harness (dsh, preview) | `deepseek-v4-pro` | No: next run (new session) | No | No | No |
+| Tool | Model format | Personal subscription | Steer | Interrupt | Questions | Cost |
+| --- | --- | --- | --- | --- | --- | --- |
+| Claude Code | `claude-sonnet-5` | Claude | Queued: runs as one more turn after the current one | Yes | Yes: one or several choices, or your own words | Yes |
+| pi | `anthropic/claude-sonnet-5` | Claude or ChatGPT | Yes, after the current tool call | Yes | Yes: one or several choices, or your own words | Yes |
+| Codex CLI | `gpt-5-codex`, `openai/gpt-5-mini`, or `vercel/moonshotai/kimi-k3` | ChatGPT | Yes, at the next model call | Yes | Yes: one choice, or your own words | Tokens only |
+| opencode | `anthropic/claude-sonnet-5` | No | Yes, at the next model call | Yes | No | Tokens only |
+| Cursor CLI | `claude-sonnet-5`, `composer-2.5`, `grok-4.6` | No | No: next run (session resume) | No | No | No |
+| Antigravity CLI | `gemini-3.1-pro-high` | No | No: next run (conversation resume) | No | No | No |
+| Muse Code | `muse-spark-1.3` | No | No: next run (session resume) | No | No | No |
+| fx | `moonshotai/kimi-k3` | No | No: next run (session resume) | No | No | No |
+| Poolside (pool) | `poolside/laguna-s-2.1` | No | No: next run (new session) | No | No | No |
+| DeepSeek Harness (dsh, preview) | `deepseek-v4-pro` | No | No: next run (new session) | No | No | No |
 
+- **Personal subscription**: account connections through **Agents → Your personal subscriptions** in local and hosted Bento. Applies to matching models on stage runs you start; see [setup and limits](#personal-account-connections). Other local login-sharing options are described in the per-tool notes.
 - **Steer**: what happens to a message you send while the agent works. Yes means it reaches the turn already running. Queued means it waits in the same session for the current turn to end. "Next run" means it waits for the run to end and starts a new one, resuming the conversation where the tool can.
 - **Interrupt**: Stop ends only the current turn, and the agent waits for your next message in the same session. Where it is No, Stop ends the run.
 - **Questions**: the agent can ask you a question on the card and wait for your answer.
