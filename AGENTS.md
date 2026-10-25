@@ -1148,7 +1148,8 @@ one place that decides:
 - Local Bento reads its startup flag, `BENTO_BETA_FEATURES`, which the
   desktop app sets from the launcher's "Try beta and experimental
   features" box. Nothing in the database counts, so it changes only by
-  restarting local Bento, and the launcher locks the box while it runs.
+  restarting local Bento, which the launcher does when the box changes
+  while it runs.
 - A hosted server needs two things: the team allows it
   (`identity.organization.beta_features_allowed`, an owner or admin's
   setting in Settings, Team) and the person turned it on

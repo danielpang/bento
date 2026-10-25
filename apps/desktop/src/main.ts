@@ -9,6 +9,7 @@ import { createUpdates } from "./update-service.js";
 import type { DesktopUpdates } from "./updates.js";
 import { isTrustedConsoleUrl, LAUNCHER_ORIGIN, normalizeServerUrl, safeExternalUrl, validateSettings } from "./security.js";
 import type { DesktopSettings, DesktopStatus } from "./contracts.js";
+import { localSettings, localSettingsChanged } from "./local-settings.js";
 
 const directory = import.meta.dirname;
 app.setName("Bento");
@@ -166,9 +167,7 @@ function consoleConnection(event: IpcMainInvokeEvent): Connection {
 function withLocal(next: DesktopStatus): DesktopStatus {
   const { local: _stale, ...rest } = next;
   const running = connections.get("local")?.settings;
-  if (!running) return rest;
-  const { dataDir, databaseUrl, sandbox, sandboxImage, betaFeatures, modelProxy } = running;
-  return { ...rest, local: { dataDir, databaseUrl, sandbox, sandboxImage, betaFeatures, modelProxy } };
+  return running ? { ...rest, local: localSettings(running) } : rest;
 }
 
 /** The connection a new window or a menu command means when none is in focus. */
@@ -258,8 +257,15 @@ async function connect(settings: DesktopSettings): Promise<void> {
     try {
       await store.saveSettings(settings);
       const key = connectionKey(settings);
+      let existing = connections.get(key);
+      // Local Bento reads its settings only as it starts, so new ones restart it.
+      if (existing && settings.mode === "local" && localSettingsChanged(existing.settings, settings)) {
+        publish({ phase: "starting", message: "Restarting Bento with your new settings..." });
+        await runtime.stop();
+        closeLocal();
+        existing = undefined;
+      }
       // Already connected there: another window, and nothing restarts.
-      const existing = connections.get(key);
       if (existing) {
         lastUsed = existing;
         publish({ phase: "ready", message: settings.mode === "local" ? "Bento is running on this Mac." : "Connected to your Bento server.", serverUrl: existing.origin });

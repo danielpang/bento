@@ -31,8 +31,7 @@ export interface DesktopStatus {
   verificationUrl?: string;
   /**
    * The settings local Bento is running with, while it runs. The launcher
-   * shows them and locks Advanced settings, since Start reopens the
-   * running local Bento rather than restarting it.
+   * shows them, and Start with different ones restarts local Bento.
    */
   local?: Pick<DesktopSettings, "dataDir" | "databaseUrl" | "sandbox" | "sandboxImage" | "betaFeatures" | "modelProxy">;
 }
