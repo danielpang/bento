@@ -77,9 +77,13 @@ function hosted(letIn: string[]): AppContext {
   } as unknown as AppContext;
 }
 
-async function join(ctx: AppContext, mailer: Mailer): Promise<number> {
+async function joinResponse(ctx: AppContext, mailer: Mailer): Promise<Response> {
   const app = new Hono().use("*", actorMiddleware(ctx)).route("/", swarmWaitlistRoutes(ctx, mailer));
-  return (await app.request("/", { method: "POST" })).status;
+  return app.request("/", { method: "POST" });
+}
+
+async function join(ctx: AppContext, mailer: Mailer): Promise<number> {
+  return (await joinResponse(ctx, mailer)).status;
 }
 
 async function requestedAt(): Promise<Date | null> {
@@ -94,8 +98,11 @@ test("a failed mail leaves the person free to ask again", async () => {
 
 test("joining mails the inbox once with the email and GitHub username, and is recorded", async () => {
   const mailer = recordingMailer();
-  assert.equal(await join(hosted([]), mailer), 200);
-  assert.equal(await join(hosted([]), mailer), 200, "asking again still answers yes");
+  const first = await joinResponse(hosted([]), mailer);
+  assert.equal(first.status, 200);
+  assert.deepEqual(await first.json(), { ok: true, alreadyJoined: false });
+  const again = await joinResponse(hosted([]), mailer);
+  assert.deepEqual(await again.json(), { ok: true, alreadyJoined: true }, "asking again says they are already on it");
   assert.equal(mailer.sent.length, 1, "but sends nothing the second time");
   assert.equal(mailer.sent[0]!.to, SWARM_WAITLIST_EMAIL);
   assert.match(mailer.sent[0]!.text, /una@x\.test/);

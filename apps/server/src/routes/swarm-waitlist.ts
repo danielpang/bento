@@ -17,7 +17,7 @@ export const SWARM_WAITLIST_EMAIL = "waitlist@usebento.ai";
  * actor middleware is the whole check. The sender is looked up rather
  * than taken from a body, so a request cannot sign someone else up.
  * Refused without SMTP, because the console says the person was added
- * only when the mail really went. Asked again, it answers yes without a
+ * only when the mail really went. Asked again, it says so and sends no
  * second mail. Somebody already let in has nothing to wait for, and is
  * refused.
  */
@@ -33,7 +33,7 @@ export function swarmWaitlistRoutes(ctx: AppContext, mailer: Mailer = createMail
       .set({ swarmWaitlistRequestedAt: new Date() })
       .where(and(eq(user.id, userId), isNull(user.swarmWaitlistRequestedAt)))
       .returning({ name: user.name, email: user.email });
-    if (!sender) return c.json({ ok: true as const });
+    if (!sender) return c.json({ ok: true as const, alreadyJoined: true });
 
     try {
       await mailer.send(
@@ -51,6 +51,6 @@ export function swarmWaitlistRoutes(ctx: AppContext, mailer: Mailer = createMail
       return c.json({ error: "could not send" }, 502);
     }
     ctx.analytics?.capture({ event: "swarm waitlist joined", userId });
-    return c.json({ ok: true as const });
+    return c.json({ ok: true as const, alreadyJoined: false });
   });
 }

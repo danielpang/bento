@@ -2,7 +2,7 @@ import { BILLING_HREF } from "../swarm/plan.js";
 
 const DOWNLOAD_URL = "https://usebento.ai/download";
 
-export type WaitlistState = "idle" | "sending" | "joined" | "failed";
+export type WaitlistState = "idle" | "sending" | "joined" | "already" | "failed";
 
 function RunLocally({ lead }: { lead: string }) {
   return (
@@ -25,33 +25,30 @@ export function SwarmWaitlist({ state, onJoin }: { state: WaitlistState; onJoin:
   return (
     <div className="empty-state empty-project">
       <h1>Join the waitlist for Bento swarms.</h1>
+      <p className="muted">We're updating access daily, and we'll email you when you have access.</p>
       <RunLocally lead="Can't wait? You can" />
-      {state === "joined" ? (
+      <button className="btn btn-primary" onClick={onJoin} disabled={state === "sending"}>
+        Join waitlist
+      </button>
+      {state === "joined" && (
         <p role="status">Added to waitlist, in the meantime you can still run Bento swarms locally.</p>
-      ) : (
-        <button className="btn btn-primary" onClick={onJoin} disabled={state === "sending"}>
-          Join waitlist
-        </button>
       )}
+      {state === "already" && <p role="status">You're already on the waitlist.</p>}
       {state === "failed" && <p role="alert">Could not join the waitlist. Try again.</p>}
     </div>
   );
 }
 
-/** A team whose plan does not include swarms. */
+/** A team on the free plan. Only an owner or admin can subscribe. */
 export function SwarmSubscribe({ canUpgrade }: { canUpgrade: boolean }) {
   return (
     <div className="empty-state empty-project">
-      <h1>Bento swarms require a subscription.</h1>
-      <p className="muted">
-        {canUpgrade
-          ? "Upgrade this team's plan to start swarms."
-          : "Ask an owner or admin of this team to upgrade its plan."}
-      </p>
+      <h1>Bento swarms is only available on paid plans, subscribe to get access.</h1>
+      {!canUpgrade && <p className="muted">Ask an owner or admin to subscribe.</p>}
       <RunLocally lead="In the meantime, you can" />
       {canUpgrade && (
         <a className="btn btn-primary" href={BILLING_HREF}>
-          See plans
+          Subscribe
         </a>
       )}
     </div>

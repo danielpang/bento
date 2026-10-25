@@ -414,8 +414,6 @@ export interface FlagSnapshot {
    * "open" in local mode. Absent from a server that predates it.
    */
   swarms?: SwarmAccessState;
-  /** On the waitlist only: whether this person already asked to join it. */
-  swarmWaitlistJoined?: boolean;
 }
 
 export interface FeatureEvent {

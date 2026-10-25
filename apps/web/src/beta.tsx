@@ -26,12 +26,10 @@ export type SwarmFlag = SwarmAccessState | "unavailable";
 
 interface SwarmFlagValue {
   state: SwarmFlag | null;
-  /** Whether this person already asked to join the hosted waitlist. */
-  joined: boolean;
   retry: () => void;
 }
 
-const SwarmFlagContext = createContext<SwarmFlagValue>({ state: null, joined: false, retry: () => {} });
+const SwarmFlagContext = createContext<SwarmFlagValue>({ state: null, retry: () => {} });
 
 export function FlagsProvider({
   client,
@@ -45,25 +43,25 @@ export function FlagsProvider({
 }) {
   const [ready, setReady] = useState(false);
   const [enabled, setEnabled] = useState(false);
-  const [swarm, setSwarm] = useState<{ state: SwarmFlag | null; joined: boolean }>({ state: null, joined: false });
+  const [swarm, setSwarm] = useState<SwarmFlag | null>(null);
   const [attempt, setAttempt] = useState(0);
   const retry = useCallback(() => setAttempt((n) => n + 1), []);
 
   useEffect(() => {
     let cancelled = false;
-    setSwarm((current) => ({ ...current, state: null }));
+    setSwarm(null);
     void client
       .flags()
       .then((snapshot) => {
         if (cancelled) return;
         setEnabled(snapshot.betaTesters);
-        setSwarm({ state: snapshot.swarms ?? "unavailable", joined: snapshot.swarmWaitlistJoined === true });
+        setSwarm(snapshot.swarms ?? "unavailable");
         setReady(true);
       })
       .catch(() => {
         if (cancelled) return;
         setEnabled(false);
-        setSwarm({ state: "unavailable", joined: false });
+        setSwarm("unavailable");
         setReady(true);
       });
     return () => {
@@ -73,7 +71,7 @@ export function FlagsProvider({
 
   return (
     <BetaTestersContext.Provider value={{ ready, enabled, set: setEnabled }}>
-      <SwarmFlagContext.Provider value={{ ...swarm, retry }}>{children}</SwarmFlagContext.Provider>
+      <SwarmFlagContext.Provider value={{ state: swarm, retry }}>{children}</SwarmFlagContext.Provider>
     </BetaTestersContext.Provider>
   );
 }

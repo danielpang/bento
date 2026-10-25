@@ -166,7 +166,6 @@ test("hosted swarms answer the waitlist through the whole app, whatever beta say
   assert.equal(((await refused.json()) as { code: string }).code, "SWARM_WAITLIST");
   const waiting = await flags();
   assert.equal(waiting.swarms, "waitlist");
-  assert.equal(waiting.swarmWaitlistJoined, false);
 
   letIn.push(email);
   forgetSwarmAccess();

@@ -500,12 +500,11 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
   /** Behind the tab, which everyone sees: a subscription, then the hosted waitlist. */
   const swarmGateState = swarmGate(swarmAccess, swarmFlag.state);
   const swarming = boardMode === "swarms" && screen === "board";
-  const [waitlistRequest, setWaitlist] = useState<WaitlistState>("idle");
-  const waitlist: WaitlistState = swarmFlag.joined ? "joined" : waitlistRequest;
+  const [waitlist, setWaitlist] = useState<WaitlistState>("idle");
   const joinWaitlist = useCallback(() => {
     setWaitlist("sending");
     client.joinSwarmWaitlist().then(
-      () => setWaitlist("joined"),
+      ({ alreadyJoined }) => setWaitlist(alreadyJoined ? "already" : "joined"),
       () => setWaitlist("failed"),
     );
   }, []);
@@ -522,8 +521,8 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
     waitlistIntent.current = true;
     setBoardMode("swarms");
     rememberBoardMode(swarmStorage, "swarms");
-    if (swarmGateState === "waitlist" && !swarmFlag.joined) joinWaitlist();
-  }, [swarmGateState, swarmStorage, joinWaitlist, swarmFlag.joined]);
+    if (swarmGateState === "waitlist") joinWaitlist();
+  }, [swarmGateState, swarmStorage, joinWaitlist]);
 
   const [stages, setStages] = useState<Stage[]>([]);
   const [pipelineId, setPipelineId] = useState<string | null>(null);

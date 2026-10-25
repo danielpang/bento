@@ -541,20 +541,25 @@ test("a plan without swarms still shows the segment, with a lock", () => {
 
 test("the pages behind the Swarms tab", () => {
   const subscribe = renderToStaticMarkup(createElement(SwarmSubscribe, { canUpgrade: true }));
-  assert.match(subscribe, /require a subscription/);
-  assert.match(subscribe, /See plans/);
-  assert.doesNotMatch(renderToStaticMarkup(createElement(SwarmSubscribe, { canUpgrade: false })), /See plans/);
+  assert.match(subscribe, /only available on paid plans, subscribe to get access/);
+  assert.match(subscribe, />Subscribe</);
+  const member = renderToStaticMarkup(createElement(SwarmSubscribe, { canUpgrade: false }));
+  assert.doesNotMatch(member, />Subscribe</);
+  assert.match(member, /Ask an owner or admin to subscribe/);
 
   const waitlist = renderToStaticMarkup(createElement(SwarmWaitlist, { state: "idle", onJoin: () => {} }));
   assert.match(waitlist, /Join waitlist/);
   assert.match(waitlist, /href="https:\/\/usebento.ai\/download"/);
+  assert.match(waitlist, /updating access daily/);
   const joined = renderToStaticMarkup(createElement(SwarmWaitlist, { state: "joined", onJoin: () => {} }));
   assert.match(joined, /Added to waitlist/);
-  assert.doesNotMatch(joined, /<button/);
+  const already = renderToStaticMarkup(createElement(SwarmWaitlist, { state: "already", onJoin: () => {} }));
+  assert.match(already, /already on the waitlist/);
+  assert.match(already, /Join waitlist/, "the button stays, so asking again gets an answer");
 
   const unavailable = renderToStaticMarkup(createElement(SwarmUnavailable, { onRetry: () => {} }));
   assert.match(unavailable, /Try again/);
-  for (const html of [subscribe, waitlist, joined, unavailable]) assertNoDashes(html, "a swarm gate page");
+  for (const html of [subscribe, member, waitlist, joined, already, unavailable]) assertNoDashes(html, "a swarm gate page");
 });
 
 const NOW = Date.parse("2026-09-04T12:00:00.000Z");
