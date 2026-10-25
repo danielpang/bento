@@ -37,7 +37,7 @@ On a hosted (multi mode) server, an agent's sandbox does not get the organizatio
 | Poolside (pool) | `POOLSIDE_API_KEY` |
 | DeepSeek Harness | `DEEPSEEK_API_KEY` |
 
-These still reach the sandbox as they are: a Claude subscription token (it is valid only at Anthropic's own API), Cursor's credentials (Cursor's backend is not a model API with a base URL), `META_API_KEY` for Muse Code and `AI_GATEWAY_API_KEY` for fx (neither documents a base URL for its built in route), custom provider keys, and Ollama's.
+These still reach the sandbox as they are: a legacy local Claude setup token (personal account connections use the proxy), Cursor's credentials (Cursor's backend is not a model API with a base URL), `META_API_KEY` for Muse Code and `AI_GATEWAY_API_KEY` for fx (neither documents a base URL for its built in route), custom provider keys, and Ollama's.
 
 A base URL saved for a key (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `GOOGLE_GEMINI_BASE_URL`, `DEEPSEEK_BASE_URL`, `POOLSIDE_STANDALONE_BASE_URL`) still decides where the requests go, and when it is a public `https` address, Bento's server makes the call, not the sandbox. A saved base URL that is plain `http` or a private network address cannot be reached by the proxy (the same rule MCP servers follow), so that key is not proxied: the run gets the key and the base URL as it did before the proxy existed, and the transcript says so. With the network lock on, a sandbox whose keys are proxied needs only Bento's own address, not the providers'.
 
@@ -141,11 +141,11 @@ Bare model ids (`claude-sonnet-5`, `claude-opus-5`). Reports cost. Mid-run inter
 
 ### pi
 
-Provider-agnostic (`provider/id` format). Keys: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `AI_GATEWAY_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY` as required by model. Prefix with `vercel/` to bill through Vercel AI Gateway. Reports cost.
+Provider-agnostic (`provider/id` format). Claude and ChatGPT connections can cover eligible personal runs (see [Personal account connections](#personal-account-connections)). Otherwise, keys: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `AI_GATEWAY_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY` as required by model. Prefix with `vercel/` to bill through Vercel AI Gateway. Reports cost.
 
 ### Codex CLI
 
-Bare OpenAI ids (`gpt-5-codex`) use `OPENAI_API_KEY`. When OpenRouter is the selected provider, the model is an OpenRouter slug (`openai/gpt-5-mini`) and Bento passes `-c model_provider=openrouter` so Codex reads `OPENROUTER_API_KEY`. When Vercel AI Gateway is selected, the model is `vercel/` plus a Gateway slug (`vercel/moonshotai/kimi-k3`) and Bento passes `-c model_provider=vercel` so Codex reads `AI_GATEWAY_API_KEY`. You do not set `OPENAI_BASE_URL` for either route.
+Bare OpenAI ids (`gpt-5-codex`) use your connected ChatGPT subscription for eligible personal runs, or `OPENAI_API_KEY` otherwise (see [Personal account connections](#personal-account-connections)). When OpenRouter is the selected provider, the model is an OpenRouter slug (`openai/gpt-5-mini`) and Bento passes `-c model_provider=openrouter` so Codex reads `OPENROUTER_API_KEY`. When Vercel AI Gateway is selected, the model is `vercel/` plus a Gateway slug (`vercel/moonshotai/kimi-k3`) and Bento passes `-c model_provider=vercel` so Codex reads `AI_GATEWAY_API_KEY`. You do not set `OPENAI_BASE_URL` for either route.
 
 Codex 0.153 ignores `OPENAI_API_KEY` for its built in provider. Bento hands the saved OpenAI key over as `CODEX_API_KEY`. `OPENAI_BASE_URL` is still honored for other OpenAI compatible gateways, as `-c openai_base_url=...`. Does not report cost.
 
@@ -207,36 +207,46 @@ MCP servers attach through `~/.fx/mcp.json`, which Bento rewrites before every r
 
 ## Personal account connections
 
-Under **Agents**, **Your personal subscriptions**, connect Claude for Claude Code
-and Pi, or ChatGPT for Codex and Pi. This works in local and hosted multi mode.
-Claude opens a browser login and asks you to paste the complete `code#state` back
-into Bento. ChatGPT opens device authorization and supplies a one-time code.
-Bento stores the resulting tokens encrypted and refreshes them on the server.
-Reconnect replaces the connection; Disconnect stops its next model request.
+Connect your own Claude or ChatGPT subscription under **Agents → Your personal subscriptions**. Setup is the same in local and hosted Bento. On hosted Bento, sign in with your own Bento user account before connecting. Each person connects separately; companies and teams must not share subscription logins.
 
-A connection belongs to the signed-in person, even inside a team. Owners and
-admins cannot list, change, or use another member's connection. An explicit
-stage run pins its starter's connection when queued. Other members cannot steer,
-answer questions on, or change that card while the personal run is active.
-Follow-up messages from different people are handled in separate runs.
-Background stages with no initiating user, swarms, and remote runners keep using
-their existing credentials. There is no fallback to the project owner's login.
-Organization secrets cannot accept Claude subscription tokens in multi mode.
+| Connection | Coding agents | Matching models |
+| --- | --- | --- |
+| Claude | Claude Code, pi | Bare Claude model IDs in Claude Code; `anthropic/` models in pi |
+| ChatGPT | Codex, pi | Bare OpenAI model IDs in Codex; `openai/` or `openai-codex/` models in pi that are available through Codex |
 
-A connected Claude account takes priority on Claude Code and Pi's `anthropic/`
-models. A connected ChatGPT account takes priority on Codex's bare OpenAI model
-ids and Pi's `openai/` or `openai-codex/` models. Pi uses its native Codex provider
-for these ChatGPT calls, so the selected model must be available through Codex.
-Custom provider URLs keep their API-key route. Disconnect before starting a new
-run to return to API keys. A running subscription task never silently switches
-to a paid API key if its account is disconnected or needs reconnecting.
+### Connect Claude
 
-Personal connections always use Bento's existing model proxy, including local
-mode. The agent gets a short-lived run token, never the provider's access or
-refresh token. The proxy checks the initiating user, current team membership,
-and the pinned connection on each request. Subscription calls use fixed vendor
-endpoints and cannot be redirected through a saved organization base URL. A
-remote sandbox needs `BENTO_MCP_GATEWAY_URL` set to an address it can reach.
-Reported subscription cost is treated as a notional list price, rather than
-API spend. Bento hosting charges and the provider's subscription usage limits
-still apply.
+1. Open **Agents → Your personal subscriptions** and click **Connect Claude**.
+2. Open the **Claude sign in** link, sign in to your own Claude account, and authorize the connection.
+3. Copy the complete authorization code, including the `#` and the text after it (`code#state`).
+4. Paste it into **Paste the complete authorization code** in Bento and click **Finish connection**.
+5. Wait for Claude to show **Connected to your account**.
+
+This one connection supports both Claude Code and pi with Anthropic models.
+
+### Connect ChatGPT
+
+1. Open **Agents → Your personal subscriptions** and click **Connect ChatGPT**.
+2. Open the **ChatGPT sign in** link and sign in to your own ChatGPT account.
+3. Enter the device code shown in Bento and approve the connection. If the provider refuses device-code login, enable it in your account's security settings and start again.
+4. Keep Bento open while it checks for approval. When complete, ChatGPT shows **Connected to your account**; there is no authorization code to paste back into Bento.
+
+This one connection supports both Codex and pi with models available through Codex.
+
+### Start a run
+
+Choose a matching agent and model, then explicitly start a card's stage run or send a follow-up message. A connected subscription takes priority for matching models, so you do not need a separate provider API key for those runs. In Codex, a provider-prefixed model such as `openai/gpt-5-mini` selects OpenRouter, not your ChatGPT subscription.
+
+Custom provider endpoints keep using their API keys. Background stages, judges, conflict resolution, swarms, and remote runners keep their existing credentials. They do not borrow your subscription or the project owner's login.
+
+Your connection belongs to you, even inside a team. Other members, including owners and admins, cannot list, change, or use it. They cannot steer, answer questions on, or change your card while your personal subscription run is active. Follow-ups from different people are handled in separate runs.
+
+### Reconnect or disconnect
+
+Return to **Agents → Your personal subscriptions** and click **Reconnect** if Bento asks you to sign in again. For an expired device code, start a new connection. For an invalid Claude authorization code, paste the complete `code#state` from the current login attempt. **Cancel connection** cancels a pending login.
+
+Click **Disconnect** to stop using a connection. Its next model request is refused; start a new run to use your configured API credentials. A running subscription task never silently switches to paid API credentials. Reconnecting creates a new connection, so start a new run after reconnecting rather than trying to revive an old task. Automatic retries retain the original user and connection.
+
+Bento encrypts your provider tokens and refreshes them on the server. Agents receive only a temporary Bento run token through the model proxy. Provider subscription limits and Bento hosting charges still apply; a reported subscription model cost is a notional list price, not an API charge.
+
+For a remote sandbox, set `BENTO_MCP_GATEWAY_URL` to a Bento server address the sandbox can reach. Personal connections always use the model proxy, including local mode. The proxy checks the initiating user, current team membership, and original connection on each request. Provider access and refresh tokens never enter the sandbox, and subscription requests use fixed vendor endpoints.
