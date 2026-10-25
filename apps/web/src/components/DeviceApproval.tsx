@@ -4,6 +4,7 @@ import { useSession } from "../auth-client.js";
 import { BrandLockup } from "./BrandLockup.js";
 import { CenteredPanelSkeleton } from "./Skeleton.js";
 import { SignIn } from "./SignIn.js";
+import { deviceApprovalCallbackUrl } from "../device-approval.js";
 
 type Phase = "entering" | "claiming" | "ready" | "done" | "denied" | "error";
 
@@ -62,7 +63,7 @@ export function DeviceApproval() {
   }
 
   if (isPending) return <CenteredPanelSkeleton />;
-  if (!session) return <SignIn />;
+  if (!session) return <SignIn callbackURL={deviceApprovalCallbackUrl(code)} />;
 
   return (
     <div className="center">
