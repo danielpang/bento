@@ -1,5 +1,5 @@
-import { and, eq } from "drizzle-orm";
-import { agentAccounts, agentRuns, member } from "@bento/db";
+import { and, eq, isNull } from "drizzle-orm";
+import { agentAccounts, agentRuns, member, secrets, type Db } from "@bento/db";
 import type { AppContext } from "../context.js";
 import type { ResolvedGrant } from "../mcp/grants.js";
 import { AccountLoginError, refreshLogin, type AccountProvider, type AccountTokens } from "./oauth.js";
@@ -14,6 +14,24 @@ export function personalProvider(cli: string, model: string): AccountProvider | 
   if (cli === "pi" && (model.startsWith("openai-codex/") || model.startsWith("openai/"))) return "openai-codex";
   return null;
 }
+/** Shared by queueing and execution, including local process endpoints.
+ * Hosted runs never consult the operator's environment. A stored override
+ * wins even if it is empty or cannot be decrypted: it is not a subscription.
+ */
+export async function personalEndpointRedirected(
+  db: Pick<Db, "select">,
+  organizationId: string | null,
+  provider: AccountProvider,
+  mode: "local" | "multi",
+): Promise<boolean> {
+  const name = provider === "anthropic" ? "ANTHROPIC_BASE_URL" : "OPENAI_BASE_URL";
+  const [stored] = await db.select({ id: secrets.id }).from(secrets).where(and(
+    organizationId ? eq(secrets.organizationId, organizationId) : isNull(secrets.organizationId),
+    eq(secrets.name, name),
+  ));
+  return Boolean(stored || (mode === "local" && process.env[name]));
+}
+
 export async function isCurrentMember(ctx: AppContext, userId: string, organizationId: string | null) {
   if (ctx.env.BENTO_MODE !== "multi") return userId === ctx.userId;
   if (!organizationId) return true;

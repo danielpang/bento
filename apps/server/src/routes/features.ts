@@ -805,7 +805,7 @@ export function featureRoutes(ctx: AppContext) {
         // The person sending the message owns the hours the resumed
         // run spends, not whoever started the conversation.
         startedBy: actor(c),
-      }, ctx.entitlements, ctx.analytics, (task) => deferAfterCommit(c, async () => task()));
+      }, ctx.entitlements, ctx.analytics, (task) => deferAfterCommit(c, async () => task()), ctx.env.BENTO_MODE);
       // A run started in the gap between the read and the insert; the
       // messages wait for it like any other mid-run message.
       if (run === "busy") {

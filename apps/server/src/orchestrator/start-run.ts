@@ -1,8 +1,8 @@
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
-import { agentAccounts, agentProfiles, agentRuns, repositories, secrets, swarmLandings, type Db } from "@bento/db";
+import { agentAccounts, agentProfiles, agentRuns, repositories, swarmLandings, type Db } from "@bento/db";
 import type { Analytics } from "../analytics.js";
 import type { Entitlements } from "../context.js";
-import { personalProvider } from "../agent-accounts/store.js";
+import { personalEndpointRedirected, personalProvider } from "../agent-accounts/store.js";
 import { budgetRefusal } from "./swarm/ledger.js";
 
 type AgentRun = typeof agentRuns.$inferSelect;
@@ -140,6 +140,7 @@ export async function startRunIfIdle(
   entitlements?: Entitlements,
   analytics?: Analytics,
   defer?: (task: () => void) => void,
+  mode?: "local" | "multi",
 ): Promise<AgentRun | "busy" | "gone" | OutOfCompute>;
 export async function startRunIfIdle(
   db: Db,
@@ -147,6 +148,7 @@ export async function startRunIfIdle(
   entitlements?: Entitlements,
   analytics?: Analytics,
   defer?: (task: () => void) => void,
+  mode?: "local" | "multi",
 ): Promise<AgentRun | "busy" | "gone" | typeof SWARM_FULL | OutOfCompute>;
 export async function startRunIfIdle(
   db: Db,
@@ -164,9 +166,11 @@ export async function startRunIfIdle(
    * pool, where the transaction below really commits, and omit this.
    */
   defer?: (task: () => void) => void,
+  // Explicit local mode is required before consulting host endpoint variables.
+  mode?: "local" | "multi",
 ): Promise<AgentRun | "busy" | "gone" | typeof SWARM_FULL | OutOfCompute> {
   const result = await db.transaction(async (tx) =>
-    values.type === "swarm" ? insertSwarmRun(tx, values, entitlements) : insertPipelineRun(tx, values, entitlements),
+    values.type === "swarm" ? insertSwarmRun(tx, values, entitlements) : insertPipelineRun(tx, values, entitlements, mode ?? "multi"),
   );
 
   if (result !== "busy" && result !== "gone" && result !== SWARM_FULL && !("outOfCompute" in result)) {
@@ -203,7 +207,8 @@ type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 async function insertPipelineRun(
   tx: Tx,
   values: PipelineNewRun,
-  entitlements?: Entitlements,
+  entitlements: Entitlements | undefined,
+  mode: "local" | "multi",
 ): Promise<AgentRun | "busy" | "gone" | OutOfCompute> {
   /**
    * The lock also answers whose organization this is. Callers do not
@@ -234,15 +239,14 @@ async function insertPipelineRun(
 
   // Only a person's explicit stage run can use their subscription. Swarms,
   // unattended gates, and remote runners keep their existing credentials.
-  let personalAccountId: string | null = null;
-  if (values.startedBy && (values.executor ?? "server") === "server" && (values.role ?? "stage") === "stage") {
+  // An automatic retry retains the original binding, including an explicit
+  // null. Reconnecting must not authorize an old run to spend a new account.
+  let personalAccountId: string | null = values.personalAccountId ?? null;
+  if (values.personalAccountId === undefined && values.startedBy && (values.executor ?? "server") === "server" && (values.role ?? "stage") === "stage") {
     const [profile] = await tx.select().from(agentProfiles).where(eq(agentProfiles.id, values.agentProfileId));
     const provider = profile && personalProvider(profile.cli, profile.model);
     if (provider) {
-      const [redirect] = await tx.select({ id: secrets.id }).from(secrets).where(and(
-        organizationId ? eq(secrets.organizationId, organizationId) : isNull(secrets.organizationId),
-        eq(secrets.name, provider === "anthropic" ? "ANTHROPIC_BASE_URL" : "OPENAI_BASE_URL"),
-      ));
+      const redirect = await personalEndpointRedirected(tx, organizationId, provider, mode);
       const [account] = await tx.select({ id: agentAccounts.id }).from(agentAccounts)
         .where(and(eq(agentAccounts.userId, values.startedBy), eq(agentAccounts.provider, provider)));
       personalAccountId = redirect ? null : account?.id ?? null;

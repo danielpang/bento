@@ -101,7 +101,7 @@ import { isSafeBranchName, taskTrailer } from "./swarm/branches.js";
 import { confirmSwarmMessagesDelivered, requeueUndeliveredNodeMessages, takeNodeMessages } from "./swarm/node-messages.js";
 import { exportSwarmBranch, swarmBranchName } from "./swarm/sandbox.js";
 import { applyRunCharge, chargeForRun } from "./swarm/ledger.js";
-import { accountForRun } from "../agent-accounts/store.js";
+import { accountForRun, personalEndpointRedirected, personalProvider } from "../agent-accounts/store.js";
 import { proxyPersonalAccount } from "../agent-accounts/run.js";
 import { resolveAgentEnv } from "./agent-env.js";
 import { drivesRuns, runSlots } from "../env.js";
@@ -305,7 +305,11 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   // A custom provider key is sufficient. Forwarding every other
   // provider key would give this sandbox credentials it does
   // not need, and a shared local login can mount read-only state.
-  const personalAccount = run.personalAccountId && subject.kind === "pipeline" && !customProvider && !onOllama && !Object.keys(resolvedEnv).some((key) => key.endsWith("_BASE_URL") && resolvedEnv[key])
+  const subscriptionProvider = run.personalAccountId && personalProvider(profile.cli, profile.model);
+  const redirectedSubscription = subscriptionProvider && await personalEndpointRedirected(
+    ctx.db, project.organizationId, subscriptionProvider, ctx.env.BENTO_MODE,
+  );
+  const personalAccount = run.personalAccountId && subject.kind === "pipeline" && !customProvider && !onOllama && !redirectedSubscription
     ? await accountForRun(ctx, run.startedBy, project.organizationId, profile.cli, profile.model) : null;
   // A pinned subscription never silently falls back to billed API calls.
   if (run.personalAccountId && (!personalAccount || personalAccount.id !== run.personalAccountId || personalAccount.reconnectRequired)) {
@@ -1406,7 +1410,9 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
           agentProfileId: runRow.agentProfileId,
           prompt: runRow.prompt,
           executor: runRow.executor,
-        }, ctx.entitlements, ctx.analytics);
+          startedBy: runRow.startedBy,
+          personalAccountId: runRow.personalAccountId,
+        }, ctx.entitlements, ctx.analytics, undefined, ctx.env.BENTO_MODE);
         if (next !== "busy" && next !== "gone" && !("outOfCompute" in next)) {
           ctx.bus.emitBoardEvent({
             type: "run_updated",
@@ -2833,7 +2839,7 @@ export async function deliverQueuedMessage(ctx: AppContext, runId: string): Prom
     cliSessionId: source.cliSessionId,
     executor: source.executor,
     startedBy: author ?? priorStarter,
-  }, ctx.entitlements, ctx.analytics);
+  }, ctx.entitlements, ctx.analytics, undefined, ctx.env.BENTO_MODE);
   if (next === "busy") {
     // Another run started in the gap; the messages wait for its end.
     await requeueMessages(ctx.db, ids);

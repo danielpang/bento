@@ -1271,6 +1271,7 @@ test("a resume against a lost conversation restarts fresh instead of failing for
     status: string;
     cliSessionId: string | null;
     error: string | null;
+    startedBy: string | null;
   }
   // The failed resume and its fresh replacement, which must succeed.
   let failed: RunRow | undefined;
@@ -1288,6 +1289,8 @@ test("a resume against a lost conversation restarts fresh instead of failing for
   assert.equal(failed.cliSessionId, null, "the dead session id is wiped, so nothing resumes it again");
   assert.ok(retried && retried.id !== failed.id, "a fresh run with the same prompt starts by itself");
   assert.equal(retried.status, "succeeded");
+  assert.equal(failed.startedBy, ctx.userId);
+  assert.equal(retried.startedBy, failed.startedBy, "automatic retry retains the initiating user");
 
   const transcript = await (await app.request(`/api/runs/${failed.id}/transcript`)).text();
   assert.match(transcript, /cannot be resumed/, "the transcript says what happened and what happens next");

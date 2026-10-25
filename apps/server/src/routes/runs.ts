@@ -71,7 +71,7 @@ export function runRoutes(ctx: AppContext) {
         cliSessionId: body.resumeSessionId ?? null,
         executor,
         startedBy: actor(c),
-      }, ctx.entitlements, ctx.analytics, (task) => deferAfterCommit(c, async () => task()));
+      }, ctx.entitlements, ctx.analytics, (task) => deferAfterCommit(c, async () => task()), ctx.env.BENTO_MODE);
       if (run === "busy") return c.json({ error: CARD_BUSY }, 409);
       // The card was deleted while this request was in flight.
       if (run === "gone") return c.json({ error: "feature not found" }, 404);
@@ -119,7 +119,7 @@ export function runRoutes(ctx: AppContext) {
         // The person resuming owns the hours, not whoever started the
         // run being resumed.
         startedBy: actor(c),
-      }, ctx.entitlements, ctx.analytics, (task) => deferAfterCommit(c, async () => task()));
+      }, ctx.entitlements, ctx.analytics, (task) => deferAfterCommit(c, async () => task()), ctx.env.BENTO_MODE);
       if (run === "busy") return c.json({ error: CARD_BUSY }, 409);
       if (run === "gone") return c.json({ error: "not found" }, 404);
       if ("outOfCompute" in run) return c.json({ error: run.outOfCompute, code: "PLAN_LIMIT" }, 402);

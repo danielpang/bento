@@ -1016,6 +1016,12 @@ which must not revive old grants. The native-looking tokens Pi receives contain
 only the opaque Bento run token and a placeholder account id, never a vendor
 credential. The proxy unwraps these before normal grant authentication.
 
+Queueing and execution use `personalEndpointRedirected` for the same
+provider-specific endpoint decision, including process environment overrides
+only in local mode. Automatic lost-session retries preserve `started_by` and
+the original `personal_account_id`, including null; they must never select a
+new connection or silently change to API-key billing.
+
 A colleague cannot steer or mutate an active personal run's card. Queue claims
 for live runs filter by the starter; new follow-up runs claim one sender at a
 time. Background work must never borrow a project owner's subscription.

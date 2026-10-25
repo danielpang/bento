@@ -4032,3 +4032,51 @@ test("personal agent accounts stay private even from an owner of the same team",
   await app.request(`/api/agent-accounts/anthropic/login/${finalLogin.id}`, { method: "DELETE", headers: alice.headers });
   assert.equal((await ctx.db.select().from(agentAccounts).where(eq(agentAccounts.userId, alice.id))).length, 0, "cancel after completion removes only that attempt's connection");
 });
+
+test("subscription selection respects local endpoints and preserves retry bindings", async () => {
+  const { agentAccounts, secrets, stages } = await import("@bento/db");
+  const { startRunIfIdle } = await import("./orchestrator/start-run.js");
+  const { personalEndpointRedirected } = await import("./agent-accounts/store.js");
+  const person = crypto.randomUUID();
+  await ctx.db.insert(user).values({ id: person, name: "Subscription routing", email: `${person}@bento.test` });
+  const [project] = await ctx.db.insert(projects).values({ ownerId: person, name: "Routing" }).returning();
+  const [pipeline] = await ctx.db.insert(pipelines).values({ projectId: project!.id, name: "p" }).returning();
+  const [stage] = await ctx.db.insert(stages).values({ pipelineId: pipeline!.id, slug: "s", name: "S", position: 0 }).returning();
+  const [feature] = await ctx.db.insert(features).values({ projectId: project!.id, pipelineId: pipeline!.id, title: "Routing" }).returning();
+  const [profile] = await ctx.db.insert(agentProfiles).values({ ownerId: person, name: "a", cli: "claude-code", model: "claude-sonnet-5" }).returning();
+  const originalEndpoint = process.env.ANTHROPIC_BASE_URL;
+  const [account] = await ctx.db.insert(agentAccounts).values({ userId: person, provider: "anthropic", ciphertext: "unused", expiresAt: new Date(Date.now() + 3600_000) }).returning();
+  const values = { type: "pipeline" as const, featureId: feature!.id, stageId: stage!.id, agentProfileId: profile!.id, startedBy: person, prompt: "task" };
+  const start = async (mode: "local" | "multi", binding?: string | null) => {
+    const result = await startRunIfIdle(ctx.db, { ...values, ...(binding !== undefined ? { personalAccountId: binding } : {}) }, undefined, undefined, undefined, mode);
+    assert.ok(typeof result === "object" && "id" in result);
+    await ctx.db.update(agentRuns).set({ status: "failed" }).where(eq(agentRuns.id, result.id));
+    return result;
+  };
+  try {
+    process.env.ANTHROPIC_BASE_URL = "https://local-gateway.example.test";
+    assert.equal((await start("local")).personalAccountId, null, "local endpoints do not pin a subscription");
+    assert.equal(await personalEndpointRedirected(ctx.db, null, "anthropic", "local"), true);
+    assert.equal((await start("multi")).personalAccountId, account!.id, "hosted runs ignore the operator's endpoint");
+    assert.equal(await personalEndpointRedirected(ctx.db, null, "anthropic", "multi"), false);
+    delete process.env.ANTHROPIC_BASE_URL;
+    assert.equal((await start("local")).personalAccountId, account!.id);
+    const [override] = await ctx.db.insert(secrets).values({ ownerId: person, name: "ANTHROPIC_BASE_URL", ciphertext: ctx.secretBox.encrypt("https://stored-gateway.example.test") }).returning();
+    try {
+      for (const mode of ["local", "multi"] as const) {
+        assert.equal((await start(mode)).personalAccountId, null);
+        assert.equal(await personalEndpointRedirected(ctx.db, null, "anthropic", mode), true);
+      }
+    } finally { await ctx.db.delete(secrets).where(eq(secrets.id, override!.id)); }
+    await ctx.db.delete(agentAccounts).where(eq(agentAccounts.id, account!.id));
+    assert.equal((await start("local", account!.id)).personalAccountId, account!.id, "disconnect cannot switch retry billing to API keys");
+    await ctx.db.insert(agentAccounts).values({ userId: person, provider: "anthropic", ciphertext: "replacement", expiresAt: new Date(Date.now() + 3600_000) });
+    const retry = await start("local", account!.id);
+    assert.equal(retry.startedBy, person);
+    assert.equal(retry.personalAccountId, account!.id, "retry cannot spend a replacement connection");
+    assert.equal((await start("local", null)).personalAccountId, null, "API-key retries cannot switch to a new subscription");
+  } finally {
+    if (originalEndpoint === undefined) delete process.env.ANTHROPIC_BASE_URL;
+    else process.env.ANTHROPIC_BASE_URL = originalEndpoint;
+  }
+});

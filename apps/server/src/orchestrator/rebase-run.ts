@@ -113,6 +113,7 @@ export async function startFeatureFollowUpRun(
     ctx.entitlements,
     ctx.analytics,
     defer,
+    ctx.env.BENTO_MODE,
   );
   if (run === "busy") return { ok: false, status: 409, error: CARD_BUSY, code: "CARD_BUSY" };
   if (run === "gone") return { ok: false, status: 404, error: "not found" };
