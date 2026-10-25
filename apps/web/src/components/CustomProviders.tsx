@@ -30,6 +30,7 @@ export function CustomProviderKeyField({ client, provider, canManage, onChanged 
   const [remove, setRemove] = useState(false);
   const [shareWithOrg, setShareWithOrg] = useState(false);
   const scope = shareWithOrg && canManage && provider.organizationId ? "org" : "user";
+  const keyLabel = scope === "user" ? "Personal API key" : "Shared organization key";
   const saved = scope === "user" ? provider.hasPersonalApiKey : provider.hasApiKey;
   const hint = scope === "user" ? provider.personalKeyHint : provider.keyHint;
   async function save() {
@@ -38,7 +39,7 @@ export function CustomProviderKeyField({ client, provider, canManage, onChanged 
       await client.saveCustomProviderKey(provider.id, key.trim(), scope);
       setKey("");
       onChanged();
-      toast.note("API key saved");
+      toast.note(`${keyLabel} saved`);
     } catch (err) { toast.fail(err); } finally { setBusy(false); }
   }
   async function deleteKey() {
@@ -50,21 +51,21 @@ export function CustomProviderKeyField({ client, provider, canManage, onChanged 
     } catch (err) { toast.fail(err); } finally { setBusy(false); }
   }
   return <div className="field">
-    <h4 className="field-heading">{provider.name} API key</h4>
+    <h4 className="field-heading">{provider.name}: {keyLabel}</h4>
     {canManage && provider.organizationId && <label className="gate-check">
       <input type="checkbox" checked={shareWithOrg} disabled={busy} onChange={(e) => setShareWithOrg(e.target.checked)} />
-      <span>Save key for the organization</span>
+      <span>Shared organization key</span>
     </label>}
     <p className="muted">{scope === "user" ? "This key is private to you. Your stage runs use it before a shared key." : "This key is shared with the current organization. Only share credentials licensed for team use."}</p>
-    {scope === "user" && provider.hasApiKey && <p className="muted">An organization key is also available.</p>}
+    {scope === "user" && provider.hasApiKey && <p className="muted">A shared organization key is also available.</p>}
     {saved ? <div className="criterion">
       <span className="criterion-cmd">Saved {hint ?? ""}</span>
       {(scope === "user" || canManage) && <button className="btn btn-ghost" disabled={busy} onClick={() => setRemove(true)}>Remove</button>}
     </div> : <p className="muted">Not set. Runs using this provider need a key.</p>}
     {(scope === "user" || canManage) && <SecretField value={key} onChange={setKey} onSubmit={() => void save()}
-      label={`${provider.name} API key`} placeholder="Paste the key" submitLabel={saved ? "Replace" : "Save"}
+      label={`${provider.name}: ${keyLabel}`} placeholder="Paste the key" submitLabel={saved ? "Replace" : "Save"}
       busy={busy} secret />}
-    {remove && <ConfirmDialog title={`Remove ${provider.name} API key?`}
+    {remove && <ConfirmDialog title={`Remove ${provider.name} ${keyLabel.toLowerCase()}?`}
       description="Agents using this provider stop running until a key is saved again."
       confirmLabel="Remove" destructive onClose={() => setRemove(false)} onConfirm={() => void deleteKey()} />}
   </div>;

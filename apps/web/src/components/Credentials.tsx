@@ -157,7 +157,7 @@ export function ProviderKeysCard({
         <Tabs.Content value={active.id} className="section tab-panel">
           {canShareWithOrg && <label className="gate-check">
             <input type="checkbox" checked={shareWithOrg} disabled={busy} onChange={(e) => setShareWithOrg(e.target.checked)} />
-            <span>Save keys for the organization</span>
+            <span>Shared organization key</span>
           </label>}
           <p className="muted">{scope === "user" ? "Saving for you only. Teammates cannot use or manage your keys." : "Saving for all members of the current organization. Only share credentials licensed for team use."}</p>
           {active.keys.map((keyName) => {
@@ -171,7 +171,7 @@ export function ProviderKeysCard({
             {/* A heading, not a label: it names the group below it (what
                 is saved, the field to replace it, and the note on where the
                 key is used) rather than one control. */}
-            <h4 className="field-heading">{isBaseUrl ? "Base URL (optional)" : "API key"}</h4>
+            <h4 className="field-heading">{isBaseUrl ? "Base URL (optional)" : scope === "user" ? "Personal API key" : "Shared organization key"}</h4>
             {saved ? (
               <div className="criterion">
                 <span className="criterion-cmd">Saved {saved.hint ?? ""}</span>
@@ -212,7 +212,7 @@ export function ProviderKeysCard({
               </p>
             )}
             {shared && <div className="criterion">
-              <span className="muted">Shared key available {shared.hint ?? ""}. {saved ? "Your key takes priority." : "Used when you have no personal key for this provider."}</span>
+              <span className="muted">Shared organization key available {shared.hint ?? ""}. {saved ? "Your personal API key takes priority." : "Used when you have no personal API key for this provider."}</span>
               {canManage && <button className="btn btn-ghost" disabled={busy} onClick={() => setRemoving({ name: keyName, id: shared.id })}>Remove shared</button>}
             </div>}
             {credential && <p className="muted">{credential.help}</p>}
