@@ -8,7 +8,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { APIError, FilesystemError, Sprite as SpriteClass, SpriteCommand, type Sprite } from "@fly/sprites";
 import { AGENT_BINARIES, agentToolchainScript } from "./agent-toolchain.js";
-import { LineChannel, ProvisionFailure, collectExec } from "./driver.js";
+import { LineChannel, ProvisionFailure, collectExec, type ToolchainInstallFailure } from "./driver.js";
 import {
   FILESYSTEM_RETRY_DELAYS_MS,
   SpriteDriver,
@@ -978,6 +978,7 @@ test("Sprite provisioning stops retrying when the filesystem stays unavailable",
  */
 test("Sprite provisioning says which agent CLI could not be installed", async () => {
   const messages: string[] = [];
+  const reported: ToolchainInstallFailure[] = [];
   const sprite = {
     spawn(_file: string, args: string[]) {
       const child = fakeChild();
@@ -985,7 +986,10 @@ test("Sprite provisioning says which agent CLI could not be installed", async ()
         // The probe answers first; the toolchain script reports what it
         // could not put on the PATH.
         if ((args[1] ?? "").includes("tools-absent")) child.stdout.write("tools-absent\n");
-        else child.stdout.write("bento-toolchain-missing: opencode \n");
+        else {
+          child.stdout.write("bento-toolchain-missing: opencode \n");
+          child.stderr.write("bento: opencode install failed\nbento: opencode: curl: (22) 403\n");
+        }
         child.stdout.end();
         child.stderr.end();
         child.emit("exit", 0);
@@ -1010,9 +1014,15 @@ test("Sprite provisioning says which agent CLI could not be installed", async ()
     onProgress: (message) => {
       messages.push(message);
     },
+    onToolchainMissing: (failure) => {
+      reported.push(failure);
+    },
   });
 
   assert.equal(handle.provider, "sprite");
+  assert.deepEqual(reported, [
+    { missing: ["opencode"], output: "bento: opencode install failed\nbento: opencode: curl: (22) 403\n" },
+  ]);
   const said = messages.find((message) => message.includes("Could not install"));
   assert.ok(said, `no message named the missing CLI: ${messages.join(" | ")}`);
   assert.match(said, /opencode/);

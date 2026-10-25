@@ -32,12 +32,30 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # A failed test step ends with a recap of every failing test (file,
+      # line, name, error), so the last lines of the log, where GitHub
+      # mobile opens it, say what failed. See scripts/test-failures-reporter.mjs.
+      - name: Record failing tests for the recap
+        run: |
+          echo "BENTO_TEST_FAILURES_DIR=$RUNNER_TEMP/test-failures" >> "$GITHUB_ENV"
+          echo "BENTO_TEST_REPORTERS=--test-reporter=spec --test-reporter-destination=stdout --test-reporter=$GITHUB_WORKSPACE/scripts/test-failures-reporter.mjs --test-reporter-destination=stderr" >> "$GITHUB_ENV"
       - run: pnpm build
       - run: pnpm typecheck
       - run: pnpm db:migrate
       - run: pnpm db:migrate # idempotency check
-      - run: pnpm test
+      - name: Test
+        env:
+          NODE_OPTIONS: ${{ env.BENTO_TEST_REPORTERS }}
+        run: pnpm test || { node "$GITHUB_WORKSPACE/scripts/test-failures-summary.mjs"; exit 1; }
       - name: Verify release installer behavior
-        run: node --test scripts/install.test.mjs
+        env:
+          NODE_OPTIONS: ${{ env.BENTO_TEST_REPORTERS }}
+        run: node --test scripts/install.test.mjs || { node "$GITHUB_WORKSPACE/scripts/test-failures-summary.mjs"; exit 1; }
       - name: Verify release tag resolution and retry guards
-        run: node --test scripts/release-target.test.mjs
+        env:
+          NODE_OPTIONS: ${{ env.BENTO_TEST_REPORTERS }}
+        run: node --test scripts/release-target.test.mjs || { node "$GITHUB_WORKSPACE/scripts/test-failures-summary.mjs"; exit 1; }
+      - name: Verify the failing test recap
+        env:
+          NODE_OPTIONS: ${{ env.BENTO_TEST_REPORTERS }}
+        run: node --test scripts/test-failures.test.mjs || { node "$GITHUB_WORKSPACE/scripts/test-failures-summary.mjs"; exit 1; }

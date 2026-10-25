@@ -6,7 +6,7 @@ import type {
   PlanState,
   TeamPolicy,
 } from "./settings.js";
-import { SseParser, type AgentDelta, type AgentEvent, type CatalogProvider, type CustomProviderProtocol, type GateCriteria, type TurnState } from "@bento/core";
+import { SseParser, type AgentDelta, type AgentEvent, type RecordedRunEvent, type CatalogProvider, type CustomProviderProtocol, type GateCriteria, type TurnState } from "@bento/core";
 import { BUILD_HEADER } from "@bento/core";
 import type {
   AgentProfile,
@@ -88,7 +88,7 @@ export interface CustomModelProvider extends CustomModelProviderInput {
 }
 
 export interface RunStreamHandlers {
-  onEvent?: (event: AgentEvent, seq: number) => void;
+  onEvent?: (event: RecordedRunEvent, seq: number) => void;
   onDelta?: (delta: AgentDelta) => void;
   /** A live run's agent started or ended a turn, as the server holding it says. */
   onTurn?: (state: TurnState) => void;
@@ -1212,7 +1212,7 @@ export class BentoClient {
    * the conversation left out of a long run's block, oldest first.
    */
   getEventsBefore(runId: string, seq: number, limit = 200) {
-    return this.request<{ events: AgentEvent[]; firstSeq: number | null; earlier: number }>(
+    return this.request<{ events: RecordedRunEvent[]; firstSeq: number | null; earlier: number }>(
       `/api/runs/${runId}/events/before?seq=${seq}&limit=${limit}`,
     );
   }
@@ -1716,7 +1716,7 @@ export class BentoClient {
         if (seq <= lastSeq) return;
         lastSeq = seq;
       }
-      handlers.onEvent?.(JSON.parse(message.data) as AgentEvent, seq);
+      handlers.onEvent?.(JSON.parse(message.data) as RecordedRunEvent, seq);
     });
     source.addEventListener("run_delta", (e) => {
       handlers.onDelta?.(JSON.parse((e as MessageEvent<string>).data) as AgentDelta);
@@ -1788,7 +1788,7 @@ export class BentoClient {
                     if (seq <= lastSeq) continue;
                     lastSeq = seq;
                   }
-                  handlers.onEvent?.(JSON.parse(frame.data) as AgentEvent, seq);
+                  handlers.onEvent?.(JSON.parse(frame.data) as RecordedRunEvent, seq);
                 } else if (frame.event === "run_delta") {
                   handlers.onDelta?.(JSON.parse(frame.data) as AgentDelta);
                 } else if (frame.event === "run_turn") {

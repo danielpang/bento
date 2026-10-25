@@ -772,7 +772,7 @@ export function swarmRoutes(ctx: AppContext) {
           else 0 end), 0)::double precision` })
         .from(agentRuns)
         .where(eq(agentRuns.swarmId, swarm.id));
-      const [plannerRun] = await db(c, ctx)
+      const plannerRuns = await db(c, ctx)
         .select({
           id: agentRuns.id,
           status: agentRuns.status,
@@ -784,8 +784,8 @@ export function swarmRoutes(ctx: AppContext) {
         })
         .from(agentRuns)
         .where(and(eq(agentRuns.swarmId, swarm.id), eq(agentRuns.role, "planner")))
-        .orderBy(desc(agentRuns.queuedAt), desc(agentRuns.id))
-        .limit(1);
+        .orderBy(desc(agentRuns.queuedAt), desc(agentRuns.id));
+      const [plannerRun] = plannerRuns;
       const [plannerAgent] = plannerRun
         ? await db(c, ctx)
             .select({ name: agentProfiles.name, cli: agentProfiles.cli, model: agentProfiles.model })
@@ -901,6 +901,7 @@ export function swarmRoutes(ctx: AppContext) {
         activeRuns: runs,
         agentTimeMs,
         plannerRun: plannerRun ? { ...plannerRun, error: plannerError, agent: plannerAgent ?? null } : null,
+        plannerRuns: plannerRuns.map(({ id, queuedAt, endedAt }) => ({ id, queuedAt, endedAt })).reverse(),
         landings,
         landingSummary: landingSummary ?? { total: 0, committed: 0 },
         branchCheckout: {

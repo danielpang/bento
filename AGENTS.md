@@ -215,7 +215,10 @@ that ends without a machine emits one more (`kind` "final"),
 including one refused before any provider was asked (`phase`
 "preflight", `attempts` 0: an unreachable clone URL, or a network lock
 nothing can honor); it carries the error's kind and class, never its
-text. All of these, and `sandbox ready`, name the run (`run_id`,
+text. A CLI the toolchain script could not install does not fail
+the provision; each goes to error tracking as a
+`ToolchainInstallError` (`agent_toolchain_install`) with the script's
+stderr. All of these, and `sandbox ready`, name the run (`run_id`,
 `role`, `run_type`), which `provisionWorkspace` takes as `run`, and
 the run itself records the provider that answered in
 `agent_runs.sandbox_provider`, because the sandboxes row is rewritten

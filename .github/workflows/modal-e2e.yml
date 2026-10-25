@@ -44,6 +44,13 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # A failed test step ends with a recap of every failing test (file,
+      # line, name, error), so the last lines of the log, where GitHub
+      # mobile opens it, say what failed. See scripts/test-failures-reporter.mjs.
+      - name: Record failing tests for the recap
+        run: |
+          echo "BENTO_TEST_FAILURES_DIR=$RUNNER_TEMP/test-failures" >> "$GITHUB_ENV"
+          echo "BENTO_TEST_REPORTERS=--test-reporter=spec --test-reporter-destination=stdout --test-reporter=$GITHUB_WORKSPACE/scripts/test-failures-reporter.mjs --test-reporter-destination=stderr" >> "$GITHUB_ENV"
 
       # tsx runs the sandbox sources directly, but a workspace
       # dependency resolves through its package exports, which point at
@@ -66,7 +73,9 @@ jobs:
       - name: Provision a Modal sandbox
         if: ${{ env.MODAL_TOKEN_ID != '' && env.MODAL_TOKEN_SECRET != '' }}
         working-directory: packages/sandbox
-        run: node --test --import tsx src/modal.e2e.test.ts
+        env:
+          NODE_OPTIONS: ${{ env.BENTO_TEST_REPORTERS }}
+        run: node --test --import tsx src/modal.e2e.test.ts || { node "$GITHUB_WORKSPACE/scripts/test-failures-summary.mjs"; exit 1; }
 
       # The test terminates its own machine. This covers a cancelled
       # job, the timeout above, or a runner that died. The name is

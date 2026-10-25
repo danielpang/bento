@@ -244,6 +244,18 @@ export interface ProvisionSpec {
    * report may ignore it.
    */
   onProgress?: (message: string) => void | Promise<void>;
+  /**
+   * Called when the toolchain script left CLIs off the PATH. The
+   * provision goes on, so this is how the failure reaches error
+   * tracking. A throw here does not fail the provision.
+   */
+  onToolchainMissing?: (failure: ToolchainInstallFailure) => void | Promise<void>;
+}
+
+export interface ToolchainInstallFailure {
+  missing: string[];
+  /** The toolchain script's stderr. */
+  output: string;
 }
 
 /**
