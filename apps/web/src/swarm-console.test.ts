@@ -1,3 +1,4 @@
+import { SANDBOX_CAPACITY_MESSAGE } from "@bento/core";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createElement } from "react";
@@ -2055,4 +2056,66 @@ test("a worker's silence ages with the page between reads", () => {
   assert.equal(workerQuietMs(run, 31_000, 1_000), 60_000, "a clock behind the read never shortens it");
   assert.equal(workerQuietMs({ ...run, quietMs: null }, 0, 0), null);
   assert.equal(workerQuietMs(undefined, 0, 0), null);
+});
+
+
+test("a new swarm blocked by capacity shows a launch notice instead of a failed planner or empty diagram", () => {
+  const html = pageHtml("multi", "planning", { extra: () => ({
+    tasks: [],
+    plannerRun: {
+      id: "capacity-planner", status: "failed", error: `sandbox provisioning failed: ${SANDBOX_CAPACITY_MESSAGE}`,
+      agent: null, queuedAt: new Date(NOW).toISOString(), startedAt: null, endedAt: new Date(NOW).toISOString(),
+    },
+  }) });
+  assert.match(html, /Waiting for capacity/);
+  assert.match(html, /Your swarm is saved/);
+  assert.match(html, /planner couldn&#x27;t start/);
+  assert.match(html, /swarm-capacity-stage/);
+  assert.doesNotMatch(html, /Planner failed|stalled|swarm-viewbar|swarm-planner-step/);
+});
+
+test("a retried planner leaves the capacity launch screen as soon as it is queued", () => {
+  const html = pageHtml("multi", "planning", { extra: () => ({
+    tasks: [],
+    plannerRun: {
+      id: "capacity-planner", status: "queued", error: `sandbox provisioning failed: ${SANDBOX_CAPACITY_MESSAGE}`,
+      agent: null, queuedAt: new Date(NOW).toISOString(), startedAt: null, endedAt: null,
+    },
+  }) });
+  assert.doesNotMatch(html, /swarm-capacity-stage|Waiting for capacity/);
+  assert.match(html, /swarm-viewbar/);
+});
+
+
+for (const status of ["cancelled", "done", "landed"] as const) {
+  test(`a ${status} worker does not show an old capacity failure as its current status`, () => {
+    const task = { ...tasks().find((task) => task.nodeType === "leaf")!, status };
+    const model = buildSwarmModel([task], { now: NOW });
+    const html = renderToStaticMarkup(createElement(SwarmNodeDrawer, {
+      task, node: model.byId.get(task.id)!, onClose() {}, onRetry() {}, swarmStatus: "running",
+      detail: { taskId: task.id, commits: [], events: [], runs: [{
+        id: "capacity-worker", status: "failed", error: `sandbox provisioning failed: ${SANDBOX_CAPACITY_MESSAGE}`,
+        queuedAt: new Date(NOW).toISOString(), startedAt: null, endedAt: new Date(NOW).toISOString(),
+      }] },
+    }));
+    assert.doesNotMatch(html, /Waiting for capacity|Retry this worker when capacity is available|>Retry worker</);
+    assert.equal((html.match(/class="capacity-notice"/g) ?? []).length, 1, "only the historical attempt keeps its notice");
+    assert.ok(html.indexOf('class="capacity-notice"') > html.indexOf("Worker attempts"));
+  });
+}
+
+test("a worker capacity failure explains that the worker never started and offers a non-destructive retry", () => {
+  const task = { ...tasks().find((task) => task.nodeType === "leaf")!, status: "failed" as const, attention: "failed" as const };
+  const model = buildSwarmModel([task], { now: NOW });
+  const html = renderToStaticMarkup(createElement(SwarmNodeDrawer, {
+    task, node: model.byId.get(task.id)!, onClose() {}, onRetry() {}, onStartOver() {}, swarmStatus: "running",
+    detail: { taskId: task.id, commits: [], events: [], runs: [{
+      id: "capacity-worker", status: "failed", error: `sandbox provisioning failed: ${SANDBOX_CAPACITY_MESSAGE}`,
+      queuedAt: new Date(NOW).toISOString(), startedAt: null, endedAt: new Date(NOW).toISOString(),
+    }] },
+  }));
+  assert.match(html, /Waiting for capacity/);
+  assert.match(html, /This worker couldn&#x27;t start/);
+  assert.match(html, />Retry worker</);
+  assert.doesNotMatch(html, /Start this task over in a new sandbox/);
 });

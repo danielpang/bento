@@ -3,6 +3,7 @@ import test from "node:test";
 import { recordingAnalytics } from "../test-analytics.js";
 import {
   reportSandboxProvisioned,
+  reportSandboxCapacity,
   reportSandboxReady,
   reportToolchainInstallFailed,
   runOwnerProperties,
@@ -316,4 +317,12 @@ test("a CLI that could not be installed is one exception per CLI, carrying the i
     userId: null,
     owner: { featureId: "feature-1" },
   });
+});
+
+test("capacity telemetry never prevents recovery when PostHog is unavailable", () => {
+  assert.doesNotThrow(() => reportSandboxCapacity({ capture() { throw new Error("posthog is down"); } } as never, {
+    kind: "exhausted", provider: "modal", providers: ["sprite", "modal"], selection: "auto", attempts: 2,
+    errorKind: "capacity", errorName: "Error", projectId: "project", organizationId: "org", userId: "user",
+    owner: { featureId: "feature" },
+  }));
 });

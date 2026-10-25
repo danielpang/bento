@@ -1,3 +1,5 @@
+import { SANDBOX_CAPACITY_MESSAGE } from "@bento/core";
+import { allAttemptsAtCapacity, isCapacityAttempt } from "./sandbox-capacity.js";
 import { usingSandboxDriver } from "./sandbox-usage.js";
 import { sandboxOperation } from "./sandbox-operations.js";
 import { and, eq, isNull, ne, sql } from "drizzle-orm";
@@ -28,6 +30,7 @@ import {
   errorClassName,
   reportSandboxProvisioned,
   reportSandboxProvisionFailed,
+  reportSandboxCapacity,
   reportToolchainInstallFailed,
   sandboxOrigin,
   type SandboxOrigin,
@@ -491,7 +494,7 @@ export async function provisionWorkspace(
         provider: candidate.provider,
         phase: failure.phase,
         blame: failure.blame,
-        errorKind: sandboxErrorKind(reason),
+        errorKind: isCapacityAttempt(failure) ? "capacity" : sandboxErrorKind(reason),
         errorName: errorClassName(reason),
       };
       reportSandboxProvisionFailed(ctx.analytics, {
@@ -500,7 +503,14 @@ export async function provisionWorkspace(
         attempts,
         ...(movingOn && next ? { nextProvider: next.provider } : {}),
       });
+      if (isCapacityAttempt(failure)) {
+        reportSandboxCapacity(ctx.analytics, { ...failedEvent, kind: "provider", attempts, providers: [candidate.provider] });
+      }
       if (!movingOn) {
+        const failures = [...earlierFailures, failure];
+        if (allAttemptsAtCapacity(failures)) {
+          reportSandboxCapacity(ctx.analytics, { ...failedEvent, kind: "exhausted", attempts, providers: failures.map((item) => item.provider) });
+        }
         reportSandboxProvisionFailed(ctx.analytics, { ...failedEvent, kind: "final", attempts });
         throw new SandboxProvisionError(blame ?? "provider", [...earlierFailures, failure], err);
       }
@@ -717,7 +727,7 @@ export class SandboxProvisionError extends Error {
   constructor(blame: ProvisionBlame, failures: ProvisionAttemptFailure[], cause: unknown) {
     const last = failures.at(-1)?.reason ?? cause;
     super(
-      blame === "project" ? (last instanceof Error ? last.message : String(last)) : SANDBOX_UNAVAILABLE_MESSAGE,
+      blame === "project" ? (last instanceof Error ? last.message : String(last)) : allAttemptsAtCapacity(failures) ? SANDBOX_CAPACITY_MESSAGE : SANDBOX_UNAVAILABLE_MESSAGE,
       { cause },
     );
     this.name = "SandboxProvisionError";

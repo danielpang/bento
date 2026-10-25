@@ -1,3 +1,5 @@
+import { isSandboxCapacityError } from "@bento/core";
+import { CapacityNotice } from "./CapacityNotice.js";
 import { Fragment, useEffect, useMemo, useState, type ReactNode } from "react";
 import * as Tabs from "@radix-ui/react-tabs";
 import { Markdown } from "./Markdown.js";
@@ -170,6 +172,9 @@ export function SwarmNodeDrawer({
   const [confirming, setConfirming] = useState(false);
   const [confirmingStartOver, setConfirmingStartOver] = useState(false);
   const [tab, setTab] = useState("overview");
+  const runs = detail?.runs ?? [];
+  const capacityBlocked = !["cancelled", "done", "landed"].includes(task.status) &&
+    !node.agentActive && runs[0]?.status === "failed" && isSandboxCapacityError(runs[0].error);
   const mergeQueueFailure = task.nodeType === "leaf" && typeof task.flags.landingError === "string";
   // A conflict the resolver could not settle fails the leaf with the
   // conflict on it and no landing error: the resolver already had its
@@ -181,7 +186,7 @@ export function SwarmNodeDrawer({
   const checksFailed = checksFailedAfterLanding(task);
   const failedPlan = task.nodeType === "plan" && task.status === "failed" && !node.agentActive;
   const attention = isAttention(node.attention);
-  const note = failedPlan ? null
+  const note = capacityBlocked || failedPlan ? null
     : diagramAttentionWords(task.status, task.nodeType, node.attention, node.agentActive);
   /*
    * The sentence under the header. The cases above are said whatever
@@ -198,7 +203,7 @@ export function SwarmNodeDrawer({
       : conflictFailed
         ? "This branch conflicts with the swarm's branch, and the agent put on the conflict could not resolve it. Retry the task to start it over from the swarm's branch."
         : null;
-  const longNote = mergeQueueFailure ? null : statusNote ?? (attention ? attentionNote(node.attention) : null);
+  const longNote = capacityBlocked || mergeQueueFailure ? null : statusNote ?? (attention ? attentionNote(node.attention) : null);
   const retries = Number((task.flags as { retries?: unknown }).retries ?? 0);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(task.description);
@@ -221,7 +226,6 @@ export function SwarmNodeDrawer({
   // empty.
   const commits = detail ? detail.commits : task.commits;
   const events = detail?.events ?? [];
-  const runs = detail?.runs ?? [];
   const readAt = useMemo(() => Date.now(), [detail]);
   const [now, setNow] = useState(() => Date.now());
   /*
@@ -278,7 +282,7 @@ export function SwarmNodeDrawer({
   const unlandedBranch = task.nodeType === "leaf" && (node.landing !== null || task.status === "landed");
   const assignedWaiting = task.nodeType === "leaf" && task.status === "assigned" && !task.assignedRunId && !startingOver;
   const reviewNote = task.nodeType === "leaf" && node.landing === "review" && !node.agentActive ? reviewNextStep(node.review) : null;
-  const primaryAction = canStartOver && task.status === "failed" ? "startOver"
+  const primaryAction = capacityBlocked ? null : canStartOver && task.status === "failed" ? "startOver"
     : canRetryLanding ? "landing"
     : canFixForward ? "fix"
     : (task.status === "failed" || (task.status === "assigned" && task.assignedRunId)) && canRetry ? "retry"
@@ -287,7 +291,7 @@ export function SwarmNodeDrawer({
     (canRetryLanding && primaryAction !== "landing") || (canFixForward && primaryAction !== "fix") ||
     (canEdit && primaryAction !== "edit") || canSplit || (canAdd && primaryAction !== "add") ||
     canCancel || (!!onReassign && task.nodeType === "leaf" && agents.length > 0);
-  const nextStep = startingOver
+  const nextStep = capacityBlocked ? "Retry this worker when capacity is available." : startingOver
     ? "Restarting. The old sandbox is being removed, then a new agent starts on a fresh branch from the swarm's."
     : mergeQueueFailure ? landingFailure
     : task.nodeType === "leaf" && node.landing === "waiting"
@@ -350,8 +354,8 @@ export function SwarmNodeDrawer({
           <span className="status swarm-node-header-status">
             {node.agentActive
               ? <AgentOrb label="Agent working" />
-              : <span className="dot" data-state={diagramTaskTone(task.status, task.nodeType, node.agentActive, node.landing, node.review)} />}
-            {diagramTaskWords(task.status, task.nodeType, node.agentActive, node.landing, node.review)}
+              : <span className="dot" data-state={capacityBlocked ? "gated" : diagramTaskTone(task.status, task.nodeType, node.agentActive, node.landing, node.review)} />}
+            {capacityBlocked ? "Waiting for capacity" : diagramTaskWords(task.status, task.nodeType, node.agentActive, node.landing, node.review)}
           </span>
           <button className="btn btn-ghost feature-close" onClick={onClose} aria-label="Close" title="Close (Esc)">
             <span aria-hidden="true">×</span>
@@ -396,6 +400,9 @@ export function SwarmNodeDrawer({
           </p>
         )}
         {cancelNotice}
+        {capacityBlocked && (
+          <CapacityNotice context="worker" busy={busy} onRetry={canRetry && onRetry ? () => onRetry(task.id) : undefined} />
+        )}
 
         <section className="section swarm-node-actions">
           <div className="feature-section-heading">
@@ -764,7 +771,7 @@ export function SwarmNodeDrawer({
                     <time dateTime={run.queuedAt}>{new Date(run.queuedAt).toLocaleString()}</time>
                     <SandboxProviderNote provider={run.sandboxProvider} />
                   </div>
-                  {run.error && <p className="swarm-attempt-error">{run.error}</p>}
+                  {run.error && (isSandboxCapacityError(run.error) ? <CapacityNotice context="worker" /> : <p className="swarm-attempt-error">{run.error}</p>)}
                   {onOpenRun && <button className="swarm-output-link" type="button" onClick={() => onOpenRun(run.id)}>View output</button>}
                 </li>
               ))}

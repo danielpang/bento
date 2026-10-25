@@ -1,3 +1,4 @@
+import { SANDBOX_CAPACITY_MESSAGE } from "@bento/core";
 /**
  * Failures of the machinery rather than the work, recognised from the
  * sentence a run record opens with: a machine that never ran the agent,
@@ -76,6 +77,11 @@ export const SWARM_BRANCH_LOST_MESSAGE =
   "The swarm's branch was lost with its sandbox and is not on GitHub, so its landed tasks cannot be restored. Start the swarm again.";
 
 export const INFRA_FAILURE_REASONS: readonly InfraFailureReason[] = [
+  {
+    id: "sandbox-capacity",
+    summary: "All eligible sandbox providers were at capacity before the agent started.",
+    match: { kind: "prefix", text: `sandbox provisioning failed: ${SANDBOX_CAPACITY_MESSAGE}` },
+  },
   {
     id: "sandbox-unavailable",
     summary: "No sandbox provider could make the machine before the agent started.",

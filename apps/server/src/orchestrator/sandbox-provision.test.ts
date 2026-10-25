@@ -1,3 +1,5 @@
+import { SANDBOX_CAPACITY_MESSAGE } from "@bento/core";
+import { SANDBOX_CAPACITY_EVENT } from "./sandbox-metrics.js";
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -877,3 +879,39 @@ for (const phase of ["handle", "completion"] as const) {
     });
   }
 }
+
+for (const providers of [["sprite", "modal"], ["sprite"], ["modal"]] as const) {
+  test(`capacity is recorded for ${providers.join(" and ")} and once for the blocked run`, async () => {
+    const featureId = await seedFeature("At capacity");
+    const asked: string[] = [];
+    const drivers = providers.map((provider) => stubDriver(provider, asked, {
+      fail: new Error(provider === "sprite" ? "concurrent_sprite_limit_exceeded token=secret" : "Concurrent sandbox limit exceeded token=secret"),
+      restricted: true,
+    }));
+    const before = analytics.events.length;
+    await assert.rejects(provisionOn(featureId, drivers[0]!, drivers.slice(1), []), (err: unknown) => {
+      assert.ok(err instanceof SandboxProvisionError);
+      assert.equal(err.message, SANDBOX_CAPACITY_MESSAGE);
+      return true;
+    });
+    const events = analytics.events.slice(before).filter((event) => event.event === SANDBOX_CAPACITY_EVENT);
+    assert.equal(events.length, providers.length + 1);
+    assert.deepEqual(events.map((event) => event.properties?.kind), [...providers.map(() => "provider"), "exhausted"]);
+    assert.deepEqual(events.at(-1)?.properties?.providers, [...providers]);
+    assert.equal(events.at(-1)?.properties?.run_id, `run-${featureId}`);
+    assert.equal(events.at(-1)?.properties?.feature_id, featureId);
+    for (const event of events) assert.doesNotMatch(propertyText(event), /secret|token/);
+  });
+}
+
+test("capacity covered by fallback is recorded without declaring Bento exhausted", async () => {
+  const featureId = await seedFeature("Capacity covered");
+  const asked: string[] = [];
+  const before = analytics.events.length;
+  await provisionOn(featureId,
+    stubDriver("sprite", asked, { fail: new Error("max sprites per org exceeded") }),
+    [stubDriver("modal", asked)], []);
+  const events = analytics.events.slice(before).filter((event) => event.event === SANDBOX_CAPACITY_EVENT);
+  assert.equal(events.length, 1);
+  assert.equal(events[0]?.properties?.kind, "provider");
+});

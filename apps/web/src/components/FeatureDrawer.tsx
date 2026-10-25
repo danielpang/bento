@@ -1,3 +1,5 @@
+import { isSandboxCapacityError } from "@bento/core";
+import { CapacityNotice } from "./CapacityNotice.js";
 import { lazy, Suspense, useEffect, useId, useRef, useState } from "react";
 import * as Tabs from "@radix-ui/react-tabs";
 import { ProviderMark } from "./ProviderMark.js";
@@ -782,7 +784,7 @@ export function FeatureDrawer({
         <div className="feature-topline">
           <span className="feature-kicker">Feature</span>
           <span className="chip" data-status={runActive ? "active" : feature.status}>
-            {runActive ? "Agent working" : statusWords(feature.status)}
+            {runActive ? latestRun?.status === "queued" ? "Waiting to start" : latestRun?.status === "starting" ? "Starting agent" : "Agent working" : !finished && latestRun?.status === "failed" && isSandboxCapacityError(latestRun.error) ? "Waiting for capacity" : statusWords(feature.status)}
           </span>
           <button className="btn btn-ghost feature-close" onClick={onClose} aria-label="Close" title="Close (Esc)">
             <span aria-hidden="true">×</span>
@@ -938,13 +940,20 @@ export function FeatureDrawer({
                 {note.text}
               </p>
             ))}
-          {needsRecovery && stageAgent && !finished && !noRepositories && <button className="btn btn-primary recovery-action" disabled={busy || detailsPending || loadFailed} onClick={() => act(() => client.startRun({ featureId: feature.id, agentProfileId: stageAgent.id }))}>Try again with {stageAgent.name}</button>}
+          {needsRecovery && stageAgent && !finished && !noRepositories && !isSandboxCapacityError(latestRun?.error) && <button className="btn btn-primary recovery-action" disabled={busy || detailsPending || loadFailed} onClick={() => act(() => client.startRun({ featureId: feature.id, agentProfileId: stageAgent.id }))}>Try again with {stageAgent.name}</button>}
           {needsRecovery && !stageAgent && !finished && <button className="btn btn-primary recovery-action" onClick={showConversation}>Review the last run</button>}
           {/* Why the last run failed, where the eye lands. The same
               sentence closes the transcript, but a person looking at a
               red card reads the actions first. Boxed so it reads as the
               failure reason, not another muted line of drawer text. */}
-          {latestRun?.status === "failed" && latestRun.error && !finished && (
+          {latestRun?.status === "failed" && latestRun.error && !finished && (isSandboxCapacityError(latestRun.error) ? (
+            <CapacityNotice busy={busy || detailsPending || loadFailed} onRetry={stageAgent && !noRepositories ? () => void act(async () => {
+              const run = await client.startRun({ featureId: feature.id, agentProfileId: stageAgent.id });
+              // The API accepted this run. Do not wait for a worker's first
+              // event to replace the capacity error with the queued state.
+              setRuns((current) => [run, ...current.filter((item) => item.id !== run.id)]);
+            }) : undefined} />
+          ) : (
             <p className="error error-box">
               {linkifiedError(
                 withProviderOutageAdvice(latestRun.error, {
@@ -953,7 +962,7 @@ export function FeatureDrawer({
                 }),
               )}
             </p>
-          )}
+          ))}
           <CardSpend runs={runs} />
 
           <details className="feature-more-actions">

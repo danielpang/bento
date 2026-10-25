@@ -108,11 +108,13 @@ function hatch(pts: Pt[], density: number, len: number, r: ReturnType<typeof rng
  * orange square 88 by 88, the blue rectangle 124 by 64, both standing
  * with their feet 62 below the centre, two legs, two arms, dot eyes.
  */
-export function sketchMascot(kind: "orange" | "blue", cx: number, cy: number, s: number, seed: number): SketchedMascot {
+export function sketchMascot(kind: "orange" | "blue", cx: number, cy: number, s: number, seed: number, pose: "standing" | "sitting" = "standing"): SketchedMascot {
   const blue = kind === "blue";
   const bw = blue ? 124 : 88, bh = blue ? 64 : 88, top = 44 - bh;
   const at = (pts: Pt[]): Pt[] => pts.map(([x, y]) => [cx + x * s, cy + y * s]);
-  const legs = [-1, 1].map((side) => at(roundPts(side * (blue ? 30 : 20) - 6, 38, 12, 24, 5, 3)));
+  const legs = [-1, 1].map((side) => at(pose === "sitting"
+    ? roundPts(side < 0 ? -bw / 2 - 12 : bw / 2 - 16, 34, 28, 16, 7, 3)
+    : roundPts(side * (blue ? 30 : 20) - 6, 38, 12, 24, 5, 3)));
   const arms = [-1, 1].map((side) => at(roundPts(side * (bw / 2 + 5) - 5, top + bh / 2 - 2, 10, 18, 4, 2)));
   const body = at(roundPts(-bw / 2, top, bw, bh, blue ? 16 : 18));
   const ex = blue ? 20 : 15, ey = top + bh / 2 + 2;

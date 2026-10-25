@@ -1,3 +1,5 @@
+import { isSandboxCapacityError } from "@bento/core";
+import { CapacityNotice } from "./CapacityNotice.js";
 import { useEffect, useState, type ReactNode } from "react";
 import { CompletionRing } from "./CompletionRing.js";
 import { MergeQueue } from "./MergeQueue.js";
@@ -304,14 +306,21 @@ export function SwarmPage({
     (openLeaves.length > 0 && (swarm.status === "running" || swarm.status === "waiting" || swarm.status === "done"))
   );
   const waitingForPlan = swarm.status === "planning" && !planReady;
+  const plannerAtCapacity = waitingForPlan && detail.plannerRun?.status === "failed" && isSandboxCapacityError(detail.plannerRun.error);
   /** The one sentence about what this swarm waits on a person for, shown whether or not the brief is open. */
-  const nextStep = waitingForPlan
-    ? detail.plannerRun?.status === "failed"
-      ? "Planner failed. Open its output below, then retry."
-      : plannerActive
-        ? "Planner is building the task tree. Review the plan here before starting work."
-        : "The plan is not ready. Message the planner to finish it."
-    : "Review the diagram, then approve the plan to start ready workers.";
+  const nextStep = plannerAtCapacity
+    ? "Your swarm is saved. Retry the planner in a few minutes to start building the plan."
+    : waitingForPlan
+      ? detail.plannerRun?.status === "failed"
+        ? "Planner failed. Open its output below, then retry."
+        : detail.plannerRun?.status === "queued"
+          ? "Your planner is queued. The plan will appear here after it starts."
+          : detail.plannerRun?.status === "starting"
+            ? "Preparing a workspace for the planner. Your plan will appear here once it starts."
+            : plannerActive
+              ? "Planner is building the task tree. Review the plan here before starting work."
+              : "The plan is not ready. Message the planner to finish it."
+      : "Review the diagram, then approve the plan to start ready workers.";
   const plannerFailed = waitingForPlan && detail.plannerRun?.status === "failed";
   const ceiling = ceilingAction(swarm.status);
   const primaryAction = planNeedsApproval
@@ -369,7 +378,7 @@ export function SwarmPage({
             <div className="swarm-head-chips">
               <span className="status">
                 <span className="dot" data-state={plannerFailed || swarm.status === "failed" ? "gated" : swarmTone(swarm.status)} />
-                {plannerFailed || swarm.status === "failed" ? "stalled" : swarmWords(swarm.status)}
+                {plannerAtCapacity ? "Waiting for capacity" : plannerFailed || swarm.status === "failed" ? "stalled" : swarmWords(swarm.status)}
               </span>
               {swarm.branchName && (
                 <span className="chip chip-clip" title={swarm.branchName}>
@@ -399,7 +408,7 @@ export function SwarmPage({
 
         <div className="swarm-head-actions">
           {primaryAction && <button className="btn btn-primary swarm-main-action" disabled={busy} onClick={primaryAction.onClick}>{primaryAction.label}</button>}
-          {waitingForPlan && plannerActive && <span className="swarm-awaiting-plan">Planner at work</span>}
+          {waitingForPlan && plannerActive && <span className="swarm-awaiting-plan">{detail.plannerRun?.status === "queued" ? "Waiting to start" : detail.plannerRun?.status === "starting" ? "Starting planner" : "Planner at work"}</span>}
           <button className="btn" disabled={busy} onClick={actions.onSettings}>Settings</button>
           <details className="swarm-more-actions">
             <summary className="btn" aria-label="More swarm actions">
@@ -565,6 +574,13 @@ export function SwarmPage({
         </div>
       )}
 
+      {plannerAtCapacity ? (
+        <div className="swarm-capacity-stage">
+          <CapacityNotice context="planner" busy={busy} onRetry={actions.onRetryPlanner} />
+          <p className="swarm-capacity-next">Once the planner starts, your task tree will appear here.</p>
+        </div>
+      ) : (
+      <>
       <div className="swarm-viewbar">
         <span className="swarm-section-title">Diagram</span>
         <div className="seg" role="group" aria-label="View">
@@ -595,6 +611,9 @@ export function SwarmPage({
       ) : (
         <SwarmOutline model={model} selectedId={selectedId} onSelect={onSelect}
           plannerRun={detail.plannerRun} onRetryPlanner={actions.onRetryPlanner} onOpenPlannerOutput={onOpenPlannerOutput} canRetryPlanner={!planReady && swarm.status === "planning"} busy={busy} now={now} />
+      )}
+
+      </>
       )}
 
       {detail.landings.length > 0 && (

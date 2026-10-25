@@ -1,3 +1,5 @@
+import { isSandboxCapacityError } from "@bento/core";
+import { CapacityNotice } from "./CapacityNotice.js";
 import { useEffect, useRef, useState } from "react";
 import type { BentoClient } from "@bento/api-client";
 import type { RecordedRunEvent } from "@bento/core";
@@ -336,14 +338,16 @@ export function SwarmRunOutputDrawer({ client, api, swarmId, swarmStatus, runId,
         <h2 className="drawer-title">{agentName}</h2>
       </header>
       <div className="drawer-body">
-        {runStatus === "failed" && (
+        {runStatus === "failed" && (isSandboxCapacityError(runError) ? (
+          <CapacityNotice context="planner" busy={busy} onRetry={canRetry ? onRetry : undefined} />
+        ) : (
           <section className="swarm-failure-detail" role="status">
             <strong>{failure.title}</strong>
             <p>{failure.summary} {failure.beforeAgent ? "The agent did not start." : "Review its output before retrying."}</p>
             {canRetry && onRetry && <button className="btn btn-primary" type="button" disabled={busy} onClick={onRetry}>Retry planner</button>}
             {runError && <details><summary>Technical details</summary><pre>{runError}</pre></details>}
           </section>
-        )}
+        ))}
         <SwarmRunOutput client={client} runId={runId} agentName={agentName} plannerMessages={messages} plannerRuns={plannerRuns} onActivity={setActivity} onPlannerInput={refreshMessages} />
       </div>
       {canMessage && (
