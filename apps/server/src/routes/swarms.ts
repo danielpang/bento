@@ -110,18 +110,39 @@ export const RUNNER_PROJECT_REFUSAL =
  * How much of the merge queue the detail carries.
  *
  * Enough to answer what a person opens the panel to ask: what is
- * landing now, what is behind it, and did the last few go in. A swarm
- * has a landing per leaf, so the whole list grows without bound and
- * without becoming more useful.
+ * landing now, what is behind it, and did the last few go in. The rest
+ * of the history is a page of `GET /:id/landings`, asked for only when
+ * a person scrolls or searches for an older branch, because the detail
+ * is refetched on every swarm event and a long swarm has a landing per
+ * leaf.
  *
  * Counted per half, because the two halves answer different questions
  * and one cap over both hid the half that matters: the front of the
- * queue is what is happening, and the history is only how a person
- * checks that the queue is moving at all. The console draws ten of
- * that history, so ten is what it is sent.
+ * queue is what is happening, and the history is how a person finds
+ * what already went in.
  */
-const LANDINGS_SHOWN = 20;
+const LANDINGS_SHOWN = 50;
 const LANDINGS_HISTORY = 10;
+/** The most one page of `GET /:id/landings` answers with. */
+const LANDINGS_PAGE_MAX = 50;
+const FINISHED_LANDING_STATUSES = ["landed", "failed", "cancelled"] as const;
+
+const LANDING_COLUMNS = {
+  id: swarmLandings.id,
+  taskId: swarmLandings.taskId,
+  branchName: swarmLandings.branchName,
+  position: swarmLandings.position,
+  status: swarmLandings.status,
+  attempt: swarmLandings.attempt,
+  error: swarmLandings.error,
+  errorCode: swarmLandings.errorCode,
+  resolverRunId: swarmLandings.resolverRunId,
+  // When a queued row may be tried again, so the panel can say a
+  // branch is waiting out a backoff rather than waiting its turn.
+  notBefore: swarmLandings.notBefore,
+  startedAt: swarmLandings.startedAt,
+  endedAt: swarmLandings.endedAt,
+};
 
 /** What a request that would pull a branch out from under a landing in flight is told. */
 const LANDING_IN_FLIGHT = "This task's branch is landing right now. Try again when the merge queue finishes with it.";
@@ -793,24 +814,8 @@ export function swarmRoutes(ctx: AppContext) {
        * a swarm of two hundred leaves must not send two hundred rows on
        * every refetch.
        */
-      const landingColumns = {
-        id: swarmLandings.id,
-        taskId: swarmLandings.taskId,
-        branchName: swarmLandings.branchName,
-        position: swarmLandings.position,
-        status: swarmLandings.status,
-        attempt: swarmLandings.attempt,
-        error: swarmLandings.error,
-        errorCode: swarmLandings.errorCode,
-        resolverRunId: swarmLandings.resolverRunId,
-        // When a queued row may be tried again, so the panel can say a
-        // branch is waiting out a backoff rather than waiting its turn.
-        notBefore: swarmLandings.notBefore,
-        startedAt: swarmLandings.startedAt,
-        endedAt: swarmLandings.endedAt,
-      };
       const inQueue = await db(c, ctx)
-        .select(landingColumns)
+        .select(LANDING_COLUMNS)
         .from(swarmLandings)
         .where(
           and(
@@ -821,15 +826,15 @@ export function swarmRoutes(ctx: AppContext) {
         .orderBy(asc(swarmLandings.position), asc(swarmLandings.createdAt))
         .limit(LANDINGS_SHOWN);
       const finished = await db(c, ctx)
-        .select(landingColumns)
+        .select(LANDING_COLUMNS)
         .from(swarmLandings)
         .where(
           and(
             eq(swarmLandings.swarmId, swarm.id),
-            inArray(swarmLandings.status, ["landed", "failed", "cancelled"]),
+            inArray(swarmLandings.status, FINISHED_LANDING_STATUSES),
           ),
         )
-        .orderBy(desc(swarmLandings.endedAt), desc(swarmLandings.createdAt))
+        .orderBy(desc(swarmLandings.endedAt), desc(swarmLandings.createdAt), desc(swarmLandings.id))
         .limit(LANDINGS_HISTORY);
       const landings = [...inQueue, ...finished];
       const [landingSummary] = await db(c, ctx)
@@ -905,6 +910,46 @@ export function swarmRoutes(ctx: AppContext) {
         },
         pullRequests,
       });
+    })
+    /**
+     * The merge queue's history past the detail's first page, newest
+     * first, and a search over it by task title or branch name. Asked
+     * for only when a person scrolls or searches, so a long swarm's
+     * refetches carry ten finished rows rather than all of them.
+     */
+    .get("/:id/landings", async (c) => {
+      const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
+      if (!swarm) return c.json({ error: "not found" }, 404);
+      const refusal = await requireSwarms(ctx, c, swarm.organizationId);
+      if (refusal) return c.json(refusal.body, refusal.status);
+      const parsed = z
+        .object({
+          q: z.string().trim().max(200).optional(),
+          offset: z.coerce.number().int().min(0).max(100_000).default(0),
+          limit: z.coerce.number().int().min(1).max(LANDINGS_PAGE_MAX).default(LANDINGS_PAGE_MAX),
+        })
+        .safeParse(c.req.query());
+      if (!parsed.success) return c.json({ error: "Invalid page." }, 400);
+      const { q, offset, limit } = parsed.data;
+      const pattern = q ? `%${q.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%` : null;
+      const rows = await db(c, ctx)
+        .select(LANDING_COLUMNS)
+        .from(swarmLandings)
+        .leftJoin(swarmTasks, eq(swarmTasks.id, swarmLandings.taskId))
+        .where(
+          and(
+            eq(swarmLandings.swarmId, swarm.id),
+            inArray(swarmLandings.status, FINISHED_LANDING_STATUSES),
+            pattern
+              ? sql`(${swarmTasks.title} ilike ${pattern} or ${swarmLandings.branchName} ilike ${pattern})`
+              : undefined,
+          ),
+        )
+        .orderBy(desc(swarmLandings.endedAt), desc(swarmLandings.createdAt), desc(swarmLandings.id))
+        .offset(offset)
+        .limit(limit + 1);
+      const landings = rows.slice(0, limit);
+      return c.json({ landings, next: rows.length > limit ? offset + limit : null });
     })
     .post("/:id/branch/release", async (c) => {
       const accessible = await getAccessibleSwarm(ctx, c, c.req.param("id"));
@@ -1188,12 +1233,15 @@ export function swarmRoutes(ctx: AppContext) {
      * when a swarm may run.
      */
     /**
-     * Opens the pull requests of a finished swarm, in the shape a
-     * person chose: "combined", one pull request of the swarm's branch
-     * with every task merged in order, or "stacked", one per landed task
-     * against the task before it. The branches are already on GitHub
-     * (pushed as the swarm went), so this only asks GitHub for the
-     * pull requests, through the publish queue, which retries.
+     * Opens a swarm's pull requests, in the shape a person chose:
+     * "combined", one pull request of the swarm's branch with every task
+     * merged in order, or "stacked", one per landed task against the task
+     * before it. Any time once a task has landed, not only once the swarm
+     * is done, because a person who wants the work out of the sandbox
+     * before it can be reaped should not have to wait for the planner.
+     * Asking again while the swarm runs adds the tasks that landed since
+     * to the stack; a combined pull request follows the swarm's branch
+     * by itself, since every landing pushes it.
      */
     .post("/:id/publish", async (c) => {
       const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
@@ -1203,8 +1251,13 @@ export function swarmRoutes(ctx: AppContext) {
       const body = await c.req.json().catch(() => ({}));
       const parsed = z.object({ mode: z.enum(["combined", "stacked"]) }).safeParse(body);
       if (!parsed.success) return c.json({ error: "Choose combined or stacked pull requests." }, 400);
-      if (swarm.status !== "done") {
-        return c.json({ error: "Pull requests open once the swarm is done." }, 409);
+      const [landed] = await db(c, ctx)
+        .select({ id: swarmLandings.id })
+        .from(swarmLandings)
+        .where(and(eq(swarmLandings.swarmId, swarm.id), eq(swarmLandings.status, "landed")))
+        .limit(1);
+      if (!landed) {
+        return c.json({ error: "Nothing has been committed to the swarm's branch yet, so there is nothing to open a pull request for." }, 409);
       }
       deferAfterCommit(c, () => enqueueSwarmPublish(ctx, swarm.id, parsed.data.mode));
       return c.json({ mode: parsed.data.mode, status: "queued" }, 202);

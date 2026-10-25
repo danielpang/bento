@@ -194,7 +194,7 @@ export function SwarmNodeDrawer({
       ? "The planner for this part stopped without writing any tasks. Add a task to it by hand, or cancel it."
       : "A task below this plan failed. Open it to fix or retry it."
     : checksFailed
-      ? "This task's branch landed, and the swarm's checks then failed. A new attempt starts automatically, with the failure as its instructions."
+      ? "This task's branch was merged, and the swarm's checks then failed. A new attempt starts automatically, with the failure as its instructions."
       : conflictFailed
         ? "This branch conflicts with the swarm's branch, and the agent put on the conflict could not resolve it. Retry the task to start it over from the swarm's branch."
         : null;
@@ -291,7 +291,7 @@ export function SwarmNodeDrawer({
     ? "Restarting. The old sandbox is being removed, then a new agent starts on a fresh branch from the swarm's."
     : mergeQueueFailure ? landingFailure
     : task.nodeType === "leaf" && node.landing === "waiting"
-      ? "Waiting to land. If the sandbox holding this branch is asleep, Bento starts it first, which can take a minute."
+      ? "Waiting to merge. If the sandbox holding this branch is asleep, Bento starts it first, which can take a minute."
     : reviewNote ? reviewNote
     : checksFailed ? "A new attempt starts when a worker is free."
     : assignedWaiting && startBlocker ? startBlocker
@@ -472,7 +472,7 @@ export function SwarmNodeDrawer({
                   <button className="btn" type="button" disabled={busy} onClick={() => setConfirming(true)}>Mark done</button>
                 )}
                 {canRetryLanding && primaryAction !== "landing" && (
-                  <button className="btn" type="button" disabled={busy} title="Try landing this task's branch again, from the sandbox it is in." onClick={() => onRetryLanding?.(task.id)}>
+                  <button className="btn" type="button" disabled={busy} title="Try merging this task's branch again, from the sandbox it is in." onClick={() => onRetryLanding?.(task.id)}>
                     Retry merge queue
                   </button>
                 )}
@@ -520,7 +520,7 @@ export function SwarmNodeDrawer({
               {task.nodeType !== "leaf" && <p className="muted">A plan node is finished by its own tasks finishing.</p>}
               {canMarkDone && (
                 <p className="muted">
-                  Marking this done stops its worker and counts it as finished.{unlandedBranch ? " Its branch is not landed." : ""}
+                  Marking this done stops its worker and counts it as finished.{unlandedBranch ? " Its branch is not merged." : ""}
                 </p>
               )}
             </details>
@@ -685,7 +685,7 @@ export function SwarmNodeDrawer({
               {mergeQueueFailure && (
                 <div className="swarm-failure-detail" role="status">
                   <strong>{landingFailure}</strong>
-                  <p>The worker finished its attempt. Its branch could not be landed on the swarm branch.</p>
+                  <p>The worker finished its attempt. Its branch could not be merged into the swarm branch.</p>
                   <details><summary>Technical details</summary><pre>{String(task.flags.landingError)}</pre></details>
                 </div>
               )}
@@ -929,7 +929,7 @@ function SandboxProviderNote({ provider }: { provider: string | null | undefined
 export function markDoneConfirmText(unlandedBranch: boolean): string {
   const counts = "Marking this done counts its weight towards every plan above it, and towards the swarm's own ring.";
   return unlandedBranch
-    ? `${counts} This task's branch has not landed on the swarm's branch, and it will not be: marking it done takes it out of the merge queue.`
+    ? `${counts} This task's branch has not been merged into the swarm's branch, and it will not be: marking it done takes it out of the merge queue.`
     : counts;
 }
 
@@ -961,7 +961,7 @@ export function eventWords(event: SwarmTaskEvent): string {
       // conflict, with a resolver put on it.
       return event.detail?.resolver === "started" ? "Resolver started" : "Needs attention";
     case "landed":
-      return "Landed";
+      return "Committed";
     case "note":
       return event.detail?.accepted === true ? "Planner accepted" : "Note";
     default:

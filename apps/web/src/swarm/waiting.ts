@@ -63,7 +63,7 @@ export function leafStartBlocker(
 function statusWord(task: Pick<SwarmTask, "status" | "nodeType">): string {
   if (task.status === "assigned" || task.status === "open") return "not started";
   if (task.status === "working") return "in progress";
-  if (task.status === "landed") return "waiting to land";
+  if (task.status === "landed") return "waiting to merge";
   return task.status;
 }
 
@@ -98,6 +98,6 @@ export function idleWords(detail: Pick<SwarmDetail, "swarm" | "tasks" | "landing
       : held > 1 ? `${held} tasks are waiting for tasks they depend on` : null,
     noWorker ? "no worker agent is set, so ready tasks cannot start (choose one in Settings)" : null,
   ].filter((reason): reason is string => reason !== null);
-  if (reasons.length === 0) return "No agent is running and nothing is waiting to land. The swarm starts the next ready task on its next pass.";
+  if (reasons.length === 0) return "No agent is running and nothing is waiting to merge. The swarm starts the next ready task on its next pass.";
   return `No agent is running right now: ${reasons.join("; ")}.`;
 }

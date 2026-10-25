@@ -133,7 +133,7 @@ export function SwarmRunSettingsFields({
           <span className="muted">
             {deliverable === "document"
               ? "Each worker writes a section, and the planner assembles them into one file on the branch."
-              : "Each worker makes a change on its own branch, and they land on the swarm's branch one at a time."}
+              : "Each worker makes a change on its own branch, and they are merged into the swarm's branch one at a time."}
           </span>
         </fieldset>
       )}

@@ -686,8 +686,37 @@ test("the merge queue is still visible on a swarm with more landings than the ca
   assert.equal(byStatus("conflicted").length, 1, "the row the whole queue is waiting on");
   assert.equal(byStatus("conflicted")[0]!.branchName, "swarm/s-20");
   assert.equal(byStatus("queued").length, 1, "and what is behind it");
-  assert.equal(byStatus("landed").length, 10, "with the history capped rather than filling the answer");
-  assert.ok(detail.landings.length <= 30, "and the whole thing still bounded");
+  assert.equal(byStatus("landed").length, 10, "with the history's first page, not all of it");
+
+  type Page = { landings: { branchName: string | null }[]; next: number | null };
+  const page = async (query: string) => (await (await app.request(`/api/swarms/${swarm.id}/landings?${query}`)).json()) as Page;
+  const first = await page("offset=10&limit=5");
+  assert.deepEqual(first.landings.map((row) => row.branchName), ["swarm/s-9", "swarm/s-8", "swarm/s-7", "swarm/s-6", "swarm/s-5"], "older pages continue newest first");
+  assert.equal(first.next, 15);
+  const last = await page("offset=15&limit=5");
+  assert.equal(last.landings.length, 5);
+  assert.equal(last.next, null, "and say when there is no more");
+  const found = await page("q=s-3");
+  assert.deepEqual(found.landings.map((row) => row.branchName), ["swarm/s-3"], "a search finds an early branch by name");
+  const byTitle = await page("q=LEAF%201");
+  assert.deepEqual(
+    byTitle.landings.map((row) => row.branchName),
+    ["swarm/s-19", "swarm/s-18", "swarm/s-17", "swarm/s-16", "swarm/s-15", "swarm/s-14", "swarm/s-13", "swarm/s-12", "swarm/s-11", "swarm/s-10", "swarm/s-1"],
+    "and by task title, without regard to case",
+  );
+  assert.equal((await page("q=%25")).landings.length, 0, "a percent sign is a character, not a wildcard");
+});
+
+test("pull requests open once anything has landed, before the swarm is done", async () => {
+  const swarm = await createSwarm();
+  await db.update(swarms).set({ status: "running" }).where(eq(swarms.id, swarm.id));
+  const publish = () => post(`/api/swarms/${swarm.id}/publish`, { mode: "combined" });
+  const early = await publish();
+  assert.equal(early.status, 409, "nothing landed yet");
+  const [task] = await db.insert(swarmTasks).values({ swarmId: swarm.id, title: "leaf", status: "done" }).returning();
+  await db.insert(swarmLandings).values({ swarmId: swarm.id, taskId: task!.id, branchName: "swarm/x-1", position: 0, status: "landed", attempt: 1, endedAt: new Date() });
+  const res = await publish();
+  assert.equal(res.status, 202, await res.clone().text());
 });
 
 test("pausing and resuming are a person's, and resuming wakes the reconciler", async () => {

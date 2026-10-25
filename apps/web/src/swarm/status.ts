@@ -130,7 +130,7 @@ export function taskWords(status: TaskStatus): string {
     case "working":
       return "working";
     case "landed":
-      return "landed";
+      return "waiting to merge";
     case "done":
       return "done";
     case "blocked":
@@ -166,8 +166,8 @@ export function diagramTaskWords(
   if (agentActive) return "working";
   // A leaf whose work is finished and accepted is not pending: its
   // branch is in the merge queue, or failed to land.
-  if (landing === "failed") return "landing failed";
-  if (landing === "waiting") return "waiting to land";
+  if (landing === "failed") return "merge failed";
+  if (landing === "waiting") return "waiting to merge";
   // Reported and not yet accepted: the worker finished, and the
   // planner has the report. Not pending, which reads as nobody started.
   if (landing === "review") return reviewWords(review);
@@ -321,7 +321,7 @@ export function pausedWords(
     case "attention":
       return "Something in this swarm is waiting on you.";
     case "error":
-      return "This swarm stopped on an error. Its plan and everything that landed are still here.";
+      return "This swarm stopped on an error. Its plan and everything that was committed are still here.";
     case "usage_limit": {
       const at = until ? new Date(until) : null;
       return at && !Number.isNaN(at.getTime())

@@ -160,6 +160,8 @@ export interface GitHubPublisher {
   ensurePullRequest(input: PullRequestInput): Promise<OpenPullRequest>;
   getPullRequest(ref: PullRequestRef): Promise<PullRequestDetails>;
   updatePullRequest(input: PullRequestUpdateInput): Promise<void>;
+  /** Takes a draft out of draft; nothing when it is not one. */
+  markPullRequestReady?(ref: PullRequestRef): Promise<void>;
   /** True when a comment containing the marker is already on the pull request. */
   pullRequestHasComment(ref: PullRequestRef, marker: string): Promise<boolean>;
   createPullRequestComment(ref: PullRequestRef, body: string): Promise<void>;

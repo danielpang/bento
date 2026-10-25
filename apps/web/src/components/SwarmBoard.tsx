@@ -199,6 +199,12 @@ export function SwarmBoard({
    * draw. Refetched with the detail, so the assembled document appears
    * when the swarm finishes rather than on the next reload.
    */
+  const loadLandings = useCallback(
+    (input: { query?: string; offset: number }) =>
+      selectedId ? swarmApi.listLandings(selectedId, input) : Promise.resolve({ landings: [], next: null }),
+    [selectedId],
+  );
+
   const loadArtifacts = useCallback((swarmId: string) => {
     void swarmApi
       .listArtifacts(swarmId)
@@ -470,6 +476,7 @@ export function SwarmBoard({
             onReleaseBranch: () => selectedId && act(() => swarmApi.releaseSwarmBranch(selectedId)),
             onRetryLanding: (taskId) => selectedId && act(() => swarmApi.retryLanding(selectedId, taskId), true),
             onPublish: (mode) => selectedId && act(() => swarmApi.publishSwarm(selectedId, mode)),
+            onLoadLandings: loadLandings,
             onReopen: () => setReopening(true),
             onDelete: () => selectedId && setDeleting({ id: selectedId, name: detail.swarm.name }),
             onArchive: () => selectedId && act(() => swarmApi.archiveSwarm(selectedId)),

@@ -1140,6 +1140,8 @@ test("every entity route refuses a foreign tenant", async () => {
     ["POST", "/api/swarms", { body: JSON.stringify({ projectId: project.id, title: "Injected" }) }],
     ["GET", `/api/swarms?projectId=${project.id}`],
     ["GET", `/api/swarms/${swarm.id}`],
+    ["GET", `/api/swarms/${swarm.id}/landings`],
+    ["GET", `/api/swarms/${swarm.id}/landings?q=leaf&offset=10`],
     ["PATCH", `/api/swarms/${swarm.id}`, { body: JSON.stringify({ title: "Stolen" }) }],
     // Within the worker ceiling on purpose: a body the schema refuses
     // would answer 400 before the access check ran, and this row is
