@@ -1,4 +1,8 @@
+import { SketchMascot } from "./SketchMascot.js";
+import { sketchMascot } from "../mascot-sketch.js";
 import { SANDBOX_CAPACITY_TITLE } from "@bento/core";
+
+const MASCOT = sketchMascot("orange", 80, 76, 0.8, 1);
 
 /** A recoverable service limit, shown in the work that could not start. */
 export function CapacityNotice({ onRetry, busy = false, context = "run" }: {
@@ -15,7 +19,14 @@ export function CapacityNotice({ onRetry, busy = false, context = "run" }: {
   return (
     <section className="capacity-notice" role="status" aria-label="Bento is at capacity">
       <div className="capacity-notice-art" aria-hidden="true">
-        <span /><span /><span /><span /><span /><span className="capacity-notice-new">+</span>
+        <svg viewBox="0 0 160 132" width="160" height="132" focusable="false">
+          <g transform="rotate(-8 80 110)"><SketchMascot m={MASCOT} dizzy /></g>
+          <g className="capacity-notice-stars">
+            <path d="m43 14 2 5 5 2-5 2-2 5-2-5-5-2 5-2Z" />
+            <path d="m112 18 2 4 4 2-4 2-2 4-2-4-4-2 4-2Z" />
+            <path d="M58 20q22-12 40 0M108 38l5 3M31 41l5-3" />
+          </g>
+        </svg>
       </div>
       <span className="capacity-notice-kicker">Making room for more</span>
       <h3>{SANDBOX_CAPACITY_TITLE}</h3>

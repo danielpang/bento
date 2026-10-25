@@ -11136,9 +11136,10 @@ a.swarm-plan-source-name:hover {
   color: var(--text);
   text-align: left;
 }
-.capacity-notice-art { display: grid; grid-template-columns: repeat(3, 22px); gap: 5px; margin-bottom: 24px; }
-.capacity-notice-art span { height: 22px; border: 1px solid color-mix(in srgb, var(--brand) 55%, var(--line)); border-radius: 5px; background: color-mix(in srgb, var(--brand) 18%, var(--panel)); }
-.capacity-notice-art .capacity-notice-new { display: grid; place-items: center; border-style: dashed; background: transparent; color: var(--brand); font-size: 18px; line-height: 1; }
+.capacity-notice-art { width: 128px; margin: -12px 0 12px; }
+.capacity-notice-art svg { display: block; width: 100%; height: auto; overflow: visible; }
+.capacity-notice-art .board-mascot, .capacity-notice-art .board-mascot-eyes { animation: none; }
+.capacity-notice-stars { fill: none; stroke: var(--text-dim); stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .capacity-notice-kicker { color: var(--text-dim); font: 500 11px/1.5 var(--mono); text-transform: uppercase; letter-spacing: .1em; }
 .capacity-notice h3 { margin: 9px 0 12px; font: 600 clamp(21px, 3vw, 27px)/1.2 var(--display); letter-spacing: -.035em; }
 .capacity-notice p { margin: 0; max-width: 48ch; font: 400 14px/1.7 var(--sans); color: var(--text-dim); }

@@ -1,7 +1,8 @@
+import { SketchFrames, SketchMascot } from "./SketchMascot.js";
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { TOAST_DOCK_ABOVE_ID } from "./Toasts.js";
-import { sketchBubble, sketchGround, sketchMascot, type SketchFrame, type SketchedBubble, type SketchedMascot } from "../mascot-sketch.js";
+import { sketchBubble, sketchGround, sketchMascot, type SketchedBubble } from "../mascot-sketch.js";
 
 /**
  * The orange square and the blue rectangle from the Bento mark, standing
@@ -52,38 +53,13 @@ const ASK = sketchBubble({ x: 2, y: 6, w: 234, h: 44 }, { x: 98, tipX: 100, tipY
 const ANSWER = sketchBubble({ x: 116, y: 56, w: 212, h: 44 }, { x: 215, tipX: 213, tipY: 120 }, 4);
 const GROUND = sketchGround(20, 300, 194, 5);
 
-function Frames({ frames, clip }: { frames: SketchFrame[]; clip?: string }) {
-  return frames.map((frame, i) => (
-    <g key={i} className="board-mascots-frame" data-frame={i}>
-      {frame.hatch && <path className="board-mascot-hatch" d={frame.hatch} clipPath={clip ? `url(#${clip})` : undefined} />}
-      {frame.ink.map((stroke, j) => <path key={j} className="board-mascots-ink" d={stroke.d} strokeWidth={stroke.width} />)}
-    </g>
-  ));
-}
-
-function Mascot({ m }: { m: SketchedMascot }) {
-  const clip = `board-mascot-clip-${m.kind}`;
-  return (
-    <g className={`board-mascot board-mascot-${m.kind}`}>
-      <clipPath id={clip}><path d={m.clip} /></clipPath>
-      {m.limbFills.map((d, i) => <path key={i} className="board-mascot-fill" d={d} />)}
-      <Frames frames={m.limbFrames} />
-      <path className="board-mascot-fill" d={m.bodyFill} />
-      <Frames frames={m.frames} clip={clip} />
-      <g className="board-mascot-eyes">
-        {m.eyes.map((e, i) => <ellipse key={i} cx={e.cx} cy={e.cy} rx="3" ry="5" />)}
-      </g>
-    </g>
-  );
-}
-
 function Bubble({ b, text, side }: { b: SketchedBubble; text: string; side: "ask" | "answer" }) {
   return (
     <g className={`board-mascots-bubble board-mascots-bubble-${side}`}>
       <path className="board-mascots-paper" d={b.box} />
-      <Frames frames={b.boxFrames} />
+      <SketchFrames frames={b.boxFrames} />
       <path className="board-mascots-paper" d={b.tail} />
-      <Frames frames={b.tailFrames} />
+      <SketchFrames frames={b.tailFrames} />
       <text x={b.textX} y={b.textY}>{text}</text>
     </g>
   );
@@ -97,8 +73,8 @@ function Mascots({ onNewCard, onDismiss, dragging }: { onNewCard: () => void; on
           {GROUND.map((d, i) => <path key={i} className="board-mascots-frame board-mascots-ground" data-frame={i} d={d} />)}
           <Bubble b={ASK} text="What are we working on?" side="ask" />
           <Bubble b={ANSWER} text="What should we build?" side="answer" />
-          <Mascot m={ORANGE} />
-          <Mascot m={BLUE} />
+          <SketchMascot m={ORANGE} />
+          <SketchMascot m={BLUE} />
         </svg>
       </button>
       <button type="button" className="board-mascots-dismiss" onClick={onDismiss} aria-label="Hide the mascots" title="Hide the mascots">
