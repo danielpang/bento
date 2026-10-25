@@ -513,19 +513,11 @@ test("a retry refusal is visible inside the open task drawer", () => {
   assert.match(html, /<p class="error-box" role="alert">This swarm has finished/);
 });
 
-test("the mode toggle is two segments, and only for a tester", () => {
+test("the mode toggle is two segments, for everyone", () => {
   const access = { show: true, included: true, canUpgrade: false, prompt: null };
-  const off = renderToStaticMarkup(
-    createElement(BetaTestersScope, {
-      enabled: false,
-      children: createElement(BoardModeToggle, { mode: "pipeline", access, onSelect: () => {} }),
-    }),
-  );
-  assert.equal(off, "");
-
   const on = renderToStaticMarkup(
     createElement(BetaTestersScope, {
-      enabled: true,
+      enabled: false,
       children: createElement(BoardModeToggle, { mode: "pipeline", access, onSelect: () => {} }),
     }),
   );

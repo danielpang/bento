@@ -1,8 +1,8 @@
 import type { Context } from "hono";
 import { getActiveOrganizationMembership } from "../../access.js";
 import type { AppContext } from "../../context.js";
-import { hasBetaFeatures } from "../../feature-flags.js";
 import { actor } from "../../middleware/actor.js";
+import { swarmAccessFor } from "../../swarm-access.js";
 
 /**
  * Why a swarm request is refused, as the status and body the route
@@ -10,7 +10,7 @@ import { actor } from "../../middleware/actor.js";
  * point: see requireSwarms.
  */
 export type SwarmRefusal =
-  | { status: 404; body: { error: string } }
+  | { status: 403; body: { error: string; code: "SWARM_WAITLIST" } }
   | { status: 402; body: { error: string; message: string; code: "PLAN_LIMIT" } };
 
 /**
@@ -18,17 +18,15 @@ export type SwarmRefusal =
  *
  * Two gates, in this order and never the other way round:
  *
- * 1. Beta features, for the team the work belongs to (see
- *    hasBetaFeatures), answered as 404 when they are off.
- *    Someone without beta must not be able to tell that swarms exist,
- *    and a 402 saying "your plan does not include swarms" would tell
- *    them. Same convention as the access helpers: not yours reads as
- *    not there.
+ * 1. The waitlist (see swarmAccessFor), answered as 403 with
+ *    SWARM_WAITLIST: on a hosted server only people let in through
+ *    PostHog run swarms on Bento's sandboxes. Everyone sees the
+ *    Swarms tab, so there is nothing to hide behind a 404.
  * 2. The plan, answered as 402 with PLAN_LIMIT, which is the code the
  *    console already knows how to render.
  *
- * Local mode registers no entitlements module, so there only the
- * switch refuses. A multi mode install without a billing module reaches
+ * Local mode registers no entitlements module and has no waitlist, so
+ * nothing refuses there. A multi mode install without a billing module reaches
  * the same place through the optional method being absent.
  */
 export async function requireSwarms(
@@ -43,15 +41,15 @@ export async function requireSwarms(
    */
   organizationId?: string | null,
 ): Promise<SwarmRefusal | null> {
+  if ((await swarmAccessFor(ctx, actor(c))) === "waitlist") {
+    return { status: 403, body: { error: "swarms are waitlisted on this server", code: "SWARM_WAITLIST" } };
+  }
   const organization =
     organizationId === undefined ? (await getActiveOrganizationMembership(ctx, c))?.organizationId ?? null : organizationId;
-  // Beta is asked about the same team: the one the work belongs to.
-  if (!(await hasBetaFeatures(ctx, actor(c), organization))) return { status: 404, body: { error: "not found" } };
 
   const canUseSwarms = ctx.entitlements?.canUseSwarms;
   if (!canUseSwarms) return null;
   // Nothing to charge and nobody to charge it to: plans are per team.
-  // (Only local mode gets here without one, since beta needs a team.)
   if (!organization) return null;
 
   const refusal = await canUseSwarms.call(ctx.entitlements, organization);

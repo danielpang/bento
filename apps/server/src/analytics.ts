@@ -29,6 +29,15 @@ export interface Analytics {
     organizationId?: string | null,
     properties?: Record<string, unknown>,
   ): void;
+  /**
+   * Whether a PostHog feature flag is on for this person, evaluated with
+   * the person properties given. Undefined when PostHog could not say.
+   */
+  isFeatureEnabled?(
+    flag: string,
+    userId: string,
+    personProperties: Record<string, string>,
+  ): Promise<boolean | undefined>;
   /** Flushes the queue and removes process listeners; call on shutdown. */
   shutdown(): Promise<void>;
 }
@@ -151,6 +160,10 @@ export function createAnalytics(env: Env): Analytics | null {
         ...(organizationId ? { $groups: { organization: organizationId } } : {}),
         ...properties,
       });
+    },
+
+    async isFeatureEnabled(flag, userId, personProperties) {
+      return client.isFeatureEnabled(flag, userId, { personProperties, sendFeatureFlagEvents: false });
     },
 
     async shutdown(): Promise<void> {

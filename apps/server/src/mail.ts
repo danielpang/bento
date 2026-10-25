@@ -166,6 +166,42 @@ export function contactMessage(input: ContactEmailInput): Message {
   return { to: input.to, subject, text, html: body };
 }
 
+export interface SwarmWaitlistEmailInput {
+  to: string;
+  senderName: string;
+  senderEmail: string;
+  githubUsername: string | null;
+  appUrl: string;
+}
+
+/** A person asking to run swarms on hosted Bento. */
+export function swarmWaitlistMessage(input: SwarmWaitlistEmailInput): Message {
+  const subject = `[Bento] Swarms waitlist: ${input.senderEmail}`;
+  const github = input.githubUsername ?? "not linked";
+  const footerNote = "You are receiving this because this address takes the Bento Swarms waitlist.";
+
+  const text = renderText({
+    lines: [`${input.senderName} asked to join the Bento Swarms waitlist.`, "", `Email: ${input.senderEmail}`, `GitHub: ${github}`],
+    footerNote,
+    appUrl: input.appUrl,
+  });
+
+  const body = renderEmail({
+    appUrl: input.appUrl,
+    preheader: `${input.senderName} asked to join the Swarms waitlist.`,
+    heading: `${input.senderName} asked to join the Swarms waitlist`,
+    paragraphs: [
+      html`Email: ` + anchor(`mailto:${input.senderEmail}`, input.senderEmail),
+      input.githubUsername
+        ? html`GitHub: ` + anchor(`https://github.com/${encodeURIComponent(input.githubUsername)}`, input.githubUsername)
+        : "GitHub: not linked",
+    ],
+    footerNote,
+  });
+
+  return { to: input.to, subject, text, html: body };
+}
+
 export interface LinkEmailInput {
   email: string;
   url: string;

@@ -681,6 +681,11 @@ export class BentoClient {
     return this.request<FlagSnapshot>("/api/flags");
   }
 
+  /** Asks to be let in to swarms on hosted Bento. */
+  joinSwarmWaitlist() {
+    return this.request<{ ok: true }>("/api/swarm-waitlist", { method: "POST" });
+  }
+
   listProjects() {
     return this.request<Project[]>("/api/projects");
   }

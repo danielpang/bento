@@ -33,7 +33,9 @@ import {
 import { useGitHubOutcome } from "./components/GitHubIdentity.js";
 import { SignOutButton } from "./components/IconButtons.js";
 import { CHANGELOG_URL } from "./changelog.js";
-import { BetaTestersProvider, useBetaTesters } from "./beta.js";
+import { BetaTestersProvider, useBetaTesters, useSwarmAccessState, useSwarmWaitlistJoined } from "./beta.js";
+import { SwarmWaitlist, type WaitlistState } from "./components/SwarmWaitlist.js";
+import { takeWaitlistIntent } from "./swarm/waitlist-intent.js";
 import { BoardModeToggle } from "./components/BoardModeToggle.js";
 import { useSwarmPlan } from "./swarm/plan.js";
 import { isSwarmEvent } from "./swarm/events.js";
@@ -494,10 +496,36 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
     readBoardMode(window.location.search, swarmStorage),
   );
   const { access: swarmAccess, surfaces: swarmSurfaces } = useSwarmPlan(mode);
-  const betaTester = useBetaTesters();
-  /** Swarms only render for a tester on a plan that includes them. */
-  const swarmsOpen = betaTester && swarmAccess.included;
+  /** Open in local Bento; hosted Bento shows the waitlist to people not let in yet. */
+  const swarmState = useSwarmAccessState();
+  const swarmsOpen = swarmAccess.included;
   const swarming = boardMode === "swarms" && swarmsOpen && screen === "board";
+  const [waitlist, setWaitlist] = useState<WaitlistState>("idle");
+  const waitlistJoined = useSwarmWaitlistJoined();
+  useEffect(() => {
+    if (waitlistJoined) setWaitlist("joined");
+  }, [waitlistJoined]);
+  const joinWaitlist = useCallback(() => {
+    setWaitlist("sending");
+    client.joinSwarmWaitlist().then(
+      () => setWaitlist("joined"),
+      () => setWaitlist("failed"),
+    );
+  }, []);
+  /*
+   * Arrived from the landing page's Join waitlist button: open the
+   * Swarms tab, and join for them once the flags say they are waitlisted.
+   */
+  const waitlistIntent = useRef<boolean | null>(null);
+  useEffect(() => {
+    if (swarmState === null) return;
+    if (waitlistIntent.current === null) waitlistIntent.current = takeWaitlistIntent();
+    if (!waitlistIntent.current) return;
+    waitlistIntent.current = false;
+    setBoardMode("swarms");
+    rememberBoardMode(swarmStorage, "swarms");
+    if (swarmState === "waitlist" && !waitlistJoined) joinWaitlist();
+  }, [swarmState, swarmStorage, joinWaitlist, waitlistJoined]);
 
   const [stages, setStages] = useState<Stage[]>([]);
   const [pipelineId, setPipelineId] = useState<string | null>(null);
@@ -1270,7 +1298,7 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
    * whose project list fails to load got a topbar with no Board, no
    * Sessions and no toggle: nothing but the URL bar to get out with.
    */
-  const onSwarmBoard = swarming && projectId !== null && hasProjects;
+  const onSwarmBoard = swarming && projectId !== null && hasProjects && swarmState === "open";
   const actions: NavAction[] = onSwarmBoard
     ? [
         { id: "agents", label: "Agents", onSelect: () => { setAgentsIntent(null); setPanel("agents"); } },
@@ -1451,6 +1479,10 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
         <Suspense fallback={<SpendPageSkeleton />}>
           <SpendPage client={client} projectId={projectId} />
         </Suspense>
+      ) : swarming && projectId && swarmState === "waitlist" ? (
+        <SwarmWaitlist state={waitlist} onJoin={joinWaitlist} />
+      ) : swarming && projectId && swarmState === null ? (
+        <SwarmPageSkeleton />
       ) : swarming && projectId ? (
         /* A second board of the same project. Its own boundary, like
            the panels: the chunk arrives without blanking the chrome. A

@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { BetaOnly } from "../beta.js";
 import { Modal } from "./Modal.js";
 import { BILLING_HREF, type SwarmAccess } from "../swarm/plan.js";
 import type { BoardMode } from "../swarm/view-state.js";
@@ -33,7 +32,7 @@ export function BoardModeToggle({
   if (!access.show) return null;
 
   return (
-    <BetaOnly>
+    <>
       <div className="seg" role="group" aria-label="Board">
         <Segment
           id="pipeline"
@@ -74,7 +73,7 @@ export function BoardModeToggle({
           </p>
         </Modal>
       )}
-    </BetaOnly>
+    </>
   );
 }
 

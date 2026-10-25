@@ -1222,6 +1222,22 @@ When a feature is gated:
 
 Do not mint a flag for "show this to testers". This switch is that.
 
+## Swarms are shown to everyone, and hosted Bento waitlists them
+
+The Swarms tab is no longer behind beta. Local Bento always opens it,
+because its swarms run on the person's own machine. A hosted server
+with a PostHog key asks the `hosted-swarms` flag, evaluated with the
+person properties `email` and `github_username` (read from GitHub with
+the person's linked token), so a person is let in by adding either to
+the flag. Beta features never let anyone past it; `swarmAccessFor` in `apps/server/src/swarm-access.ts` is the
+one rule. Anyone else gets the waitlist page, and every swarm route
+answers 403 `SWARM_WAITLIST` before the plan is asked about. Join
+waitlist mails `waitlist@usebento.ai` (`POST /api/swarm-waitlist`) once
+per person, recorded in `user.swarm_waitlist_requested_at`, and
+the landing page links to the console with `?waitlist=swarms`, which is
+kept in local storage through sign in and joins once the board knows the
+person is waitlisted.
+
 ## Verify against something real before calling it done
 
 Type checks and green tests have repeatedly agreed with each other while

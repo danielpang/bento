@@ -38,6 +38,11 @@ export const user = identity.table("user", {
    * ignores it and reads its startup flag. `hasBetaFeatures` reads it.
    */
   betaFeatures: boolean("beta_features").notNull().default(false),
+  /**
+   * When this person asked to join the hosted Swarms waitlist, so the
+   * console says they are on it and the waitlist inbox hears once.
+   */
+  swarmWaitlistRequestedAt: timestamp("swarm_waitlist_requested_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });

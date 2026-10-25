@@ -409,6 +409,13 @@ export interface FlagSnapshot {
    * desktop app's startup flag decides.
    */
   betaFeatures?: { enabled: boolean; allowed: boolean };
+  /**
+   * Whether the Swarms tab opens the board or the waitlist. Always
+   * "open" in local mode. Absent from a server that predates it.
+   */
+  swarms?: "open" | "waitlist";
+  /** On the waitlist only: whether this person already asked to join it. */
+  swarmWaitlistJoined?: boolean;
 }
 
 export interface FeatureEvent {

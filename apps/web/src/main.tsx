@@ -5,11 +5,15 @@ import { ErrorBoundary } from "./ErrorBoundary.js";
 import { ToastHost } from "./components/Toasts.js";
 import { startErrorTracking } from "./posthog.js";
 import { ownBuild } from "./build-watch.js";
+import { captureWaitlistIntent } from "./swarm/waitlist-intent.js";
 import "./styles.css";
 import "./desktop.css";
 
 const root = document.getElementById("root");
 if (!root) throw new Error("missing #root");
+
+// Before sign in, so the landing page's waitlist link survives it.
+captureWaitlistIntent(window.location);
 
 // Fire and forget: exception autocapture should be on before the first
 // screen paints, but a slow or missing PostHog key must not hold it.
