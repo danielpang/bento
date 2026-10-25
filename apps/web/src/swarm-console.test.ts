@@ -14,6 +14,9 @@ import { SwarmPlannerStep } from "./components/SwarmPlannerStep.js";
 import { SwarmNodeDrawer } from "./components/SwarmNodeDrawer.js";
 import { SwarmRunOutput, SwarmRunOutputDrawer, SwarmWorkerOutputDrawer } from "./components/SwarmRunOutput.js";
 import { publishOffer, stackedPullRequests, SwarmArtifacts, SwarmPage, SwarmPlanBrief, WorkerStepper } from "./components/SwarmPage.js";
+import { RunConversationRows, SwarmRunOutput, SwarmRunOutputDrawer, SwarmWorkerOutputDrawer } from "./components/SwarmRunOutput.js";
+import type { SwarmPlannerMessage } from "./swarm/client.js";
+import { stackedPullRequests, SwarmArtifacts, SwarmPage, SwarmPlanBrief, WorkerStepper } from "./components/SwarmPage.js";
 import { ceilingRefusal, reopenEffectLines } from "./components/ReopenDialog.js";
 import {
   DEFAULT_RUN_SETTINGS,
@@ -26,7 +29,8 @@ import { modeSurfaces } from "./swarm/plan.js";
 import { memoryStorage } from "./swarm/view-state.js";
 import { canReopen } from "./swarm/status.js";
 import { seedSwarms } from "./swarm/fixtures.js";
-import { buildSwarmModel } from "./swarm/layout.js";
+import { buildSwarmModel, visibleNodes } from "./swarm/layout.js";
+import { searchSwarmNodes } from "./swarm/search.js";
 import type { SwarmDetail, SwarmLanding, SwarmPlannerRun, SwarmStatus, SwarmSummary, SwarmTask } from "./swarm/types.js";
 import { markDoneConfirmText, WORKER_QUIET_HINT_MS, workerQuietMs } from "./components/SwarmNodeDrawer.js";
 import { backoffMinutes, mergeQueueView } from "./components/MergeQueue.js";
@@ -88,6 +92,51 @@ function tasks(): SwarmTask[] {
 }
 
 const model = buildSwarmModel(tasks(), { now: 60 * 60 * 1000 });
+
+test("tree search reveals and highlights folded matches without changing manual folds", () => {
+  const rows = tasks();
+  const folded = ["root"];
+  const before = buildSwarmModel(rows, { folded, now: 0 });
+  assert.equal(before.byId.get("s1")?.hidden, true);
+  const search = searchSwarmNodes(rows, "line totals");
+  const searched = buildSwarmModel(rows, {
+    expanded: search.revealIds,
+    folded: folded.filter((id) => !search.revealIds.has(id)),
+    now: 0,
+  });
+  assert.equal(searched.byId.get("s1")?.hidden, false);
+  const html = renderToStaticMarkup(createElement(SwarmTree, {
+    model: searched, selectedId: null, onSelect: () => {}, onToggle: () => {},
+    search: { query: "line totals", matchIds: search.matchIds, onChange: () => {} },
+  }));
+  assert.match(html, /role="search"/);
+  assert.match(html, /type="search" aria-label="Search nodes"/);
+  assert.match(html, /aria-label="Match 1 of 1"/);
+  assert.match(html, /aria-label="Previous matching node"/);
+  assert.match(html, /aria-label="Next matching node"/);
+  assert.match(html, /aria-label="Clear node search"/);
+  assert.ok(html.indexOf('aria-label="Search nodes"') < html.indexOf('class="swarm-tree-content"'), "search sits above the transformed canvas");
+  assert.equal((html.match(/data-search-match=""/g) ?? []).length, 1);
+  assert.equal((html.match(/data-search-active=""/g) ?? []).length, 1);
+  assert.equal((html.match(/data-node-id=/g) ?? []).length, visibleNodes(searched).length, "search highlights, not filters");
+  const cleared = searchSwarmNodes(rows, "");
+  const restored = buildSwarmModel(rows, {
+    expanded: cleared.revealIds, folded: folded.filter((id) => !cleared.revealIds.has(id)), now: 0,
+  });
+  assert.deepEqual(visibleNodes(restored).map((node) => node.id), visibleNodes(before).map((node) => node.id));
+  assert.deepEqual(folded, ["root"]);
+});
+
+test("tree search explains no matches and disables result navigation", () => {
+  const search = searchSwarmNodes(tasks(), "nothing-matches");
+  const html = renderToStaticMarkup(createElement(SwarmTree, {
+    model, selectedId: null, onSelect: () => {}, onToggle: () => {},
+    search: { query: "nothing-matches", matchIds: search.matchIds, onChange: () => {} },
+  }));
+  assert.match(html, /No matching nodes/);
+  assert.match(html, /aria-label="Next matching node"[^>]*disabled/);
+  assert.doesNotMatch(html, /data-search-match=/);
+});
 
 function summary(id: string, over: Partial<SwarmSummary> = {}): SwarmSummary {
   return {
@@ -846,6 +895,41 @@ test("the planner conversation has guidance input and worker output stays read-o
   assert.match(activePlanner, /aria-label="Stop the agent"/, "Stop sits beside the field while the planner works, as on a card");
   assert.match(activePlanner, /class="composer"/, "the card conversation's one-line composer");
   assert.doesNotMatch(planner, /aria-label="Stop the agent"/, "a finished planner has no running turn to stop");
+});
+
+test("planner guidance stays inline with replies across runs, not in an earlier-guidance dropdown", () => {
+  const message = (id: string, runId: string | null, text: string, status: SwarmPlannerMessage["status"] = "delivered"): SwarmPlannerMessage => ({
+    id, runId, text, status, taskId: null, source: "person", createdAt: "2026-09-04T12:00:00.000Z",
+  });
+  const earlier = message("m1", "run-1", "Keep the existing API.");
+  const current = { ...message("m2", "run-2", "Focus on the checkout."), createdAt: "2026-09-04T12:05:00.000Z" };
+  const queued = { ...message("m3", "run-2", "Cover refunds too.", "queued"), createdAt: "2026-09-04T12:06:00.000Z" };
+  const html = renderToStaticMarkup(createElement(SwarmRunOutput, {
+    client: {} as BentoClient, runId: "run-2", agentName: "Planner agent",
+    plannerMessages: [earlier, current, queued],
+  }));
+  assert.doesNotMatch(html, /Earlier guidance|<details/);
+  assert.ok(html.indexOf(earlier.text) < html.indexOf(current.text));
+  assert.ok(html.indexOf(current.text) < html.indexOf(queued.text));
+  assert.equal(html.split(queued.text).length - 1, 1, "a queued message bound to this run appears only once");
+
+  const conversation = renderToStaticMarkup(createElement("div", null,
+    createElement(RunConversationRows, {
+      runId: "run-1", agentName: "Planner agent", messages: [earlier],
+      events: [{ type: "message", role: "assistant", text: "I will preserve the API." }],
+    }),
+    createElement(RunConversationRows, {
+      runId: "run-2", agentName: "Planner agent", messages: [current],
+      events: [
+        { type: "message", role: "assistant", text: "The initial plan is ready.", recordedAt: "2026-09-04T12:04:00.000Z" },
+        { type: "message", role: "user", text: current.text, recordedAt: "2026-09-04T12:05:01.000Z" },
+        { type: "message", role: "assistant", text: "I will update the checkout plan.", recordedAt: "2026-09-04T12:06:00.000Z" },
+      ],
+    }),
+  ));
+  const ordered = [earlier.text, "I will preserve the API.", "The initial plan is ready.", current.text, "I will update the checkout plan."];
+  for (let i = 1; i < ordered.length; i++) assert.ok(conversation.indexOf(ordered[i - 1]!) < conversation.indexOf(ordered[i]!));
+  assert.equal(conversation.split(current.text).length - 1, 1, "a live turn's echoed guidance keeps its place, without a duplicate");
 });
 
 test("a checkout failure offers retry and keeps its error in technical details", () => {

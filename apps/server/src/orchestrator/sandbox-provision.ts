@@ -28,6 +28,7 @@ import {
   errorClassName,
   reportSandboxProvisioned,
   reportSandboxProvisionFailed,
+  reportToolchainInstallFailed,
   sandboxOrigin,
   type SandboxOrigin,
   type SandboxRun,
@@ -407,6 +408,8 @@ export async function provisionWorkspace(
           mounts: [...repoGitMounts(candidate), ...input.authMounts],
           image: ctx.env.BENTO_SANDBOX_IMAGE,
           onProgress: input.say,
+          onToolchainMissing: (failure) =>
+            reportToolchainInstallFailed(ctx.analytics, { ...eventBase, provider: candidate.provider, ...failure }),
         });
         await recordHandle(completedHandle);
         return completedHandle;

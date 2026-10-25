@@ -8,6 +8,8 @@ WORKDIR /app
 RUN corepack enable
 
 COPY pnpm-workspace.yaml package.json pnpm-lock.yaml turbo.json tsconfig.base.json ./
+# pnpm reads patch files even when their package is outside this workspace subset.
+COPY patches ./patches
 COPY packages ./packages
 COPY apps/server ./apps/server
 COPY apps/web ./apps/web

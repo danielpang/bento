@@ -174,6 +174,62 @@ export function reportSandboxProvisionFailed(
 }
 
 /**
+ * An agent CLI could not be installed. One exception per CLI, with a
+ * message naming only the CLI and provider, so a broken vendor
+ * installer groups as one issue rather than one per sandbox.
+ */
+export class ToolchainInstallError extends Error {
+  constructor(
+    readonly cli: string,
+    readonly provider: string,
+  ) {
+    super(`Could not install ${cli} in a ${provider} sandbox`);
+    this.name = "ToolchainInstallError";
+  }
+}
+
+export interface ToolchainInstallFailed {
+  provider: string;
+  missing: readonly string[];
+  /** The toolchain script's stderr. */
+  output: string;
+  projectId: string;
+  organizationId: string | null;
+  userId: string | null;
+  owner: SandboxOwner;
+  run?: SandboxRun | null;
+}
+
+/** The end of a script's output, short enough to ride on an exception. */
+export function toolchainOutputTail(output: string): string {
+  const tail = output.trim().split("\n").slice(-60).join("\n");
+  return tail.length > 6_000 ? tail.slice(-6_000) : tail;
+}
+
+export function reportToolchainInstallFailed(
+  analytics: Analytics | null | undefined,
+  info: ToolchainInstallFailed,
+): void {
+  const output = toolchainOutputTail(info.output);
+  for (const cli of info.missing) {
+    try {
+      analytics?.captureException(new ToolchainInstallError(cli, info.provider), info.userId, info.organizationId, {
+        source: "agent_toolchain_install",
+        provider: info.provider,
+        cli,
+        missing: info.missing.join(" "),
+        ...(output ? { output } : {}),
+        project_id: info.projectId,
+        ...runProperties(info.run),
+        ...runOwnerProperties(info.owner),
+      });
+    } catch (err) {
+      console.warn(`could not record a failed ${cli} install on ${info.provider}:`, err);
+    }
+  }
+}
+
+/**
  * A run's sandbox was provisioned and its agent has come up in it.
  *
  * One event per run whose agent started, timed from the moment the

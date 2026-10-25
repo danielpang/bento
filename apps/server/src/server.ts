@@ -1,7 +1,6 @@
 import { getRequestListener, serve } from "@hono/node-server";
 import type { Server } from "node:http";
 import { createDb, createPool, pgBossDatabase, poolMaxForRuns, runMigrations, runEvents } from "@bento/db";
-import type { AgentEvent } from "@bento/core";
 import { createAnalytics } from "./analytics.js";
 import { startLogExport } from "./log-export.js";
 import { attachPgBus } from "./pg-bus.js";
@@ -25,7 +24,7 @@ import {
   reportSpriteLookupRetry,
   type AppContext,
 } from "./context.js";
-import { EventBus } from "./events.js";
+import { EventBus, recordedRunEvent } from "./events.js";
 import { loadEnv, posthogApiKey, runSlots, type Env } from "./env.js";
 import { registerJobs } from "./orchestrator/run-executor.js";
 import { releaseOwnedRuns } from "./orchestrator/run-ownership.js";
@@ -261,11 +260,11 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
       connectionString: env.BENTO_DIRECT_DATABASE_URL ?? env.DATABASE_URL,
       loadRunEvent: async (runId, seq) => {
         const [row] = await db
-          .select({ payload: runEvents.payload })
+          .select({ payload: runEvents.payload, ts: runEvents.ts })
           .from(runEvents)
           .where(and(eq(runEvents.runId, runId), eq(runEvents.seq, seq)))
           .limit(1);
-        return (row?.payload as AgentEvent | undefined) ?? null;
+        return row ? recordedRunEvent(row) : null;
       },
     });
 
