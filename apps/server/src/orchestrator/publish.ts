@@ -300,6 +300,7 @@ export async function publishSwarmBranches(
     body: string;
     branch: string;
     repositories: PublishableRepository[];
+    draft?: boolean;
   },
   options: {
     remoteUrl?: (owner: string, repo: string) => string;
@@ -311,6 +312,7 @@ export async function publishSwarmBranches(
     title: args.title,
     body: args.body,
     repositories: args.repositories,
+    openAsDraft: args.draft === true,
     protectedBranchRefusal: (branch) =>
       `this swarm's branch is named ${branch}, which is a protected branch. Nothing was pushed.`,
     ...options,
@@ -531,6 +533,8 @@ async function publishBranches(
     remoteUrl?: (owner: string, repo: string) => string;
     includeStageNotes?: boolean;
     draft?: boolean;
+    /** Opens the pull request as a draft without the draft push's other allowances. */
+    openAsDraft?: boolean;
     onlyRepositories?: string[];
   },
 ): Promise<PublishOutcome> {
@@ -613,7 +617,7 @@ async function publishBranches(
         base: repo.defaultBranch,
         title: plan.title,
         body: plan.body,
-        draft: plan.draft === true,
+        draft: plan.draft === true || plan.openAsDraft === true,
       });
 
       await plan.record(remoteRepo, { prNumber: pr.prNumber, url: pr.url, headSha: pushedHead });

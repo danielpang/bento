@@ -1,10 +1,15 @@
 import { EventEmitter } from "node:events";
-import type { AgentDelta, AgentEvent, TurnState } from "@bento/core";
+import type { AgentDelta, AgentEvent, RecordedRunEvent, TurnState } from "@bento/core";
+
+/** The same database timestamp accompanies replayed and live transcript events. */
+export function recordedRunEvent(row: { payload: unknown; ts: Date | string }): RecordedRunEvent {
+  return { ...(row.payload as AgentEvent), recordedAt: new Date(row.ts).toISOString() };
+}
 
 export interface RunEventEnvelope {
   runId: string;
   seq: number;
-  event: AgentEvent;
+  event: RecordedRunEvent;
 }
 
 /** What happened on the pipeline board: a card, or a card's run. */

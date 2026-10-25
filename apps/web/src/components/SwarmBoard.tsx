@@ -12,6 +12,7 @@ import { SwarmPage } from "./SwarmPage.js";
 import { SwarmPageSkeleton } from "./Skeleton.js";
 import { swarmApi, type SwarmAgent } from "../swarm/client.js";
 import { createModelCache } from "../swarm/layout.js";
+import { searchSwarmNodes } from "../swarm/search.js";
 import { leafStartBlocker } from "../swarm/waiting.js";
 import type { ModeSurfaces } from "../swarm/plan.js";
 import type {
@@ -104,6 +105,7 @@ export function SwarmBoard({
   const [view, setView] = useState<SwarmView>(() => readSwarmView(window.location.search, storage));
   const [expanded, setExpanded] = useState<string[]>([]);
   const [folded, setFolded] = useState<string[]>([]);
+  const [nodeQuery, setNodeQuery] = useState("");
   const [taskId, setTaskId] = useState<string | null>(null);
   /**
    * The open node's commits and history.
@@ -197,6 +199,12 @@ export function SwarmBoard({
    * draw. Refetched with the detail, so the assembled document appears
    * when the swarm finishes rather than on the next reload.
    */
+  const loadLandings = useCallback(
+    (input: { query?: string; offset: number }) =>
+      selectedId ? swarmApi.listLandings(selectedId, input) : Promise.resolve({ landings: [], next: null }),
+    [selectedId],
+  );
+
   const loadArtifacts = useCallback((swarmId: string) => {
     void swarmApi
       .listArtifacts(swarmId)
@@ -217,6 +225,7 @@ export function SwarmBoard({
     setNode(null);
     setExpanded([]);
     setFolded([]);
+    setNodeQuery("");
     setArtifacts([]);
     setOpenArtifact(null);
     rememberSwarmId(storage, projectId, selectedId);
@@ -323,10 +332,15 @@ export function SwarmBoard({
   const [plannerOutputOpen, setPlannerOutputOpen] = useState(false);
   const [workerOutput, setWorkerOutput] = useState<{ runId: string; taskTitle: string } | null>(null);
 
+  const nodeSearch = useMemo(
+    () => searchSwarmNodes(detail?.tasks ?? [], view === "tree" ? nodeQuery : ""),
+    [detail?.tasks, nodeQuery, view],
+  );
   const model = useMemo(
     () => buildModel(detail?.tasks ?? [], {
-      expanded,
-      folded,
+      // Reveal matching paths temporarily. Never mutate the person's folds.
+      expanded: [...expanded, ...nodeSearch.revealIds],
+      folded: folded.filter((id) => !nodeSearch.revealIds.has(id)),
       autoCollapseCompleted: detail?.swarm.status !== "done",
       now,
       // An empty list is an answer: nobody is in a sandbox. A fixture
@@ -339,7 +353,7 @@ export function SwarmBoard({
           }
         : {}),
     }),
-    [buildModel, detail, expanded, folded, now],
+    [buildModel, detail, expanded, folded, now, nodeSearch],
   );
 
   function act(run: () => Promise<unknown>, forTask = false) {
@@ -431,6 +445,7 @@ export function SwarmBoard({
             setView(next);
             rememberSwarmView(storage, next);
           }}
+          search={{ query: nodeQuery, matchIds: nodeSearch.matchIds, onChange: setNodeQuery }}
           selectedId={taskId}
           onSelect={(id) => { setTaskActionError(""); setTaskId(id); }}
           onToggleNode={(id) => {
@@ -461,6 +476,7 @@ export function SwarmBoard({
             onReleaseBranch: () => selectedId && act(() => swarmApi.releaseSwarmBranch(selectedId)),
             onRetryLanding: (taskId) => selectedId && act(() => swarmApi.retryLanding(selectedId, taskId), true),
             onPublish: (mode) => selectedId && act(() => swarmApi.publishSwarm(selectedId, mode)),
+            onLoadLandings: loadLandings,
             onReopen: () => setReopening(true),
             onDelete: () => selectedId && setDeleting({ id: selectedId, name: detail.swarm.name }),
             onArchive: () => selectedId && act(() => swarmApi.archiveSwarm(selectedId)),
@@ -541,7 +557,9 @@ export function SwarmBoard({
           api={swarmApi}
           swarmId={selectedId}
           swarmStatus={detail.swarm.status}
+          key={selectedId}
           runId={detail.plannerRun.id}
+          plannerRuns={detail.plannerRuns}
           runStatus={detail.plannerRun.status}
           runError={detail.plannerRun.error}
           agentName={detail.plannerRun.agent?.name ?? "Planner agent"}

@@ -13,8 +13,9 @@ import { SwarmTree } from "./components/SwarmTree.js";
 import { SwarmOutline } from "./components/SwarmOutline.js";
 import { SwarmPlannerStep } from "./components/SwarmPlannerStep.js";
 import { SwarmNodeDrawer } from "./components/SwarmNodeDrawer.js";
-import { SwarmRunOutput, SwarmRunOutputDrawer, SwarmWorkerOutputDrawer } from "./components/SwarmRunOutput.js";
-import { stackedPullRequests, SwarmArtifacts, SwarmPage, SwarmPlanBrief, WorkerStepper } from "./components/SwarmPage.js";
+import { RunConversationRows, SwarmRunOutput, SwarmRunOutputDrawer, SwarmWorkerOutputDrawer } from "./components/SwarmRunOutput.js";
+import type { SwarmPlannerMessage } from "./swarm/client.js";
+import { publishOffer, stackedPullRequests, SwarmArtifacts, SwarmPage, SwarmPlanBrief, WorkerStepper } from "./components/SwarmPage.js";
 import { ceilingRefusal, reopenEffectLines } from "./components/ReopenDialog.js";
 import {
   DEFAULT_RUN_SETTINGS,
@@ -27,10 +28,11 @@ import { modeSurfaces } from "./swarm/plan.js";
 import { memoryStorage } from "./swarm/view-state.js";
 import { canReopen } from "./swarm/status.js";
 import { seedSwarms } from "./swarm/fixtures.js";
-import { buildSwarmModel } from "./swarm/layout.js";
+import { buildSwarmModel, visibleNodes } from "./swarm/layout.js";
+import { searchSwarmNodes } from "./swarm/search.js";
 import type { SwarmDetail, SwarmLanding, SwarmPlannerRun, SwarmStatus, SwarmSummary, SwarmTask } from "./swarm/types.js";
 import { markDoneConfirmText, WORKER_QUIET_HINT_MS, workerQuietMs } from "./components/SwarmNodeDrawer.js";
-import { backoffMinutes } from "./components/MergeQueue.js";
+import { backoffMinutes, mergeQueueView } from "./components/MergeQueue.js";
 import { checksFailedAfterLanding, idleWords, leafStartBlocker } from "./swarm/waiting.js";
 import { taskActionRefusal } from "./swarm/status.js";
 import { readFileSync, readdirSync } from "node:fs";
@@ -89,6 +91,51 @@ function tasks(): SwarmTask[] {
 }
 
 const model = buildSwarmModel(tasks(), { now: 60 * 60 * 1000 });
+
+test("tree search reveals and highlights folded matches without changing manual folds", () => {
+  const rows = tasks();
+  const folded = ["root"];
+  const before = buildSwarmModel(rows, { folded, now: 0 });
+  assert.equal(before.byId.get("s1")?.hidden, true);
+  const search = searchSwarmNodes(rows, "line totals");
+  const searched = buildSwarmModel(rows, {
+    expanded: search.revealIds,
+    folded: folded.filter((id) => !search.revealIds.has(id)),
+    now: 0,
+  });
+  assert.equal(searched.byId.get("s1")?.hidden, false);
+  const html = renderToStaticMarkup(createElement(SwarmTree, {
+    model: searched, selectedId: null, onSelect: () => {}, onToggle: () => {},
+    search: { query: "line totals", matchIds: search.matchIds, onChange: () => {} },
+  }));
+  assert.match(html, /role="search"/);
+  assert.match(html, /type="search" aria-label="Search nodes"/);
+  assert.match(html, /aria-label="Match 1 of 1"/);
+  assert.match(html, /aria-label="Previous matching node"/);
+  assert.match(html, /aria-label="Next matching node"/);
+  assert.match(html, /aria-label="Clear node search"/);
+  assert.ok(html.indexOf('aria-label="Search nodes"') < html.indexOf('class="swarm-tree-content"'), "search sits above the transformed canvas");
+  assert.equal((html.match(/data-search-match=""/g) ?? []).length, 1);
+  assert.equal((html.match(/data-search-active=""/g) ?? []).length, 1);
+  assert.equal((html.match(/data-node-id=/g) ?? []).length, visibleNodes(searched).length, "search highlights, not filters");
+  const cleared = searchSwarmNodes(rows, "");
+  const restored = buildSwarmModel(rows, {
+    expanded: cleared.revealIds, folded: folded.filter((id) => !cleared.revealIds.has(id)), now: 0,
+  });
+  assert.deepEqual(visibleNodes(restored).map((node) => node.id), visibleNodes(before).map((node) => node.id));
+  assert.deepEqual(folded, ["root"]);
+});
+
+test("tree search explains no matches and disables result navigation", () => {
+  const search = searchSwarmNodes(tasks(), "nothing-matches");
+  const html = renderToStaticMarkup(createElement(SwarmTree, {
+    model, selectedId: null, onSelect: () => {}, onToggle: () => {},
+    search: { query: "nothing-matches", matchIds: search.matchIds, onChange: () => {} },
+  }));
+  assert.match(html, /No matching nodes/);
+  assert.match(html, /aria-label="Next matching node"[^>]*disabled/);
+  assert.doesNotMatch(html, /data-search-match=/);
+});
 
 function summary(id: string, over: Partial<SwarmSummary> = {}): SwarmSummary {
   return {
@@ -755,7 +802,7 @@ test("a finished leaf stuck waiting on the merge queue reads as such, and can st
     task: stuck, node: stuckModel.byId.get("slow")!, onClose: () => {},
     onStartOver: () => {}, onRetryLanding: () => {}, onRetry: () => {},
   }));
-  assert.match(stuckHtml, /landing failed/);
+  assert.match(stuckHtml, /merge failed/);
   assert.doesNotMatch(stuckHtml, /pending/);
   assert.match(stuckHtml, /Retry merge queue/);
   assert.match(stuckHtml, />Retry task</, "starting over is there whatever the leaf is stuck in");
@@ -766,8 +813,8 @@ test("a finished leaf stuck waiting on the merge queue reads as such, and can st
     task: waiting, node: waitingModel.byId.get("slow")!, onClose: () => {},
     onStartOver: () => {}, onRetry: () => {},
   }));
-  assert.match(waitingHtml, /waiting to land/);
-  assert.match(waitingHtml, /Waiting to land\./);
+  assert.match(waitingHtml, /waiting to merge/);
+  assert.match(waitingHtml, /Waiting to merge\./);
   assert.doesNotMatch(waitingHtml, /Waiting for an agent to start/);
   assert.match(waitingHtml, />Retry task</);
 });
@@ -847,6 +894,41 @@ test("the planner conversation has guidance input and worker output stays read-o
   assert.match(activePlanner, /aria-label="Stop the agent"/, "Stop sits beside the field while the planner works, as on a card");
   assert.match(activePlanner, /class="composer"/, "the card conversation's one-line composer");
   assert.doesNotMatch(planner, /aria-label="Stop the agent"/, "a finished planner has no running turn to stop");
+});
+
+test("planner guidance stays inline with replies across runs, not in an earlier-guidance dropdown", () => {
+  const message = (id: string, runId: string | null, text: string, status: SwarmPlannerMessage["status"] = "delivered"): SwarmPlannerMessage => ({
+    id, runId, text, status, taskId: null, source: "person", createdAt: "2026-09-04T12:00:00.000Z",
+  });
+  const earlier = message("m1", "run-1", "Keep the existing API.");
+  const current = { ...message("m2", "run-2", "Focus on the checkout."), createdAt: "2026-09-04T12:05:00.000Z" };
+  const queued = { ...message("m3", "run-2", "Cover refunds too.", "queued"), createdAt: "2026-09-04T12:06:00.000Z" };
+  const html = renderToStaticMarkup(createElement(SwarmRunOutput, {
+    client: {} as BentoClient, runId: "run-2", agentName: "Planner agent",
+    plannerMessages: [earlier, current, queued],
+  }));
+  assert.doesNotMatch(html, /Earlier guidance|<details/);
+  assert.ok(html.indexOf(earlier.text) < html.indexOf(current.text));
+  assert.ok(html.indexOf(current.text) < html.indexOf(queued.text));
+  assert.equal(html.split(queued.text).length - 1, 1, "a queued message bound to this run appears only once");
+
+  const conversation = renderToStaticMarkup(createElement("div", null,
+    createElement(RunConversationRows, {
+      runId: "run-1", agentName: "Planner agent", messages: [earlier],
+      events: [{ type: "message", role: "assistant", text: "I will preserve the API." }],
+    }),
+    createElement(RunConversationRows, {
+      runId: "run-2", agentName: "Planner agent", messages: [current],
+      events: [
+        { type: "message", role: "assistant", text: "The initial plan is ready.", recordedAt: "2026-09-04T12:04:00.000Z" },
+        { type: "message", role: "user", text: current.text, recordedAt: "2026-09-04T12:05:01.000Z" },
+        { type: "message", role: "assistant", text: "I will update the checkout plan.", recordedAt: "2026-09-04T12:06:00.000Z" },
+      ],
+    }),
+  ));
+  const ordered = [earlier.text, "I will preserve the API.", "The initial plan is ready.", current.text, "I will update the checkout plan."];
+  for (let i = 1; i < ordered.length; i++) assert.ok(conversation.indexOf(ordered[i - 1]!) < conversation.indexOf(ordered[i]!));
+  assert.equal(conversation.split(current.text).length - 1, 1, "a live turn's echoed guidance keeps its place, without a duplicate");
 });
 
 test("a checkout failure offers retry and keeps its error in technical details", () => {
@@ -997,7 +1079,8 @@ test("the header carries the ring, branch, agent time and controls", () => {
   assert.match(html, /approve the plan to start ready workers/);
   assert.match(html, />Stop swarm<\/button>/);
   assert.match(html, />Delete swarm<\/button>/);
-  assert.doesNotMatch(html, /One pull request/, "a swarm still working offers no pull request yet");
+  assert.match(html, />One pull request<\/button>/, "a swarm still working offers pull requests once a task landed");
+  assert.match(html, /keep that work on GitHub if the swarm&#x27;s sandbox is deleted/);
   assert.match(html, /aria-label="One more worker"/);
   assert.match(html, /aria-label="One fewer worker"/);
   assertNoDashes(html, "the swarm header");
@@ -1011,8 +1094,32 @@ test("a finished swarm offers one pull request or one per task, and a failed one
   assertNoDashes(done, "the publish choice");
 
   const failed = pageHtml("multi", "failed");
-  assert.doesNotMatch(failed, /One pull request/);
+  assert.match(failed, />One pull request<\/button>/, "a failed swarm's landed work can still be published");
   assertNoDashes(failed, "the failed swarm header");
+});
+
+test("pull requests are offered once anything landed, and a stack is offered the tasks landed since", () => {
+  const detail: SwarmDetail = seedSwarms("p1", NOW).find((entry) => entry.swarm.id === "sw-checkout")!;
+  const landed = (task: SwarmDetail["tasks"][number], flags: Record<string, unknown>) => ({ ...task, flags: { ...task.flags, ...flags } });
+  const none = { ...detail, landings: [], landingSummary: { total: 0, committed: 0 }, pullRequests: [] };
+  assert.equal(publishOffer(none), null, "nothing committed, nothing to offer");
+
+  const some = { ...detail, landingSummary: { total: 3, committed: 2 }, pullRequests: [] };
+  assert.equal(publishOffer(some)?.stackOnly, false);
+  assert.match(publishOffer(some)?.words ?? "", /2 tasks are committed/);
+
+  assert.equal(publishOffer({ ...some, pullRequests: [{ id: "p", repoUrl: "r", number: 1, url: null, headSha: null }] }), null,
+    "a combined pull request follows the branch by itself");
+
+  const [a, b] = some.tasks;
+  const stacked = { ...some, tasks: [
+    landed(a!, { landedHeads: { app: "1" }, pullRequests: { r: { number: 1, url: "https://github.com/a/b/pull/1" } } }),
+    landed(b!, { landedHeads: { app: "2" } }),
+    ...some.tasks.slice(2),
+  ] };
+  assert.deepEqual(publishOffer(stacked), { words: "1 task was committed after the stack of pull requests was created.", stackOnly: true });
+  const allStacked = { ...stacked, tasks: [stacked.tasks[0]!, landed(b!, { landedHeads: { app: "2" }, pullRequests: { r: { number: 2, url: null } } }), ...some.tasks.slice(2)] };
+  assert.equal(publishOffer(allStacked), null);
 });
 
 test("stacked pull requests are read off the tasks, with their addresses checked", () => {
@@ -1205,6 +1312,58 @@ function queueHtml(landings: SwarmLanding[]): string {
   return renderToStaticMarkup(createElement(MergeQueue, { landings, tasks: tasks() }));
 }
 
+test("the merge queue lists every committed branch, with a search once it is long", () => {
+  const rows = Array.from({ length: 36 }, (_, i) => landing({
+    id: `l${i}`,
+    taskId: "t-api",
+    branchName: `swarm/mvp-${String(i).padStart(4, "0")}`,
+    status: "landed",
+    attempt: 1,
+    endedAt: new Date(Date.UTC(2026, 0, 1, 0, i)).toISOString(),
+  }));
+  const html = queueHtml(rows);
+  assert.equal(html.match(/aria-label="Copy branch name swarm\/mvp-/g)?.length, 36);
+  assert.match(html, /aria-label="Search the merge queue"/);
+  assert.ok(!queueHtml(rows.slice(0, 3)).includes("Search the merge queue"));
+});
+
+test("the merge queue offers older branches only when there are more than it was sent", () => {
+  const rows = Array.from({ length: 10 }, (_, i) => landing({
+    id: `l${i}`, taskId: "t-api", status: "landed", attempt: 1, endedAt: new Date(Date.UTC(2026, 0, 1, 0, i)).toISOString(),
+  }));
+  const loadFinished = () => Promise.resolve({ landings: [], next: null });
+  const render = (total: number) => renderToStaticMarkup(createElement(MergeQueue, {
+    landings: rows, tasks: tasks(), summary: { total, committed: total }, loadFinished,
+  }));
+  assert.match(render(36), />Show older branches<\/button>/);
+  assert.match(render(36), /36 branches/);
+  assert.doesNotMatch(render(10), /Show older branches/);
+});
+
+test("a branch retried after its older page loaded is drawn once, as the live row", () => {
+  const failedThen = landing({ id: "old", taskId: "t-api", status: "failed", attempt: 1, endedAt: "2026-01-01T09:00:00.000Z" });
+  const view = mergeQueueView({
+    landings: [landing({ id: "old", taskId: "t-api", status: "queued", attempt: 1 })],
+    titles: new Map(), needle: "", total: 20, paged: true,
+    older: { rows: [failedThen], next: null }, found: null, loadError: false,
+  });
+  assert.deepEqual(view.shown.map((row) => [row.id, row.status]), [["old", "queued"]]);
+});
+
+test("the merge queue drops the last search's matches as soon as the search changes", () => {
+  const match = landing({ id: "m", taskId: "t-api", status: "landed", branchName: "swarm/api-1" });
+  const base = { landings: [], titles: new Map<string, string>(), total: 20, paged: true, older: null, loadError: false };
+  const view = mergeQueueView({ ...base, needle: "apix", found: { query: "api", rows: [match], next: 50 } });
+  assert.deepEqual(view.shown, [], "the old matches are not shown under the new search");
+  assert.equal(view.searching, true);
+  assert.equal(view.next, null, "and no page of the old search is offered");
+  const failed = mergeQueueView({ ...base, needle: "apix", found: null, loadError: true });
+  assert.equal(failed.searching, false, "a failed search says so rather than searching forever");
+  const answered = mergeQueueView({ ...base, needle: "api", found: { query: "api", rows: [match], next: 50 } });
+  assert.deepEqual(answered.shown.map((row) => row.id), ["m"]);
+  assert.equal(answered.next, 50);
+});
+
 test("the merge queue says what is landing, what is waiting, and what went in", () => {
   const html = queueHtml([
     landing({ id: "a", taskId: "t-api", status: "landed", attempt: 1, endedAt: "2026-01-01T10:00:00.000Z" }),
@@ -1212,7 +1371,7 @@ test("the merge queue says what is landing, what is waiting, and what went in", 
     landing({ id: "c", taskId: "t-docs", status: "queued", position: 2 }),
   ]);
   assert.match(html, /Merge queue/);
-  assert.match(html, /Landing/);
+  assert.match(html, /Merging/);
   assert.match(html, /Waiting/);
   assert.match(html, /Committed/);
   assert.match(html, /Branches: 1 waiting/);
@@ -1274,7 +1433,7 @@ test("what git said about a conflict is printed as text, and only while it stand
   assert.ok(!conflict.includes("<script>x</script>"));
   assert.match(conflict, /&lt;script&gt;/);
   assert.match(conflict, /Merge attempt 2/);
-  assert.match(conflict, /nothing else lands until this is settled/);
+  assert.match(conflict, /nothing else is merged until this is settled/);
 
   // A landed row's error is history, and printing it would read as a
   // failure on work that is in.
@@ -1408,18 +1567,18 @@ test("the reopen dialog says what reopening will actually do to the pull request
   assert.ok(!one[0]!.includes("second branch is"), "no second branch is offered");
   assert.match(one[1]!, /acme\/app #12 is updated when the follow up finishes/);
   assert.match(one[1]!, /rather than a second one being opened/);
-  assert.match(one[2]!, /3 tasks that landed stay landed/);
+  assert.match(one[2]!, /3 committed tasks stay committed/);
 
   const none = reopenEffectLines({ branchName: null }, [], 0);
   assert.match(none[1]!, /has opened no pull request yet/);
-  assert.match(none[2]!, /Nothing has landed through the merge queue yet/);
+  assert.match(none[2]!, /Nothing has been merged through the merge queue yet/);
 
   const many = reopenEffectLines({ branchName: "swarm/x" }, [
     { id: "a", repoUrl: "https://github.com/acme/app", number: 12, url: null, headSha: null },
     { id: "b", repoUrl: "https://github.com/acme/api", number: 3, url: null, headSha: null },
   ], 1);
   assert.match(many[1]!, /The 2 pull requests it already opened \(acme\/app #12, acme\/api #3\)/);
-  assert.match(many[2]!, /The 1 task that landed/);
+  assert.match(many[2]!, /The 1 committed task stays committed/);
 
   assertNoDashes([...one, ...none, ...many].join(" "), "the reopen dialog's sentences");
 });
@@ -1656,7 +1815,7 @@ test("a failed leaf is never waiting to land, and a conflict the resolver gave u
 
   const conflict = node("c", { status: "failed", attention: "conflict", flags: { conflict: "CONFLICT in a.ts" } });
   const html = drawerHtml(conflict);
-  assert.doesNotMatch(html, /waiting to land/);
+  assert.doesNotMatch(html, /waiting to merge/);
   assert.match(html, /could not resolve it/);
   assert.doesNotMatch(html, /An agent will try to resolve the conflict/);
   assertNoDashes(html, "a conflict failure");
@@ -1741,7 +1900,7 @@ test("marking an accepted leaf done says its branch will not be landed", () => {
   assert.match(markDoneConfirmText(true), /will not be: marking it done takes it out of the merge queue/);
   assert.doesNotMatch(markDoneConfirmText(false), /merge queue/);
   const accepted = drawerHtml(node("a", { status: "working", report: "done", flags: { accepted: true } }));
-  assert.match(accepted, /Its branch is not landed\./);
+  assert.match(accepted, /Its branch is not merged\./);
   assert.doesNotMatch(drawerHtml(node("b", { status: "failed" })), /Its branch is not landed/);
   assertNoDashes(markDoneConfirmText(true), "the mark done confirmation");
 });

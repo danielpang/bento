@@ -1,5 +1,5 @@
 import pg from "pg";
-import type { AgentEvent } from "@bento/core";
+import type { RecordedRunEvent } from "@bento/core";
 import type { BusWirePayload, EventBus } from "./events.js";
 
 /** Also named by the grant triggers in migration 0068, which publish onto it. */
@@ -26,7 +26,7 @@ export interface PgBusOptions {
    * so a miss means the run was deleted in between, and the event is
    * dropped with it.
    */
-  loadRunEvent: (runId: string, seq: number) => Promise<AgentEvent | null>;
+  loadRunEvent: (runId: string, seq: number) => Promise<RecordedRunEvent | null>;
 }
 
 export interface PgBus {

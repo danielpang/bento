@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import type { LandingPage } from "../swarm/client.js";
 import type { SwarmLanding, SwarmStatus, SwarmTask } from "../swarm/types.js";
 import { MERGE_QUEUE_FAILURE, landingFailureWords } from "../swarm/failures.js";
 import { taskActionRefusal } from "../swarm/status.js";
@@ -34,7 +35,7 @@ import { taskActionRefusal } from "../swarm/status.js";
  * a row people cannot tell apart from the one above it.
  */
 const WORDS: Record<SwarmLanding["status"], { label: string; tone: string }> = {
-  landing: { label: "Landing", tone: "running" },
+  landing: { label: "Merging", tone: "running" },
   queued: { label: "Waiting", tone: "idle" },
   landed: { label: "Committed", tone: "succeeded" },
   conflicted: { label: "Conflict", tone: "gated" },
@@ -42,8 +43,8 @@ const WORDS: Record<SwarmLanding["status"], { label: string; tone: string }> = {
   cancelled: { label: "Withdrawn", tone: "cancelled" },
 };
 
-/** How many landed rows are worth keeping on screen. */
-const HISTORY = 10;
+/** Past this many rows the panel offers a search, because scrolling for one branch is slow. */
+const SEARCH_FROM = 10;
 
 /** The local OrbStack HTTP origin may not expose the Clipboard API. */
 async function copyBranchName(branchName: string): Promise<void> {
@@ -99,6 +100,7 @@ export function MergeQueue({
   onSelect,
   onRetryLanding,
   swarmStatus,
+  loadFinished,
   now = Date.now(),
 }: {
   landings: SwarmLanding[];
@@ -115,10 +117,39 @@ export function MergeQueue({
   onRetryLanding?: (taskId: string) => void;
   /** The swarm's status, which closes the queue once it is done or stopped. */
   swarmStatus?: SwarmStatus;
+  /**
+   * Asks the server for a page of finished rows past the detail's first
+   * few, or for the rows a search matches. Without it the panel shows
+   * and searches only what it was given.
+   */
+  loadFinished?: (input: { query?: string; offset: number }) => Promise<LandingPage>;
   /** The instant a backoff is measured against. Passed by a test, the clock otherwise. */
   now?: number;
 }) {
   const [commandCopyState, setCommandCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const [query, setQuery] = useState("");
+  // Older pages a person asked for, kept across the detail's refetches.
+  const [older, setOlder] = useState<LoadedPage | null>(null);
+  // What the server matched for the current search.
+  const [found, setFound] = useState<(LoadedPage & { query: string }) | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState(false);
+  const needle = query.trim().toLowerCase();
+  useEffect(() => {
+    setFound(null);
+    setLoadError(false);
+    if (!loadFinished || !needle) return;
+    let stale = false;
+    const timer = setTimeout(() => {
+      loadFinished({ query: needle, offset: 0 })
+        .then((page) => { if (!stale) setFound({ query: needle, rows: page.landings, next: page.next }); })
+        .catch(() => { if (!stale) setLoadError(true); });
+    }, 250);
+    return () => {
+      stale = true;
+      clearTimeout(timer);
+    };
+  }, [needle, loadFinished]);
   useEffect(() => {
     if (commandCopyState === "idle") return;
     const timer = setTimeout(() => setCommandCopyState("idle"), 2000);
@@ -147,19 +178,28 @@ export function MergeQueue({
       ? tasks.filter((task) => task.canRetryLanding === true).map((task) => task.id)
       : [],
   );
-  const inFlight = landings.filter((landing) => landing.status === "landing" || landing.status === "conflicted");
-  const waiting = landings.filter((landing) => landing.status === "queued");
-  /**
-   * Newest first, which is the opposite of the queue's own order: a
-   * queue is read from its front and a history is read from its end.
-   * Sorted by when each ended rather than by position, because a
-   * landing that was retried keeps its place in the queue and is
-   * nonetheless the most recent thing that happened.
-   */
-  const finished = landings
-    .filter((landing) => landing.status === "landed" || landing.status === "failed" || landing.status === "cancelled")
-    .sort((a, b) => (b.endedAt ?? "").localeCompare(a.endedAt ?? ""))
-    .slice(0, HISTORY);
+  const { waiting, shown, searchingServer, searching, next, total } = mergeQueueView({
+    landings, titles, needle, total: counts.total, paged: Boolean(loadFinished), older, found, loadError,
+  });
+  async function loadMore() {
+    if (!loadFinished || next === null) return;
+    setLoading(true);
+    try {
+      const page = await loadFinished({ ...(searchingServer ? { query: needle } : {}), offset: next });
+      if (searchingServer) {
+        setFound((prior) => prior?.query === needle
+          ? { query: needle, rows: [...prior.rows, ...page.landings], next: page.next }
+          : prior);
+      } else {
+        setOlder((current) => ({ rows: [...(current?.rows ?? []), ...page.landings], next: page.next }));
+      }
+      setLoadError(false);
+    } catch {
+      setLoadError(true);
+    } finally {
+      setLoading(false);
+    }
+  }
 
   if (landings.length === 0) {
     return (
@@ -216,8 +256,37 @@ export function MergeQueue({
         </div>
       )}
 
+      {total > SEARCH_FROM && (
+        <div className="swarm-queue-search">
+          <div className="search" data-on={needle ? "" : undefined}>
+            <input
+              className="search-input"
+              type="search"
+              value={query}
+              placeholder="Search tasks or branches"
+              aria-label="Search the merge queue"
+              onChange={(event) => setQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape" && query) {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setQuery("");
+                }
+              }}
+            />
+          </div>
+          <span className="muted" role="status" aria-live="polite">
+            {loading ? "Loading…" : searching ? "Searching…" : loadError && needle ? "Could not search. Try again." : needle ? `${shown.length}${next !== null ? "+" : ""} found` : `${total} branches`}
+          </span>
+        </div>
+      )}
+
+      {needle && shown.length === 0 && !loading && !searching && (
+        <p className="muted swarm-queue-empty">No branch matches "{query.trim()}".</p>
+      )}
+
       <ul className="swarm-queue-list">
-        {[...inFlight, ...waiting, ...finished].map((landing) => (
+        {shown.map((landing) => (
           <Row
             key={landing.id}
             landing={landing}
@@ -229,6 +298,14 @@ export function MergeQueue({
             now={now}
           />
         ))}
+        {next !== null && (
+          <li className="swarm-queue-more">
+            <button type="button" className="btn" disabled={loading} onClick={() => void loadMore()}>
+              {loading ? "Loading…" : needle ? "Show more matches" : "Show older branches"}
+            </button>
+            {loadError && <span className="muted">Could not load branches. Try again.</span>}
+          </li>
+        )}
       </ul>
     </section>
   );
@@ -314,7 +391,7 @@ function Row({
       )}
       {onRetry && (
         <div className="swarm-queue-actions">
-          <button type="button" className="btn" disabled={busy} title="Try landing this task's branch again, from the sandbox it is in." onClick={() => onRetry(landing.taskId)}>
+          <button type="button" className="btn" disabled={busy} title="Try merging this task's branch again, from the sandbox it is in." onClick={() => onRetry(landing.taskId)}>
             Retry merge queue
           </button>
         </div>
@@ -327,12 +404,12 @@ function Row({
       {backoff !== null && (
         <p className="muted swarm-queue-note">
           {backoff <= 1
-            ? "The last try did not land. The next one is in about a minute."
-            : `The last try did not land. The next one is in about ${backoff} minutes.`}
+            ? "The last merge attempt did not go through. The next one is in about a minute."
+            : `The last merge attempt did not go through. The next one is in about ${backoff} minutes.`}
         </p>
       )}
       {landing.status === "landing" && (
-        <p className="swarm-queue-note">Landing. If a sandbox holding this branch is asleep, Bento starts it first, which can take a minute.</p>
+        <p className="swarm-queue-note">Merging. If a sandbox holding this branch is asleep, Bento starts it first, which can take a minute.</p>
       )}
       {landing.error && landing.status === "failed" && (
         <details className="swarm-queue-technical"><summary>Technical details</summary><pre className="swarm-queue-error swarm-text">{landing.error}</pre></details>
@@ -357,12 +434,69 @@ function Row({
          */
         <p className="muted swarm-queue-note">
           {landing.resolverRunId
-            ? "An agent is reconciling this branch with the swarm's branch. Nothing else lands until it is settled."
-            : "No agent is on this branch yet. One is asked for each time the swarm is reconciled, and nothing else lands until this is settled."}
+            ? "An agent is reconciling this branch with the swarm's branch. Nothing else is merged until it is settled."
+            : "No agent is on this branch yet. One is asked for each time the swarm is reconciled, and nothing else is merged until this is settled."}
         </p>
       )}
     </li>
   );
+}
+
+type LoadedPage = { rows: SwarmLanding[]; next: number | null };
+
+/** Which rows the panel draws, and where the next page starts. */
+export function mergeQueueView(input: {
+  landings: SwarmLanding[];
+  titles: Map<string, string>;
+  needle: string;
+  total: number;
+  /** Whether more pages can be asked of the server. */
+  paged: boolean;
+  older: LoadedPage | null;
+  found: (LoadedPage & { query: string }) | null;
+  loadError: boolean;
+}) {
+  const { landings, titles, needle, older, found, loadError } = input;
+  const inFlight = landings.filter((landing) => landing.status === "landing" || landing.status === "conflicted");
+  const waiting = landings.filter((landing) => landing.status === "queued");
+  /**
+   * Newest first, which is the opposite of the queue's own order: a
+   * queue is read from its front and a history is read from its end.
+   * Sorted by when each ended rather than by position, because a
+   * landing that was retried keeps its place in the queue and is
+   * nonetheless the most recent thing that happened.
+   */
+  const firstPage = landings
+    .filter((landing) => landing.status === "landed" || landing.status === "failed" || landing.status === "cancelled")
+    .sort((a, b) => (b.endedAt ?? "").localeCompare(a.endedAt ?? ""));
+  const matches = (landing: SwarmLanding) =>
+    (titles.get(landing.taskId) ?? "").toLowerCase().includes(needle)
+    || (landing.branchName ?? "").toLowerCase().includes(needle);
+  const searchingServer = input.paged && needle !== "";
+  const current = found?.query === needle ? found : null;
+  const searching = searchingServer && !current && !loadError;
+  const finished = searchingServer
+    ? [...firstPage.filter(matches), ...(current?.rows ?? [])]
+    : [...firstPage, ...(older?.rows ?? [])];
+  const queue = [...inFlight, ...waiting];
+  /*
+   * The detail's rows are live and win over a row loaded earlier, which
+   * is the same row as it was when its page was asked for.
+   */
+  const shown = uniqueById([...(needle ? queue.filter(matches) : queue), ...(needle && !searchingServer ? finished.filter(matches) : finished)]);
+  const loadedCount = queue.length + firstPage.length + (older?.rows.length ?? 0);
+  const total = Math.max(input.total, landings.length);
+  const next = searchingServer
+    ? current?.next ?? null
+    : older
+      ? older.next
+      : input.paged && total > loadedCount ? firstPage.length : null;
+  return { waiting, shown, searchingServer, searching, next, total };
+}
+
+function uniqueById(rows: SwarmLanding[]): SwarmLanding[] {
+  const seen = new Set<string>();
+  return rows.filter((row) => !seen.has(row.id) && (seen.add(row.id), true));
 }
 
 /** Whole minutes until a queued row may be tried again, or null when it may go now. */

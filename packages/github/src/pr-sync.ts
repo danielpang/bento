@@ -34,6 +34,16 @@ export async function updatePullRequestVia(octokit: Octokit, input: PullRequestU
   });
 }
 
+/** Takes a draft pull request out of draft. GitHub offers this only through GraphQL. */
+export async function markPullRequestReadyVia(octokit: Octokit, ref: PullRequestRef): Promise<void> {
+  const pr = await octokit.pulls.get({ owner: ref.owner, repo: ref.repo, pull_number: ref.prNumber });
+  if (!pr.data.draft || pr.data.state !== "open") return;
+  await octokit.graphql(
+    "mutation($id: ID!) { markPullRequestReadyForReview(input: { pullRequestId: $id }) { clientMutationId } }",
+    { id: pr.data.node_id },
+  );
+}
+
 export async function pullRequestHasCommentVia(
   octokit: Octokit,
   ref: PullRequestRef,

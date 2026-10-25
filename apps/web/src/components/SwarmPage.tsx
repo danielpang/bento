@@ -5,7 +5,7 @@ import { CompletionRing } from "./CompletionRing.js";
 import { MergeQueue } from "./MergeQueue.js";
 import { OutOfCompute } from "./OutOfCompute.js";
 import { SwarmOutline } from "./SwarmOutline.js";
-import { SwarmTree } from "./SwarmTree.js";
+import { SwarmTree, type SwarmTreeSearch } from "./SwarmTree.js";
 import { canPause, canReopen, canResume, canStop, ceilingAction, pausedWords, swarmTone, swarmWords } from "../swarm/status.js";
 import { idleWords } from "../swarm/waiting.js";
 import { cappedUsd, formatUsd, showSwarmSpend } from "../swarm/money.js";
@@ -13,6 +13,7 @@ import { formatCompletion, type SwarmModel } from "../swarm/layout.js";
 import { formatElapsed } from "../swarm/time.js";
 import type { ModeSurfaces } from "../swarm/plan.js";
 import type { SwarmArtifact, SwarmDetail, SwarmPlanSource } from "../swarm/types.js";
+import type { LandingPage } from "../swarm/client.js";
 import { formatBytes } from "@bento/core";
 import { externalHttpUrl } from "../external-url.js";
 import { browserStorage, readBriefOpen, rememberBriefOpen, type StorageLike, type SwarmView } from "../swarm/view-state.js";
@@ -64,11 +65,14 @@ export interface SwarmActions {
   /** Retries one task's failed merge queue entry, from the queue's own row. */
   onRetryLanding?: (taskId: string) => void;
   /**
-   * Opens the pull requests of a finished swarm, in the shape a person
-   * chooses: one for the swarm, or one per task, stacked. The branches
-   * are already on GitHub; this only asks for the pull requests.
+   * Opens the swarm's pull requests, in the shape a person chooses: one
+   * for the swarm, or one per task, stacked. Offered once anything has
+   * landed, not only once the swarm is done, so the work can be on
+   * GitHub before its sandbox is gone.
    */
   onPublish?: (mode: "combined" | "stacked") => void;
+  /** A page of the merge queue's older rows, or the rows a search matches. */
+  onLoadLandings?: (input: { query?: string; offset: number }) => Promise<LandingPage>;
   /**
    * Opens the reopen dialog for a swarm that has finished.
    *
@@ -247,6 +251,7 @@ export function SwarmPage({
   selectedId,
   onSelect,
   onToggleNode,
+  search,
   actions,
   surfaces,
   busy,
@@ -262,6 +267,7 @@ export function SwarmPage({
   selectedId: string | null;
   onSelect: (taskId: string) => void;
   onToggleNode: (taskId: string) => void;
+  search?: SwarmTreeSearch;
   actions: SwarmActions;
   surfaces: ModeSurfaces;
   busy?: boolean;
@@ -504,15 +510,25 @@ export function SwarmPage({
         </p>
       )}
 
-      {swarm.status === "done" && actions.onPublish && detail.pullRequests.length === 0 && stackedPullRequests(detail.tasks).length === 0 && (
-        <div className="swarm-publish" role="group" aria-label="Open pull requests">
-          <p>Every branch is on GitHub. Open the pull requests as one for the swarm, or one per task, stacked in the order the tasks landed.</p>
-          <div className="actions">
-            <button className="btn btn-primary" disabled={busy} onClick={() => actions.onPublish?.("combined")}>One pull request</button>
-            <button className="btn" disabled={busy} onClick={() => actions.onPublish?.("stacked")}>One per task, stacked</button>
+      {actions.onPublish && (() => {
+        const offer = publishOffer(detail);
+        if (!offer) return null;
+        return (
+          <div className="swarm-publish" role="group" aria-label="Open pull requests">
+            <p>{offer.words}</p>
+            <div className="actions">
+              {offer.stackOnly ? (
+                <button className="btn btn-primary" disabled={busy} onClick={() => actions.onPublish?.("stacked")}>Add them to the stack</button>
+              ) : (
+                <>
+                  <button className="btn btn-primary" disabled={busy} onClick={() => actions.onPublish?.("combined")}>One pull request</button>
+                  <button className="btn" disabled={busy} onClick={() => actions.onPublish?.("stacked")}>One per task, stacked</button>
+                </>
+              )}
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {stackedPullRequests(detail.tasks).length > 0 && (
         <div className="swarm-prs" aria-label="Stacked pull requests">
@@ -590,7 +606,7 @@ export function SwarmPage({
       </div>
 
       {view === "tree" ? (
-        <SwarmTree model={model} selectedId={selectedId} onSelect={onSelect} onToggle={onToggleNode}
+        <SwarmTree key={detail.swarm.id} model={model} selectedId={selectedId} onSelect={onSelect} onToggle={onToggleNode} search={search}
           plannerRun={detail.plannerRun} onRetryPlanner={actions.onRetryPlanner} onOpenPlannerOutput={onOpenPlannerOutput} canRetryPlanner={!planReady && swarm.status === "planning"} busy={busy} now={now} />
       ) : (
         <SwarmOutline model={model} selectedId={selectedId} onSelect={onSelect}
@@ -602,6 +618,7 @@ export function SwarmPage({
 
       {detail.landings.length > 0 && (
         <MergeQueue
+          key={swarm.id}
           landings={detail.landings}
           summary={detail.landingSummary}
           destination={swarm.branchName}
@@ -614,10 +631,52 @@ export function SwarmPage({
           tasks={detail.tasks}
           selectedId={selectedId}
           onSelect={onSelect}
+          loadFinished={actions.onLoadLandings}
         />
       )}
     </div>
   );
+}
+
+/**
+ * Whether to offer pull requests, and in what words.
+ *
+ * Offered as soon as one task is committed to the swarm's branch, so a
+ * person can get the work onto GitHub before the sandbox holding it is
+ * reaped. A combined pull request follows the swarm's branch by itself,
+ * so once it is open there is nothing more to offer; a stack covers the
+ * tasks landed when it was opened, so tasks landed since are offered as
+ * an addition to it.
+ */
+export function publishOffer(detail: SwarmDetail): { words: string; stackOnly: boolean } | null {
+  if (detail.pullRequests.length > 0) return null;
+  const committed = detail.landingSummary?.committed
+    ?? detail.landings.filter((landing) => landing.status === "landed").length;
+  if (committed === 0) return null;
+  const stacked = new Set(stackedPullRequests(detail.tasks).map((pr) => pr.taskId));
+  if (stacked.size > 0) {
+    const unstacked = detail.tasks.filter((task) => {
+      const heads = (task.flags as { landedHeads?: Record<string, unknown> }).landedHeads;
+      return heads && Object.keys(heads).length > 0 && !stacked.has(task.id);
+    }).length;
+    if (unstacked === 0) return null;
+    return {
+      words: unstacked === 1
+        ? "1 task was committed after the stack of pull requests was created."
+        : `${unstacked} tasks were committed after the stack of pull requests was created.`,
+      stackOnly: true,
+    };
+  }
+  if (detail.swarm.status === "done") {
+    return {
+      words: "Every branch is on GitHub. Open the pull requests as one for the swarm, or one per task, stacked in the order the tasks were committed.",
+      stackOnly: false,
+    };
+  }
+  return {
+    words: `${committed === 1 ? "1 task is" : `${committed} tasks are`} committed to the swarm's branch. Open pull requests now to keep that work on GitHub if the swarm's sandbox is deleted. One pull request picks up later commits automatically. A stack can be extended later.`,
+    stackOnly: false,
+  };
 }
 
 /**
@@ -835,8 +894,8 @@ function graceDate(updatedAt: string): string {
  */
 export function stackedPullRequests(
   tasks: SwarmDetail["tasks"],
-): { key: string; title: string; repoUrl: string; number: number; url: string | null }[] {
-  const out: { key: string; title: string; repoUrl: string; number: number; url: string | null }[] = [];
+): { key: string; taskId: string; title: string; repoUrl: string; number: number; url: string | null }[] {
+  const out: { key: string; taskId: string; title: string; repoUrl: string; number: number; url: string | null }[] = [];
   for (const task of tasks) {
     const prs = (task.flags as { pullRequests?: Record<string, { number?: unknown; url?: unknown }> }).pullRequests;
     if (!prs || typeof prs !== "object") continue;
@@ -844,6 +903,7 @@ export function stackedPullRequests(
       if (typeof pr?.number !== "number") continue;
       out.push({
         key: `${task.id}:${repoUrl}`,
+        taskId: task.id,
         title: task.title,
         repoUrl,
         number: pr.number,
