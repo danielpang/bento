@@ -365,7 +365,8 @@ test("the planner is told to find out why a leaf failed before retrying it", () 
     repositories: [{ name: "app", mountPath: "/workspace/app" }],
   });
   assert.match(prompt, /read_task_runs says how each run ended[\s\S]*read_transcript_tail[\s\S]*read_task_messages/);
-  assert.match(prompt, /Bento already restarted it before telling you[\s\S]*ask_user instead/);
+  assert.match(prompt, /the sandbox failed was already restarted by Bento[\s\S]*ask_user instead/);
+  assert.match(prompt, /cancelled before its agent started was stopped, not broken/, "a cancel is not read as a sandbox failure");
   const sub = buildSubPlannerPrompt({
     swarm: { title: "T", goal: "G", branchName: "swarm/t" } as never,
     node: { id: "n1", title: "Part", description: "" },
