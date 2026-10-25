@@ -303,7 +303,7 @@ async function patchStage(stageId: string, patch: Record<string, unknown>) {
 test("local mode reports the acting user as a beta tester", async () => {
   const res = await app.request("/api/flags");
   assert.equal(res.status, 200);
-  assert.deepEqual(await res.json(), { betaTesters: true });
+  assert.deepEqual(await res.json(), { betaTesters: true, swarms: "open" });
 });
 
 test("local mode defaults to personal credentials", async () => {

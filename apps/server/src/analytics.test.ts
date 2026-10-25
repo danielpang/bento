@@ -83,3 +83,39 @@ test("captureJobErrors without analytics is a plain passthrough", async () => {
   })();
   assert.ok(ran);
 });
+
+test("a feature flag is asked with the person properties it is evaluated on", async () => {
+  const { createServer } = await import("node:http");
+  const asked: { path: string; body: Record<string, unknown> }[] = [];
+  const server = createServer((req, res) => {
+    let raw = "";
+    req.on("data", (chunk) => (raw += chunk));
+    req.on("end", () => {
+      const body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+      asked.push({ path: req.url ?? "", body });
+      const email = (body.person_properties as { email?: string } | undefined)?.email;
+      const enabled = email === "in@bento.test";
+      res.setHeader("content-type", "application/json");
+      res.end(
+        JSON.stringify({
+          featureFlags: { "hosted-swarms": enabled },
+          flags: { "hosted-swarms": { key: "hosted-swarms", enabled, variant: null, reason: {}, metadata: { id: 1, version: 1 } } },
+          errorsWhileComputingFlags: false,
+        }),
+      );
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as { port: number }).port;
+  const analytics = createAnalytics(loadEnv({ ...FAKE_ENV, POSTHOG_HOST: `http://127.0.0.1:${port}` }))!;
+  try {
+    assert.equal(await analytics.isFeatureEnabled!("hosted-swarms", "u1", { email: "in@bento.test" }), true);
+    assert.equal(await analytics.isFeatureEnabled!("hosted-swarms", "u2", { email: "out@bento.test" }), false);
+    const flagCalls = asked.filter((call) => call.path.startsWith("/flags"));
+    assert.ok(flagCalls.length >= 2, `the SDK asked ${asked.map((call) => call.path).join(", ")}`);
+    assert.deepEqual(flagCalls[0]!.body.person_properties, { email: "in@bento.test" });
+  } finally {
+    await analytics.shutdown();
+    server.close();
+  }
+});

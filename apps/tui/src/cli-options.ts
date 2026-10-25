@@ -136,27 +136,6 @@ Commands
                        place, so a live board keeps its cards where they are.
   spend                Agent spend for the project, one line per card.
   sessions             Conversations in the project, newest activity first.
-  swarm [list]         Swarms in the project, one per line: name, state,
-                       tasks done, what is waiting on you, and spend.
-  swarm new <title> --goal <goal> [--branch <name>] [--budget <usd>]
-                       [--plan <file>]... [--plan-url <url>]... [--existing-plan]
-                       Start a swarm. Its planner begins at once; nothing
-                       else starts until you have read the plan and run
-                       swarm start. Give a branch that already exists to
-                       carry on from it, review comments included. Give
-                       --plan files or --plan-url pages the planner should
-                       read first, and --existing-plan to have it build the
-                       task tree from them rather than plan from scratch.
-  swarm status <swarm> Print the plan as a tree, once.
-  swarm watch <swarm>  The same tree, redrawn as the swarm works. Ends
-                       when the swarm does, or on Ctrl+C.
-  swarm start <swarm>  Say the plan is worth running. Also resumes one
-                       that was paused.
-  swarm stop <swarm>   Stop it, agents included. What landed is kept.
-  swarm reopen <swarm> --instruction <text> [--budget <usd>]
-                       Add a follow up to a swarm that has finished, on
-                       the same branch, so the pull requests it opened
-                       are updated rather than joined by a second set.
   mcp [list]           MCP servers agents can call, one per line.
   mcp add <name> --url <url> [--key <value>]
                        Add a custom server. Pass --key for API key auth.
@@ -257,7 +236,7 @@ export function parseCliOptions(argv: string[]): CliOptions {
       first !== "swarm"
     ) {
       throw new Error(
-        `unknown command "${first}". Use setup, serve, runner, login, update, uninstall, repos, pipeline, agents, spend, sessions, swarm, or mcp, or no command for the board.`,
+        `unknown command "${first}". Use setup, serve, runner, login, update, uninstall, repos, pipeline, agents, spend, sessions, or mcp, or no command for the board.`,
       );
     }
     command = first;

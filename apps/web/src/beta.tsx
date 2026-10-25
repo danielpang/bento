@@ -1,5 +1,6 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
 import type { BentoClient } from "@bento/api-client";
+import type { SwarmAccessState } from "@bento/core";
 
 /**
  * Whether the signed-in user turned beta features on (Settings, Account).
@@ -9,23 +10,30 @@ import type { BentoClient } from "@bento/api-client";
  * module only consumes `/api/flags`. Hidden until that answer arrives,
  * so unfinished UI cannot flash.
  */
-type SwarmAccessState = "open" | "waitlist";
-
-const BetaTestersContext = createContext<{
-  ready: boolean;
-  enabled: boolean;
-  swarms: SwarmAccessState;
-  swarmWaitlistJoined: boolean;
-  set: (enabled: boolean) => void;
-}>({
+const BetaTestersContext = createContext<{ ready: boolean; enabled: boolean; set: (enabled: boolean) => void }>({
   ready: false,
   enabled: false,
-  swarms: "open",
-  swarmWaitlistJoined: false,
   set: () => {},
 });
 
-export function BetaTestersProvider({
+/**
+ * Whether swarms open here, from the same `/api/flags` answer. Not
+ * beta: the Swarms tab is shown to everyone. Null while in flight, and
+ * "unavailable" when the answer never came, which is never read as
+ * allowed.
+ */
+export type SwarmFlag = SwarmAccessState | "unavailable";
+
+interface SwarmFlagValue {
+  state: SwarmFlag | null;
+  /** Whether this person already asked to join the hosted waitlist. */
+  joined: boolean;
+  retry: () => void;
+}
+
+const SwarmFlagContext = createContext<SwarmFlagValue>({ state: null, joined: false, retry: () => {} });
+
+export function FlagsProvider({
   client,
   userId,
   children,
@@ -37,32 +45,36 @@ export function BetaTestersProvider({
 }) {
   const [ready, setReady] = useState(false);
   const [enabled, setEnabled] = useState(false);
-  const [swarms, setSwarms] = useState<SwarmAccessState>("open");
-  const [swarmWaitlistJoined, setSwarmWaitlistJoined] = useState(false);
+  const [swarm, setSwarm] = useState<{ state: SwarmFlag | null; joined: boolean }>({ state: null, joined: false });
+  const [attempt, setAttempt] = useState(0);
+  const retry = useCallback(() => setAttempt((n) => n + 1), []);
 
   useEffect(() => {
     let cancelled = false;
+    setSwarm((current) => ({ ...current, state: null }));
     void client
       .flags()
       .then((snapshot) => {
         if (cancelled) return;
         setEnabled(snapshot.betaTesters);
-        setSwarms(snapshot.swarms ?? "open");
-        setSwarmWaitlistJoined(snapshot.swarmWaitlistJoined === true);
+        setSwarm({ state: snapshot.swarms ?? "unavailable", joined: snapshot.swarmWaitlistJoined === true });
         setReady(true);
       })
       .catch(() => {
         if (cancelled) return;
         setEnabled(false);
+        setSwarm({ state: "unavailable", joined: false });
         setReady(true);
       });
     return () => {
       cancelled = true;
     };
-  }, [client, userId]);
+  }, [client, userId, attempt]);
 
   return (
-    <BetaTestersContext.Provider value={{ ready, enabled, swarms, swarmWaitlistJoined, set: setEnabled }}>{children}</BetaTestersContext.Provider>
+    <BetaTestersContext.Provider value={{ ready, enabled, set: setEnabled }}>
+      <SwarmFlagContext.Provider value={{ ...swarm, retry }}>{children}</SwarmFlagContext.Provider>
+    </BetaTestersContext.Provider>
   );
 }
 
@@ -83,19 +95,9 @@ export function useBetaTesters(): boolean {
   return ready && enabled;
 }
 
-/**
- * Whether the Swarms tab opens the board or the waitlist, or null while
- * the flags are in flight. Hosted Bento waitlists people PostHog has
- * not let in; local Bento is always open.
- */
-export function useSwarmAccessState(): SwarmAccessState | null {
-  const { ready, swarms } = useContext(BetaTestersContext);
-  return ready ? swarms : null;
-}
-
-/** Whether this person already asked to join the hosted Swarms waitlist. */
-export function useSwarmWaitlistJoined(): boolean {
-  return useContext(BetaTestersContext).swarmWaitlistJoined;
+/** Whether swarms open, wait on the waitlist, or could not be checked. */
+export function useSwarmFlag(): SwarmFlagValue {
+  return useContext(SwarmFlagContext);
 }
 
 /** Renders children only for users with beta features on. */
@@ -109,7 +111,5 @@ export function BetaOnly({ children }: { children: ReactNode }) {
  * Tests, and a parent that already knows.
  */
 export function BetaTestersScope({ enabled, children }: { enabled: boolean; children: ReactNode }) {
-  return (
-    <BetaTestersContext.Provider value={{ ready: true, enabled, swarms: "open", swarmWaitlistJoined: false, set: () => {} }}>{children}</BetaTestersContext.Provider>
-  );
+  return <BetaTestersContext.Provider value={{ ready: true, enabled, set: () => {} }}>{children}</BetaTestersContext.Provider>;
 }

@@ -55,8 +55,8 @@ test("swarm new takes plan files and pages, each more than once, and the existin
   assert.deepEqual(options.plan, ["docs/plan.md", "docs/notes.md"]);
   assert.deepEqual(options.planUrl, ["https://example.test/plan"]);
   assert.equal(options.existingPlan, true);
-  assert.match(HELP, /--plan <file>/);
-  assert.match(HELP, /--existing-plan/);
+  // Parsed, but not offered: the terminal does not run swarms yet.
+  assert.doesNotMatch(HELP, /swarm/);
 
   const plain = parseCliOptions(["swarm", "new", "Checkout", "--goal", "Make it work"]);
   assert.equal(plain.plan, undefined, "no files means no field, so a swarm started from a goal sends what it always sent");

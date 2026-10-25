@@ -44,6 +44,7 @@ import { SecretBox } from "./secrets.js";
 import { createAuth, type AuthHooks } from "./auth.js";
 import { reportAuthEvent } from "./auth-events.js";
 import { recordingAnalytics } from "./test-analytics.js";
+import { forgetSwarmAccess } from "./swarm-access.js";
 import { createDrivers, type AppContext } from "./context.js";
 import { EventBus } from "./events.js";
 import { loadEnv } from "./env.js";
@@ -140,6 +141,39 @@ function jsonPost(path: string, body: unknown, token?: string) {
     body: JSON.stringify(body),
   });
 }
+
+test("hosted swarms answer the waitlist through the whole app, whatever beta says", async () => {
+  const email = "swarm-waitlist@bento.test";
+  const signUp = await jsonPost("/api/auth/sign-up/email", { email, password: "correct-horse-battery", name: "Waiting" });
+  assert.equal(signUp.status, 200);
+  const headers = { authorization: `Bearer ${signUp.headers.get("set-auth-token")!}` };
+  const letIn: string[] = [];
+  const hosted = createApp({
+    ...ctx,
+    analytics: {
+      capture: () => {},
+      captureException: () => {},
+      shutdown: async () => {},
+      isFeatureEnabled: async (_flag, _userId, properties) => letIn.includes(properties.email ?? ""),
+    },
+  });
+  const flags = async () => (await (await hosted.request("/api/flags", { headers })).json()) as Record<string, unknown>;
+
+  await setBetaFeatures([email], true);
+  forgetSwarmAccess();
+  const refused = await hosted.request("/api/swarms", { headers });
+  assert.equal(refused.status, 403, "beta features are not a way in");
+  assert.equal(((await refused.json()) as { code: string }).code, "SWARM_WAITLIST");
+  const waiting = await flags();
+  assert.equal(waiting.swarms, "waitlist");
+  assert.equal(waiting.swarmWaitlistJoined, false);
+
+  letIn.push(email);
+  forgetSwarmAccess();
+  assert.equal((await hosted.request("/api/swarms", { headers })).status, 200, "an email on the flag is the way in");
+  assert.equal((await flags()).swarms, "open");
+  forgetSwarmAccess();
+});
 
 test("the API refuses unauthenticated requests in multi mode", async () => {
   const res = await app.request("/api/projects");

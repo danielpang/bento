@@ -1,4 +1,4 @@
-import type { AgentCli, FeatureStatus, GateCriteria, RunStatus, SandboxProvider } from "@bento/core";
+import type { AgentCli, FeatureStatus, GateCriteria, RunStatus, SandboxProvider, SwarmAccessState } from "@bento/core";
 
 export interface Project {
   id: string;
@@ -413,7 +413,7 @@ export interface FlagSnapshot {
    * Whether the Swarms tab opens the board or the waitlist. Always
    * "open" in local mode. Absent from a server that predates it.
    */
-  swarms?: "open" | "waitlist";
+  swarms?: SwarmAccessState;
   /** On the waitlist only: whether this person already asked to join it. */
   swarmWaitlistJoined?: boolean;
 }

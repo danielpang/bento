@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { captureWaitlistIntent, takeWaitlistIntent } from "./swarm/waitlist-intent.js";
+import { captureWaitlistIntent, hasWaitlistIntent, signInCallbackURL, takeWaitlistIntent } from "./swarm/waitlist-intent.js";
 
 function memory() {
   const map = new Map<string, string>();
@@ -30,4 +30,12 @@ test("an address without the parameter leaves nothing behind", () => {
   });
   assert.equal(replaced, false);
   assert.equal(takeWaitlistIntent(store), false);
+});
+
+test("sign in sends the intent back through the address, so another browser still has it", () => {
+  const store = memory();
+  assert.equal(signInCallbackURL(store), "/");
+  captureWaitlistIntent({ pathname: "/", search: "?waitlist=swarms", hash: "" }, store, () => {});
+  assert.equal(signInCallbackURL(store), "/?waitlist=swarms");
+  assert.equal(hasWaitlistIntent(store), true, "asking does not use it up");
 });

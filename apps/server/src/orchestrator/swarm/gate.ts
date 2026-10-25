@@ -18,12 +18,13 @@ export type SwarmRefusal =
  *
  * Two gates, in this order and never the other way round:
  *
- * 1. The waitlist (see swarmAccessFor), answered as 403 with
+ * 1. The plan, answered as 402 with PLAN_LIMIT, which is the code the
+ *    console already knows how to render. Swarms need a subscription.
+ * 2. The waitlist (see swarmAccessFor), answered as 403 with
  *    SWARM_WAITLIST: on a hosted server only people let in through
- *    PostHog run swarms on Bento's sandboxes. Everyone sees the
- *    Swarms tab, so there is nothing to hide behind a 404.
- * 2. The plan, answered as 402 with PLAN_LIMIT, which is the code the
- *    console already knows how to render.
+ *    PostHog run swarms on Bento's sandboxes, and the console offers
+ *    the waitlist only to a team whose plan includes swarms. Everyone
+ *    sees the Swarms tab, so there is nothing to hide behind a 404.
  *
  * Local mode registers no entitlements module and has no waitlist, so
  * nothing refuses there. A multi mode install without a billing module reaches
@@ -41,20 +42,18 @@ export async function requireSwarms(
    */
   organizationId?: string | null,
 ): Promise<SwarmRefusal | null> {
+  const canUseSwarms = ctx.entitlements?.canUseSwarms;
+  if (canUseSwarms) {
+    const organization =
+      organizationId === undefined ? (await getActiveOrganizationMembership(ctx, c))?.organizationId ?? null : organizationId;
+    // Nothing to charge and nobody to charge it to: plans are per team.
+    const refusal = organization ? await canUseSwarms.call(ctx.entitlements, organization) : null;
+    // message and error carry the same sentence, because the console
+    // reads one and the older clients read the other.
+    if (refusal) return { status: 402, body: { error: refusal.reason, message: refusal.reason, code: "PLAN_LIMIT" } };
+  }
   if ((await swarmAccessFor(ctx, actor(c))) === "waitlist") {
     return { status: 403, body: { error: "swarms are waitlisted on this server", code: "SWARM_WAITLIST" } };
   }
-  const organization =
-    organizationId === undefined ? (await getActiveOrganizationMembership(ctx, c))?.organizationId ?? null : organizationId;
-
-  const canUseSwarms = ctx.entitlements?.canUseSwarms;
-  if (!canUseSwarms) return null;
-  // Nothing to charge and nobody to charge it to: plans are per team.
-  if (!organization) return null;
-
-  const refusal = await canUseSwarms.call(ctx.entitlements, organization);
-  if (!refusal) return null;
-  // message and error carry the same sentence, because the console
-  // reads one and the older clients read the other.
-  return { status: 402, body: { error: refusal.reason, message: refusal.reason, code: "PLAN_LIMIT" } };
+  return null;
 }

@@ -40,6 +40,24 @@ export function captureWaitlistIntent(
   replace(`${location.pathname}${search ? `?${search}` : ""}${location.hash}`);
 }
 
+/** Whether an intent is waiting, without forgetting it. */
+export function hasWaitlistIntent(store: IntentStorage | null = storage()): boolean {
+  try {
+    return store?.getItem(KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Where sign in sends the person back to. The intent rides in the
+ * address as well as in storage, so a verification link opened in
+ * another browser still carries it there.
+ */
+export function signInCallbackURL(store: IntentStorage | null = storage()): string {
+  return hasWaitlistIntent(store) ? `/?${WAITLIST_PARAM}=${WAITLIST_VALUE}` : "/";
+}
+
 /** Whether an intent is waiting, and forgets it. */
 export function takeWaitlistIntent(store: IntentStorage | null = storage()): boolean {
   try {

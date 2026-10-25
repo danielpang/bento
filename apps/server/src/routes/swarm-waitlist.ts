@@ -2,9 +2,10 @@ import { Hono } from "hono";
 import { and, eq, isNull } from "drizzle-orm";
 import { user } from "@bento/db";
 import type { AppContext } from "../context.js";
-import { createMailer, swarmWaitlistMessage } from "../mail.js";
+import { createMailer, LoggingMailer, swarmWaitlistMessage, type Mailer } from "../mail.js";
 import { actor } from "../middleware/actor.js";
-import { githubLogin } from "../swarm-access.js";
+import { githubLogin } from "../github-user.js";
+import { swarmAccessFor } from "../swarm-access.js";
 
 export const SWARM_WAITLIST_EMAIL = "waitlist@usebento.ai";
 
@@ -17,15 +18,15 @@ export const SWARM_WAITLIST_EMAIL = "waitlist@usebento.ai";
  * than taken from a body, so a request cannot sign someone else up.
  * Refused without SMTP, because the console says the person was added
  * only when the mail really went. Asked again, it answers yes without a
- * second mail.
+ * second mail. Somebody already let in has nothing to wait for, and is
+ * refused.
  */
-export function swarmWaitlistRoutes(ctx: AppContext) {
-  const mailer = createMailer(ctx.env);
-
+export function swarmWaitlistRoutes(ctx: AppContext, mailer: Mailer = createMailer(ctx.env)) {
   return new Hono().post("/", async (c) => {
-    if (!ctx.env.SMTP_HOST) return c.json({ error: "mail is not configured on this server" }, 503);
+    if (mailer instanceof LoggingMailer) return c.json({ error: "mail is not configured on this server" }, 503);
 
     const userId = actor(c);
+    if ((await swarmAccessFor(ctx, userId)) !== "waitlist") return c.json({ error: "already allowed" }, 409);
     // Claimed before the mail goes, so a double click sends one.
     const [sender] = await ctx.db
       .update(user)
