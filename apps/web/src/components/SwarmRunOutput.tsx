@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { BentoClient } from "@bento/api-client";
-import type { AgentEvent } from "@bento/core";
+import type { RecordedRunEvent } from "@bento/core";
 import type { SwarmApi, SwarmPlannerMessage } from "../swarm/client.js";
-import type { SwarmStatus } from "../swarm/types.js";
+import type { SwarmPlannerHistoryRun, SwarmStatus } from "../swarm/types.js";
+import { plannerConversationEvents, plannerMessageRun } from "../swarm/planner-conversation.js";
 import { plannerFailure } from "../swarm/failures.js";
 import { ChatRow, toChatItems } from "./AgentSession.js";
 import { AgentOrb } from "./AgentOrb.js";
@@ -39,14 +40,16 @@ export function WorkingRow({ activity, agentName }: { activity: RunActivity; age
  * conversation does; one that does not gets the row at the foot of
  * the log.
  */
-export function SwarmRunOutput({ client, runId, agentName, plannerMessages = [], onActivity }: {
+export function SwarmRunOutput({ client, runId, agentName, plannerMessages, plannerRuns, onActivity, onPlannerInput }: {
   client: BentoClient;
   runId: string;
   agentName: string;
   plannerMessages?: SwarmPlannerMessage[];
+  plannerRuns?: SwarmPlannerHistoryRun[];
   onActivity?: (activity: RunActivity) => void;
+  onPlannerInput?: () => void;
 }) {
-  const [events, setEvents] = useState<AgentEvent[]>([]);
+  const [events, setEvents] = useState<RecordedRunEvent[]>([]);
   const [draft, setDraft] = useState("");
   const [status, setStatus] = useState("loading");
   const [error, setError] = useState("");
@@ -54,17 +57,21 @@ export function SwarmRunOutput({ client, runId, agentName, plannerMessages = [],
   const [tool, setTool] = useState<string | null>(null);
   const lastSeq = useRef(0);
   const draftRef = useRef("");
+  const onPlannerInputRef = useRef(onPlannerInput);
+  onPlannerInputRef.current = onPlannerInput;
   const chatRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
   const [scrolledUp, setScrolledUp] = useState(false);
-  const items = useMemo(() => toChatItems(events, agentName, runId, status === "running"), [events, agentName, runId, status]);
+  const hasOutput = events.some((event) => event.type !== "init");
   const running = status === "running";
   useEffect(() => {
     onActivity?.({ running, tool });
   }, [onActivity, running, tool]);
-  const earlierMessages = plannerMessages.filter((message) => message.runId && message.runId !== runId);
-  const currentMessages = plannerMessages.filter((message) => message.runId === runId);
-  const queuedMessages = plannerMessages.filter((message) => message.status === "queued");
+  // Older servers have no run list. Message bindings still recover the
+  // runs people spoke to, without putting their guidance in a separate UI.
+  const historyRunIds = [...new Set(plannerRuns?.map((run) => run.id) ?? plannerMessages?.flatMap((message) => message.runId ? [message.runId] : []) ?? [])]
+    .filter((id) => id !== runId);
+  const messagesFor = (id: string) => plannerMessages?.filter((message) => plannerMessageRun(message, plannerRuns, runId) === id);
 
   const readPosition = () => {
     const chat = chatRef.current;
@@ -90,7 +97,7 @@ export function SwarmRunOutput({ client, runId, agentName, plannerMessages = [],
       readPosition();
     });
     return () => cancelAnimationFrame(frame);
-  }, [items, draft, plannerMessages.length, error]);
+  }, [events, draft, plannerMessages, error]);
 
   useEffect(() => {
     setEvents([]);
@@ -106,6 +113,7 @@ export function SwarmRunOutput({ client, runId, agentName, plannerMessages = [],
       onEvent: (event, seq) => {
         if (seq > 0 && seq <= lastSeq.current) return;
         if (seq > 0) lastSeq.current = seq;
+        if (event.type === "message" && event.role === "user") onPlannerInputRef.current?.();
         if (event.type === "result" || (event.type === "message" && event.role === "assistant")) {
           draftRef.current = "";
           setDraft("");
@@ -137,26 +145,26 @@ export function SwarmRunOutput({ client, runId, agentName, plannerMessages = [],
   return (
     <div className="swarm-run-output" aria-label={`${agentName} output`}>
       <div className="chat swarm-output-chat" ref={chatRef} onScroll={readPosition}>
-        {earlierMessages.length > 0 && (
-          <details className="swarm-planner-history">
-            <summary>Earlier guidance ({earlierMessages.length})</summary>
-            {earlierMessages.map((message) => <PlannerMessageRow key={message.id} message={message} />)}
-          </details>
-        )}
-        {currentMessages.map((message) => <PlannerMessageRow key={message.id} message={message} />)}
+        {historyRunIds.map((id) => (
+          <PlannerRunHistory key={id} client={client} runId={id} agentName={agentName}
+            messages={messagesFor(id) ?? []}
+            onLoaded={() => {
+              const chat = chatRef.current;
+              if (chat && stickToBottom.current) chat.scrollTop = chat.scrollHeight;
+            }} />
+        ))}
+        <RunConversationRows events={events} runId={runId} agentName={agentName} messages={messagesFor(runId)} running={running} />
         {error && <p className="error" role="alert">{error}</p>}
         {/* Nothing said yet and the agent is in its sandbox: the large
             orb, the way a card's conversation opens. */}
-        {items.length === 0 && !draft && !error && running && (
+        {!hasOutput && !draft && !error && running && (
           <div className="orb-hero" aria-label={`${agentName} is getting started`}>
             <AgentOrb hero label={`${agentName} working`} />
             <span className="muted">{agentName} is getting started...</span>
           </div>
         )}
-        {items.length === 0 && !draft && !error && !running && <p className="muted">{status === "loading" ? "Waiting for agent output..." : "This run recorded no output."}</p>}
-        {items.map((item) => <ChatRow key={item.key} item={item} showDetail={false} />)}
+        {!hasOutput && !draft && !error && !running && <p className="muted">{status === "loading" ? "Waiting for agent output..." : "This run recorded no output."}</p>}
         {draft && <div className="chat-row chat-row-assistant"><div className="chat-bubble chat-bubble-assistant" data-draft><span className="chat-meta">{agentName}</span><span className="chat-text">{draft}</span></div></div>}
-        {queuedMessages.map((message) => <PlannerMessageRow key={message.id} message={message} />)}
         {scrolledUp && (
           <div className="chat-jump-anchor">
             <button type="button" className="chat-jump" onClick={jumpToBottom}>Jump to latest ↓</button>
@@ -166,6 +174,71 @@ export function SwarmRunOutput({ client, runId, agentName, plannerMessages = [],
       {!onActivity && <WorkingRow activity={{ running, tool }} agentName={agentName} />}
     </div>
   );
+}
+
+/** Guidance and replies share the same transcript, including across runs. */
+export function RunConversationRows({ events, runId, agentName, messages, running = false }: {
+  events: RecordedRunEvent[];
+  runId: string;
+  agentName: string;
+  messages?: SwarmPlannerMessage[];
+  running?: boolean;
+}) {
+  const conversation = messages ? plannerConversationEvents(events, messages) : null;
+  let nextMessage = 0;
+  return <>{toChatItems(conversation?.events ?? events, agentName, runId, running).map((item) => {
+    const message = conversation && item.kind === "message" && item.role === "user" ? conversation.messages[nextMessage++] : null;
+    return message
+      ? <PlannerMessageRow key={message.id} message={message} />
+      : <ChatRow key={item.key} item={item} showDetail={false} />;
+  })}</>;
+}
+
+/** Finished runs use paged reads, never another live stream. */
+function PlannerRunHistory({ client, runId, agentName, messages, onLoaded }: {
+  client: BentoClient;
+  runId: string;
+  agentName: string;
+  messages: SwarmPlannerMessage[];
+  onLoaded: () => void;
+}) {
+  const [page, setPage] = useState<{ events: RecordedRunEvent[]; firstSeq: number | null; earlier: number } | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  const onLoadedRef = useRef(onLoaded);
+  onLoadedRef.current = onLoaded;
+  useEffect(() => {
+    let cancelled = false;
+    setError(false);
+    void client.getEventsBefore(runId, 2_147_483_647).then((result) => {
+      if (!cancelled) {
+        setPage(result);
+        requestAnimationFrame(() => { if (!cancelled) onLoadedRef.current(); });
+      }
+    }).catch(() => { if (!cancelled) setError(true); });
+    return () => { cancelled = true; };
+  }, [client, runId, attempt]);
+
+  async function loadEarlier() {
+    if (!page?.firstSeq || loading) return;
+    setLoading(true);
+    setError(false);
+    try {
+      const earlier = await client.getEventsBefore(runId, page.firstSeq);
+      setPage({ ...earlier, events: [...earlier.events, ...page.events] });
+    } catch {
+      setError(true);
+    } finally {
+      setLoading(false);
+    }
+  }
+  return <>
+    {error && <p className="error" role="alert">Could not load earlier planner output. <button type="button" className="btn btn-ghost" onClick={() => page ? void loadEarlier() : setAttempt((value) => value + 1)}>Try again</button></p>}
+    {!page && !error && <p className="muted">Loading earlier planner output...</p>}
+    {page && page.earlier > 0 && <button type="button" className="btn btn-ghost" disabled={loading} onClick={() => void loadEarlier()}>{loading ? "Loading..." : "Load earlier output"}</button>}
+    <RunConversationRows events={page?.events ?? []} runId={runId} agentName={agentName} messages={messages} />
+  </>;
 }
 
 function PlannerMessageRow({ message }: { message: SwarmPlannerMessage }) {
@@ -180,12 +253,13 @@ function PlannerMessageRow({ message }: { message: SwarmPlannerMessage }) {
   );
 }
 
-export function SwarmRunOutputDrawer({ client, api, swarmId, swarmStatus, runId, runStatus, runError, agentName, onMessageSent, onRetry, onStop, canRetry, busy, onClose }: {
+export function SwarmRunOutputDrawer({ client, api, swarmId, swarmStatus, runId, plannerRuns, runStatus, runError, agentName, onMessageSent, onRetry, onStop, canRetry, busy, onClose }: {
   client: BentoClient;
   api: Pick<SwarmApi, "listPlannerMessages" | "messagePlanner">;
   swarmId: string;
   swarmStatus: SwarmStatus;
   runId: string;
+  plannerRuns?: SwarmPlannerHistoryRun[];
   runStatus: string;
   runError?: string | null;
   agentName: string;
@@ -198,6 +272,18 @@ export function SwarmRunOutputDrawer({ client, api, swarmId, swarmStatus, runId,
 }) {
   const panel = useDismissable<HTMLElement>(onClose);
   const [messages, setMessages] = useState<SwarmPlannerMessage[]>([]);
+  const [messageVersion, setMessageVersion] = useState(0);
+  const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // A held planner can receive guidance from another viewer without a
+  // new run. Refresh on its recorded input, coalescing a replay's burst.
+  const refreshMessages = () => {
+    if (refreshTimer.current !== null) return;
+    refreshTimer.current = setTimeout(() => {
+      refreshTimer.current = null;
+      setMessageVersion((value) => value + 1);
+    }, 100);
+  };
+  useEffect(() => () => { if (refreshTimer.current !== null) clearTimeout(refreshTimer.current); }, []);
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const [messageError, setMessageError] = useState("");
@@ -209,10 +295,12 @@ export function SwarmRunOutputDrawer({ client, api, swarmId, swarmStatus, runId,
   useEffect(() => {
     let cancelled = false;
     void api.listPlannerMessages(swarmId)
-      .then((rows) => { if (!cancelled) setMessages(rows); })
+      .then((rows) => {
+        if (!cancelled) setMessages((current) => [...rows, ...current.filter((message) => !rows.some((row) => row.id === message.id))]);
+      })
       .catch(() => { if (!cancelled) setMessageError("Could not load planner messages. Reopen this panel to try again."); });
     return () => { cancelled = true; };
-  }, [api, swarmId, runId]);
+  }, [api, swarmId, runId, messageVersion]);
 
   async function send() {
     const body = text.trim();
@@ -256,7 +344,7 @@ export function SwarmRunOutputDrawer({ client, api, swarmId, swarmStatus, runId,
             {runError && <details><summary>Technical details</summary><pre>{runError}</pre></details>}
           </section>
         )}
-        <SwarmRunOutput client={client} runId={runId} agentName={agentName} plannerMessages={messages} onActivity={setActivity} />
+        <SwarmRunOutput client={client} runId={runId} agentName={agentName} plannerMessages={messages} plannerRuns={plannerRuns} onActivity={setActivity} onPlannerInput={refreshMessages} />
       </div>
       {canMessage && (
         <div className="swarm-planner-compose composer-dock">

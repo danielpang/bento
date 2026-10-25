@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import { agentRuns, runEvents } from "@bento/db";
 import type { AgentEvent } from "@bento/core";
 import type { AppContext } from "../context.js";
+import { recordedRunEvent } from "../events.js";
 import { disownRun, ownedByMeOrNobody, yielded } from "./run-ownership.js";
 
 /**
@@ -49,7 +50,7 @@ export async function appendRunEvent(ctx: AppContext, runId: string, event: Agen
   const owner = driving ? ownedByMeOrNobody(ctx) : sql`true`;
   for (let attempt = 0; ; attempt++) {
     try {
-      const inserted = await ctx.db.execute<{ seq: number | string }>(sql`
+      const inserted = await ctx.db.execute<{ seq: number | string; recordedAt: Date | string }>(sql`
         insert into ${runEvents} (${sql.identifier("run_id")}, ${sql.identifier("seq")}, ${sql.identifier("type")}, ${sql.identifier("payload")})
         select ${runId}::uuid, next.seq, ${event.type}, ${JSON.stringify(event)}::jsonb
         from (
@@ -58,14 +59,14 @@ export async function appendRunEvent(ctx: AppContext, runId: string, event: Agen
           where ${runEvents.runId} = ${runId}::uuid
         ) as next
         where exists (select 1 from ${agentRuns} where ${agentRuns.id} = ${runId}::uuid and ${owner})
-        returning ${runEvents.seq} as seq
+        returning ${runEvents.seq} as seq, ${runEvents.ts} as "recordedAt"
       `);
       const row = inserted.rows[0];
       if (!row) {
         if (driving) disownRun(ctx, runId);
         return;
       }
-      ctx.bus.emitRunEvent({ runId, seq: Number(row.seq), event });
+      ctx.bus.emitRunEvent({ runId, seq: Number(row.seq), event: recordedRunEvent({ payload: event, ts: row.recordedAt }) });
       return;
     } catch (err) {
       if (!isUniqueViolation(err) || attempt >= 50) throw err;

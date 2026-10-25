@@ -6,6 +6,7 @@ import { z } from "zod";
 import type { AgentCli, AgentDelta, TurnState } from "@bento/core";
 import { agentProfiles, agentRuns, features, projects, runEvents, runQuestions, sandboxes, stages } from "@bento/db";
 import type { AppContext } from "../context.js";
+import { recordedRunEvent } from "../events.js";
 import { deferAfterCommit, tenantDb as db } from "../middleware/tenant.js";
 import { actor } from "../middleware/actor.js";
 import { markCancelled } from "../orchestrator/run-executor.js";
@@ -403,7 +404,7 @@ export function runRoutes(ctx: AppContext) {
       if (!Number.isInteger(before) || before < 1) return c.json({ error: "seq must be a positive integer" }, 400);
       const limit = Math.min(Math.max(Number(c.req.query("limit") ?? 200) || 200, 1), 500);
       const page = await db(c, ctx)
-        .select({ seq: runEvents.seq, payload: runEvents.payload })
+        .select({ seq: runEvents.seq, payload: runEvents.payload, ts: runEvents.ts })
         .from(runEvents)
         .where(and(eq(runEvents.runId, runId), lt(runEvents.seq, before)))
         .orderBy(desc(runEvents.seq))
@@ -417,7 +418,7 @@ export function runRoutes(ctx: AppContext) {
             .from(runEvents)
             .where(and(eq(runEvents.runId, runId), lt(runEvents.seq, firstSeq)));
       const earlier = earlierRows[0]?.earlier ?? 0;
-      return c.json({ events: page.map((row) => row.payload), firstSeq, earlier });
+      return c.json({ events: page.map(recordedRunEvent), firstSeq, earlier });
     })
     /**
      * SSE stream of a run's events. Replays persisted events after
@@ -519,7 +520,7 @@ export function runRoutes(ctx: AppContext) {
             .where(and(eq(runEvents.runId, runId), gt(runEvents.seq, since)))
             .orderBy(asc(runEvents.seq));
           for (const row of replay) {
-            await stream.writeSSE({ event: "run_event", id: String(row.seq), data: JSON.stringify(row.payload) });
+            await stream.writeSSE({ event: "run_event", id: String(row.seq), data: JSON.stringify(recordedRunEvent(row)) });
             lastSeq = row.seq;
           }
 
@@ -584,7 +585,7 @@ export function runRoutes(ctx: AppContext) {
                 .where(and(eq(runEvents.runId, runId), gt(runEvents.seq, lastSeq)))
                 .orderBy(asc(runEvents.seq));
               for (const row of missed) {
-                await stream.writeSSE({ event: "run_event", id: String(row.seq), data: JSON.stringify(row.payload) });
+                await stream.writeSSE({ event: "run_event", id: String(row.seq), data: JSON.stringify(recordedRunEvent(row)) });
                 lastSeq = row.seq;
               }
               // The run may have ended while this process was deaf,
