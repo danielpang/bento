@@ -1,5 +1,9 @@
 export type DesktopMode = "local" | "remote";
 
+/** What local Bento reads as it starts, so a change to any of them restarts it. */
+export const LOCAL_SETTING_KEYS = ["dataDir", "databaseUrl", "sandbox", "sandboxImage", "betaFeatures", "modelProxy"] as const;
+export type LocalSettings = Pick<DesktopSettings, typeof LOCAL_SETTING_KEYS[number]>;
+
 export interface DesktopUpdateNotice {
   version: string;
   action: "download" | "restart";
@@ -33,7 +37,7 @@ export interface DesktopStatus {
    * The settings local Bento is running with, while it runs. The launcher
    * shows them, and Start with different ones restarts local Bento.
    */
-  local?: Pick<DesktopSettings, "dataDir" | "databaseUrl" | "sandbox" | "sandboxImage" | "betaFeatures" | "modelProxy">;
+  local?: LocalSettings;
 }
 
 export type RuntimeCommand =

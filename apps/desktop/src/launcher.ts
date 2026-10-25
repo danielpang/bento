@@ -1,4 +1,4 @@
-import type { DesktopMode, DesktopSettings, DesktopStatus, LauncherBridge } from "./contracts.js";
+import type { DesktopMode, DesktopSettings, DesktopStatus, LauncherBridge, LocalSettings } from "./contracts.js";
 import { localSettingsChanged } from "./local-settings.js";
 
 const bridge = (window as unknown as { bentoLauncher: LauncherBridge }).bentoLauncher;
@@ -28,6 +28,15 @@ function renderIsolation() {
   renderStartLabel();
 }
 
+function fillForm(settings: LocalSettings) {
+  field("data-dir").value = settings.dataDir;
+  field("database-url").value = settings.databaseUrl;
+  field("sandbox-image").value = settings.sandboxImage;
+  element<HTMLSelectElement>("sandbox").value = settings.sandbox;
+  field("beta-features").checked = settings.betaFeatures;
+  field("model-proxy").checked = settings.modelProxy;
+}
+
 function formSettings(mode: DesktopMode): DesktopSettings {
   return {
     mode,
@@ -39,10 +48,9 @@ function formSettings(mode: DesktopMode): DesktopSettings {
   };
 }
 
-/** Start reopens a running local Bento, unless the settings changed, which restarts it. */
 function renderStartLabel() {
   if (busy && pressed === "local") return;
-  const restart = Boolean(runningLocal) && localSettingsChanged(runningLocal!, formSettings("local"));
+  const restart = runningLocal && localSettingsChanged(runningLocal, formSettings("local"));
   element(actions.local.id).textContent = restart ? "Restart to save these settings" : actions.local.label;
 }
 
@@ -67,30 +75,18 @@ function renderStatus(status: DesktopStatus) {
  * They stay editable: Start with changed settings restarts it.
  */
 function renderLocal(local: DesktopStatus["local"]) {
-  const started = local && JSON.stringify(local) !== JSON.stringify(runningLocal);
+  const started = local && (!runningLocal || localSettingsChanged(runningLocal, local));
   runningLocal = local;
-  if (started) {
-    field("data-dir").value = local.dataDir;
-    field("database-url").value = local.databaseUrl;
-    field("sandbox-image").value = local.sandboxImage;
-    element<HTMLSelectElement>("sandbox").value = local.sandbox;
-    field("beta-features").checked = local.betaFeatures;
-    field("model-proxy").checked = local.modelProxy;
-  }
+  if (started) fillForm(local);
   renderIsolation();
-  element("local-lock-note").hidden = !local;
+  element("local-running-note").hidden = !local;
 }
 
 function showError(error: unknown) { renderStatus({ phase: "error", message: error instanceof Error ? error.message.replace(/^Error invoking remote method '[^']+': Error: /, "") : String(error), ...(runningLocal ? { local: runningLocal } : {}) }); }
 
 async function start() {
   const settings = await bridge.settings();
-  field("data-dir").value = settings.dataDir;
-  field("database-url").value = settings.databaseUrl;
-  field("sandbox-image").value = settings.sandboxImage;
-  element<HTMLSelectElement>("sandbox").value = settings.sandbox;
-  field("beta-features").checked = settings.betaFeatures;
-  field("model-proxy").checked = settings.modelProxy;
+  fillForm(settings);
   pressed = settings.mode;
   element("sandbox").addEventListener("change", renderIsolation);
   element("connection-form").addEventListener("input", renderStartLabel);

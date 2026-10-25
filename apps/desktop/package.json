@@ -17,6 +17,7 @@
     "start": "electron .",
     "test": "node --test --import tsx src/*.test.ts scripts/*.test.mjs",
     "test:e2e": "node scripts/smoke.mjs",
+    "test:restart": "node scripts/restart-smoke.mjs",
     "test:auth": "node scripts/remote-smoke.mjs",
     "test:updates": "node scripts/update-smoke.mjs",
     "package:mac": "node scripts/package.mjs"

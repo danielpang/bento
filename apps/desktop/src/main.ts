@@ -255,14 +255,20 @@ async function connect(settings: DesktopSettings): Promise<void> {
   connectionTask = (async () => {
     let startedLocal = false;
     try {
-      await store.saveSettings(settings);
       const key = connectionKey(settings);
       let existing = connections.get(key);
+      const runningLocal = connections.get("local")?.settings;
       // Local Bento reads its settings only as it starts, so new ones restart it.
-      if (existing && settings.mode === "local" && localSettingsChanged(existing.settings, settings)) {
+      const restart = settings.mode === "local" && existing !== undefined && localSettingsChanged(existing.settings, settings);
+      if (restart && !await confirmRestart()) return;
+      // Signing in elsewhere keeps the settings local Bento runs with.
+      await store.saveSettings(settings.mode === "remote" && runningLocal ? { ...settings, ...localSettings(runningLocal) } : settings);
+      if (restart) {
         publish({ phase: "starting", message: "Restarting Bento with your new settings..." });
-        await runtime.stop();
+        try { await runtime.stop(); }
+        catch { throw new Error("Bento could not restart with your new settings. Please try again."); }
         closeLocal();
+        controller.signal.throwIfAborted();
         existing = undefined;
       }
       // Already connected there: another window, and nothing restarts.
@@ -313,6 +319,13 @@ async function connect(settings: DesktopSettings): Promise<void> {
     }
   })();
   try { await connectionTask; } finally { connectionTask = undefined; }
+}
+
+async function confirmRestart(): Promise<boolean> {
+  const options: Electron.MessageBoxOptions = { type: "warning", buttons: ["Restart", "Cancel"], defaultId: 0, cancelId: 1, message: "Restart local Bento?",
+    detail: "Your new settings take effect after a restart. Agents that are working now are interrupted and continue after Bento starts again." };
+  const { response } = launcher && !launcher.isDestroyed() ? await dialog.showMessageBox(launcher, options) : await dialog.showMessageBox(options);
+  return response === 0;
 }
 
 /** One local Bento, and one connection per server address. */
