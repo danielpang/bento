@@ -7,7 +7,7 @@ import type { AppContext, Entitlements } from "../../context.js";
 import { loadEnv } from "../../env.js";
 import { actorMiddleware } from "../../middleware/actor.js";
 import { forgetSwarmAccess, HOSTED_SWARMS_FLAG } from "../../swarm-access.js";
-import { requireSwarms } from "./gate.js";
+import { requireSwarmCompute, requireSwarms } from "./gate.js";
 
 /**
  * The swarm gate, against a real database and a real request.
@@ -102,7 +102,7 @@ function localCtx(beta: boolean, overrides: { entitlements?: Entitlements } = {}
 /** Runs one request through the gate and reports what a route would send. */
 async function ask(ctx: AppContext): Promise<{ status: number; body: unknown }> {
   const app = new Hono().use("*", actorMiddleware(ctx)).get("/", async (c) => {
-    const refusal = await requireSwarms(ctx, c);
+    const refusal = await requireSwarmCompute(ctx, c);
     if (refusal) return c.json(refusal.body, refusal.status);
     return c.json({ allowed: true });
   });
@@ -143,20 +143,30 @@ test("turning beta features on does not get past the waitlist", async () => {
 });
 
 test("a plan without swarms says so before the waitlist is asked about", async () => {
-  const seen: Record<string, string>[] = [];
-  const answer = await ask(multiCtx({ entitlements: refusingPlan, analytics: posthog([], seen) }));
+  const answer = await ask(multiCtx({ entitlements: refusingPlan, analytics: posthog([]) }));
   assert.equal(answer.status, 402);
   const body = answer.body as { code: string; error: string; message: string };
   assert.equal(body.code, "PLAN_LIMIT");
   assert.match(body.error, /Business plan/);
   assert.equal(body.message, body.error, "both spellings carry the sentence a person reads");
-  assert.deepEqual(seen, [], "PostHog is not asked for a team that cannot run swarms anyway");
 });
 
-test("PostHog that does not answer in time is the waitlist", async () => {
+test("the plan alone, which reading and stopping ask, never asks PostHog", async () => {
+  const seen: Record<string, string>[] = [];
+  const ctx = multiCtx({ entitlements: allowingPlan, analytics: posthog([], seen) });
+  const app = new Hono().use("*", actorMiddleware(ctx)).get("/", async (c) => {
+    const refusal = await requireSwarms(ctx, c);
+    return refusal ? c.json(refusal.body, refusal.status) : c.json({ allowed: true });
+  });
+  assert.equal((await app.request("/")).status, 200, "somebody on the waitlist can still read their swarms");
+  assert.deepEqual(seen, []);
+});
+
+test("PostHog that does not answer in time is unavailable, never the waitlist", async () => {
   const started = Date.now();
   const answer = await ask(multiCtx({ entitlements: allowingPlan, analytics: silentPosthog }));
-  assert.equal(answer.status, 403);
+  assert.equal(answer.status, 503);
+  assert.equal((answer.body as { code: string }).code, "SWARM_ACCESS_UNAVAILABLE");
   assert.ok(Date.now() - started < 5000, "the gate does not wait on PostHog for long");
 });
 

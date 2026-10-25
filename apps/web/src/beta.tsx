@@ -19,17 +19,19 @@ const BetaTestersContext = createContext<{ ready: boolean; enabled: boolean; set
 /**
  * Whether swarms open here, from the same `/api/flags` answer. Not
  * beta: the Swarms tab is shown to everyone. Null while in flight, and
- * "unavailable" when the answer never came, which is never read as
- * allowed.
+ * "unavailable" when the answer never came or the server could not
+ * read the flag, which is never read as allowed.
  */
-export type SwarmFlag = SwarmAccessState | "unavailable";
+export type SwarmFlag = SwarmAccessState;
 
 interface SwarmFlagValue {
   state: SwarmFlag | null;
+  /** Whether this person already asked to join the hosted waitlist. */
+  joined: boolean;
   retry: () => void;
 }
 
-const SwarmFlagContext = createContext<SwarmFlagValue>({ state: null, retry: () => {} });
+const SwarmFlagContext = createContext<SwarmFlagValue>({ state: null, joined: false, retry: () => {} });
 
 export function FlagsProvider({
   client,
@@ -43,25 +45,25 @@ export function FlagsProvider({
 }) {
   const [ready, setReady] = useState(false);
   const [enabled, setEnabled] = useState(false);
-  const [swarm, setSwarm] = useState<SwarmFlag | null>(null);
+  const [swarm, setSwarm] = useState<{ state: SwarmFlag | null; joined: boolean }>({ state: null, joined: false });
   const [attempt, setAttempt] = useState(0);
   const retry = useCallback(() => setAttempt((n) => n + 1), []);
 
   useEffect(() => {
     let cancelled = false;
-    setSwarm(null);
+    setSwarm({ state: null, joined: false });
     void client
       .flags()
       .then((snapshot) => {
         if (cancelled) return;
         setEnabled(snapshot.betaTesters);
-        setSwarm(snapshot.swarms ?? "unavailable");
+        setSwarm({ state: snapshot.swarms ?? "unavailable", joined: snapshot.swarmWaitlistJoined === true });
         setReady(true);
       })
       .catch(() => {
         if (cancelled) return;
         setEnabled(false);
-        setSwarm("unavailable");
+        setSwarm({ state: "unavailable", joined: false });
         setReady(true);
       });
     return () => {
@@ -71,7 +73,7 @@ export function FlagsProvider({
 
   return (
     <BetaTestersContext.Provider value={{ ready, enabled, set: setEnabled }}>
-      <SwarmFlagContext.Provider value={{ state: swarm, retry }}>{children}</SwarmFlagContext.Provider>
+      <SwarmFlagContext.Provider value={{ ...swarm, retry }}>{children}</SwarmFlagContext.Provider>
     </BetaTestersContext.Provider>
   );
 }

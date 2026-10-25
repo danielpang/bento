@@ -1,4 +1,6 @@
 import { Hono } from "hono";
+import { eq } from "drizzle-orm";
+import { user } from "@bento/db";
 import type { AppContext } from "../context.js";
 import { betaFeaturesState, getBetaTester } from "../feature-flags.js";
 import { actor, actorMiddleware } from "../middleware/actor.js";
@@ -17,11 +19,17 @@ export function flagRoutes(ctx: AppContext) {
   return new Hono()
     .use("*", actorMiddleware(ctx))
     .get("/", async (c) => {
-      const [betaFeatures, beta, swarms] = await Promise.all([
+      const [betaFeatures, beta, swarms, waitlist] = await Promise.all([
         betaFeaturesState(ctx, c),
         getBetaTester(ctx, c),
         swarmAccessFor(ctx, actor(c)),
+        ctx.db.select({ at: user.swarmWaitlistRequestedAt }).from(user).where(eq(user.id, actor(c))).limit(1),
       ]);
-      return c.json({ betaTesters: beta !== null, swarms, ...(betaFeatures ? { betaFeatures } : {}) });
+      return c.json({
+        betaTesters: beta !== null,
+        swarms,
+        ...(swarms === "waitlist" ? { swarmWaitlistJoined: Boolean(waitlist[0]?.at) } : {}),
+        ...(betaFeatures ? { betaFeatures } : {}),
+      });
     });
 }

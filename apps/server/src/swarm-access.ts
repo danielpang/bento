@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import type { SwarmAccessState } from "@bento/core";
 import { user } from "@bento/db";
-import type { MiddlewareHandler } from "hono";
+import type { Context, MiddlewareHandler } from "hono";
 import type { AppContext } from "./context.js";
 import { actor } from "./middleware/actor.js";
 
@@ -63,10 +63,11 @@ export function forgetSwarmAccess(): void {
  * open. A hosted server asks PostHog, because every swarm there runs on
  * sandboxes Bento pays for. A server with no PostHog key is somebody's
  * own install on their own sandboxes, and is open too. A flag PostHog
- * could not answer in time is the waitlist.
+ * could not answer in time is "unavailable": refused, but not read as
+ * the person being on the waitlist.
  *
- * Answers are cached per person, so the routes that ask inside a tenant
- * transaction read the answer `warmSwarmAccess` fetched before it.
+ * Answers are cached per person; a failure only briefly, so the next
+ * request asks again.
  */
 export async function swarmAccessFor(ctx: AppContext, userId: string): Promise<SwarmAccessState> {
   if (ctx.env.BENTO_MODE !== "multi") return "open";
@@ -77,7 +78,7 @@ export async function swarmAccessFor(ctx: AppContext, userId: string): Promise<S
   if (cached) return cached;
 
   const [person] = await ctx.db.select({ email: user.email }).from(user).where(eq(user.id, userId)).limit(1);
-  if (!person) return "waitlist";
+  if (!person) return "unavailable";
   const properties: SwarmFlagPerson = { email: person.email };
   try {
     const enabled = await withTimeout(
@@ -90,19 +91,31 @@ export async function swarmAccessFor(ctx: AppContext, userId: string): Promise<S
     return state;
   } catch (err) {
     console.warn(`[swarms] ${HOSTED_SWARMS_FLAG} could not be evaluated for user ${userId}:`, err);
-    answers.set(userId, "waitlist", FAILURE_TTL_MS);
-    return "waitlist";
+    answers.set(userId, "unavailable", FAILURE_TTL_MS);
+    return "unavailable";
   }
 }
 
+const REQUEST_KEY = "swarmAccess";
+
+/** This request's answer: the one `warmSwarmAccess` stored, or asked now. */
+export async function requestSwarmAccess(ctx: AppContext, c: Context): Promise<SwarmAccessState> {
+  const stored = c.get(REQUEST_KEY) as SwarmAccessState | undefined;
+  if (stored) return stored;
+  const state = await swarmAccessFor(ctx, actor(c));
+  c.set(REQUEST_KEY, state);
+  return state;
+}
+
 /**
- * Asks before the tenant transaction opens, for the routes that check
- * swarm access inside one, so the PostHog round trip never holds a
- * pooled connection. They then read the cached answer.
+ * Asks before the tenant transaction opens and keeps the answer on the
+ * request, so the PostHog round trip of a route that starts agents
+ * (requireSwarmCompute) never holds a pooled connection. Every such
+ * route is a write under /api/swarms; reads never ask.
  */
 export function warmSwarmAccess(ctx: AppContext): MiddlewareHandler {
   return async (c, next) => {
-    if (/^\/api\/(swarms|runs|artifacts)(\/|$)/.test(c.req.path)) await swarmAccessFor(ctx, actor(c));
+    if (c.req.method !== "GET" && /^\/api\/swarms(\/|$)/.test(c.req.path)) await requestSwarmAccess(ctx, c);
     await next();
   };
 }

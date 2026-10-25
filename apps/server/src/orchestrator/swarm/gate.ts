@@ -1,34 +1,28 @@
 import type { Context } from "hono";
 import { getActiveOrganizationMembership } from "../../access.js";
 import type { AppContext } from "../../context.js";
-import { actor } from "../../middleware/actor.js";
-import { swarmAccessFor } from "../../swarm-access.js";
+import { requestSwarmAccess } from "../../swarm-access.js";
 
 /**
  * Why a swarm request is refused, as the status and body the route
- * sends. Two different answers, and the order they are asked in is the
- * point: see requireSwarms.
+ * sends. The order they are asked in is the point: see requireSwarms
+ * and requireSwarmCompute.
  */
 export type SwarmRefusal =
   | { status: 403; body: { error: string; code: "SWARM_WAITLIST" } }
+  | { status: 503; body: { error: string; code: "SWARM_ACCESS_UNAVAILABLE" } }
   | { status: 402; body: { error: string; message: string; code: "PLAN_LIMIT" } };
 
 /**
- * The door every swarm route goes through. Null means allowed.
+ * The door every swarm route goes through: the plan, answered as 402
+ * with PLAN_LIMIT, which the console renders as the subscribe message.
+ * Null means allowed. Reading, stopping and deleting a swarm ask only
+ * this, so they never wait on PostHog and a person taken off the
+ * waitlist flag can still stop what they started.
  *
- * Two gates, in this order and never the other way round:
- *
- * 1. The plan, answered as 402 with PLAN_LIMIT, which is the code the
- *    console already knows how to render. Swarms need a subscription.
- * 2. The waitlist (see swarmAccessFor), answered as 403 with
- *    SWARM_WAITLIST: on a hosted server only people let in through
- *    PostHog run swarms on Bento's sandboxes, and the console offers
- *    the waitlist only to a team whose plan includes swarms. Everyone
- *    sees the Swarms tab, so there is nothing to hide behind a 404.
- *
- * Local mode registers no entitlements module and has no waitlist, so
- * nothing refuses there. A multi mode install without a billing module reaches
- * the same place through the optional method being absent.
+ * Local mode registers no entitlements module, so nothing refuses
+ * there. A multi mode install without a billing module reaches the
+ * same place through the optional method being absent.
  */
 export async function requireSwarms(
   ctx: AppContext,
@@ -43,17 +37,37 @@ export async function requireSwarms(
   organizationId?: string | null,
 ): Promise<SwarmRefusal | null> {
   const canUseSwarms = ctx.entitlements?.canUseSwarms;
-  if (canUseSwarms) {
-    const organization =
-      organizationId === undefined ? (await getActiveOrganizationMembership(ctx, c))?.organizationId ?? null : organizationId;
-    // Nothing to charge and nobody to charge it to: plans are per team.
-    const refusal = organization ? await canUseSwarms.call(ctx.entitlements, organization) : null;
-    // message and error carry the same sentence, because the console
-    // reads one and the older clients read the other.
-    if (refusal) return { status: 402, body: { error: refusal.reason, message: refusal.reason, code: "PLAN_LIMIT" } };
-  }
-  if ((await swarmAccessFor(ctx, actor(c))) === "waitlist") {
+  if (!canUseSwarms) return null;
+  const organization =
+    organizationId === undefined ? (await getActiveOrganizationMembership(ctx, c))?.organizationId ?? null : organizationId;
+  // Nothing to charge and nobody to charge it to: plans are per team.
+  const refusal = organization ? await canUseSwarms.call(ctx.entitlements, organization) : null;
+  // message and error carry the same sentence, because the console
+  // reads one and the older clients read the other.
+  return refusal ? { status: 402, body: { error: refusal.reason, message: refusal.reason, code: "PLAN_LIMIT" } } : null;
+}
+
+/**
+ * The door for the routes that start agents (create, start, reopen, a
+ * message, a retry, a split): the plan, then the hosted waitlist (see
+ * swarmAccessFor), answered as 403 with SWARM_WAITLIST, or 503 when the
+ * flag could not be read. Only these spend sandbox time, so only these
+ * ask PostHog, and `warmSwarmAccess` asks before the tenant
+ * transaction opens.
+ */
+export async function requireSwarmCompute(
+  ctx: AppContext,
+  c: Context,
+  organizationId?: string | null,
+): Promise<SwarmRefusal | null> {
+  const plan = await requireSwarms(ctx, c, organizationId);
+  if (plan) return plan;
+  const access = await requestSwarmAccess(ctx, c);
+  if (access === "waitlist") {
     return { status: 403, body: { error: "swarms are waitlisted on this server", code: "SWARM_WAITLIST" } };
+  }
+  if (access === "unavailable") {
+    return { status: 503, body: { error: "swarm access could not be checked, try again", code: "SWARM_ACCESS_UNAVAILABLE" } };
   }
   return null;
 }

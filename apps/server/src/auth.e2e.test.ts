@@ -142,34 +142,51 @@ function jsonPost(path: string, body: unknown, token?: string) {
   });
 }
 
-test("hosted swarms answer the waitlist through the whole app, whatever beta says", async () => {
+test("hosted swarms refuse to start for the waitlist through the whole app, whatever beta says", async () => {
   const email = "swarm-waitlist@bento.test";
   const signUp = await jsonPost("/api/auth/sign-up/email", { email, password: "correct-horse-battery", name: "Waiting" });
   assert.equal(signUp.status, 200);
   const headers = { authorization: `Bearer ${signUp.headers.get("set-auth-token")!}` };
   const letIn: string[] = [];
+  let asked = 0;
   const hosted = createApp({
     ...ctx,
     analytics: {
       capture: () => {},
       captureException: () => {},
       shutdown: async () => {},
-      isFeatureEnabled: async (_flag, _userId, properties) => letIn.includes(properties.email ?? ""),
+      isFeatureEnabled: async (_flag, _userId, properties) => {
+        asked += 1;
+        return letIn.includes(properties.email ?? "");
+      },
     },
   });
+  const project = (await (await jsonPost("/api/projects", { name: "Swarm waitlist", localPath: "/tmp" }, signUp.headers.get("set-auth-token")!)).json()) as { id: string };
+  const start = () =>
+    hosted.request("/api/swarms", {
+      method: "POST",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({ projectId: project.id, title: "Checkout", goal: "Make it work" }),
+    });
   const flags = async () => (await (await hosted.request("/api/flags", { headers })).json()) as Record<string, unknown>;
 
   await setBetaFeatures([email], true);
   forgetSwarmAccess();
-  const refused = await hosted.request("/api/swarms", { headers });
+  const refused = await start();
   assert.equal(refused.status, 403, "beta features are not a way in");
   assert.equal(((await refused.json()) as { code: string }).code, "SWARM_WAITLIST");
   const waiting = await flags();
   assert.equal(waiting.swarms, "waitlist");
 
+  // Reading never asks PostHog, so the waitlist can still see and stop what it has.
+  forgetSwarmAccess();
+  asked = 0;
+  assert.equal((await hosted.request("/api/swarms", { headers })).status, 200);
+  assert.equal(asked, 0, "a read does not ask PostHog");
+
   letIn.push(email);
   forgetSwarmAccess();
-  assert.equal((await hosted.request("/api/swarms", { headers })).status, 200, "an email on the flag is the way in");
+  assert.notEqual((await start()).status, 403, "an email on the flag is the way in");
   assert.equal((await flags()).swarms, "open");
   forgetSwarmAccess();
 });

@@ -82,7 +82,7 @@ test("a subscribed team follows the flag, and a flag that never came is not allo
   const access = swarmAccess({ mode: "multi", plan: plan({ swarms: { included: true } }), absent: false });
   assert.equal(swarmGate(access, "open"), "open");
   assert.equal(swarmGate(access, "waitlist"), "waitlist");
-  assert.equal(swarmGate(access, "unavailable"), "unavailable");
+  assert.equal(swarmGate(access, "unavailable"), "unavailable", "a flag the server could not read either");
 });
 
 test("local mode drops the plan footer, drops the agent hours line, and keeps the estimate", () => {

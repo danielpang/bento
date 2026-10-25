@@ -117,6 +117,16 @@ test("somebody already let in is not put on the waitlist", async () => {
   assert.equal(mailer.sent.length, 0);
 });
 
+test("a flag PostHog could not read sends nothing and says to try again", async () => {
+  await pool.query(`update identity."user" set swarm_waitlist_requested_at = null where id = 'u1'`);
+  const ctx = hosted([]);
+  ctx.analytics!.isFeatureEnabled = async () => undefined;
+  const mailer = recordingMailer();
+  assert.equal(await join(ctx, mailer), 503);
+  assert.equal(mailer.sent.length, 0);
+  assert.equal(await requestedAt(), null);
+});
+
 test("a server that cannot send mail says so rather than pretending", async () => {
   assert.equal(await join(hosted([]), new LoggingMailer()), 503);
 });

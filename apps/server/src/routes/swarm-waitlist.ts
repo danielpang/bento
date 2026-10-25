@@ -26,7 +26,9 @@ export function swarmWaitlistRoutes(ctx: AppContext, mailer: Mailer = createMail
     if (mailer instanceof LoggingMailer) return c.json({ error: "mail is not configured on this server" }, 503);
 
     const userId = actor(c);
-    if ((await swarmAccessFor(ctx, userId)) !== "waitlist") return c.json({ error: "already allowed" }, 409);
+    const access = await swarmAccessFor(ctx, userId);
+    if (access === "unavailable") return c.json({ error: "swarm access could not be checked, try again" }, 503);
+    if (access === "open") return c.json({ error: "already allowed" }, 409);
     // Claimed before the mail goes, so a double click sends one.
     const [sender] = await ctx.db
       .update(user)

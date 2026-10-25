@@ -45,21 +45,9 @@ test("--base-branch is kept for repos add and repos set, and blank means detect 
   assert.match(HELP, /--base-branch <branch>/);
 });
 
-test("swarm new takes plan files and pages, each more than once, and the existing plan flag", () => {
-  const options = parseCliOptions([
-    "swarm", "new", "Checkout", "--goal", "Implement the plan",
-    "--plan", "docs/plan.md", "--plan", "docs/notes.md",
-    "--plan-url", "https://example.test/plan",
-    "--existing-plan",
-  ]);
-  assert.deepEqual(options.plan, ["docs/plan.md", "docs/notes.md"]);
-  assert.deepEqual(options.planUrl, ["https://example.test/plan"]);
-  assert.equal(options.existingPlan, true);
-  // Parsed, but not offered: the terminal does not run swarms yet.
+test("swarm is not offered, and whatever follows it is not parsed", () => {
+  const options = parseCliOptions(["swarm", "new", "Checkout", "--goal", "Make it work"]);
+  assert.equal(options.command, "swarm");
+  assert.deepEqual(options.positionals, []);
   assert.doesNotMatch(HELP, /swarm/);
-
-  const plain = parseCliOptions(["swarm", "new", "Checkout", "--goal", "Make it work"]);
-  assert.equal(plain.plan, undefined, "no files means no field, so a swarm started from a goal sends what it always sent");
-  assert.equal(plain.planUrl, undefined);
-  assert.equal(plain.existingPlan, false);
 });
