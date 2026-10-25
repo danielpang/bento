@@ -616,8 +616,8 @@ and back to queued when the run ends without one
 back by the coordinator instead, which reads how the run ended to decide
 whether they wake another planner.
 
-Both are behind beta features (`isBetaRun` in
-`swarmLiveConversation`), because a held planner is a held machine.
+Both are on for every swarm run. Who may run swarms at all is decided
+before any run starts, so the live session is not gated again here.
 
 ## A live session is a line per message or a protocol, and a reattach never decides again
 
