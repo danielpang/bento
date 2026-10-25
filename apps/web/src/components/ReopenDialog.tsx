@@ -193,8 +193,8 @@ export function reopenEffectLines(
         ? `Pull request ${pullRequestLabel(pullRequests[0]!)} is updated when the follow up finishes, rather than a second one being opened.`
         : `The ${pullRequests.length} pull requests it already opened (${pullRequests.map(pullRequestLabel).join(", ")}) are updated when the follow up finishes, rather than a second set being opened.`,
     landed === 0
-      ? "Nothing has landed through the merge queue yet, so the follow up starts from whatever is on the branch."
-      : `The ${landed} ${landed === 1 ? "task" : "tasks"} that landed stay landed. A follow up adds work, it does not take any back.`,
+      ? "Nothing has been merged through the merge queue yet, so the follow up starts from whatever is on the branch."
+      : `The ${landed} committed ${landed === 1 ? "task stays" : "tasks stay"} committed. A follow up adds work, it does not take any back.`,
   ];
 }
 

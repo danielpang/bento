@@ -25,7 +25,7 @@ import type { AppContext } from "../../context.js";
 import { EventBus, type BoardEvent } from "../../events.js";
 import { loadEnv } from "../../env.js";
 import { SWARM_DESIGN_PATH } from "./design-document.js";
-import { publishFinishedSwarm, publishSwarmCompletion, swarmPullRequestBody } from "./complete.js";
+import { publishFinishedSwarm, publishSwarmCompletion, refreshSwarmPullRequests, swarmPullRequestBody } from "./complete.js";
 import { swarmWorkspaceKey } from "./sandbox.js";
 
 /**
@@ -68,7 +68,9 @@ let repoPath: string;
 let remotePath: string;
 
 /** What the fake GitHub was asked to open, so the body can be read. */
-let opened: { owner: string; repo: string; head: string; base: string; title: string; body: string }[];
+let opened: { owner: string; repo: string; head: string; base: string; title: string; body: string; draft?: boolean }[];
+const updated: { prNumber: number; body?: string }[] = [];
+const readied: number[] = [];
 
 const publisher = {
   async pushToken() {
@@ -81,6 +83,7 @@ const publisher = {
     base: string;
     title: string;
     body: string;
+    draft?: boolean;
   }) {
     opened.push(input);
     // The same number every time, which is what GitHub answers for a
@@ -90,7 +93,12 @@ const publisher = {
   async getPullRequest() {
     return { title: "", body: null, state: "open", merged: false };
   },
-  async updatePullRequest() {},
+  async updatePullRequest(input: { prNumber: number; body?: string }) {
+    updated.push(input);
+  },
+  async markPullRequestReady(ref: { prNumber: number }) {
+    readied.push(ref.prNumber);
+  },
   async pullRequestHasComment() {
     return false;
   },
@@ -170,6 +178,8 @@ beforeEach(async () => {
   await pool.query("delete from swarms");
   emitted.length = 0;
   opened.length = 0;
+  updated.length = 0;
+  readied.length = 0;
 });
 
 /**
@@ -298,7 +308,7 @@ test("a finished swarm pushes its branch and records the pull request it opened"
   assert.match(body, /One module per payment path\./, "the planner's write-up");
   assert.match(body, /- Cart \(done\)/, "the tree");
   assert.match(body, /\n {2}- Line item totals \(done\)/, "and its leaves under it");
-  assert.match(body, /## What landed on this branch\n\n- Line item totals/);
+  assert.match(body, /## What was merged into this branch\n\n- Line item totals/);
 
   assert.ok(
     emitted.some((event) => event.type === "swarm_updated" && event.swarmId === fx.swarm.id),
@@ -359,12 +369,49 @@ test("a swarm somebody pushed to since is refused rather than forced over", asyn
   );
 });
 
-test("a swarm that is not finished is not published", async () => {
+test("a running swarm with committed work can be published before it is done", async () => {
   const fx = await finishedSwarm("running");
   await db.update(swarms).set({ status: "running" }).where(eq(swarms.id, fx.swarm.id));
+  const [running] = await db.select().from(swarms).where(eq(swarms.id, fx.swarm.id));
+
+  const result = await publishSwarmCompletion(ctx, running!, publisher, { remoteUrl: () => remotePath });
+  assert.deepEqual(result.failures, []);
+  assert.equal(result.published.length, 1);
+  assert.equal((await prRows(fx.swarm.id)).length, 1);
+  assert.equal(opened[0]!.draft, true, "unfinished work opens as a draft");
+  assert.deepEqual(readied, []);
+
+  // A later task is merged, and the open pull request is rewritten to say so.
+  const [later] = await db
+    .insert(swarmTasks)
+    .values({ swarmId: fx.swarm.id, parentId: fx.plan.id, title: "Tax lines", status: "done", position: 1 })
+    .returning();
+  await db.insert(swarmLandings).values({ swarmId: fx.swarm.id, taskId: later!.id, status: "landed", position: 1 });
+  updated.length = 0;
+  await refreshSwarmPullRequests(ctx, fx.swarm.id, publisher);
+  assert.equal(updated.length, 1);
+  assert.equal(updated[0]!.prNumber, 7);
+  assert.match(updated[0]!.body ?? "", /## What was merged into this branch\n\n- Line item totals\n- Tax lines/);
+  assert.deepEqual(readied, [], "still a draft while the swarm runs");
+
+  await db.update(swarms).set({ status: "done" }).where(eq(swarms.id, fx.swarm.id));
+  await refreshSwarmPullRequests(ctx, fx.swarm.id, publisher);
+  assert.deepEqual(readied, [7], "and ready for review once the swarm is done");
+});
+
+test("a finished swarm's pull request is not opened as a draft", async () => {
+  const fx = await finishedSwarm("ready");
+  await publishSwarmCompletion(ctx, fx.swarm, publisher, { remoteUrl: () => remotePath });
+  assert.equal(opened[0]!.draft, false);
+});
+
+test("a swarm with nothing committed is not published", async () => {
+  const fx = await finishedSwarm("nothing-landed");
+  await db.update(swarms).set({ status: "running" }).where(eq(swarms.id, fx.swarm.id));
+  await db.update(swarmLandings).set({ status: "queued" }).where(eq(swarmLandings.swarmId, fx.swarm.id));
 
   const result = await publishFinishedSwarm(ctx, fx.swarm.id);
-  assert.match(result?.skipped ?? "", /is running, not done/);
+  assert.match(result?.skipped ?? "", /nothing has been committed/);
   assert.deepEqual(await prRows(fx.swarm.id), []);
 });
 
@@ -387,5 +434,5 @@ test("the body names the goal, the plan and the landed work even with nothing el
   assert.match(body, /Opened by Bento for the swarm "Rewrite the checkout"\./);
   assert.match(body, /## Goal\n\n\(none given\)/);
   assert.doesNotMatch(body, /## What the planner wrote/, "a section with nothing in it is not drawn");
-  assert.match(body, /Nothing landed through the merge queue\./);
+  assert.match(body, /Nothing was merged through the merge queue\./);
 });

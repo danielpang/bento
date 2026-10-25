@@ -101,8 +101,8 @@ test("a task says working only while an agent is running, and pending or complet
   assert.equal(diagramTaskWords("working", "plan"), "pending");
   assert.equal(diagramTaskTone("assigned", "leaf"), "idle");
   assert.equal(diagramTaskTone("working", "plan"), "idle");
-  assert.equal(diagramTaskWords("working", "leaf", false, "waiting"), "waiting to land", "an accepted leaf is not pending");
-  assert.equal(diagramTaskWords("working", "leaf", false, "failed"), "landing failed");
+  assert.equal(diagramTaskWords("working", "leaf", false, "waiting"), "waiting to merge", "an accepted leaf is not pending");
+  assert.equal(diagramTaskWords("working", "leaf", false, "failed"), "merge failed");
   assert.equal(diagramTaskWords("working", "leaf", false, "review"), "waiting for review", "a reported leaf is not pending");
   assert.equal(diagramTaskTone("working", "leaf", false, "review"), "idle");
   assert.equal(diagramTaskWords("working", "leaf", true, "review"), "working", "an agent in the sandbox is working");
@@ -111,7 +111,7 @@ test("a task says working only while an agent is running, and pending or complet
   assert.equal(diagramTaskWords("working", "leaf", false, "review", "restarting"), "planner restarting");
   assert.equal(diagramTaskWords("working", "leaf", false, "review", "stopped"), "planner stopped");
   assert.equal(diagramTaskWords("working", "leaf", false, "review", "undecided"), "not reviewed");
-  assert.equal(diagramTaskWords("working", "leaf", false, "waiting", "reviewing"), "waiting to land", "a review never outranks the landing");
+  assert.equal(diagramTaskWords("working", "leaf", false, "waiting", "reviewing"), "waiting to merge", "a review never outranks the landing");
   assert.equal(diagramTaskTone("working", "leaf", false, "failed"), "failed");
   assert.equal(diagramTaskWords("working", "leaf", true), "working");
   assert.equal(diagramTaskTone("working", "leaf", true), "running");
@@ -122,7 +122,7 @@ test("a task says working only while an agent is running, and pending or complet
   assert.equal(diagramTaskWords("failed", "plan"), "stalled");
   assert.equal(diagramTaskWords("done", "leaf"), "completed");
   assert.equal(diagramTaskTone("done", "leaf"), "succeeded");
-  assert.equal(diagramTaskWords("landed", "leaf"), "landed");
+  assert.equal(diagramTaskWords("landed", "leaf"), "waiting to merge");
   assert.equal(diagramTaskWords("cancelled", "leaf"), "cancelled");
 });
 
@@ -289,7 +289,7 @@ test("the controls a swarm offers follow the state it is in", () => {
   assert.equal(isSwarmOver("stopped"), true);
   assert.equal(isSwarmOver("failed"), true);
   assert.equal(isSwarmOver("paused"), false);
-  assert.equal(taskWords("landed"), "landed");
+  assert.equal(taskWords("landed"), "waiting to merge");
 });
 
 test("a reported leaf says where its review stands, and only while it waits for one", () => {
