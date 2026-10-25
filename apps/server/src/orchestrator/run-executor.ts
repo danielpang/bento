@@ -1,3 +1,4 @@
+import { hasPersonalKeys } from "../agent-accounts/credentials.js";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import { and, asc, desc, eq, inArray, isNull, lt, ne, sql } from "drizzle-orm";
@@ -291,23 +292,37 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   // Never for an ollama/ model: the run goes to Ollama, and a shared
   // Claude login would be sent to whatever server OLLAMA_BASE_URL names.
   //
-  // Credentials come from the owning organization, never from the
-  // server's own environment: see resolveAgentEnv. Resolved here, ahead
+  // Hosted credentials come from personal or organization storage,
+  // never from the server's own environment: see resolveAgentEnv. Resolved here, ahead
   // of the logins, because it decides whether the run goes to Ollama.
-  const { env: resolvedEnv, missing, ollama: onOllama } = await resolveAgentEnv(
-    ctx,
-    project.organizationId,
-    adapter,
-    profile.model,
-    driver,
-  );
-  const customProvider = await customProviderRunEnv(ctx, project.organizationId, profile.cli, profile.model);
+  let resolvedCredentials: Awaited<ReturnType<typeof resolveAgentEnv>>;
+  let customProvider: Awaited<ReturnType<typeof customProviderRunEnv>>;
+  try {
+    resolvedCredentials = await resolveAgentEnv(
+      ctx,
+      project.organizationId,
+      adapter,
+      profile.model,
+      driver,
+      run.startedBy,
+      run.personalCredentialIds,
+    );
+    customProvider = await customProviderRunEnv(ctx, project.organizationId, profile.cli, profile.model, run.startedBy, run.personalCredentialIds);
+  } catch {
+    await finishRun(ctx, runId, { ok: false, fault: "bento", error: hasPersonalKeys(run.personalCredentialIds)
+      ? "Your personal API key or provider configuration changed. Check Agents and start a new run."
+      : "Bento could not read this run's model credentials. Please try again." }, null);
+    emitBoard("failed");
+    await subject.settle(ctx);
+    return;
+  }
+  const { env: resolvedEnv, missing, ollama: onOllama } = resolvedCredentials;
   // A custom provider key is sufficient. Forwarding every other
   // provider key would give this sandbox credentials it does
   // not need, and a shared local login can mount read-only state.
   const subscriptionProvider = run.personalAccountId && personalProvider(profile.cli, profile.model);
   const redirectedSubscription = subscriptionProvider && await personalEndpointRedirected(
-    ctx.db, project.organizationId, subscriptionProvider, ctx.env.BENTO_MODE,
+    ctx.db, project.organizationId, subscriptionProvider, ctx.env.BENTO_MODE, run.personalCredentialIds,
   );
   const personalAccount = run.personalAccountId && subject.kind === "pipeline" && !customProvider && !onOllama && !redirectedSubscription
     ? await accountForRun(ctx, run.startedBy, project.organizationId, profile.cli, profile.model) : null;
@@ -319,7 +334,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     return;
   }
   const agentEnv = customProvider || personalAccount ? {} : resolvedEnv;
-  const sharesLogin = !onOllama && !customProvider && !personalAccount;
+  const sharesLogin = !onOllama && !customProvider && !personalAccount && !hasPersonalKeys(run.personalCredentialIds);
   const authEnv = sharesLogin ? await agentAuthEnv(ctx, adapter) : {};
   /**
    * When the login arrives as an env token, the config mounts are not
@@ -444,7 +459,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     // honor the restriction and so is never asked.
     const modalNetwork =
       restrictNetwork && allCandidates(chosenDrivers).some((d) => d.provider === "modal")
-        ? await modalNetworkForProject(ctx, project.id, subject.organizationId, profile.cli, profile.model)
+        ? await modalNetworkForProject(ctx, project.id, subject.organizationId, profile.cli, profile.model, run.startedBy, run.personalCredentialIds)
         : {};
     // The workspace, from the function both boards provision through.
     // Modal restore, the restricted-host list, and the sandboxes row
@@ -649,6 +664,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       driver,
       handle,
       env: agentEnv,
+      personalCredentialIds: run.personalCredentialIds,
       say: saySystem,
     }));
   } catch (err) {
@@ -1412,6 +1428,7 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
           executor: runRow.executor,
           startedBy: runRow.startedBy,
           personalAccountId: runRow.personalAccountId,
+          personalCredentialIds: runRow.personalCredentialIds,
         }, ctx.entitlements, ctx.analytics, undefined, ctx.env.BENTO_MODE);
         if (next !== "busy" && next !== "gone" && !("outOfCompute" in next)) {
           ctx.bus.emitBoardEvent({

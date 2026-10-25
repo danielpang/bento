@@ -1,5 +1,6 @@
 import { and, eq, isNull } from "drizzle-orm";
 import { agentAccounts, agentRuns, member, secrets, type Db } from "@bento/db";
+import type { PersonalCredentialIds } from "./credentials.js";
 import type { AppContext } from "../context.js";
 import type { ResolvedGrant } from "../mcp/grants.js";
 import { AccountLoginError, refreshLogin, type AccountProvider, type AccountTokens } from "./oauth.js";
@@ -23,8 +24,10 @@ export async function personalEndpointRedirected(
   organizationId: string | null,
   provider: AccountProvider,
   mode: "local" | "multi",
+  ids: PersonalCredentialIds = {},
 ): Promise<boolean> {
   const name = provider === "anthropic" ? "ANTHROPIC_BASE_URL" : "OPENAI_BASE_URL";
+  if (Object.hasOwn(ids, name)) return Boolean(ids[name]);
   const [stored] = await db.select({ id: secrets.id }).from(secrets).where(and(
     organizationId ? eq(secrets.organizationId, organizationId) : isNull(secrets.organizationId),
     eq(secrets.name, name),

@@ -294,6 +294,8 @@ export function runRoutes(ctx: AppContext) {
                 feature.organizationId,
                 profile.cli,
                 profile.model,
+                run.startedBy,
+                run.personalCredentialIds,
               );
             })()
           : {};

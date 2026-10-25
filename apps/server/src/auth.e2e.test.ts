@@ -1392,7 +1392,7 @@ test("custom providers keep definitions and keys inside their organization", asy
     assert.equal(provider.encryptedApiKey, undefined);
     assert.equal((await customProviderRunEnv(ctx, firstOrg.id, "opencode", "private-models/vendor/model-1"))?.missingKey, true);
     assert.equal((await customProviderRunEnv(ctx, firstOrg.id, "opencode", "private-models/retired"))?.missingModel, true);
-    const saved = await asUser(firstToken, `/api/custom-providers/${provider.id}/key`, { method: "PUT", body: JSON.stringify({ apiKey: "sk-private-123456789" }) });
+    const saved = await asUser(firstToken, `/api/custom-providers/${provider.id}/key`, { method: "PUT", body: JSON.stringify({ scope: "org", apiKey: "sk-private-123456789" }) });
     assert.equal(saved.status, 200);
     assert.doesNotMatch(await saved.text(), /sk-private-123456789/);
     const config = await customProviderRunEnv(ctx, firstOrg.id, "opencode", "private-models/vendor/model-1");
@@ -1426,7 +1426,7 @@ test("custom providers keep definitions and keys inside their organization", asy
     });
     assert.equal(fxProvider.status, 201);
     const fxId = (await fxProvider.json() as { id: string }).id;
-    await asUser(firstToken, `/api/custom-providers/${fxId}/key`, { method: "PUT", body: JSON.stringify({ apiKey: "sk-fx-private" }) });
+    await asUser(firstToken, `/api/custom-providers/${fxId}/key`, { method: "PUT", body: JSON.stringify({ scope: "org", apiKey: "sk-fx-private" }) });
     const fxRoute = await customProviderRunEnv(ctx, firstOrg.id, "fx", "fx-models/chat-a");
     assert.equal(fxRoute?.selection?.modelId, "chat-a");
     assert.equal(fxRoute?.env.BENTO_CUSTOM_PROVIDER_API_KEY, "sk-fx-private");
@@ -1436,7 +1436,7 @@ test("custom providers keep definitions and keys inside their organization", asy
     });
     assert.equal(responsesProvider.status, 201);
     const responsesId = (await responsesProvider.json() as { id: string }).id;
-    await asUser(firstToken, `/api/custom-providers/${responsesId}/key`, { method: "PUT", body: JSON.stringify({ apiKey: "sk-responses-private" }) });
+    await asUser(firstToken, `/api/custom-providers/${responsesId}/key`, { method: "PUT", body: JSON.stringify({ scope: "org", apiKey: "sk-responses-private" }) });
     const codexRoute = await customProviderRunEnv(ctx, firstOrg.id, "codex", "responses-models/reasoning-a");
     assert.equal(codexRoute?.selection?.modelId, "reasoning-a");
     assert.equal(codexRoute?.env.BENTO_CUSTOM_PROVIDER_API_KEY, "sk-responses-private");
@@ -1447,14 +1447,28 @@ test("custom providers keep definitions and keys inside their organization", asy
     const codexProfileId = (await codexProfile.json() as { id: string }).id;
     const memberList = await asUser(memberToken, "/api/custom-providers");
     assert.equal((await memberList.json() as { providers: unknown[] }).providers.length, 3);
-    const memberWrite = await asUser(memberToken, `/api/custom-providers/${provider.id}/key`, { method: "PUT", body: JSON.stringify({ apiKey: "stolen" }) });
+    const memberWrite = await asUser(memberToken, `/api/custom-providers/${provider.id}/key`, { method: "PUT", body: JSON.stringify({ scope: "org", apiKey: "stolen" }) });
     assert.equal(memberWrite.status, 403);
+    const ownCustom = await asUser(memberToken, `/api/custom-providers/${provider.id}/key`, { method: "PUT", body: JSON.stringify({ apiKey: "member-custom-private" }) });
+    assert.equal(ownCustom.status, 200, "members can save a personal custom-provider key");
+    const { pinPersonalCredentials } = await import("./agent-accounts/credentials.js");
+    const binding = await pinPersonalCredentials(ctx.db, memberUser!.id, firstOrg.id, "opencode", "private-models/vendor/model-1");
+    const ownRoute = await customProviderRunEnv(ctx, firstOrg.id, "opencode", "private-models/vendor/model-1", memberUser!.id, binding);
+    assert.equal(ownRoute?.env.BENTO_CUSTOM_PROVIDER_API_KEY, "member-custom-private");
+    const ownList = await (await asUser(memberToken, "/api/custom-providers")).json() as { providers: { id: string; hasPersonalApiKey: boolean }[] };
+    assert.equal(ownList.providers.find((p) => p.id === provider.id)?.hasPersonalApiKey, true);
+    const ownerList = await (await asUser(firstToken, "/api/custom-providers")).json() as { providers: { id: string; hasPersonalApiKey: boolean }[] };
+    assert.equal(ownerList.providers.find((p) => p.id === provider.id)?.hasPersonalApiKey, false);
+    await ctx.db.update(customModelProviders).set({ baseUrl: "https://changed.example.test/v1" }).where(eq(customModelProviders.id, provider.id));
+    await assert.rejects(customProviderRunEnv(ctx, firstOrg.id, "opencode", "private-models/vendor/model-1", memberUser!.id, binding), /endpoint changed/);
+    await ctx.db.update(customModelProviders).set({ baseUrl: input.baseUrl }).where(eq(customModelProviders.id, provider.id));
+
     const otherList = await asUser(secondToken, "/api/custom-providers");
     assert.deepEqual((await otherList.json() as { providers: unknown[] }).providers, []);
     for (const [method, path, body] of [
       ["GET", `/api/custom-providers/${provider.id}`, undefined],
       ["PUT", `/api/custom-providers/${provider.id}`, input],
-      ["PUT", `/api/custom-providers/${provider.id}/key`, { apiKey: "stolen" }],
+      ["PUT", `/api/custom-providers/${provider.id}/key`, { scope: "org", apiKey: "stolen" }],
       ["DELETE", `/api/custom-providers/${provider.id}/key`, undefined],
       ["DELETE", `/api/custom-providers/${provider.id}`, undefined],
     ] as const) {
@@ -1467,11 +1481,11 @@ test("custom providers keep definitions and keys inside their organization", asy
     assert.doesNotMatch(await after.text(), /sk-private-123456789/);
 
     const replacedKey = await asUser(firstToken, `/api/custom-providers/${provider.id}/key`, {
-      method: "PUT", body: JSON.stringify({ apiKey: "sk-replacement-123456789" }),
+      method: "PUT", body: JSON.stringify({ scope: "org", apiKey: "sk-replacement-123456789" }),
     });
     assert.equal(replacedKey.status, 200);
     assert.equal((await customProviderRunEnv(ctx, firstOrg.id, "opencode", "private-models/vendor/model-1"))?.env.BENTO_CUSTOM_PROVIDER_API_KEY, "sk-replacement-123456789");
-    assert.equal((await asUser(firstToken, `/api/custom-providers/${provider.id}/key`, { method: "DELETE" })).status, 200);
+    assert.equal((await asUser(firstToken, `/api/custom-providers/${provider.id}/key?scope=org`, { method: "DELETE" })).status, 200);
     assert.equal((await customProviderRunEnv(ctx, firstOrg.id, "opencode", "private-models/vendor/model-1"))?.missingKey, true);
     const edited = await asUser(firstToken, `/api/custom-providers/${provider.id}`, {
       method: "PUT",
@@ -1489,7 +1503,7 @@ test("custom providers keep definitions and keys inside their organization", asy
     assert.deepEqual(retired?.env, {});
     assert.equal((await asUser(firstToken, `/api/custom-providers/${responsesId}`)).status, 404);
     assert.equal((await asUser(firstToken, `/api/custom-providers/${responsesId}/key`, {
-      method: "PUT", body: JSON.stringify({ apiKey: "sk-reenabled" }),
+      method: "PUT", body: JSON.stringify({ scope: "org", apiKey: "sk-reenabled" }),
     })).status, 404);
     const visible = await asUser(firstToken, "/api/custom-providers");
     assert.equal((await visible.json() as { providers: unknown[] }).providers.length, 2);
@@ -1860,7 +1874,7 @@ test("agent credentials are per organization and write only", async () => {
   ).json()) as { id: string };
   await jsonPost("/api/auth/organization/set-active", { organizationId: org.id }, token);
 
-  const created = await jsonPost("/api/secrets", { name: "ANTHROPIC_API_KEY", value: "sk-ant-secret-1234" }, token);
+  const created = await jsonPost("/api/secrets", { scope: "org", name: "ANTHROPIC_API_KEY", value: "sk-ant-secret-1234" }, token);
   assert.equal(created.status, 201);
 
   const listed = (await (
@@ -1911,7 +1925,7 @@ test("credential access follows current membership and mutation roles", async ()
 
   const original = await jsonPost(
     "/api/secrets",
-    { name: "ANTHROPIC_API_KEY", value: "owner-secret-value" },
+    { scope: "org", name: "ANTHROPIC_API_KEY", value: "owner-secret-value" },
     ownerToken,
   );
   assert.equal(original.status, 201);
@@ -1935,7 +1949,7 @@ test("credential access follows current membership and mutation roles", async ()
 
   const memberCreate = await jsonPost(
     "/api/secrets",
-    { name: "OPENAI_API_KEY", value: "member-must-not-write" },
+    { scope: "org", name: "OPENAI_API_KEY", value: "member-must-not-write" },
     teammateToken,
   );
   assert.equal(memberCreate.status, 403);
@@ -1951,7 +1965,7 @@ test("credential access follows current membership and mutation roles", async ()
     .where(and(eq(member.userId, teammateId), eq(member.organizationId, organization.id)));
   const adminCreate = await jsonPost(
     "/api/secrets",
-    { name: "OPENAI_API_KEY", value: "admin-secret-value" },
+    { scope: "org", name: "OPENAI_API_KEY", value: "admin-secret-value" },
     teammateToken,
   );
   assert.equal(adminCreate.status, 201, "an admin may add credentials");
@@ -1977,10 +1991,10 @@ test("credential access follows current membership and mutation roles", async ()
   const staleList = await app.request("/api/secrets", {
     headers: { authorization: `Bearer ${teammateToken}` },
   });
-  assert.deepEqual(await staleList.json(), { secrets: [], canManage: false });
+  assert.deepEqual(await staleList.json(), { secrets: [], canManage: false, canManagePersonal: true, canManageOrg: false, canShareWithOrg: false });
   const staleCreate = await jsonPost(
     "/api/secrets",
-    { name: "ANTHROPIC_API_KEY", value: "stale-must-not-write" },
+    { scope: "org", name: "ANTHROPIC_API_KEY", value: "stale-must-not-write" },
     teammateToken,
   );
   assert.equal(staleCreate.status, 404);
@@ -4079,4 +4093,63 @@ test("subscription selection respects local endpoints and preserves retry bindin
     if (originalEndpoint === undefined) delete process.env.ANTHROPIC_BASE_URL;
     else process.env.ANTHROPIC_BASE_URL = originalEndpoint;
   }
+});
+
+test("personal API keys are default, isolated from admins, and pinned to the initiating user", async () => {
+  const { userSecrets, secrets, stages } = await import("@bento/db");
+  const { claudeCodeAdapter } = await import("@bento/agents");
+  const { startRunIfIdle } = await import("./orchestrator/start-run.js");
+  const { pinPersonalCredentials } = await import("./agent-accounts/credentials.js");
+  const signup = async (name: string) => {
+    const response = await jsonPost("/api/auth/sign-up/email", { name, email: `${name}@bento.test`, password: "correct-horse-battery" });
+    const body = await response.json() as { user: { id: string } };
+    return { id: body.user.id, token: response.headers.get("set-auth-token")! };
+  };
+  const owner = await signup("personal-key-owner");
+  const person = await signup("personal-key-member");
+  const own = await jsonPost("/api/secrets", { name: "ANTHROPIC_API_KEY", value: "member-private-value" }, person.token);
+  assert.equal(own.status, 201, "no active organization is needed for a personal key");
+  const ownKey = await own.json() as { id: string; scope: string };
+  assert.equal(ownKey.scope, "user");
+  const team = await (await jsonPost("/api/auth/organization/create", { name: "Personal keys", slug: "personal-keys" }, owner.token)).json() as { id: string };
+  await ctx.db.insert(member).values({ id: crypto.randomUUID(), organizationId: team.id, userId: person.id, role: "member" });
+  for (const account of [owner, person]) await jsonPost("/api/auth/organization/set-active", { organizationId: team.id }, account.token);
+  assert.equal((await jsonPost("/api/secrets", { scope: "org", name: "ANTHROPIC_API_KEY", value: "shared-value" }, owner.token)).status, 201);
+  assert.equal((await jsonPost("/api/secrets", { scope: "org", name: "ANTHROPIC_BASE_URL", value: "https://shared-endpoint.example.test" }, owner.token)).status, 201);
+  assert.equal((await jsonPost("/api/secrets", { scope: "org", name: "OPENAI_API_KEY", value: "forbidden" }, person.token)).status, 403);
+  const list = async (token: string) => (await app.request("/api/secrets", { headers: { authorization: `Bearer ${token}` } })).json() as Promise<{ secrets: { id: string; name: string; scope: string }[]; canShareWithOrg: boolean }>;
+  assert.equal((await list(person.token)).canShareWithOrg, false);
+  assert.equal((await list(owner.token)).canShareWithOrg, true);
+  assert.ok(!(await list(owner.token)).secrets.some((row) => row.id === ownKey.id), "team owner cannot see a personal key");
+  await app.request(`/api/secrets/${ownKey.id}`, { method: "DELETE", headers: { authorization: `Bearer ${owner.token}` } });
+  assert.equal((await ctx.db.select().from(userSecrets).where(eq(userSecrets.id, ownKey.id))).length, 1, "team owner cannot delete a personal key");
+  const [project] = await ctx.db.insert(projects).values({ ownerId: owner.id, organizationId: team.id, name: "Personal API" }).returning();
+  const [pipeline] = await ctx.db.insert(pipelines).values({ projectId: project!.id, name: "p" }).returning();
+  const [stage] = await ctx.db.insert(stages).values({ pipelineId: pipeline!.id, slug: "s", name: "S", position: 0 }).returning();
+  const [feature] = await ctx.db.insert(features).values({ projectId: project!.id, pipelineId: pipeline!.id, title: "Personal API" }).returning();
+  const [profile] = await ctx.db.insert(agentProfiles).values({ ownerId: owner.id, organizationId: team.id, name: "a", cli: "claude-code", model: "claude-sonnet-5" }).returning();
+  const run = await startRunIfIdle(ctx.db, { type: "pipeline", featureId: feature!.id, stageId: stage!.id, agentProfileId: profile!.id, startedBy: person.id, prompt: "private key task" });
+  assert.ok(typeof run === "object" && "id" in run);
+  assert.equal(run.personalCredentialIds.ANTHROPIC_API_KEY, ownKey.id);
+  assert.equal(run.personalCredentialIds.ANTHROPIC_BASE_URL, null, "shared endpoint must not receive a personal key");
+  const resolve = () => resolveAgentEnv(ctx, team.id, claudeCodeAdapter, profile!.model, ctx.drivers.default, person.id, run.personalCredentialIds);
+  const resolved = await resolve();
+  assert.equal(resolved.env.ANTHROPIC_API_KEY, "member-private-value");
+  assert.equal(resolved.env.ANTHROPIC_BASE_URL, undefined);
+  assert.equal((await resolveAgentEnv(ctx, team.id, claudeCodeAdapter, profile!.model)).env.ANTHROPIC_API_KEY, "shared-value", "unattended work uses shared keys");
+  assert.equal((await app.request(`/api/features/${feature!.id}/message`, { method: "POST", headers: { authorization: `Bearer ${owner.token}`, "content-type": "application/json" }, body: JSON.stringify({ text: "spend their key" }) })).status, 404);
+  const rotated = await jsonPost("/api/secrets", { name: "ANTHROPIC_API_KEY", value: "member-rotated-value" }, person.token);
+  assert.equal(rotated.status, 201);
+  assert.equal((await resolve()).env.ANTHROPIC_API_KEY, "member-rotated-value");
+  await app.request(`/api/secrets/${ownKey.id}`, { method: "DELETE", headers: { authorization: `Bearer ${person.token}` } });
+  await assert.rejects(resolve(), /changed or was removed/, "removing a personal key cannot fall back to a team key");
+  await jsonPost("/api/secrets", { name: "ANTHROPIC_API_KEY", value: "new-connection" }, person.token);
+  await assert.rejects(resolve(), /changed or was removed/, "a new key cannot revive an old run");
+  await jsonPost("/api/secrets", { name: "ANTHROPIC_BASE_URL", value: "https://personal-endpoint.example.test" }, person.token);
+  const fresh = await pinPersonalCredentials(ctx.db, person.id, team.id, "claude-code", profile!.model);
+  assert.equal((await resolveAgentEnv(ctx, team.id, claudeCodeAdapter, profile!.model, ctx.drivers.default, person.id, fresh)).env.ANTHROPIC_BASE_URL, "https://personal-endpoint.example.test");
+  await ctx.db.delete(member).where(and(eq(member.userId, person.id), eq(member.organizationId, team.id)));
+  await assert.rejects(resolveAgentEnv(ctx, team.id, claudeCodeAdapter, profile!.model, ctx.drivers.default, person.id, fresh), /no longer a member/);
+  assert.equal((await list(person.token)).secrets.length, 2, "personal keys remain private and usable outside a removed team");
+  assert.equal((await ctx.db.select().from(secrets).where(eq(secrets.organizationId, team.id))).length, 2, "personal writes never mutate shared credentials");
 });

@@ -23,11 +23,21 @@ Each stage runs one agent: harness, model, and skill. Tools differ in how you ca
 - Interrupt and questions apply to a card's stage runs (see [Talking to a working agent](#talking-to-a-working-agent)). A Codex profile with `codex exec` flags, or an opencode profile with extra arguments, runs the one-shot command: no steering, interrupt or questions, messages wait for the next run, and opencode reports no tokens.
 - Credentials for each tool are set under **Agents** in the web console.
 
-Keys are stored encrypted (per organization in multi mode; local scope in local mode) via the web console, `bento setup`, or the Mac app.
+Keys are encrypted and **personal by default**, including keys saved through the web console or `bento setup`. Existing shared keys keep their scope. See [Personal and shared API keys](#personal-and-shared-api-keys).
+
+## Personal and shared API keys
+
+Open **Agents → Model provider keys**, select the provider, paste the key, and save. New keys and endpoint settings belong to you. You can also save your own key for a custom provider under **Agents → Custom provider keys** after an owner or admin defines the provider.
+
+Owners and admins can turn on **Save keys for the organization** (or **Save key for the organization** on a custom provider) before saving. This explicitly shares that credential with the current team. The toggle selects where the next save goes; it does not move an existing key. To change an existing key's scope, save it in the desired scope and remove the old copy. Members can always manage their own keys, but cannot manage shared keys or anyone else's personal keys. Only share credentials licensed for team use; a subscription key intended for one person must remain personal.
+
+Your explicitly started stage runs and stage follow-ups use your personal keys before shared keys. A personal key uses only your own endpoint override for that provider, never an organization endpoint. Save a custom base URL in the same scope as its key. An active personal-key run cannot be steered by teammates. Background stages, judges, conflict resolution, swarms, and remote runners keep their existing shared or machine credential paths; they never borrow the project owner's personal key. GitHub's integration token remains shared.
+
+Deleting a personal key stops subsequent proxied requests using it. Recreating the key does not revive an old run or switch that run to a shared key; start a new run. Replacing the value of an existing personal key rotates it for subsequent proxy requests. Keys for providers that cannot use the model proxy still reach the agent using their existing integration, so removing those keys from Bento cannot revoke a value already handed to a running agent.
 
 ## Model provider keys stay out of agent sandboxes
 
-On a hosted (multi mode) server, an agent's sandbox does not get the organization's provider keys, and on a local server a Docker sandbox does not get yours unless you turn the proxy off. Each key it would have had is replaced, under the same variable name, by a proxy token that is valid for that one run, and the provider's base URL variable points at Bento's model proxy (`/api/model-proxy/<provider>`). The proxy checks the token, swaps the organization's real key in, and passes the request and the provider's answer through unchanged, streaming included. The token stops working when the run ends, so an agent that a prompt injection talks into printing its environment gives away nothing that outlives the run.
+On a hosted (multi mode) server, an agent's sandbox does not get the organization's provider keys, and on a local server a Docker sandbox does not get yours unless you turn the proxy off. Each key it would have had is replaced, under the same variable name, by a proxy token that is valid for that one run, and the provider's base URL variable points at Bento's model proxy (`/api/model-proxy/<provider>`). The proxy checks the token, swaps the selected personal or organization key in, and passes the request and the provider's answer through unchanged, streaming included. The token stops working when the run ends, so an agent that a prompt injection talks into printing its environment gives away nothing that outlives the run.
 
 | Tool | Keys sent through the proxy |
 | --- | --- |
@@ -48,7 +58,7 @@ The sandbox reaches the proxy at `BENTO_MCP_GATEWAY_URL` (or the server's own UR
 
 ## Custom model providers
 
-Beta testers can add a provider in **Settings, Providers**. Enter its API base URL, protocol, and model IDs, then save its API key there or in **Agents, Custom provider keys**. In multi mode, owners and admins manage the definition and key for their organization. An agent model is selected as `provider-id/model-id`.
+Beta testers can add a provider in **Settings, Providers**. Enter its API base URL, protocol, and model IDs, then save its API key there or in **Agents, Custom provider keys**. In multi mode, owners and admins manage provider definitions. Each user can save a personal key; only owners and admins can save a shared key. An agent model is selected as `provider-id/model-id`.
 
 | Protocol | Harnesses |
 | --- | --- |

@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNotNull, isNull, ne, or, type SQL } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, ne, or, sql, type SQL } from "drizzle-orm";
 import {
   agentRuns,
   customModelProviders,
@@ -104,7 +104,7 @@ export async function getAccessibleFeature(ctx: AppContext, c: Context, featureI
   if (!feature) return null;
   if (c.req.method !== "GET" && c.req.method !== "HEAD") {
     const [personal] = await db(c, ctx).select({ id: agentRuns.id }).from(agentRuns).where(and(
-      eq(agentRuns.featureId, featureId), isNotNull(agentRuns.personalAccountId), ne(agentRuns.startedBy, actor(c)),
+      eq(agentRuns.featureId, featureId), or(isNotNull(agentRuns.personalAccountId), sql`${agentRuns.personalCredentialIds} <> '{}'::jsonb`), ne(agentRuns.startedBy, actor(c)),
       inArray(agentRuns.status, ["queued", "starting", "running"]),
     )).limit(1);
     if (personal) return null;

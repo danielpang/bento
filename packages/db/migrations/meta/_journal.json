@@ -498,6 +498,13 @@
       "when": 1791705760001,
       "tag": "0070_personal_agent_accounts",
       "breakpoints": true
+    },
+    {
+      "idx": 71,
+      "version": "7",
+      "when": 1791705760002,
+      "tag": "0071_personal_api_keys",
+      "breakpoints": true
     }
   ]
 }

@@ -1077,7 +1077,8 @@ test("personal account RLS follows the person, not their team or owner role", as
   await pool.query(`insert into identity."user" (id,name,email) values ('personal-a','A','personal-a@x.test'), ('personal-b','B','personal-b@x.test')`);
   await pool.query(`insert into agent_accounts(user_id,provider,ciphertext,expires_at) values ('personal-a','anthropic','encrypted',now()+interval '1 hour')`);
   await pool.query(`insert into agent_account_logins(user_id,provider,ciphertext,expires_at,next_poll_at) values ('personal-a','anthropic','encrypted',now()+interval '1 hour',now())`);
-  for (const table of ["agent_accounts", "agent_account_logins"]) {
+  await pool.query(`insert into user_secrets(user_id,name,ciphertext) values ('personal-a','ANTHROPIC_API_KEY','encrypted')`);
+  for (const table of ["agent_accounts", "agent_account_logins", "user_secrets"]) {
     const flags = await pool.query("select relrowsecurity, relforcerowsecurity from pg_class where relname=$1", [table]);
     assert.equal(flags.rows[0].relrowsecurity, true);
     assert.equal(flags.rows[0].relforcerowsecurity, true);

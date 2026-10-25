@@ -1,14 +1,13 @@
-import { and, eq, inArray, isNull } from "drizzle-orm";
 import { credentialNamesFor, runsOnOllama } from "@bento/agents";
 import { missingOllamaCredentials, ollamaCredentialsOnly, ollamaUrlFromSandbox } from "@bento/core";
-import { secrets } from "@bento/db";
+import { credentialRows, type PersonalCredentialIds } from "../agent-accounts/credentials.js";
 import type { SandboxDriver } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
 
 /**
  * The environment an agent runs with.
  *
- * In multi mode this comes only from the owning organization's stored
+ * In multi mode this comes only from stored personal or organization
  * secrets: the server's own credentials must never reach a tenant's
  * sandbox, because an agent there can read anything the sandbox can, and
  * a prompt injection is enough to exfiltrate it.
@@ -35,6 +34,8 @@ export async function resolveAgentEnv(
    * rather than assumed from the process default.
    */
   driver: SandboxDriver = ctx.drivers.default,
+  actingUserId: string | null = null,
+  personalCredentialIds: PersonalCredentialIds = {},
 ): Promise<{ env: Record<string, string>; missing: string[]; ollama: boolean }> {
   const env: Record<string, string> = {};
   // requiredEnvFor replaces requiredEnv, so a Codex OpenRouter run does
@@ -43,30 +44,25 @@ export async function resolveAgentEnv(
   const names = credentialNamesFor(adapter, model);
   const required = names.required;
   const alternatives = names.alternatives;
-  const wanted = [...required, ...names.optional, ...alternatives];
+  const wanted = [...new Set([...required, ...names.optional, ...alternatives,
+    ...Object.keys(personalCredentialIds).filter((name) => !name.includes(":")),
+  ])];
   if (wanted.length === 0) return { env, missing: [], ollama: false };
 
   if (ctx.env.BENTO_MODE !== "multi") {
     for (const name of wanted) {
       const value = process.env[name];
-      if (value) env[name] = value;
+      if (value && !Object.hasOwn(personalCredentialIds, name)) env[name] = value;
     }
   }
 
-  const rows = await ctx.db
-    .select()
-    .from(secrets)
-    .where(
-      and(
-        organizationId ? eq(secrets.organizationId, organizationId) : isNull(secrets.organizationId),
-        inArray(secrets.name, wanted),
-      ),
-    );
+  const rows = await credentialRows(ctx, organizationId, wanted, actingUserId, personalCredentialIds);
   for (const row of rows) {
     if (ctx.env.BENTO_MODE === "multi" && row.name === "CLAUDE_CODE_OAUTH_TOKEN") continue;
     try {
       env[row.name] = ctx.secretBox.decrypt(row.ciphertext);
-    } catch {
+    } catch (error) {
+      if (Object.hasOwn(personalCredentialIds, row.name)) throw error;
       // A secret encrypted with a rotated key is treated as missing,
       // which surfaces as a clear error rather than a broken agent.
     }

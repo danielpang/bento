@@ -3,6 +3,7 @@ import { agentAccounts, agentProfiles, agentRuns, repositories, swarmLandings, t
 import type { Analytics } from "../analytics.js";
 import type { Entitlements } from "../context.js";
 import { personalEndpointRedirected, personalProvider } from "../agent-accounts/store.js";
+import { pinPersonalCredentials } from "../agent-accounts/credentials.js";
 import { budgetRefusal } from "./swarm/ledger.js";
 
 type AgentRun = typeof agentRuns.$inferSelect;
@@ -237,6 +238,12 @@ async function insertPipelineRun(
     if (refusal) return { outOfCompute: refusal.reason };
   }
 
+  let personalCredentialIds = values.personalCredentialIds ?? {};
+  if (values.personalCredentialIds === undefined && values.startedBy && (values.executor ?? "server") === "server" && (values.role ?? "stage") === "stage") {
+    const [profile] = await tx.select().from(agentProfiles).where(eq(agentProfiles.id, values.agentProfileId));
+    if (profile) personalCredentialIds = await pinPersonalCredentials(tx, values.startedBy, organizationId, profile.cli, profile.model);
+  }
+
   // Only a person's explicit stage run can use their subscription. Swarms,
   // unattended gates, and remote runners keep their existing credentials.
   // An automatic retry retains the original binding, including an explicit
@@ -246,13 +253,14 @@ async function insertPipelineRun(
     const [profile] = await tx.select().from(agentProfiles).where(eq(agentProfiles.id, values.agentProfileId));
     const provider = profile && personalProvider(profile.cli, profile.model);
     if (provider) {
-      const redirect = await personalEndpointRedirected(tx, organizationId, provider, mode);
+      const redirect = await personalEndpointRedirected(tx, organizationId, provider, mode, personalCredentialIds);
       const [account] = await tx.select({ id: agentAccounts.id }).from(agentAccounts)
         .where(and(eq(agentAccounts.userId, values.startedBy), eq(agentAccounts.provider, provider)));
       personalAccountId = redirect ? null : account?.id ?? null;
     }
   }
-  const [run] = await tx.insert(agentRuns).values({ ...values, personalAccountId }).returning();
+  if (personalAccountId) personalCredentialIds = {};
+  const [run] = await tx.insert(agentRuns).values({ ...values, personalAccountId, personalCredentialIds }).returning();
   if (!run) throw new Error("run insert returned no row");
   return run;
 }

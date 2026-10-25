@@ -54,7 +54,7 @@ export async function claimQueuedMessages(db: Db, featureId: string, scope: { ru
       select id from feature_messages
       where feature_id = ${featureId} and status = 'queued'
       ${scope.runId ? sql`and exists (select 1 from agent_runs r where r.id = ${scope.runId}
-        and (r.personal_account_id is null or feature_messages.user_id = r.started_by))`
+        and ((r.personal_account_id is null and r.personal_credential_ids = '{}'::jsonb) or feature_messages.user_id = r.started_by))`
         : scope.userId ? sql`and (user_id = ${scope.userId} ${scope.includeAnonymous ? sql`or user_id is null` : sql``})`
         : sql`and user_id is not distinct from (
         select first_message.user_id from feature_messages first_message

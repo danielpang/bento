@@ -1,4 +1,5 @@
-import { and, eq, inArray, isNull } from "drizzle-orm";
+import { credentialRows, PERSONAL_KEYS_MARKER } from "../agent-accounts/credentials.js";
+import { and, eq } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { Agent, fetch as undiciFetch, type Response as UndiciResponse } from "undici";
 import {
@@ -8,7 +9,7 @@ import {
   type ModelProxyAuth,
   type ProxiedModelProvider,
 } from "@bento/core";
-import { agentAccounts, secrets } from "@bento/db";
+import { agentAccounts, agentRuns } from "@bento/db";
 import { AccountLoginError } from "../agent-accounts/oauth.js";
 import { personalCredentials } from "../agent-accounts/store.js";
 import type { AppContext } from "../context.js";
@@ -209,7 +210,7 @@ async function proxy(ctx: AppContext, cache: ModelProxyCache, c: Context): Promi
       return c.json(BENTO_FAILURE, 502);
     }
     if (!resolved) return c.json(NOT_FOUND, 404);
-    cached = personal ? { grant: resolved, credentials: new Map() } : cache.put(tokenHash, resolved, generation);
+    cached = personal || resolved.modelCredentials.includes(PERSONAL_KEYS_MARKER) ? { grant: resolved, credentials: new Map() } : cache.put(tokenHash, resolved, generation);
   }
   const entry = cached;
   const grant = entry.grant;
@@ -391,7 +392,7 @@ async function forward(
  * The key and saved base URL for one provider, read and decrypted; null
  * when the key was deleted.
  *
- * From the grant's organization's stored secrets, and nowhere else,
+ * From the run's pinned personal keys or the organization's stored secrets,
  * with one exception: a local server's grant (local mode, no
  * organization) also reads this process's environment, because that is
  * where resolveAgentEnv found the local user's keys, and with the same
@@ -408,19 +409,17 @@ async function readCredentials(
   provider: ProxiedModelProvider,
 ): Promise<ProviderCredentials | null> {
   const baseUrlKey = provider.baseUrlKey && grant.modelCredentials.includes(provider.baseUrlKey) ? provider.baseUrlKey : null;
-  const rows = await ctx.db
-    .select({ name: secrets.name, ciphertext: secrets.ciphertext })
-    .from(secrets)
-    .where(
-      and(
-        grant.organizationId ? eq(secrets.organizationId, grant.organizationId) : isNull(secrets.organizationId),
-        inArray(secrets.name, baseUrlKey ? [provider.key, baseUrlKey] : [provider.key]),
-      ),
-    );
+  let personalCredentialIds = {};
+  if (grant.modelCredentials.includes(PERSONAL_KEYS_MARKER)) {
+    const [run] = await ctx.db.select({ startedBy: agentRuns.startedBy, ids: agentRuns.personalCredentialIds }).from(agentRuns).where(eq(agentRuns.id, grant.runId));
+    if (!run || run.startedBy !== grant.actingUserId) return null;
+    personalCredentialIds = run.ids;
+  }
+  const rows = await credentialRows(ctx, grant.organizationId, baseUrlKey ? [provider.key, baseUrlKey] : [provider.key], grant.actingUserId, personalCredentialIds);
   const fromEnvironment = localEnvironmentFor(ctx, grant);
   const read = (name: string): string | null => {
     const row = rows.find((candidate) => candidate.name === name);
-    if (!fromEnvironment) return row ? ctx.secretBox.decrypt(row.ciphertext) : null;
+    if (!fromEnvironment || Object.hasOwn(personalCredentialIds, name)) return row ? ctx.secretBox.decrypt(row.ciphertext) : null;
     if (row) {
       try {
         return ctx.secretBox.decrypt(row.ciphertext);

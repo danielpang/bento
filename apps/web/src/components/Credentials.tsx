@@ -31,6 +31,7 @@ interface Secret {
   id: string;
   name: string;
   hint?: string | null;
+  scope?: "user" | "org";
 }
 
 /**
@@ -41,13 +42,15 @@ interface Secret {
 function useSecrets(client: BentoClient) {
   const [secrets, setSecrets] = useState<Secret[] | null>(null);
   const [canManage, setCanManage] = useState(false);
+  const [canShareWithOrg, setCanShareWithOrg] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
 
   const reload = useCallback(async () => {
     try {
       const result = await client.listSecrets();
       setSecrets(result.secrets);
-      setCanManage(result.canManage);
+      setCanManage(result.canManageOrg ?? result.canManage);
+      setCanShareWithOrg(result.canShareWithOrg ?? false);
       setLoadFailed(false);
     } catch {
       setLoadFailed(true);
@@ -58,7 +61,7 @@ function useSecrets(client: BentoClient) {
     void reload();
   }, [reload]);
 
-  return { secrets, canManage, loadFailed, reload };
+  return { secrets, canManage, canShareWithOrg, loadFailed, reload };
 }
 
 export function ProviderKeysCard({
@@ -70,7 +73,7 @@ export function ProviderKeysCard({
   onSecrets?: (names: string[]) => void;
 }) {
   const toast = useToast();
-  const { secrets, canManage, loadFailed, reload } = useSecrets(client);
+  const { secrets, canManage, canShareWithOrg, loadFailed, reload } = useSecrets(client);
   useEffect(() => {
     if (secrets) onSecrets?.(secrets.map((secret) => secret.name));
   }, [secrets, onSecrets]);
@@ -79,6 +82,10 @@ export function ProviderKeysCard({
   const [inputs, setInputs] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [removing, setRemoving] = useState<{ name: string; id: string } | null>(null);
+
+  const [shareWithOrg, setShareWithOrg] = useState(false);
+  const scope = shareWithOrg && canShareWithOrg ? "org" : "user";
+  const mayEdit = scope === "user" || canManage;
 
   const active = PROVIDER_TABS.find((entry) => entry.id === tab) ?? PROVIDER_TABS[0];
 
@@ -112,7 +119,7 @@ export function ProviderKeysCard({
     <section className="section settings-card">
       <h3 className="settings-title">Model provider keys</h3>
       <p className="muted">
-        API keys for the providers your agents' models run on, stored encrypted.
+        Keys are encrypted and personal by default. Your stage runs use your keys first; shared keys serve other runs. A personal key uses only your own endpoint settings.
       </p>
       {loadFailed && (
         <p className="error">
@@ -148,9 +155,15 @@ export function ProviderKeysCard({
           </Tabs.List>
         </TabScroll>
         <Tabs.Content value={active.id} className="section tab-panel">
+          {canShareWithOrg && <label className="gate-check">
+            <input type="checkbox" checked={shareWithOrg} disabled={busy} onChange={(e) => setShareWithOrg(e.target.checked)} />
+            <span>Save keys for the organization</span>
+          </label>}
+          <p className="muted">{scope === "user" ? "Saving for you only. Teammates cannot use or manage your keys." : "Saving for all members of the current organization. Only share credentials licensed for team use."}</p>
           {active.keys.map((keyName) => {
         const credential = AGENT_CREDENTIALS.find((entry) => entry.name === keyName);
-        const saved = secrets.find((secret) => secret.name === keyName);
+        const saved = secrets.find((secret) => secret.name === keyName && (secret.scope ?? "org") === scope);
+        const shared = scope === "user" ? secrets.find((secret) => secret.name === keyName && (secret.scope ?? "org") === "org") : undefined;
         const isBaseUrl = keyName.endsWith("_BASE_URL");
         const value = inputs[keyName] ?? "";
         return (
@@ -162,7 +175,7 @@ export function ProviderKeysCard({
             {saved ? (
               <div className="criterion">
                 <span className="criterion-cmd">Saved {saved.hint ?? ""}</span>
-                {canManage && (
+                {mayEdit && (
                   <button
                     className="btn btn-ghost"
                     disabled={busy}
@@ -177,13 +190,13 @@ export function ProviderKeysCard({
                 {isBaseUrl ? "Not set: requests go to the provider directly." : "Not set."}
               </p>
             )}
-            {canManage ? (
+            {mayEdit ? (
               <SecretField
                 value={value}
                 onChange={(next) => setInputs((current) => ({ ...current, [keyName]: next }))}
                 onSubmit={() =>
                   void act(async () => {
-                    await client.createSecret({ name: keyName, value: value.trim() });
+                    await client.createSecret({ name: keyName, value: value.trim(), scope });
                     setInputs((current) => ({ ...current, [keyName]: "" }));
                   })
                 }
@@ -198,6 +211,10 @@ export function ProviderKeysCard({
                 Only owners and admins can change credentials. Ask an owner to save this key.
               </p>
             )}
+            {shared && <div className="criterion">
+              <span className="muted">Shared key available {shared.hint ?? ""}. {saved ? "Your key takes priority." : "Used when you have no personal key for this provider."}</span>
+              {canManage && <button className="btn btn-ghost" disabled={busy} onClick={() => setRemoving({ name: keyName, id: shared.id })}>Remove shared</button>}
+            </div>}
             {credential && <p className="muted">{credential.help}</p>}
           </div>
             );

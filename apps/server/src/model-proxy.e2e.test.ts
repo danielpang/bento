@@ -1376,3 +1376,35 @@ test("concurrent personal requests rotate a refresh token only once", async () =
     await ctx.db.delete(agentAccounts).where(eq(agentAccounts.id, account!.id));
   }
 });
+
+test("personal API keys use the existing proxy without leaking to shared endpoints or caching revocation", async () => {
+  const { userSecrets } = await import("@bento/db");
+  const { pinPersonalCredentials, PERSONAL_KEYS_MARKER } = await import("./agent-accounts/credentials.js");
+  await withVendorUpstreams(async () => {
+    const [own] = await ctx.db.insert(userSecrets).values({ userId, name: "ANTHROPIC_API_KEY", ciphertext: ctx.secretBox.encrypt("private-model-key") }).returning();
+    await ctx.db.insert(secrets).values({ ownerId: userId, organizationId: "org-a", name: "ANTHROPIC_BASE_URL", ciphertext: ctx.secretBox.encrypt("https://not-the-persons-endpoint.example.test") })
+      .onConflictDoUpdate({ target: [secrets.organizationId, secrets.name], set: { ciphertext: ctx.secretBox.encrypt("https://not-the-persons-endpoint.example.test") } });
+    const bindings = await pinPersonalCredentials(ctx.db, userId, "org-a", "claude-code", "claude-sonnet-5");
+    const runId = await newRun("org-a");
+    await ctx.db.update(agentRuns).set({ startedBy: userId, personalCredentialIds: bindings }).where(eq(agentRuns.id, runId));
+    const token = await mintRunGrant(ctx, { runId, organizationId: "org-a", actingUserId: userId, serverIds: [], modelCredentials: ["ANTHROPIC_API_KEY", PERSONAL_KEYS_MARKER], ttlMs: 60_000 });
+    const request = () => fetch(`${bentoUrl}/api/model-proxy/anthropic/v1/messages`, { method: "POST", headers: { "x-api-key": token }, body: "{}" });
+    assert.equal((await request()).status, 201);
+    assert.equal(seen.at(-1)?.headers["x-api-key"], "private-model-key");
+    await ctx.db.update(userSecrets).set({ ciphertext: ctx.secretBox.encrypt("rotated-private-key") }).where(eq(userSecrets.id, own!.id));
+    assert.equal((await request()).status, 201);
+    assert.equal(seen.at(-1)?.headers["x-api-key"], "rotated-private-key");
+    const calls = seen.length;
+    const mode = ctx.env.BENTO_MODE;
+    ctx.env.BENTO_MODE = "multi";
+    try {
+      assert.notEqual((await request()).status, 201, "membership is rechecked even after a successful call");
+    } finally { ctx.env.BENTO_MODE = mode; }
+    await ctx.db.delete(userSecrets).where(eq(userSecrets.id, own!.id));
+    assert.notEqual((await request()).status, 201, "removal never falls back to the shared key");
+    assert.equal(seen.length, calls);
+    await ctx.db.insert(userSecrets).values({ userId, name: "ANTHROPIC_API_KEY", ciphertext: ctx.secretBox.encrypt("replacement-key") });
+    assert.notEqual((await request()).status, 201, "recreating a personal key cannot revive a previous run");
+    await ctx.db.delete(userSecrets).where(eq(userSecrets.userId, userId));
+  });
+});

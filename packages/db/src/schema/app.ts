@@ -710,6 +710,7 @@ export const agentRuns = pgTable(
    */
   /** Pins a personal connection at queue time. Kept after disconnect for ownership. */
   personalAccountId: uuid("personal_account_id"),
+  personalCredentialIds: jsonb("personal_credential_ids").$type<Record<string, string | null>>().notNull().default({}),
   sharedAgentAuth: boolean("shared_agent_auth").notNull().default(false),
   numTurns: integer("num_turns"),
   error: text("error"),
@@ -1080,6 +1081,16 @@ export const gateChecks = pgTable("gate_checks", {
   lastEvaluatedAt: timestamp("last_evaluated_at", { withTimezone: true }),
   ...timestamps,
 });
+
+/** Personal API credentials, isolated by authenticated user RLS. */
+export const userSecrets = pgTable("user_secrets", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  ciphertext: text("ciphertext").notNull(),
+  hint: text("hint").notNull().default(""),
+  ...timestamps,
+}, (t) => [uniqueIndex("user_secrets_user_name_idx").on(t.userId, t.name)]);
 
 /**
  * Agent credentials, encrypted at rest. Scoped to an organization so a

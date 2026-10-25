@@ -85,6 +85,8 @@ export interface CustomModelProvider extends CustomModelProviderInput {
   organizationId: string | null;
   keyHint: string | null;
   hasApiKey: boolean;
+  hasPersonalApiKey?: boolean;
+  personalKeyHint?: string | null;
 }
 
 export interface RunStreamHandlers {
@@ -1473,8 +1475,11 @@ export class BentoClient {
 
   listSecrets() {
     return this.request<{
-      secrets: { id: string; name: string; hint: string }[];
+      secrets: { id: string; name: string; hint: string; scope: "user" | "org" }[];
       canManage: boolean;
+      canManagePersonal: boolean;
+      canManageOrg: boolean;
+      canShareWithOrg: boolean;
     }>("/api/secrets");
   }
 
@@ -1494,16 +1499,16 @@ export class BentoClient {
     return this.request<{ ok: boolean }>(`/api/custom-providers/${id}`, { method: "DELETE" });
   }
 
-  saveCustomProviderKey(id: string, apiKey: string) {
-    return this.request<CustomModelProvider>(`/api/custom-providers/${id}/key`, { method: "PUT", body: JSON.stringify({ apiKey }) });
+  saveCustomProviderKey(id: string, apiKey: string, scope: "user" | "org" = "user") {
+    return this.request<CustomModelProvider>(`/api/custom-providers/${id}/key`, { method: "PUT", body: JSON.stringify({ apiKey, scope }) });
   }
 
-  deleteCustomProviderKey(id: string) {
-    return this.request<{ ok: boolean }>(`/api/custom-providers/${id}/key`, { method: "DELETE" });
+  deleteCustomProviderKey(id: string, scope: "user" | "org" = "user") {
+    return this.request<{ ok: boolean }>(`/api/custom-providers/${id}/key?scope=${scope}`, { method: "DELETE" });
   }
 
   /** Values are write only: nothing reads a secret back. */
-  createSecret(input: { name: string; value: string }) {
+  createSecret(input: { name: string; value: string; scope?: "user" | "org" }) {
     return this.request<{ id: string; name: string; hint: string }>("/api/secrets", {
       method: "POST",
       body: JSON.stringify(input),

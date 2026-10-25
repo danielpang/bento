@@ -1,3 +1,4 @@
+import { hasPersonalKeys, PERSONAL_KEYS_MARKER, type PersonalCredentialIds } from "../agent-accounts/credentials.js";
 import type { AgentAdapter } from "@bento/agents";
 import { MODEL_PROXY_PATH, modelProviderForKey } from "@bento/core";
 import { collectExec, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
@@ -259,6 +260,7 @@ export async function proxyModelCredentials(
      */
     handle?: SandboxHandle;
     env: Record<string, string>;
+    personalCredentialIds?: PersonalCredentialIds;
     say: (text: string) => Promise<void>;
   },
 ): Promise<{ env: Record<string, string>; grantToken: string | null }> {
@@ -294,7 +296,7 @@ export async function proxyModelCredentials(
     organizationId: input.organizationId,
     actingUserId: input.actingUserId,
     serverIds: [],
-    modelCredentials: grantedModelCredentials(input.env, plan.keys),
+    modelCredentials: [...grantedModelCredentials(input.env, plan.keys), ...(hasPersonalKeys(input.personalCredentialIds ?? {}) ? [PERSONAL_KEYS_MARKER] : [])],
     swarmId: input.swarmId ?? null,
     ttlMs: runGrantTtlMs(ctx),
   });
