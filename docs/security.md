@@ -4,7 +4,7 @@ Agents read untrusted input (issues, READMEs, web pages, tool output), so Bento 
 
 ## Model keys stay encrypted in Bento
 
-For supported providers on hosted Bento (app.usebento.ai) and other multi mode servers, the model proxy keeps personal API keys and shared organization keys out of the sandbox. Local Docker sandboxes also use the proxy by default, with the exceptions described below. It contains a **proxy token** instead: a token minted for one agent session, under the same variable name as the key it replaces (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and so on). The tool's base URL variable points at Bento's model proxy, so the agent sends its model calls to Bento with the proxy token, and Bento sends them on to the provider with the real key.
+For supported providers on hosted Bento (app.usebento.ai) and other multi mode servers, the model proxy keeps personal API keys and shared organization keys out of the sandbox. Local Docker sandboxes also use the proxy by default, with the exceptions described below. The sandbox contains a **proxy token** instead: a token minted for one agent session, under the same variable name as the key it replaces (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and so on). The tool's base URL variable points at Bento's model proxy, so the agent sends its model calls to Bento with the proxy token, and Bento sends them on to the provider with the real key.
 
 ![The sandbox contains a proxy token; only Bento stores the key](./images/model-proxy.svg)
 
@@ -83,5 +83,5 @@ A run is billed unless Bento or its sandbox failed it. If the proxy itself fails
 ## Good practice
 
 - Never expose the host Docker socket, host SSH keys, or host git config to a sandbox.
-- In local mode (hosted Bento offers no subscription logins), prefer API keys over mounting subscription credential files, so the key can go through the proxy.
+- Prefer proxied API keys or personal account connections over legacy local machine login sharing, so provider credentials stay outside the sandbox.
 - Keep a saved provider base URL on public `https`, for the same reason.
