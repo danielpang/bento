@@ -43,9 +43,21 @@ import type {
  * here rather than in the components: one translation, in the file
  * that owns the boundary.
  */
+export interface LandingPage {
+  landings: SwarmLanding[];
+  /** Where the next page starts, or null when this was the last. */
+  next: number | null;
+}
+
 export interface SwarmApi {
   listSwarms(projectId: string): Promise<SwarmSummary[]>;
   getSwarm(swarmId: string): Promise<SwarmDetail>;
+  /**
+   * A page of the merge queue's finished rows, newest first, optionally
+   * narrowed to a task title or branch name. The detail carries only the
+   * first few; the panel asks for the rest when a person wants them.
+   */
+  listLandings(swarmId: string, input: { query?: string; offset: number }): Promise<LandingPage>;
   /**
    * The agents a leaf can be handed to.
    *
@@ -253,6 +265,20 @@ export function fixtureSwarmApi(clock: () => number = () => Date.now()): Fixture
           summarise(detail, buildSwarmModel(detail.tasks, { now: clock() }).root.completion),
         ),
       );
+    },
+    listLandings(swarmId, { query, offset }) {
+      const detail = find(swarmId);
+      if (!detail) return Promise.reject(new Error("not found"));
+      const titles = new Map(detail.tasks.map((task) => [task.id, task.title]));
+      const needle = query?.trim().toLowerCase() ?? "";
+      const rows = detail.landings
+        .filter((landing) => landing.status === "landed" || landing.status === "failed" || landing.status === "cancelled")
+        .filter((landing) => !needle
+          || (titles.get(landing.taskId) ?? "").toLowerCase().includes(needle)
+          || (landing.branchName ?? "").toLowerCase().includes(needle))
+        .sort((a, b) => (b.endedAt ?? "").localeCompare(a.endedAt ?? ""));
+      const page = rows.slice(offset, offset + 50);
+      return Promise.resolve({ landings: page, next: offset + 50 < rows.length ? offset + 50 : null });
     },
     getSwarm(swarmId) {
       const detail = find(swarmId);
@@ -719,6 +745,7 @@ export interface WireDetail {
     agentStartedAt?: string | null;
   }[];
   plannerRun?: SwarmPlannerRun | null;
+  plannerRuns?: SwarmDetail["plannerRuns"];
   /**
    * Optional, because a detail from a server that predates the merge
    * queue has none and a panel that read undefined.length would take
@@ -1032,6 +1059,12 @@ export function httpSwarmApi(
       const rows = await call<WireSwarmRow[]>(`/api/swarms?projectId=${encodeURIComponent(projectId)}`);
       return rows.map(toSummary);
     },
+    async listLandings(swarmId, { query, offset }) {
+      const params = new URLSearchParams({ offset: String(offset) });
+      if (query?.trim()) params.set("q", query.trim());
+      const page = await call<{ landings: WireLanding[]; next: number | null }>(`/api/swarms/${swarmId}/landings?${params}`);
+      return { landings: page.landings.map(toLanding), next: page.next };
+    },
     async getSwarm(swarmId) {
       const detail = await call<WireDetail>(`/api/swarms/${swarmId}`);
       return toDetail(detail);
@@ -1204,6 +1237,7 @@ export function toDetail(detail: WireDetail): SwarmDetail {
     tasks: detail.tasks.map(toTask),
     agentTimeMs: Number(detail.agentTimeMs ?? 0),
     plannerRun: detail.plannerRun ?? null,
+    plannerRuns: detail.plannerRuns,
     landings: (detail.landings ?? []).map(toLanding),
     landingSummary: detail.landingSummary,
     branchCheckout: detail.branchCheckout,

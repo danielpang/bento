@@ -20,6 +20,7 @@ import { swarmBranchName, swarmWorkspaceKey } from "./sandbox.js";
 import { workerBranchName } from "./branches.js";
 import { pushSwarmBranch } from "./remote-branches.js";
 import { driverForSandbox } from "../sandbox-driver.js";
+import { SandboxGone, wakeSwarmSandbox } from "../hibernate-sandbox.js";
 
 /**
  * What happens when a swarm is finished.
@@ -141,14 +142,18 @@ export async function publishFinishedSwarm(
   const [swarm] = await ctx.db.select().from(swarms).where(eq(swarms.id, swarmId)).limit(1);
   if (!swarm) return null;
   /**
-   * Only a swarm that is actually finished. The job is sent by the
-   * tick that saw the status change, and a swarm can move off "done"
-   * before the job is picked up (a person reopens it, the planner adds
-   * a leaf). Publishing a branch that is being worked again would open
-   * a pull request over a change that is not finished.
+   * A person may publish at any point once something landed, so the
+   * work is on GitHub before the sandbox holding it can be reaped. A
+   * pull request opened mid swarm is over an unfinished change, which
+   * is what the person asked for.
    */
-  if (swarm.status !== "done") {
-    return { published: [], failures: [], skipped: `the swarm is ${swarm.status}, not done` };
+  const [landed] = await ctx.db
+    .select({ id: swarmLandings.id })
+    .from(swarmLandings)
+    .where(and(eq(swarmLandings.swarmId, swarm.id), eq(swarmLandings.status, "landed")))
+    .limit(1);
+  if (!landed) {
+    return { published: [], failures: [], skipped: "nothing has been committed to the swarm's branch yet" };
   }
 
   const publisher = await githubConnectionFor(ctx, swarm.organizationId);
@@ -207,7 +212,7 @@ export async function publishStackedPullRequests(
     if (task && Object.keys((task.flags as StackFlags).landedHeads ?? {}).length > 0) landedTasks.push(task);
   }
   if (landedTasks.length === 0) {
-    return { published: [], failures: [], skipped: "no task landed with changes, so there is nothing to stack" };
+    return { published: [], failures: [], skipped: "no task was merged with changes, so there is nothing to stack" };
   }
 
   const swarmBranch = swarm.branchName ?? swarmBranchName(swarm.slug);
@@ -311,41 +316,24 @@ export async function publishSwarmCompletion(
   }
 
   const branch = swarm.branchName ?? swarmBranchName(swarm.slug);
-  const tasks = await ctx.db
-    .select()
-    .from(swarmTasks)
-    .where(eq(swarmTasks.swarmId, swarm.id))
-    .orderBy(asc(swarmTasks.position), asc(swarmTasks.createdAt));
-  const landedIds = await ctx.db
-    .select({ taskId: swarmLandings.taskId })
-    .from(swarmLandings)
-    .where(and(eq(swarmLandings.swarmId, swarm.id), eq(swarmLandings.status, "landed")));
-  const [design] = await ctx.db
-    .select({ content: runArtifacts.content })
-    .from(runArtifacts)
-    .where(and(eq(runArtifacts.swarmId, swarm.id), eq(runArtifacts.path, SWARM_DESIGN_PATH)))
-    .orderBy(desc(runArtifacts.createdAt))
-    .limit(1);
-  const [document] = await ctx.db
-    .select({ path: runArtifacts.path })
-    .from(runArtifacts)
-    .where(and(eq(runArtifacts.swarmId, swarm.id), eq(runArtifacts.stageSlug, "document")))
-    .orderBy(desc(runArtifacts.createdAt))
-    .limit(1);
-
-  const located = await swarmSandbox(ctx, swarm.sandboxId);
+  const located = await swarmSandbox(ctx, swarm);
   const handle = located?.handle ?? null;
   const publishDriver = located?.driver ?? null;
   const workspace = swarmWorkspaceKey(swarm.id);
+  const body = await combinedPullRequestBody(ctx, swarm);
+  // Unfinished work opens as a draft, so nobody merges half a swarm.
+  const draft = swarm.status !== "done";
 
-  const body = swarmPullRequestBody({
-    title: swarm.title,
-    goal: swarm.goal,
-    writeUp: design?.content ?? null,
-    tasks,
-    landedTaskIds: landedIds.map((row) => row.taskId),
-    documentPath: document?.path ?? null,
-  });
+  /*
+   * The machine is gone, so there is no checkout to push from. Every
+   * landing already pushed the swarm's branch, so the pull request is
+   * opened on what GitHub holds.
+   */
+  if (!located && ctx.drivers.default.workspace === "clone") {
+    const result = await publishPushedSwarmBranch(ctx, swarm, publisher, repoRows, branch, body, draft);
+    await refreshSwarmPullRequests(ctx, swarm.id, publisher);
+    return result;
+  }
   const publishables: PublishableRepository[] = repoRows.map((row) => {
     const githubRepoId = row.githubRepoId ? Number(row.githubRepoId) : undefined;
     return {
@@ -373,9 +361,11 @@ export async function publishSwarmCompletion(
   const result = await publishSwarmBranches(
     ctx.db,
     publisher,
-    { swarmId: swarm.id, title: swarm.title, body, branch, repositories: publishables },
+    { swarmId: swarm.id, title: swarm.title, body, branch, repositories: publishables, draft },
     options,
   );
+  // An open pull request is found rather than opened, and keeps its old text without this.
+  await refreshSwarmPullRequests(ctx, swarm.id, publisher);
 
   for (const failure of result.failures) {
     // Logged rather than thrown: a repository that could not be
@@ -389,18 +379,142 @@ export async function publishSwarmCompletion(
   return { ...result, skipped: null };
 }
 
-/** The machine holding this swarm's checkouts, when one is recorded and alive. */
+/**
+ * The machine holding this swarm's checkouts, woken when it is
+ * hibernated (a swarm can be published mid run, between turns), or
+ * null when none is recorded or it is gone.
+ */
 async function swarmSandbox(
   ctx: AppContext,
-  sandboxId: string | null,
+  swarm: typeof swarms.$inferSelect,
 ): Promise<{ handle: SandboxHandle; driver: SandboxDriver } | null> {
-  if (!sandboxId) return null;
-  const [row] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, sandboxId)).limit(1);
+  if (!swarm.sandboxId) return null;
+  const [row] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, swarm.sandboxId)).limit(1);
   if (!row || row.status === "destroyed") return null;
+  const driver = driverForSandbox(ctx.drivers, row, ctx);
+  if (driver.workspace === "clone") {
+    try {
+      await wakeSwarmSandbox(ctx, row, swarm, swarm.plannerProfileId);
+    } catch (err) {
+      if (err instanceof SandboxGone) return null;
+      throw err;
+    }
+  }
   return {
     handle: { externalId: row.externalId, provider: row.provider, workdir: row.workdir },
-    driver: driverForSandbox(ctx.drivers, row, ctx),
+    driver,
   };
+}
+
+/** A combined pull request over the swarm's branch as Bento last pushed it. */
+async function publishPushedSwarmBranch(
+  ctx: AppContext,
+  swarm: typeof swarms.$inferSelect,
+  publisher: GitHubPublisher,
+  repoRows: (typeof repositories.$inferSelect)[],
+  branch: string,
+  body: string,
+  draft: boolean,
+): Promise<SwarmPublishResult> {
+  const published: PublishedPullRequest[] = [];
+  const failures: { name: string; reason: string }[] = [];
+  for (const repo of repoRows) {
+    const headSha = repo.repoUrl ? swarm.pushedHeads?.[repo.repoUrl] : undefined;
+    const parsed = repo.repoUrl ? parseRepoUrl(repo.repoUrl) : null;
+    if (!repo.repoUrl || !headSha || !parsed) continue;
+    try {
+      const pr = await publisher.ensurePullRequest({
+        owner: parsed.owner,
+        repo: parsed.repo,
+        head: branch,
+        base: repo.defaultBranch,
+        title: swarm.title,
+        body,
+        draft,
+      });
+      await ctx.db
+        .insert(swarmPullRequests)
+        .values({ swarmId: swarm.id, repositoryId: repo.id, repoUrl: repo.repoUrl, number: pr.prNumber, url: pr.url, headSha })
+        .onConflictDoUpdate({
+          target: [swarmPullRequests.swarmId, swarmPullRequests.repoUrl],
+          set: { number: pr.prNumber, url: pr.url, headSha, updatedAt: new Date() },
+        });
+      published.push({ name: repo.name, repoUrl: repo.repoUrl, prNumber: pr.prNumber, url: pr.url });
+    } catch (err) {
+      failures.push({ name: repo.name, reason: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  for (const failure of failures) console.error(`swarm ${swarm.id}: could not publish ${failure.name}: ${failure.reason}`);
+  if (published.length > 0) {
+    ctx.bus.emitBoardEvent({ type: "swarm_updated", projectId: swarm.projectId, swarmId: swarm.id });
+  }
+  const skipped = published.length === 0 && failures.length === 0
+    ? "the swarm's sandbox is gone and its branch was never pushed to GitHub"
+    : null;
+  return { published, failures, skipped };
+}
+
+async function combinedPullRequestBody(ctx: AppContext, swarm: typeof swarms.$inferSelect): Promise<string> {
+  const tasks = await ctx.db
+    .select()
+    .from(swarmTasks)
+    .where(eq(swarmTasks.swarmId, swarm.id))
+    .orderBy(asc(swarmTasks.position), asc(swarmTasks.createdAt));
+  const landedIds = await ctx.db
+    .select({ taskId: swarmLandings.taskId })
+    .from(swarmLandings)
+    .where(and(eq(swarmLandings.swarmId, swarm.id), eq(swarmLandings.status, "landed")));
+  const [design] = await ctx.db
+    .select({ content: runArtifacts.content })
+    .from(runArtifacts)
+    .where(and(eq(runArtifacts.swarmId, swarm.id), eq(runArtifacts.path, SWARM_DESIGN_PATH)))
+    .orderBy(desc(runArtifacts.createdAt))
+    .limit(1);
+  const [document] = await ctx.db
+    .select({ path: runArtifacts.path })
+    .from(runArtifacts)
+    .where(and(eq(runArtifacts.swarmId, swarm.id), eq(runArtifacts.stageSlug, "document")))
+    .orderBy(desc(runArtifacts.createdAt))
+    .limit(1);
+  return swarmPullRequestBody({
+    title: swarm.title,
+    goal: swarm.goal,
+    writeUp: design?.content ?? null,
+    tasks,
+    landedTaskIds: landedIds.map((row) => row.taskId),
+    documentPath: document?.path ?? null,
+  });
+}
+
+/**
+ * Rewrites the swarm's combined pull requests to say what is on the
+ * branch now, and takes them out of draft once the swarm is done. Run
+ * after every push of the swarm's branch, so a pull request opened
+ * mid swarm does not keep the task list it was opened with. Best
+ * effort: a pull request GitHub will not update is logged, never
+ * thrown, because the push it follows already happened.
+ */
+export async function refreshSwarmPullRequests(
+  ctx: AppContext,
+  swarmId: string,
+  publisher: GitHubPublisher,
+): Promise<void> {
+  const [swarm] = await ctx.db.select().from(swarms).where(eq(swarms.id, swarmId)).limit(1);
+  if (!swarm) return;
+  const rows = await ctx.db.select().from(swarmPullRequests).where(eq(swarmPullRequests.swarmId, swarm.id));
+  if (rows.length === 0) return;
+  const body = await combinedPullRequestBody(ctx, swarm);
+  for (const row of rows) {
+    const parsed = parseRepoUrl(row.repoUrl);
+    if (!parsed) continue;
+    const ref = { owner: parsed.owner, repo: parsed.repo, prNumber: row.number };
+    try {
+      await publisher.updatePullRequest({ ...ref, title: swarm.title, body });
+      if (swarm.status === "done") await publisher.markPullRequestReady?.(ref);
+    } catch (err) {
+      console.error(`swarm ${swarm.id}: could not refresh pull request ${row.url}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
 }
 
 /**
@@ -467,15 +581,15 @@ export function swarmPullRequestBody(input: {
 
   const landed = new Set(input.landedTaskIds);
   const landedTasks = input.tasks.filter((task) => landed.has(task.id));
-  lines.push("## What landed on this branch", "");
+  lines.push("## What was merged into this branch", "");
   if (landedTasks.length > 0) {
     lines.push(
       ...landedTasks.map((task) => `- ${task.title}`),
       "",
-      "Each of those was worked on its own branch and landed onto this one through Bento's merge queue, one branch at a time.",
+      "Each of those was worked on its own branch and merged into this one through Bento's merge queue, one branch at a time.",
     );
   } else {
-    lines.push("Nothing landed through the merge queue. The branch carries whatever the planner committed directly.");
+    lines.push("Nothing was merged through the merge queue. The branch carries whatever the planner committed directly.");
   }
 
   return lines.join("\n");

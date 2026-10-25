@@ -449,7 +449,7 @@ test("a swarm plans, works, lands through a conflict, and opens a pull request",
   assert.match(openedBody, /One leaf per surface/);
   assert.match(openedBody, /- Empty cart state \(done\)/);
   assert.match(openedBody, /- Refund path/);
-  assert.match(openedBody, /## What landed on this branch/);
+  assert.match(openedBody, /## What was merged into this branch/);
 
   // The console's view of the same swarm, through the route it reads.
   const detail = (await (await app.request(`/api/swarms/${swarm.id}`)).json()) as {

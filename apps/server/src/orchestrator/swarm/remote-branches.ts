@@ -10,6 +10,7 @@ import { fetchRemoteBranchBundle, pushBranches, recordPushedHead, type Publishab
 import { QUEUE_POLL_SECONDS } from "../queue.js";
 import { driverForSandbox } from "../sandbox-driver.js";
 import { workerBranchName } from "./branches.js";
+import { refreshSwarmPullRequests } from "./complete.js";
 import { swarmBranchName, swarmTaskWorkspaceKey, swarmWorkspaceKey } from "./sandbox.js";
 
 /**
@@ -151,7 +152,10 @@ export async function pushSwarmBranch(
   const source = await branchSource(ctx, row, swarmWorkspaceKey(swarm.id), () =>
     wakeSwarmSandbox(ctx, row!, swarm, swarm.plannerProfileId),
   );
-  if (!source) return;
+  if (!source) {
+    await refreshSwarmPullRequests(ctx, swarm.id, publisher);
+    return;
+  }
 
   const repoRows = await projectRepositories(ctx, swarm.projectId);
   // One export per repository, shared by both pushes below.
@@ -201,6 +205,7 @@ export async function pushSwarmBranch(
       failures.push(...outcome.failures);
     }
   }
+  await refreshSwarmPullRequests(ctx, swarm.id, publisher);
   failLoudly(failures, `swarm ${swarm.id}`);
 }
 

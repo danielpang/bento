@@ -28,7 +28,7 @@ import {
   stages,
   user,
 } from "@bento/db";
-import { SseParser } from "@bento/core";
+import { SseParser, type RecordedRunEvent } from "@bento/core";
 import {
   LocalProcessDriver,
   SANDBOX_STOPPED_MESSAGE,
@@ -1338,6 +1338,33 @@ test("concurrent transcript appends all land, with contiguous seqs", async () =>
   );
   const texts = new Set(rows.map((r) => (r.payload as { text: string }).text));
   assert.equal(texts.size, writers, "no message was lost or duplicated");
+});
+
+test("transcript timestamps agree across live events, pages and SSE replay", async () => {
+  const { project, stages: projectStages } = await setupProject("Transcript clocks");
+  const feature = await createFeature(project.id, "A recorded reply");
+  const profile = await fakeProfile("transcript-clock-fake");
+  const [run] = await ctx.db.insert(agentRuns).values({
+    type: "pipeline", featureId: feature.id, stageId: projectStages[0]!.id,
+    agentProfileId: profile.id, prompt: "", status: "succeeded", executor: "server",
+  }).returning();
+  const live: RecordedRunEvent[] = [];
+  const unsubscribe = ctx.bus.onRunEvent(run!.id, (envelope) => live.push(envelope.event));
+  try {
+    await appendRunEvent(ctx, run!.id, { type: "message", role: "assistant", text: "The recorded reply" });
+  } finally {
+    unsubscribe();
+  }
+  const [stored] = await ctx.db.select().from(runEvents).where(eq(runEvents.runId, run!.id));
+  assert.equal(live[0]?.recordedAt, stored!.ts.toISOString(), "the live event uses the database clock");
+  const page = await app.request(`/api/runs/${run!.id}/events/before?seq=2`);
+  assert.equal(page.status, 200);
+  const paged = (await page.json()) as { events: RecordedRunEvent[] };
+  assert.deepEqual(paged.events, live);
+  const stream = await app.request(`/api/runs/${run!.id}/events`);
+  const frames = new SseParser().push(await stream.text());
+  const replayed = frames.filter((frame) => frame.event === "run_event").map((frame) => JSON.parse(frame.data));
+  assert.deepEqual(replayed, live, "reopening the chat preserves the same chronological positions");
 });
 
 /**

@@ -50,6 +50,9 @@ export const agentEvent = z.discriminatedUnion("type", [
 ]);
 export type AgentEvent = z.infer<typeof agentEvent>;
 
+/** A transcript read includes the database's timestamp, not the agent's clock. */
+export type RecordedRunEvent = AgentEvent & { recordedAt?: string };
+
 /**
  * A token-sized slice of what the agent is composing right now.
  *
