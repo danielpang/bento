@@ -2,7 +2,6 @@ import { and, eq, inArray } from "drizzle-orm";
 import { shouldHoldPlannerSession } from "@bento/core";
 import { swarmTasks, swarms } from "@bento/db";
 import type { AppContext } from "../../context.js";
-import { isBetaRun } from "../../feature-flags.js";
 import type { LiveConversation } from "../live-session.js";
 import type { SwarmSubject } from "../run-subject.js";
 import { enqueueSwarmTick } from "./coordinator.js";
@@ -30,9 +29,6 @@ import { claimNodeMessages, requeueSwarmMessages } from "./node-messages.js";
  *   its report, so it is never held.
  * - Every other role (judge, resolver, subplanner) is headless and
  *   closes stdin after its first turn.
- *
- * Behind beta features like every capability handed to an agent,
- * because a held planner is a held machine.
  */
 
 /** The leaves whose agents the planner is waiting on. */
@@ -128,12 +124,6 @@ export async function swarmLiveConversation(
 ): Promise<LiveConversation | null> {
   const { run, task } = subject;
   if (run.role !== "planner" && !(run.role === "worker" && task)) return null;
-  const beta = await isBetaRun(ctx, {
-    actingUserId: run.startedBy,
-    projectOwnerId: subject.project.ownerId,
-    organizationId: subject.project.organizationId,
-  });
-  if (!beta) return null;
   if (run.role === "planner") {
     return plannerConversation(ctx, { swarmId: subject.swarm.id, idleSec: ctx.env.BENTO_SWARM_PLANNER_HOLD_SEC });
   }
