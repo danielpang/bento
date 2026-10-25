@@ -63,6 +63,7 @@ export async function resolveAgentEnv(
       ),
     );
   for (const row of rows) {
+    if (ctx.env.BENTO_MODE === "multi" && row.name === "CLAUDE_CODE_OAUTH_TOKEN") continue;
     try {
       env[row.name] = ctx.secretBox.decrypt(row.ciphertext);
     } catch {

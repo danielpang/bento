@@ -1451,6 +1451,26 @@ export class BentoClient {
     });
   }
 
+  listAgentAccounts() {
+    return this.request<{ accounts: { id: string; provider: "anthropic" | "openai-codex"; reconnectRequired: boolean; updatedAt: string }[] }>("/api/agent-accounts");
+  }
+
+  connectAgentAccount(provider: "anthropic" | "openai-codex") {
+    return this.request<{ id: string; url: string; userCode: string | null; interval: number; expiresAt: string }>(`/api/agent-accounts/${provider}/login`, { method: "POST", body: "{}" });
+  }
+
+  completeAgentAccount(provider: "anthropic" | "openai-codex", id: string, code?: string) {
+    return this.request<{ status: "pending" | "connected" }>(`/api/agent-accounts/${provider}/complete`, { method: "POST", body: JSON.stringify({ id, code }) });
+  }
+
+  cancelAgentAccountLogin(provider: "anthropic" | "openai-codex", id: string) {
+    return this.request<{ ok: boolean }>(`/api/agent-accounts/${provider}/login/${id}`, { method: "DELETE" });
+  }
+
+  disconnectAgentAccount(provider: "anthropic" | "openai-codex") {
+    return this.request<{ ok: boolean }>(`/api/agent-accounts/${provider}`, { method: "DELETE" });
+  }
+
   listSecrets() {
     return this.request<{
       secrets: { id: string; name: string; hint: string }[];

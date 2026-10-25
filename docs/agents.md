@@ -98,7 +98,7 @@ If the session is unavailable (sandbox recreated or CLI session lost), Bento sta
 
 ## Claude Code on a subscription
 
-Local mode only. Not supported on [usebento.ai](https://usebento.ai).
+Use **Your personal subscriptions** in Agents for browser login in local or hosted mode (see [Personal account connections](#personal-account-connections)). The older setup-token option below is local mode only.
 
 ```bash
 claude setup-token
@@ -204,3 +204,39 @@ Gateway authentication is `AI_GATEWAY_API_KEY`. A custom Chat Completions connec
 `--full-access` disables fx's own permission checks: Bento's sandbox is the boundary. `fx ask --json` prints one object when the process exits (no streamed tool or thinking events). Runs resume by session id (`--resume`). Headless mode accepts no mid-run input. Does not report cost: the JSON carries token counts, not a dollar figure.
 
 MCP servers attach through `~/.fx/mcp.json`, which Bento rewrites before every run. fx refuses a literal Authorization header, so the run grant travels as `BENTO_MCP_GRANT` and the file names that variable.
+
+## Personal account connections
+
+Under **Agents**, **Your personal subscriptions**, connect Claude for Claude Code
+and Pi, or ChatGPT for Codex and Pi. This works in local and hosted multi mode.
+Claude opens a browser login and asks you to paste the complete `code#state` back
+into Bento. ChatGPT opens device authorization and supplies a one-time code.
+Bento stores the resulting tokens encrypted and refreshes them on the server.
+Reconnect replaces the connection; Disconnect stops its next model request.
+
+A connection belongs to the signed-in person, even inside a team. Owners and
+admins cannot list, change, or use another member's connection. An explicit
+stage run pins its starter's connection when queued. Other members cannot steer,
+answer questions on, or change that card while the personal run is active.
+Follow-up messages from different people are handled in separate runs.
+Background stages with no initiating user, swarms, and remote runners keep using
+their existing credentials. There is no fallback to the project owner's login.
+Organization secrets cannot accept Claude subscription tokens in multi mode.
+
+A connected Claude account takes priority on Claude Code and Pi's `anthropic/`
+models. A connected ChatGPT account takes priority on Codex's bare OpenAI model
+ids and Pi's `openai/` or `openai-codex/` models. Pi uses its native Codex provider
+for these ChatGPT calls, so the selected model must be available through Codex.
+Custom provider URLs keep their API-key route. Disconnect before starting a new
+run to return to API keys. A running subscription task never silently switches
+to a paid API key if its account is disconnected or needs reconnecting.
+
+Personal connections always use Bento's existing model proxy, including local
+mode. The agent gets a short-lived run token, never the provider's access or
+refresh token. The proxy checks the initiating user, current team membership,
+and the pinned connection on each request. Subscription calls use fixed vendor
+endpoints and cannot be redirected through a saved organization base URL. A
+remote sandbox needs `BENTO_MCP_GATEWAY_URL` set to an address it can reach.
+Reported subscription cost is treated as a notional list price, rather than
+API spend. Bento hosting charges and the provider's subscription usage limits
+still apply.

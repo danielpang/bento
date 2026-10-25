@@ -1,3 +1,6 @@
+import { eq } from "drizzle-orm";
+import { proxyPersonalAccount } from "./agent-accounts/run.js";
+import type { AccountProvider } from "./agent-accounts/oauth.js";
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type IncomingHttpHeaders, type Server } from "node:http";
@@ -16,7 +19,7 @@ import {
   type BuildCommandInput,
 } from "@bento/agents";
 import { MODEL_PROVIDERS, modelProviderForKey, type ModelProxyRoute } from "@bento/core";
-import { agentProfiles, agentRuns, createDb, createPool, features, pipelines, projects, runMigrations, secrets, stages } from "@bento/db";
+import { agentAccounts, agentProfiles, agentRuns, createDb, createPool, features, pipelines, projects, runMigrations, secrets, stages } from "@bento/db";
 import { LocalProcessDriver } from "@bento/sandbox";
 import { createApp } from "./app.js";
 import type { AppContext } from "./context.js";
@@ -228,7 +231,7 @@ function geminiReply(res: import("node:http").ServerResponse, url: string) {
 }
 
 /** One one-shot run of a real CLI with the environment a proxied multi mode run gets. */
-async function proxiedRun(adapter: AgentAdapter, model: string, keys: string[], runIndex: number, timeoutMs = 120_000) {
+async function proxiedRun(adapter: AgentAdapter, model: string, keys: string[], runIndex: number, timeoutMs = 120_000, personal?: AccountProvider) {
   const resolved: Record<string, string> = {
     ANTHROPIC_API_KEY: ANTHROPIC_KEY,
     ANTHROPIC_BASE_URL: providerUrl,
@@ -242,7 +245,7 @@ async function proxiedRun(adapter: AgentAdapter, model: string, keys: string[], 
   // the organization saved for it.
   const names = new Set(keys.flatMap((key) => [key, modelProviderForKey(key)?.baseUrlKey ?? key]));
   const runEnv = Object.fromEntries(Object.entries(resolved).filter(([name]) => names.has(name)));
-  const token = await mintRunGrant(ctx!, {
+  let token = await mintRunGrant(ctx!, {
     runId: runIds[runIndex]!,
     organizationId: null,
     actingUserId: null,
@@ -250,7 +253,19 @@ async function proxiedRun(adapter: AgentAdapter, model: string, keys: string[], 
     modelCredentials: grantedModelCredentials(runEnv, keys),
     ttlMs: 10 * 60_000,
   });
-  const credentials = proxiedAgentEnv(runEnv, keys, bentoUrl, token);
+  let credentials = proxiedAgentEnv(runEnv, keys, bentoUrl, token);
+  if (personal) {
+    await ctx!.db.delete(agentAccounts).where(eq(agentAccounts.userId, ctx!.userId));
+    const [account] = await ctx!.db.insert(agentAccounts).values({ userId: ctx!.userId, provider: personal,
+      ciphertext: ctx!.secretBox.encrypt(JSON.stringify({ access: "personal-access", refresh: "personal-refresh", expires: Date.now() + 3600_000, accountId: "personal-account" })),
+      expiresAt: new Date(Date.now() + 3600_000) }).returning();
+    await ctx!.db.update(agentRuns).set({ startedBy: ctx!.userId, personalAccountId: account!.id }).where(eq(agentRuns.id, runIds[runIndex]!));
+    ctx!.env.BETTER_AUTH_URL = bentoUrl;
+    const prepared = await proxyPersonalAccount(ctx!, { runId: runIds[runIndex]!, organizationId: null, actingUserId: ctx!.userId,
+      driver: new LocalProcessDriver(), cli: adapter.cli, account: account! });
+    credentials = prepared.env;
+    token = prepared.grantToken;
+  }
   const home = mkdtempSync(join(tmpdir(), `bento-proxy-${adapter.cli}-`));
   const cwd = join(home, "work");
   mkdirSync(cwd);
@@ -379,5 +394,21 @@ for (const [index, route] of ROUTES.entries()) {
     // The OpenRouter and AI Gateway keys have no saved base URL, so the
     // proxy sent them to the vendor's origin, which is the stand-in.
     assertReachedProvider(token, OTHER_KEYS[route.key]!, route.header);
+  });
+}
+
+for (const [index, example] of [
+  { adapter: claudeCodeAdapter, model: "claude-sonnet-5", provider: "anthropic" as const },
+  { adapter: codexAdapter, model: "gpt-5-codex", provider: "openai-codex" as const },
+  { adapter: piAdapter, model: "anthropic/claude-sonnet-4-5", provider: "anthropic" as const },
+  { adapter: piAdapter, model: "openai/gpt-5-codex", provider: "openai-codex" as const },
+].entries()) {
+  test(`personal subscription: ${example.adapter.cli} on ${example.provider}`, { skip, timeout: 180_000 }, async () => {
+    const { result, token, credentials } = await proxiedRun(example.adapter, example.model, [], 24 + index, 90_000, example.provider);
+    assert.equal(result.outcome.ok, true, result.outcome.error);
+    assertReachedProvider(token, "personal-access", "authorization");
+    assert.ok(!JSON.stringify(credentials).includes("personal-access"));
+    assert.ok(!JSON.stringify(credentials).includes("personal-refresh"));
+    if (example.provider === "openai-codex") assert.ok(calls.filter((c) => c.method === "POST").every((c) => c.headers["chatgpt-account-id"] === "personal-account"));
   });
 }

@@ -150,6 +150,8 @@ export const codexAdapter: AgentAdapter = {
       // read-only and the config file above was not written. Nested
       // keys create the provider table if it is missing.
       cmd.push(...openRouterConfigOverrides(openRouterBaseUrl(input.credentials)));
+    } else if (input.credentials?.BENTO_PERSONAL_PROVIDER === "openai-codex") {
+      cmd.push(...openAiKeyConfigOverrides(input.credentials.OPENAI_BASE_URL));
     } else {
       // OPENAI_BASE_URL is ignored as an env var the same way the key
       // is, so a non-OpenRouter gateway the organization saved arrives

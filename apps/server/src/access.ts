@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull, or, type SQL } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, ne, or, type SQL } from "drizzle-orm";
 import {
   agentRuns,
   customModelProviders,
@@ -102,6 +102,13 @@ export function newProjectOrg(ctx: AppContext, c: Context): string | null {
 export async function getAccessibleFeature(ctx: AppContext, c: Context, featureId: string) {
   const [feature] = await db(c, ctx).select().from(features).where(eq(features.id, featureId));
   if (!feature) return null;
+  if (c.req.method !== "GET" && c.req.method !== "HEAD") {
+    const [personal] = await db(c, ctx).select({ id: agentRuns.id }).from(agentRuns).where(and(
+      eq(agentRuns.featureId, featureId), isNotNull(agentRuns.personalAccountId), ne(agentRuns.startedBy, actor(c)),
+      inArray(agentRuns.status, ["queued", "starting", "running"]),
+    )).limit(1);
+    if (personal) return null;
+  }
   return (await canAccessProject(ctx, c, feature.projectId)) ? feature : null;
 }
 

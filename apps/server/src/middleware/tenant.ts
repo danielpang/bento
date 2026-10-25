@@ -2,7 +2,7 @@ import { sql } from "drizzle-orm";
 import type { MiddlewareHandler } from "hono";
 import type { Db } from "@bento/db";
 import type { AppContext } from "../context.js";
-import { activeOrg } from "./actor.js";
+import { actor, activeOrg } from "./actor.js";
 
 export const TENANT_DB_KEY = "bentoDb";
 const AFTER_COMMIT_KEY = "bentoAfterCommit";
@@ -49,7 +49,7 @@ export function tenantMiddleware(ctx: AppContext): MiddlewareHandler {
         // carries a parameter, and Postgres refuses more than one command
         // in a parameterized statement.
         await tx.execute(
-          sql`select set_config('role', 'bento_user', true), set_config('bento.org_id', ${orgId}, true)`,
+          sql`select set_config('role', 'bento_user', true), set_config('bento.org_id', ${orgId}, true), set_config('bento.user_id', ${actor(c)}, true)`,
         );
         c.set(TENANT_DB_KEY, tx as unknown as Db);
         await next();

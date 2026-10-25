@@ -1072,3 +1072,22 @@ test("sandbox usage leases inherit the machine's tenant and hide from other orga
     assert.equal((await client.query("select id from sandbox_usage_leases where id=$1", [lease.id])).rowCount, 0);
   });
 });
+
+test("personal account RLS follows the person, not their team or owner role", async () => {
+  await pool.query(`insert into identity."user" (id,name,email) values ('personal-a','A','personal-a@x.test'), ('personal-b','B','personal-b@x.test')`);
+  await pool.query(`insert into agent_accounts(user_id,provider,ciphertext,expires_at) values ('personal-a','anthropic','encrypted',now()+interval '1 hour')`);
+  await pool.query(`insert into agent_account_logins(user_id,provider,ciphertext,expires_at,next_poll_at) values ('personal-a','anthropic','encrypted',now()+interval '1 hour',now())`);
+  for (const table of ["agent_accounts", "agent_account_logins"]) {
+    const flags = await pool.query("select relrowsecurity, relforcerowsecurity from pg_class where relname=$1", [table]);
+    assert.equal(flags.rows[0].relrowsecurity, true);
+    assert.equal(flags.rows[0].relforcerowsecurity, true);
+    await asOrg("org-a", async (client) => {
+      assert.equal((await client.query(`select * from ${table}`)).rowCount, 0, "team context alone grants nothing");
+      await client.query("select set_config('bento.user_id','personal-b',true)");
+      assert.equal((await client.query(`select * from ${table}`)).rowCount, 0);
+      assert.equal((await client.query(`delete from ${table} where user_id='personal-a'`)).rowCount, 0);
+      await client.query("select set_config('bento.user_id','personal-a',true)");
+      assert.equal((await client.query(`select * from ${table}`)).rowCount, 1);
+    });
+  }
+});

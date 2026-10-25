@@ -69,6 +69,9 @@ export function secretRoutes(ctx: AppContext) {
         return c.json({ error: "only organization owners and admins can manage credentials" }, 403);
       }
       const body = c.req.valid("json");
+      if (ctx.env.BENTO_MODE === "multi" && body.name === "CLAUDE_CODE_OAUTH_TOKEN") {
+        return c.json({ error: "Subscriptions belong to individuals. Connect your personal account under Agents." }, 400);
+      }
       const values = {
         ownerId: actor(c),
         organizationId: resolved.organizationId,

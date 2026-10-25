@@ -40,18 +40,27 @@ export async function enqueueMessage(
 }
 
 /**
- * Takes every queued message on the card, oldest first. The rows move
+ * Takes queued messages from one sender, or messages allowed by a live run.
+ * Different senders must not spend each other's subscription or MCP identity. The rows move
  * to sent with no run yet; the caller either assigns them to the run
  * that will carry them (markMessagesSent) or puts them back
  * (requeueMessages). A claim left dangling by a crash between those two
  * steps is swept back to queued at boot.
  */
-export async function claimQueuedMessages(db: Db, featureId: string): Promise<ClaimedMessage[]> {
+export async function claimQueuedMessages(db: Db, featureId: string, scope: { runId?: string; userId?: string; includeAnonymous?: boolean } = {}): Promise<ClaimedMessage[]> {
   const result = await db.execute(sql`
     update feature_messages set status = 'sent', sent_at = now()
     where id in (
       select id from feature_messages
       where feature_id = ${featureId} and status = 'queued'
+      ${scope.runId ? sql`and exists (select 1 from agent_runs r where r.id = ${scope.runId}
+        and (r.personal_account_id is null or feature_messages.user_id = r.started_by))`
+        : scope.userId ? sql`and (user_id = ${scope.userId} ${scope.includeAnonymous ? sql`or user_id is null` : sql``})`
+        : sql`and user_id is not distinct from (
+        select first_message.user_id from feature_messages first_message
+        where first_message.feature_id = ${featureId} and first_message.status = 'queued'
+        order by first_message.created_at, first_message.id limit 1
+      )`}
       for update skip locked
     )
     returning id, text, user_id, created_at

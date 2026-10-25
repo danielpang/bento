@@ -1004,6 +1004,22 @@ run twice.
 A dedicated `pg.Client` (the LISTEN connection in `pg-bus.ts`) is
 outside this and has to handle its own reconnect.
 
+## Personal subscription connections are never organization credentials
+
+`agent_accounts` and `agent_account_logins` use user RLS (`bento.user_id`),
+not organization RLS or the organization inheritance trigger. Their secrets
+never enter a sandbox. Explicit stage runs pin `personal_account_id` when
+queued, and the model proxy checks that id and `started_by` on every request,
+with current membership and no credential cache. Refresh takes a row lock so
+replicas cannot rotate the same token twice. Reconnect replaces the row id,
+which must not revive old grants. The native-looking tokens Pi receives contain
+only the opaque Bento run token and a placeholder account id, never a vendor
+credential. The proxy unwraps these before normal grant authentication.
+
+A colleague cannot steer or mutate an active personal run's card. Queue claims
+for live runs filter by the starter; new follow-up runs claim one sender at a
+time. Background work must never borrow a project owner's subscription.
+
 ## Agent credentials belong to the organization, never the server
 
 `resolveAgentEnv` reads keys from the organization's encrypted secrets.

@@ -1,7 +1,8 @@
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
-import { agentRuns, repositories, swarmLandings, type Db } from "@bento/db";
+import { agentAccounts, agentProfiles, agentRuns, repositories, secrets, swarmLandings, type Db } from "@bento/db";
 import type { Analytics } from "../analytics.js";
 import type { Entitlements } from "../context.js";
+import { personalProvider } from "../agent-accounts/store.js";
 import { budgetRefusal } from "./swarm/ledger.js";
 
 type AgentRun = typeof agentRuns.$inferSelect;
@@ -231,7 +232,23 @@ async function insertPipelineRun(
     if (refusal) return { outOfCompute: refusal.reason };
   }
 
-  const [run] = await tx.insert(agentRuns).values(values).returning();
+  // Only a person's explicit stage run can use their subscription. Swarms,
+  // unattended gates, and remote runners keep their existing credentials.
+  let personalAccountId: string | null = null;
+  if (values.startedBy && (values.executor ?? "server") === "server" && (values.role ?? "stage") === "stage") {
+    const [profile] = await tx.select().from(agentProfiles).where(eq(agentProfiles.id, values.agentProfileId));
+    const provider = profile && personalProvider(profile.cli, profile.model);
+    if (provider) {
+      const [redirect] = await tx.select({ id: secrets.id }).from(secrets).where(and(
+        organizationId ? eq(secrets.organizationId, organizationId) : isNull(secrets.organizationId),
+        eq(secrets.name, provider === "anthropic" ? "ANTHROPIC_BASE_URL" : "OPENAI_BASE_URL"),
+      ));
+      const [account] = await tx.select({ id: agentAccounts.id }).from(agentAccounts)
+        .where(and(eq(agentAccounts.userId, values.startedBy), eq(agentAccounts.provider, provider)));
+      personalAccountId = redirect ? null : account?.id ?? null;
+    }
+  }
+  const [run] = await tx.insert(agentRuns).values({ ...values, personalAccountId }).returning();
   if (!run) throw new Error("run insert returned no row");
   return run;
 }

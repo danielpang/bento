@@ -3960,3 +3960,75 @@ test("creating an agent tags the active organization and refuses a removed membe
   const unwanted = await ctx.db.select().from(agentProfiles).where(eq(agentProfiles.name, "Must not exist"));
   assert.equal(unwanted.length, 0);
 });
+
+test("personal agent accounts stay private even from an owner of the same team", async () => {
+  const { agentAccounts, agentAccountLogins } = await import("@bento/db");
+  const signup = async (name: string) => {
+    const response = await jsonPost("/api/auth/sign-up/email", { email: `${name}@bento.test`, name, password: "correct-horse-battery" });
+    assert.equal(response.status, 200);
+    const token = response.headers.get("set-auth-token")!;
+    const [person] = await ctx.db.select().from(user).where(eq(user.email, `${name}@bento.test`));
+    return { token, id: person!.id, headers: { authorization: `Bearer ${token}` } };
+  };
+  const alice = await signup("subscription-alice");
+  const bob = await signup("subscription-bob");
+  const team = await (await jsonPost("/api/auth/organization/create", { name: "Subscriptions", slug: "personal-subscriptions" }, bob.token)).json() as { id: string };
+  await ctx.db.insert(member).values({ id: crypto.randomUUID(), userId: alice.id, organizationId: team.id, role: "member" });
+  for (const person of [alice, bob]) await jsonPost("/api/auth/organization/set-active", { organizationId: team.id }, person.token);
+
+  const begin = await jsonPost("/api/agent-accounts/anthropic/login", {}, alice.token);
+  assert.equal(begin.status, 200, "ordinary members can connect their own account");
+  const login = await begin.json() as { id: string; url: string };
+  const code = `code#${new URL(login.url).searchParams.get("state")}`;
+  assert.equal((await jsonPost("/api/agent-accounts/anthropic/complete", { id: login.id, code }, bob.token)).status, 404);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({ access_token: "private-access", refresh_token: "private-refresh", expires_in: 3600 });
+  try {
+    assert.equal((await jsonPost("/api/agent-accounts/anthropic/complete", { id: login.id, code }, alice.token)).status, 200);
+  } finally { globalThis.fetch = originalFetch; }
+  assert.equal((await jsonPost("/api/agent-accounts/anthropic/complete", { id: login.id, code }, alice.token)).status, 404, "one-time login cannot be replayed");
+  const own = await (await app.request("/api/agent-accounts", { headers: alice.headers })).json() as { accounts: { id: string }[] };
+  assert.equal(own.accounts.length, 1);
+  const pendingReconnect = await (await jsonPost("/api/agent-accounts/anthropic/login", {}, alice.token)).json() as { id: string };
+  await app.request(`/api/agent-accounts/anthropic/login/${pendingReconnect.id}`, { method: "DELETE", headers: alice.headers });
+  assert.equal((await ctx.db.select().from(agentAccounts).where(eq(agentAccounts.userId, alice.id)))[0]!.id, own.accounts[0]!.id, "cancelling reconnect preserves the existing account");
+  assert.ok(!JSON.stringify(own).includes("private-"));
+  assert.deepEqual(await (await app.request("/api/agent-accounts", { headers: bob.headers })).json(), { accounts: [] });
+  await app.request("/api/agent-accounts/anthropic", { method: "DELETE", headers: bob.headers });
+  assert.equal((await ctx.db.select().from(agentAccounts).where(eq(agentAccounts.userId, alice.id))).length, 1, "team owner cannot disconnect a member's account");
+  assert.equal((await jsonPost("/api/secrets", { name: "CLAUDE_CODE_OAUTH_TOKEN", value: "subscription-token" }, bob.token)).status, 400, "team secrets cannot share a subscription");
+
+  const [project] = await ctx.db.insert(projects).values({ ownerId: bob.id, organizationId: team.id, name: "Personal run" }).returning();
+  const [pipeline] = await ctx.db.insert(pipelines).values({ projectId: project!.id, name: "p" }).returning();
+  const { stages } = await import("@bento/db");
+  const [stage] = await ctx.db.insert(stages).values({ pipelineId: pipeline!.id, slug: "s", name: "S", position: 0 }).returning();
+  const [feature] = await ctx.db.insert(features).values({ projectId: project!.id, pipelineId: pipeline!.id, title: "private subscription run" }).returning();
+  const [profile] = await ctx.db.insert(agentProfiles).values({ ownerId: bob.id, organizationId: team.id, name: "a", cli: "claude-code", model: "claude-sonnet-5" }).returning();
+  const { startRunIfIdle } = await import("./orchestrator/start-run.js");
+  const run = await startRunIfIdle(ctx.db, { type: "pipeline", featureId: feature!.id, stageId: stage!.id, agentProfileId: profile!.id, startedBy: alice.id, prompt: "personal task" });
+  assert.ok(typeof run === "object" && "id" in run);
+  assert.equal(run.personalAccountId, own.accounts[0]!.id);
+  const change = (token: string) => app.request(`/api/features/${feature!.id}/message`, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ text: "Continue my task" }) });
+  assert.equal((await change(bob.token)).status, 404, "even a team owner cannot alter another person's active subscription run");
+  assert.equal((await change(alice.token)).status, 200);
+  const { featureMessages } = await import("@bento/db");
+  const { claimQueuedMessages } = await import("./orchestrator/messages.js");
+  await ctx.db.delete(featureMessages).where(eq(featureMessages.featureId, feature!.id));
+  await ctx.db.insert(featureMessages).values([
+    { featureId: feature!.id, userId: bob.id, text: "B first", createdAt: new Date(1000) },
+    { featureId: feature!.id, userId: alice.id, text: "A only", createdAt: new Date(2000) },
+    { featureId: feature!.id, userId: bob.id, text: "B second", createdAt: new Date(3000) },
+  ]);
+  assert.deepEqual((await claimQueuedMessages(ctx.db, feature!.id, { runId: run.id })).map((m) => m.text), ["A only"], "a message racing the route check cannot borrow the live subscription");
+  assert.deepEqual((await claimQueuedMessages(ctx.db, feature!.id)).map((m) => m.text), ["B first", "B second"], "the next run belongs to one sender");
+  await app.request("/api/agent-accounts/anthropic", { method: "DELETE", headers: alice.headers });
+  assert.equal((await ctx.db.select().from(agentAccounts).where(eq(agentAccounts.userId, alice.id))).length, 0);
+  assert.equal((await ctx.db.select().from(agentAccountLogins).where(eq(agentAccountLogins.userId, alice.id))).length, 0);
+  const finalLogin = await (await jsonPost("/api/agent-accounts/anthropic/login", {}, alice.token)).json() as { id: string; url: string };
+  globalThis.fetch = async () => Response.json({ access_token: "private-access", refresh_token: "private-refresh", expires_in: 3600 });
+  try {
+    assert.equal((await jsonPost("/api/agent-accounts/anthropic/complete", { id: finalLogin.id, code: `code#${new URL(finalLogin.url).searchParams.get("state")}` }, alice.token)).status, 200);
+  } finally { globalThis.fetch = originalFetch; }
+  await app.request(`/api/agent-accounts/anthropic/login/${finalLogin.id}`, { method: "DELETE", headers: alice.headers });
+  assert.equal((await ctx.db.select().from(agentAccounts).where(eq(agentAccounts.userId, alice.id))).length, 0, "cancel after completion removes only that attempt's connection");
+});
