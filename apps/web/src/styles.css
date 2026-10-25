@@ -11136,7 +11136,7 @@ a.swarm-plan-source-name:hover {
   color: var(--text);
   text-align: left;
 }
-.capacity-notice-art { width: 220px; max-width: 100%; margin: -12px 0 12px; }
+.capacity-notice-art { width: 220px; max-width: 100%; margin: -12px auto 12px; }
 .capacity-notice-art svg { display: block; width: 100%; height: auto; overflow: visible; }
 .capacity-notice-art .board-mascot, .capacity-notice-art .board-mascot-eyes { animation: none; }
 .capacity-notice-stars { fill: none; stroke: var(--text-dim); stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
