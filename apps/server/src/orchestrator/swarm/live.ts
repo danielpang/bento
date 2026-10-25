@@ -29,9 +29,6 @@ import { claimNodeMessages, requeueSwarmMessages } from "./node-messages.js";
  *   its report, so it is never held.
  * - Every other role (judge, resolver, subplanner) is headless and
  *   closes stdin after its first turn.
- *
- * Behind beta features like every capability handed to an agent,
- * because a held planner is a held machine.
  */
 
 /** The leaves whose agents the planner is waiting on. */
