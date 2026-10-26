@@ -79,10 +79,15 @@ export async function requireSwarmCompute(
    * go and the machine would bill forever. A host driver's work stays in
    * the host's checkout and needs no remote.
    */
-  if (ctx.drivers.default.workspace === "clone" && !(await githubConnectionFor(ctx, organizationId ?? null))) {
+  if (clonesRepositories(ctx) && !(await githubConnectionFor(ctx, organizationId ?? null))) {
     return { status: 409, body: { error: SWARM_GITHUB_REQUIRED, code: "SWARM_GITHUB_REQUIRED" } };
   }
   return null;
+}
+
+/** Whether this deployment's machines hold their own checkouts. */
+function clonesRepositories(ctx: AppContext): boolean {
+  return ctx.drivers?.default?.workspace === "clone";
 }
 
 export const SWARM_GITHUB_REQUIRED = "Connect GitHub under Settings, GitHub to run swarms.";
@@ -95,6 +100,6 @@ export function swarmRepositoriesWithoutRemote(
   ctx: AppContext,
   repos: { name: string; repoUrl: string | null }[],
 ): string[] {
-  if (ctx.drivers.default.workspace !== "clone") return [];
+  if (!clonesRepositories(ctx)) return [];
   return repos.filter((repo) => !repo.repoUrl || !parseRepoUrl(repo.repoUrl)).map((repo) => repo.name);
 }
