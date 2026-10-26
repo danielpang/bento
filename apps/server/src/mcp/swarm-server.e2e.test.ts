@@ -261,6 +261,7 @@ test("the handshake and the catalogue answer a planner", async () => {
       "reject",
       "split_task",
       "write_design",
+      "write_pull_request_description",
     ].sort(),
   );
 });
@@ -649,6 +650,19 @@ test("the design note is one note, replaced rather than added to", async () => {
     "the committed file contains the replacement note",
   );
   assert.match((await call(token, "read_design")).text, /Two branches after all/);
+});
+
+test("the planner's pull request description is kept on the swarm, replaced rather than added to", async () => {
+  const { token, swarmId } = await agentOn("planner");
+  await call(token, "write_pull_request_description", { content: "Adds dark mode." });
+  await call(token, "write_pull_request_description", { content: "  Adds dark mode and a toggle.  " });
+  const [swarm] = await db.select().from(swarms).where(eq(swarms.id, swarmId));
+  assert.equal(swarm!.pullRequestDescription, "Adds dark mode and a toggle.");
+
+  const empty = await rpc(token, "tools/call", { name: "write_pull_request_description", arguments: { content: "   " } });
+  assert.match(JSON.stringify(empty.body), /the description is empty/);
+  const [kept] = await db.select().from(swarms).where(eq(swarms.id, swarmId));
+  assert.equal(kept!.pullRequestDescription, "Adds dark mode and a toggle.", "an empty one does not replace it");
 });
 
 test("what an agent wrote comes back quoted and labelled, never as instructions", async () => {

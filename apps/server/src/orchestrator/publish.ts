@@ -267,6 +267,13 @@ export async function publishFeatureBranches(
      * push) falls back to the read-at-push behavior.
      */
     lease: async (repo) => {
+      const [feature] = await db
+        .select({ pushedHeads: features.pushedHeads })
+        .from(features)
+        .where(eq(features.id, args.featureId))
+        .limit(1);
+      const pushed = feature?.pushedHeads?.[args.branch]?.[repo.repoUrl];
+      if (pushed) return pushed;
       const [known] = await db
         .select({ headSha: featurePullRequests.headSha })
         .from(featurePullRequests)
@@ -283,6 +290,14 @@ export async function publishFeatureBranches(
         )
         .limit(1);
       return known?.headSha ?? null;
+    },
+    pushed: async (repo, headSha) => {
+      await db
+        .update(features)
+        .set({
+          pushedHeads: sql`${features.pushedHeads} || jsonb_build_object(${args.branch}::text, coalesce(${features.pushedHeads}->${args.branch}::text, '{}'::jsonb) || jsonb_build_object(${repo.repoUrl}::text, ${headSha}::text))`,
+        })
+        .where(eq(features.id, args.featureId));
     },
     record: async (repo, pr) => {
       await db
@@ -376,8 +391,8 @@ export async function publishSwarmBranches(
         .limit(1);
       return known?.headSha ?? null;
     },
+    pushed: (repo, headSha) => recordPushedHead(db, { swarmId: args.swarmId }, repo.repoUrl, headSha),
     record: async (repo, pr) => {
-      await recordPushedHead(db, { swarmId: args.swarmId }, repo.repoUrl, pr.headSha);
       await db
         .insert(swarmPullRequests)
         .values({
@@ -566,6 +581,8 @@ async function publishBranches(
     /** What to say when the branch is one nothing may push to. */
     protectedBranchRefusal: (branch: string) => string;
     lease: (repo: PublishableRemote) => Promise<string | null>;
+    /** Saves the pushed commit as the next lease before the pull request is asked for, which can fail. */
+    pushed: (repo: PublishableRemote, headSha: string) => Promise<void>;
     record: (
       repo: PublishableRemote,
       pr: { prNumber: number; url: string; headSha: string },
@@ -649,6 +666,7 @@ async function publishBranches(
         notesOnly.push(repo.name);
         continue;
       }
+      await plan.pushed(remoteRepo, pushedHead);
 
       const pr = await publisher.ensurePullRequest({
         owner: parsed.owner,
