@@ -519,6 +519,13 @@
       "when": 1793000000000,
       "tag": "0073_swarm_publish_safety",
       "breakpoints": true
+    },
+    {
+      "idx": 74,
+      "version": "7",
+      "when": 1793100000000,
+      "tag": "0074_swarm_pull_request_description",
+      "breakpoints": true
     }
   ]
 }

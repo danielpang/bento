@@ -445,6 +445,7 @@ async function combinedPullRequestBody(ctx: AppContext, swarm: typeof swarms.$in
     tasks,
     landedTaskIds: landedIds.map((row) => row.taskId),
     documentPath: document?.path ?? null,
+    description: swarm.pullRequestDescription,
   });
 }
 
@@ -502,10 +503,17 @@ export function swarmPullRequestBody(input: {
   landedTaskIds: string[];
   /** The assembled document, on a swarm whose deliverable is one. */
   documentPath?: string | null;
+  /** The planner's summary, which replaces the goal and the design note when it wrote one. */
+  description?: string | null;
 }): string {
   const lines: string[] = [`Opened by Bento for the swarm "${input.title}".`, ""];
 
-  lines.push("## Goal", "", input.goal.trim() || "(none given)", "");
+  const description = input.description?.trim();
+  if (description) {
+    lines.push("## Summary", "", description, "");
+  } else {
+    lines.push("## Goal", "", input.goal.trim() || "(none given)", "");
+  }
 
   /*
    * Named first, under the goal, on a swarm whose deliverable is a
@@ -522,7 +530,11 @@ export function swarmPullRequestBody(input: {
   }
 
   if (input.writeUp?.trim()) {
-    lines.push("## What the planner wrote", "", input.writeUp.trim(), "");
+    if (description) {
+      lines.push(`The planner's design note is in ${SWARM_DESIGN_PATH} on this branch.`, "");
+    } else {
+      lines.push("## What the planner wrote", "", input.writeUp.trim(), "");
+    }
   }
 
   const byParent = new Map<string | null, (typeof swarmTasks.$inferSelect)[]>();

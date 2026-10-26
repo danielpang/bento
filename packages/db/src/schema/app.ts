@@ -1928,6 +1928,8 @@ export const swarms = pgTable(
     branchPushedAt: timestamp("branch_pushed_at", { withTimezone: true }),
     /** A publish in progress, claimed so a second click waits for it rather than racing its push. */
     publishingSince: timestamp("publishing_since", { withTimezone: true }),
+    /** The planner's summary of the change, written as it plans, and the pull request's description. */
+    pullRequestDescription: text("pull_request_description"),
     archivedAt: timestamp("archived_at", { withTimezone: true }),
     /** Drives "pick up where you left off" without touching updatedAt. */
     lastOpenedAt: timestamp("last_opened_at", { withTimezone: true }),

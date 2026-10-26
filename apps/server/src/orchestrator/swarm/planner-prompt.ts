@@ -224,7 +224,7 @@ export function buildPlannerPrompt(input: PlannerPromptInput): string {
     existingPlan
       ? "1. Read the plan you were given first, all of it, and then enough of the code to know whether it fits what is there. The plan is the person's decision about what to build; the code is where you learn how. Where the two disagree, say so in the design note or ask_user, rather than quietly planning something else."
       : "1. Read enough of the code to know what the goal actually involves. A plan written without reading is a plan somebody else has to throw away.",
-    "2. Build the plan with your tools, not in prose. create_task and split_task are what put work on the board; a plan you only describe in a message is one nothing can act on and nobody can watch.",
+    "2. Build the plan with your tools, not in prose. create_task and split_task are what put work on the board; a plan you only describe in a message is one nothing can act on and nobody can watch. Before your first create_task, call write_pull_request_description: a short summary, for the reviewer of the pull request this swarm opens, of what the change does and why and how it goes about it. Write it again whenever the plan changes what the pull request will contain.",
     existingPlan
       ? "3. Turn the plan's implementation steps into leaves a single agent can finish on its own branch, in the plan's own order and under the plan's own headings where it has them. Two leaves that have to edit the same lines are one leaf; a step too large for one agent is a plan node with leaves under it."
       : "3. Split the goal into leaves a single agent can finish on its own branch. Two leaves that have to edit the same lines are one leaf.",

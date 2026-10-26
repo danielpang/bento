@@ -582,6 +582,19 @@ minutes). Pushes and `ensurePullRequest` are idempotent, so a publish
 cut off midway is finished by the next click. A host branch whose
 worktree was released for checkout is read from the repository's own
 branch (`hostBranchSource`), never skipped as if it had no commits.
+The commit a push put on GitHub is saved as the next push's lease as
+soon as the push succeeds (`pushed`), not once the pull request opens:
+GitHub can refuse the pull request after taking the push, and a retry
+holding the older commit read Bento's own push as somebody else's.
+
+The pull request's description is the planner's, not the goal's. The
+planner writes it before its first task (`write_pull_request_description`,
+kept in `swarms.pull_request_description`, at most
+`PULL_REQUEST_DESCRIPTION_MAX_CHARS`), and the body puts it in place of
+the goal and the design note, which a person can paste or a planner can
+write past GitHub's 65536 character limit. A swarm without one falls back
+to the goal and the design note, and `fitPullRequestBody` cuts any body
+to the limit.
 
 ## A swarm's planner and workers hold a live session, and stdin is what ends a run
 

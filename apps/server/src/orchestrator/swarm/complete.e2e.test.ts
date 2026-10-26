@@ -336,6 +336,27 @@ test("publishing the same finished swarm twice leaves one pull request", async (
   assert.equal(await git(remotePath, ["rev-parse", "refs/heads/swarm/twice"]), head);
 });
 
+test("a push whose pull request GitHub refused is Bento's own on the retry", async () => {
+  const fx = await finishedSwarm("refused");
+  await publishSwarmCompletion(ctx, fx.swarm, publisher, { remoteUrl: () => remotePath });
+
+  await writeFile(path.join(fx.tree, "more.ts"), "export const more = 2;\n");
+  await git(fx.tree, ["add", "."]);
+  await git(fx.tree, ["commit", "--quiet", "-m", "more"]);
+  const refusing = {
+    ...publisher,
+    async ensurePullRequest(): Promise<never> {
+      throw new Error("Validation Failed: body is too long");
+    },
+  };
+  const refused = await publishSwarmCompletion(ctx, fx.swarm, refusing, { remoteUrl: () => remotePath });
+  assert.match(refused.failures[0]?.reason ?? "", /body is too long/);
+
+  const retry = await publishSwarmCompletion(ctx, fx.swarm, publisher, { remoteUrl: () => remotePath });
+  assert.deepEqual(retry.failures, [], "the branch holds the commit Bento pushed, not somebody else's");
+  assert.equal(retry.published.length, 1);
+});
+
 test("a swarm somebody pushed to since is refused rather than forced over", async () => {
   /**
    * The lease, which is the reason the head is recorded at all. A
@@ -435,4 +456,19 @@ test("the body names the goal, the plan and the landed work even with nothing el
   assert.match(body, /## Goal\n\n\(none given\)/);
   assert.doesNotMatch(body, /## What the planner wrote/, "a section with nothing in it is not drawn");
   assert.match(body, /Nothing was merged through the merge queue\./);
+});
+
+test("the planner's description replaces the goal and the design note in the body", () => {
+  const body = swarmPullRequestBody({
+    title: "Rewrite the checkout",
+    goal: "x".repeat(80_000),
+    writeUp: "y".repeat(80_000),
+    tasks: [],
+    landedTaskIds: [],
+    description: "Moves checkout to one page.",
+  });
+  assert.match(body, /## Summary\n\nMoves checkout to one page\./);
+  assert.doesNotMatch(body, /## Goal|## What the planner wrote/);
+  assert.match(body, /design note is in docs\/bento\/swarm\/design\.md on this branch/);
+  assert.ok(body.length < 1000);
 });

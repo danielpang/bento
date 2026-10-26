@@ -4,6 +4,9 @@ import { collectExec, repositoryPathIn, type SandboxDriver, type SandboxHandle }
 /** The shared design document promised by the swarm PRD. */
 export const SWARM_DESIGN_PATH = "docs/bento/swarm/design.md";
 
+/** Leaves room under GitHub's 65536 for the task list Bento adds below it. */
+export const PULL_REQUEST_DESCRIPTION_MAX_CHARS = 20_000;
+
 interface CommitDesignInput {
   driver: SandboxDriver;
   handle: SandboxHandle;

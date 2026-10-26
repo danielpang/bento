@@ -19,7 +19,7 @@ import type { BoardEvent } from "../events.js";
 import { ACTIVE_RUN_STATUSES } from "../orchestrator/start-run.js";
 import { infraFailureReason } from "../infra-failures.js";
 import { quoteUntrusted } from "../orchestrator/swarm/planner-prompt.js";
-import { commitSwarmDesignDocument, SWARM_DESIGN_PATH } from "../orchestrator/swarm/design-document.js";
+import { commitSwarmDesignDocument, PULL_REQUEST_DESCRIPTION_MAX_CHARS, SWARM_DESIGN_PATH } from "../orchestrator/swarm/design-document.js";
 import { loadPlanSources, PLAN_SOURCE_DIR, planSourceFileName } from "../orchestrator/swarm/plan-sources.js";
 import { describeSource } from "../orchestrator/swarm/planner-prompt.js";
 import { queueSwarmSlackNotify } from "../orchestrator/slack-notify.js";
@@ -155,6 +155,7 @@ const shapes = {
   ask_user: z.object({ taskId: uuidArg.nullish(), question: z.string().min(1).max(4000) }).strip(),
   write_design: z.object({ content: z.string().min(1).max(200_000) }).strip(),
   read_design: z.object({}).strip(),
+  write_pull_request_description: z.object({ content: z.string().min(1).max(PULL_REQUEST_DESCRIPTION_MAX_CHARS) }).strip(),
   read_plan: z.object({ source: z.number().int().min(1).optional() }).strip(),
   read_report: z.object({ taskId: uuidArg }).strip(),
   read_transcript_tail: z
@@ -310,6 +311,17 @@ const TOOLS: Record<ToolName, ToolSpec> = {
       "Writes the swarm's design note, replacing the previous one. This is what every agent in the swarm reads for the shape of the whole change.",
     roles: ["planner"],
     inputSchema: { type: "object", properties: { content: str("Markdown.") }, required: ["content"], additionalProperties: false },
+  },
+  write_pull_request_description: {
+    description:
+      "Writes the description of the pull request this swarm's branch opens as, replacing the previous one. A reviewer who never watched the swarm reads it: what the change does and why, the approach, and what to look at closely. Bento adds the task list and what was merged below it, so do not repeat those.",
+    roles: ["planner"],
+    inputSchema: {
+      type: "object",
+      properties: { content: str(`Markdown, at most ${PULL_REQUEST_DESCRIPTION_MAX_CHARS} characters.`) },
+      required: ["content"],
+      additionalProperties: false,
+    },
   },
   read_design: {
     description:
@@ -553,6 +565,8 @@ async function runTool(
       return writeDesign(ctx, caller, args as Args<"write_design">);
     case "read_design":
       return readDesign(ctx, caller);
+    case "write_pull_request_description":
+      return writePullRequestDescription(ctx, caller, args as Args<"write_pull_request_description">);
     case "read_plan":
       return readPlan(ctx, caller, args as Args<"read_plan">);
     case "read_report":
@@ -1313,6 +1327,18 @@ async function writeDesign(ctx: AppContext, caller: SwarmCaller, args: Args<"wri
     });
   });
   return "Design note saved. Every agent in this swarm can read it.";
+}
+
+async function writePullRequestDescription(
+  ctx: AppContext,
+  caller: SwarmCaller,
+  args: Args<"write_pull_request_description">,
+): Promise<string> {
+  await ctx.db
+    .update(swarms)
+    .set({ pullRequestDescription: args.content.trim(), updatedAt: new Date() })
+    .where(eq(swarms.id, caller.swarmId));
+  return "Pull request description saved. Write it again if the plan changes what the pull request will contain.";
 }
 
 async function readDesign(ctx: AppContext, caller: SwarmCaller): Promise<string> {
