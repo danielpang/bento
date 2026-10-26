@@ -1924,6 +1924,10 @@ export const swarms = pgTable(
      * than overwrite a person's commits.
      */
     pushedHeads: jsonb("pushed_heads").$type<Record<string, string>>().notNull().default({}),
+    /** When Bento last pushed the swarm's branch, to tell a copy on GitHub that is behind a later landing. */
+    branchPushedAt: timestamp("branch_pushed_at", { withTimezone: true }),
+    /** A publish in progress, claimed so a second click waits for it rather than racing its push. */
+    publishingSince: timestamp("publishing_since", { withTimezone: true }),
     archivedAt: timestamp("archived_at", { withTimezone: true }),
     /** Drives "pick up where you left off" without touching updatedAt. */
     lastOpenedAt: timestamp("last_opened_at", { withTimezone: true }),

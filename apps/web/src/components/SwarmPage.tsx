@@ -1,6 +1,6 @@
 import { isSandboxCapacityError } from "@bento/core";
 import { CapacityNotice } from "./CapacityNotice.js";
-import { useEffect, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useState, type ReactNode } from "react";
 import { CompletionRing } from "./CompletionRing.js";
 import { MergeQueue } from "./MergeQueue.js";
 import { OutOfCompute } from "./OutOfCompute.js";
@@ -13,7 +13,7 @@ import { formatCompletion, type SwarmModel } from "../swarm/layout.js";
 import { formatElapsed } from "../swarm/time.js";
 import type { ModeSurfaces } from "../swarm/plan.js";
 import type { SwarmArtifact, SwarmDetail, SwarmPlanSource } from "../swarm/types.js";
-import type { LandingPage } from "../swarm/client.js";
+import type { LandingPage, SwarmPublishOutcome } from "../swarm/client.js";
 import { formatBytes } from "@bento/core";
 import { externalHttpUrl } from "../external-url.js";
 import { browserStorage, readBriefOpen, rememberBriefOpen, type StorageLike, type SwarmView } from "../swarm/view-state.js";
@@ -259,8 +259,11 @@ export function SwarmPage({
   briefStorage,
   onOpenArtifact,
   onOpenPlannerOutput,
+  publish = null,
 }: {
   detail: SwarmDetail;
+  /** The publish this person started here: the mode still running, or what it opened. */
+  publish?: { inFlight: "combined" | "stacked" | null; outcome: SwarmPublishOutcome | null } | null;
   model: SwarmModel;
   view: SwarmView;
   onView: (view: SwarmView) => void;
@@ -510,19 +513,28 @@ export function SwarmPage({
         </p>
       )}
 
-      {actions.onPublish && (() => {
+      {publish?.outcome && <PublishOutcome outcome={publish.outcome} />}
+
+      {actions.onPublish && !publish?.outcome && (() => {
         const offer = publishOffer(detail);
         if (!offer) return null;
+        const inFlight = publish?.inFlight ?? null;
         return (
-          <div className="swarm-publish" role="group" aria-label="Open pull requests">
+          <div className="swarm-publish" role="group" aria-label="Open pull requests" aria-busy={inFlight !== null}>
             <p>{offer.words}</p>
             <div className="actions">
               {offer.stackOnly ? (
-                <button className="btn btn-primary" disabled={busy} onClick={() => actions.onPublish?.("stacked")}>Add them to the stack</button>
+                <button className="btn btn-primary" disabled={busy} onClick={() => actions.onPublish?.("stacked")}>
+                  {inFlight === "stacked" ? "Opening…" : "Add them to the stack"}
+                </button>
               ) : (
                 <>
-                  <button className="btn btn-primary" disabled={busy} onClick={() => actions.onPublish?.("combined")}>One pull request</button>
-                  <button className="btn" disabled={busy} onClick={() => actions.onPublish?.("stacked")}>One per task, stacked</button>
+                  <button className="btn btn-primary" disabled={busy} onClick={() => actions.onPublish?.("combined")}>
+                    {inFlight === "combined" ? "Opening…" : "One pull request"}
+                  </button>
+                  <button className="btn" disabled={busy} onClick={() => actions.onPublish?.("stacked")}>
+                    {inFlight === "stacked" ? "Opening…" : "One per task, stacked"}
+                  </button>
                 </>
               )}
             </div>
@@ -648,6 +660,28 @@ export function SwarmPage({
  * tasks landed when it was opened, so tasks landed since are offered as
  * an addition to it.
  */
+function PublishOutcome({ outcome }: { outcome: SwarmPublishOutcome }) {
+  return (
+    <div className="swarm-publish" role="status">
+      {outcome.pullRequests.length > 0 && (
+        <p>
+          Opened{" "}
+          {outcome.pullRequests.map((pr, index) => (
+            <Fragment key={`${pr.name}#${pr.number}`}>
+              {index > 0 && ", "}
+              {pr.url ? <a href={pr.url} target="_blank" rel="noreferrer">#{pr.number}</a> : `#${pr.number}`}
+            </Fragment>
+          ))}
+        </p>
+      )}
+      {outcome.behind && <p>Missing tasks: the sandbox was lost before they reached GitHub.</p>}
+      {outcome.failures.map((failure) => (
+        <p key={failure.name} className="muted">{failure.name}: {failure.reason}</p>
+      ))}
+    </div>
+  );
+}
+
 export function publishOffer(detail: SwarmDetail): { words: string; stackOnly: boolean } | null {
   if (detail.pullRequests.length > 0) return null;
   const committed = detail.landingSummary?.committed

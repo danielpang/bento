@@ -1,12 +1,12 @@
 import { asc, eq } from "drizzle-orm";
 import { repositories, sandboxes, swarmTasks, swarms } from "@bento/db";
-import type { GitHubPublisher } from "@bento/github";
+import { parseRepoUrl, type GitHubPublisher } from "@bento/github";
 import type { SandboxDriver, SandboxHandle } from "@bento/sandbox";
 import { captureJobErrors } from "../../analytics.js";
 import type { AppContext } from "../../context.js";
 import { githubConnectionFor } from "../../github.js";
-import { wakeSwarmSandbox } from "../hibernate-sandbox.js";
-import { fetchRemoteBranchBundle, pushBranches, recordPushedHead, type PublishableRepository } from "../publish.js";
+import { SandboxGone, wakeSwarmSandbox } from "../hibernate-sandbox.js";
+import { fetchRemoteBranchBundle, hostBranchSource, pushBranches, recordPushedHead, type PublishableRepository } from "../publish.js";
 import { QUEUE_POLL_SECONDS } from "../queue.js";
 import { driverForSandbox } from "../sandbox-driver.js";
 import { workerBranchName } from "./branches.js";
@@ -51,6 +51,17 @@ export type SwarmPushJob =
 export interface PushOptions {
   publisher?: GitHubPublisher;
   remoteUrl?: (owner: string, repo: string) => string;
+}
+
+/**
+ * The swarm's branch could not be put on GitHub, so its machine is
+ * still the only copy of it.
+ */
+export class SwarmBranchNotSaved extends Error {
+  constructor(swarmId: string, reason: string) {
+    super(`swarm ${swarmId}'s branch is not on GitHub: ${reason}`);
+    this.name = "SwarmBranchNotSaved";
+  }
 }
 
 const pushWorkers = new WeakSet<object>();
@@ -125,7 +136,7 @@ export async function pushTaskBranch(ctx: AppContext, taskId: string, options: P
   const branch = task.branchName ?? workerBranchName(swarm.branchName ?? swarmBranchName(swarm.slug), task.id);
   const outcome = await pushBranches(publisher, {
     branch,
-    repositories: repoRows.map((repo) => publishable(ctx, repo, source)),
+    repositories: repoRows.map((repo) => publishable(ctx, repo, source, branch)),
     lease: async (repo) => flags.pushedHeads?.[repo.repoUrl] ?? null,
     record: (repo, headSha) => recordPushedHead(ctx.db, { taskId: task.id }, repo.repoUrl, headSha),
     ...(options.remoteUrl ? { remoteUrl: options.remoteUrl } : {}),
@@ -133,17 +144,47 @@ export async function pushTaskBranch(ctx: AppContext, taskId: string, options: P
   failLoudly(outcome.failures, `swarm task ${task.id}`);
 }
 
+/**
+ * Pushes the swarm's branch from its machine, and returns only once
+ * GitHub holds what the machine holds: the reap's precondition for
+ * destroying it. A push job can lose the race with the reap, fail every
+ * retry, or skip a project whose GitHub connection was removed, and
+ * each of those used to leave the machine as the only copy of the work
+ * when the reap destroyed it. Throws SwarmBranchNotSaved instead.
+ *
+ * A machine on a host driver is not asked: its checkout is the host's
+ * worktree, which outlives the machine. One that is already gone has
+ * nothing left to save.
+ */
+export async function saveSwarmBranch(ctx: AppContext, swarmId: string, options: PushOptions = {}): Promise<void> {
+  const [swarm] = await ctx.db.select().from(swarms).where(eq(swarms.id, swarmId)).limit(1);
+  if (!swarm?.sandboxId) return;
+  const [row] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, swarm.sandboxId)).limit(1);
+  if (!row || row.status === "destroyed") return;
+  if (driverForSandbox(ctx.drivers, row, ctx).workspace !== "clone") return;
+  try {
+    await pushSwarmBranch(ctx, swarmId, undefined, { ...options, required: true });
+  } catch (err) {
+    if (err instanceof SandboxGone) return;
+    if (err instanceof SwarmBranchNotSaved) throw err;
+    throw new SwarmBranchNotSaved(swarmId, err instanceof Error ? err.message : String(err));
+  }
+}
+
 /** The swarm's branch, and the branch of the task that just landed on it. */
 export async function pushSwarmBranch(
   ctx: AppContext,
   swarmId: string,
   landedTaskId?: string,
-  options: PushOptions = {},
+  options: PushOptions & { required?: boolean } = {},
 ): Promise<void> {
   const [swarm] = await ctx.db.select().from(swarms).where(eq(swarms.id, swarmId)).limit(1);
   if (!swarm) return;
   const publisher = options.publisher ?? (await githubConnectionFor(ctx, swarm.organizationId));
-  if (!publisher) return;
+  if (!publisher) {
+    if (options.required) throw new SwarmBranchNotSaved(swarm.id, "the organization has no GitHub connection");
+    return;
+  }
   const [row] = swarm.sandboxId
     ? (await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, swarm.sandboxId))).filter(
         (candidate) => candidate.status !== "destroyed",
@@ -153,15 +194,24 @@ export async function pushSwarmBranch(
     wakeSwarmSandbox(ctx, row!, swarm, swarm.plannerProfileId),
   );
   if (!source) {
+    if (options.required) throw new SwarmBranchNotSaved(swarm.id, "its machine cannot export the branch");
     await refreshSwarmPullRequests(ctx, swarm.id, publisher);
     return;
   }
 
   const repoRows = await projectRepositories(ctx, swarm.projectId);
+  if (options.required) {
+    const remoteless = repoRows.filter((repo) => !repo.repoUrl || !parseRepoUrl(repo.repoUrl));
+    if (remoteless.length > 0) {
+      throw new SwarmBranchNotSaved(swarm.id, `${remoteless.map((repo) => repo.name).join(", ")} has no GitHub remote`);
+    }
+  }
   // One export per repository, shared by both pushes below.
   const exports = new Map<string, ReturnType<NonNullable<PublishableRepository["exportBundle"]>>>();
+  const swarmBranch = swarm.branchName ?? swarmBranchName(swarm.slug);
+  // The landed task's commit is inside the swarm's branch, so one export serves both pushes.
   const shared = (repo: (typeof repoRows)[number]): PublishableRepository => {
-    const base = publishable(ctx, repo, source);
+    const base = publishable(ctx, repo, source, swarmBranch);
     if (!base.exportBundle) return base;
     const exportBundle = base.exportBundle;
     return {
@@ -177,7 +227,6 @@ export async function pushSwarmBranch(
     };
   };
 
-  const swarmBranch = swarm.branchName ?? swarmBranchName(swarm.slug);
   const failures = (
     await pushBranches(publisher, {
       branch: swarmBranch,
@@ -279,6 +328,7 @@ function publishable(
   ctx: AppContext,
   repo: typeof repositories.$inferSelect,
   source: { driver: SandboxDriver; handle: SandboxHandle } | { worktreeKey: string },
+  branch: string,
 ): PublishableRepository {
   const githubRepoId = repo.githubRepoId ? Number(repo.githubRepoId) : undefined;
   return {
@@ -289,7 +339,7 @@ function publishable(
     defaultBranch: repo.defaultBranch,
     ...("driver" in source
       ? { exportBundle: () => source.driver.exportRepository!(source.handle, repo.name, repo.defaultBranch) }
-      : { worktreePath: ctx.worktrees.worktreePath(source.worktreeKey, repo.name) }),
+      : hostBranchSource(ctx.worktrees.worktreePath(source.worktreeKey, repo.name), repo, branch)),
   };
 }
 

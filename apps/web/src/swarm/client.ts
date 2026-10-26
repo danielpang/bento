@@ -49,6 +49,14 @@ export interface LandingPage {
   next: number | null;
 }
 
+/** The pull requests one publish opened, and the repositories it could not. */
+export interface SwarmPublishOutcome {
+  pullRequests: { name: string; number: number; url: string | null }[];
+  failures: { name: string; reason: string }[];
+  /** GitHub's copy of the branch predates the last landing, and the machine that had the rest is gone. */
+  behind: boolean;
+}
+
 export interface SwarmApi {
   listSwarms(projectId: string): Promise<SwarmSummary[]>;
   getSwarm(swarmId: string): Promise<SwarmDetail>;
@@ -138,7 +146,7 @@ export interface SwarmApi {
    * request of the swarm's branch, every task merged in order; "stacked"
    * is one per landed task, each against the task before it.
    */
-  publishSwarm(swarmId: string, mode: "combined" | "stacked"): Promise<void>;
+  publishSwarm(swarmId: string, mode: "combined" | "stacked"): Promise<SwarmPublishOutcome>;
   retryLanding(swarmId: string, taskId: string): Promise<void>;
   cancelTask(swarmId: string, taskId: string): Promise<void>;
   splitTask(swarmId: string, taskId: string, children: { title: string; description?: string }[]): Promise<void>;
@@ -494,16 +502,18 @@ export function fixtureSwarmApi(clock: () => number = () => Date.now()): Fixture
     },
     publishSwarm(swarmId, mode) {
       const detail = find(swarmId);
+      const number = 4200 + (detail?.pullRequests.length ?? 0);
+      const url = `https://github.com/acme/storefront/pull/${number}`;
       if (detail && mode === "combined") {
         detail.pullRequests = [...detail.pullRequests, {
           id: `pr-${swarmId}`,
           repoUrl: "github.com/acme/storefront",
-          number: 4200 + detail.pullRequests.length,
-          url: "https://github.com/acme/storefront/pull/4200",
+          number,
+          url,
           headSha: null,
         }];
       }
-      return Promise.resolve();
+      return Promise.resolve({ pullRequests: [{ name: "storefront", number, url }], failures: [], behind: false });
     },
     startTaskOver(swarmId, taskId) {
       return mutate(swarmId, (detail) => {
@@ -1162,7 +1172,16 @@ export function httpSwarmApi(
       await post(`/api/swarms/${swarmId}/tasks/${taskId}/retry`, reason ? { reason } : {});
     },
     async publishSwarm(swarmId, mode) {
-      await post(`/api/swarms/${swarmId}/publish`, { mode });
+      const result = await post<{
+        pullRequests: { name: string; prNumber: number; url: string }[];
+        failures: { name: string; reason: string }[];
+        behind?: boolean;
+      }>(`/api/swarms/${swarmId}/publish`, { mode });
+      return {
+        pullRequests: result.pullRequests.map((pr) => ({ name: pr.name, number: pr.prNumber, url: externalHttpUrl(pr.url) })),
+        failures: result.failures,
+        behind: result.behind === true,
+      };
     },
     async startTaskOver(swarmId, taskId) {
       await post(`/api/swarms/${swarmId}/tasks/${taskId}/retry`, { fresh: true });
