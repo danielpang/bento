@@ -716,7 +716,19 @@ test("pull requests open once anything has landed, before the swarm is done", as
   const [task] = await db.insert(swarmTasks).values({ swarmId: swarm.id, title: "leaf", status: "done" }).returning();
   await db.insert(swarmLandings).values({ swarmId: swarm.id, taskId: task!.id, branchName: "swarm/x-1", position: 0, status: "landed", attempt: 1, endedAt: new Date() });
   const res = await publish();
-  assert.equal(res.status, 202, await res.clone().text());
+  const body = (await res.json()) as { error?: string };
+  assert.equal(res.status, 409, "the answer is what the publish did, not that it was queued");
+  assert.match(body.error ?? "", /^No GitHub connection is configured/);
+  assert.equal((await readSwarm(swarm.id)).publishingSince, null, "a finished publish lets go of the swarm");
+
+  await db.update(swarms).set({ publishingSince: new Date() }).where(eq(swarms.id, swarm.id));
+  const racing = await publish();
+  assert.equal(racing.status, 409, "a second publish waits for the first rather than racing its push");
+  assert.match(((await racing.json()) as { error: string }).error, /^Already opening pull requests/);
+
+  await db.update(swarms).set({ publishingSince: new Date(Date.now() - 11 * 60_000) }).where(eq(swarms.id, swarm.id));
+  const after = (await (await publish()).json()) as { error?: string };
+  assert.match(after.error ?? "", /^No GitHub connection/, "a claim left by a server that died lapses");
 });
 
 test("pausing and resuming are a person's, and resuming wakes the reconciler", async () => {
@@ -2964,4 +2976,25 @@ test("stopping a task's agent cancels its run and leaves the task for a retry", 
   const other = await createSwarm({ title: "Other" });
   const [foreign] = await db.insert(swarmTasks).values({ swarmId: other.id, title: "theirs" }).returning();
   assert.equal((await post(`/api/swarms/${swarm.id}/tasks/${foreign!.id}/stop`)).status, 404);
+});
+
+test("a hosted swarm does not start where its work could never be saved to GitHub", async () => {
+  const driver = ctx.drivers.default as { workspace: "host" | "clone" };
+  const token = ctx.env.GITHUB_TOKEN;
+  driver.workspace = "clone";
+  try {
+    (ctx.env as { GITHUB_TOKEN?: string }).GITHUB_TOKEN = undefined;
+    const unconnected = await post("/api/swarms", { projectId, title: "Rewrite checkout", goal: "make it work" });
+    assert.equal(unconnected.status, 409, "its machine would be the only copy of the work, forever");
+    assert.equal(((await unconnected.json()) as { code: string }).code, "SWARM_GITHUB_REQUIRED");
+
+    (ctx.env as { GITHUB_TOKEN?: string }).GITHUB_TOKEN = "ghp_test";
+    const remoteless = await post("/api/swarms", { projectId, title: "Rewrite checkout", goal: "make it work" });
+    assert.equal(remoteless.status, 409, "and a repository with no GitHub remote has nowhere to push to");
+    assert.match(((await remoteless.json()) as { error: string }).error, /needs a GitHub repository to run swarms/);
+  } finally {
+    driver.workspace = "host";
+    (ctx.env as { GITHUB_TOKEN?: string }).GITHUB_TOKEN = token;
+  }
+  await createSwarm();
 });

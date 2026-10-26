@@ -512,6 +512,13 @@
       "when": 1791705760003,
       "tag": "0072_swarm_waitlist",
       "breakpoints": true
+    },
+    {
+      "idx": 73,
+      "version": "7",
+      "when": 1793000000000,
+      "tag": "0073_swarm_publish_safety",
+      "breakpoints": true
     }
   ]
 }

@@ -15,6 +15,8 @@ import { ACTIVE_RUN_STATUSES } from "./start-run.js";
 import { swarmTaskWorkspaceKey } from "./swarm/sandbox.js";
 import { archiveReapsSandboxes } from "./swarm/archive.js";
 import { swarmReleasesMachine } from "./swarm/coordinator.js";
+import { swarmHasActiveRun } from "./swarm/reopen.js";
+import { saveSwarmBranch, SwarmBranchNotSaved, type PushOptions } from "./swarm/remote-branches.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -300,9 +302,32 @@ export async function reapSandbox(ctx: AppContext, featureId: string, machines?:
 export async function reapSwarmSandbox(
   ctx: AppContext,
   swarmId: string,
-  options: { now?: Date; machines?: SandboxGeneration[] } = {},
+  options: { now?: Date; machines?: SandboxGeneration[]; deferrals?: number; push?: PushOptions } = {},
 ): Promise<void> {
   const now = options.now ?? new Date();
+  /*
+   * GitHub has to hold the branch before the machine goes, because on a
+   * clone driver the machine is the only copy of whatever was committed
+   * since the last push. Read without the lock, since the push can take
+   * a minute: the locked checks below still decide, and a swarm that is
+   * live again by then keeps its machine whatever this pushed.
+   */
+  const [current] = await ctx.db
+    .select({ status: swarms.status, archivedAt: swarms.archivedAt, updatedAt: swarms.updatedAt })
+    .from(swarms)
+    .where(eq(swarms.id, swarmId))
+    .limit(1);
+  if (current && swarmMachineReleasable(current, now) && !(await swarmHasActiveRun(ctx.db, swarmId))) {
+    try {
+      await saveSwarmBranch(ctx, swarmId, options.push);
+    } catch (err) {
+      if (!(err instanceof SwarmBranchNotSaved)) throw err;
+      if (!options.deferrals) {
+        ctx.analytics?.captureException(err, null, null, { swarm_id: swarmId, source: "swarm_branch_unsaved" });
+      }
+      throw new SandboxReapDeferred(`${err.message}; keeping its sandbox`, { swarmId });
+    }
+  }
   await ctx.db.transaction(async (tx) => {
     const swarm = await lockSwarmForReap(tx, swarmId);
     if (!swarmMachineReleasable(swarm, now)) {
@@ -685,7 +710,13 @@ async function reapTarget(ctx: AppContext, data: SandboxReapTarget, now?: Date):
   // naming none of them is one nothing can act on, so it is dropped
   // rather than retried forever.
   if (data.swarmTaskId) await reapSwarmTaskSandbox(ctx, data.swarmTaskId, data.machines);
-  else if (data.swarmId) await reapSwarmSandbox(ctx, data.swarmId, { ...(now ? { now } : {}), ...(data.machines ? { machines: data.machines } : {}) });
+  else if (data.swarmId) {
+    await reapSwarmSandbox(ctx, data.swarmId, {
+      ...(now ? { now } : {}),
+      ...(data.machines ? { machines: data.machines } : {}),
+      ...(data.deferrals ? { deferrals: data.deferrals } : {}),
+    });
+  }
   else if (data.featureId) await reapSandbox(ctx, data.featureId, data.machines);
 }
 

@@ -10,7 +10,7 @@ import { SwarmNodeDrawer } from "./SwarmNodeDrawer.js";
 import { SwarmRunOutput, SwarmRunOutputDrawer, SwarmWorkerOutputDrawer } from "./SwarmRunOutput.js";
 import { SwarmPage } from "./SwarmPage.js";
 import { SwarmPageSkeleton } from "./Skeleton.js";
-import { swarmApi, type SwarmAgent } from "../swarm/client.js";
+import { swarmApi, type SwarmAgent, type SwarmPublishOutcome } from "../swarm/client.js";
 import { createModelCache } from "../swarm/layout.js";
 import { searchSwarmNodes } from "../swarm/search.js";
 import { leafStartBlocker } from "../swarm/waiting.js";
@@ -122,6 +122,9 @@ export function SwarmBoard({
   const [node, setNode] = useState<SwarmNodeDetail | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [publish, setPublish] = useState<
+    { swarmId: string; inFlight: "combined" | "stacked" | null; outcome: SwarmPublishOutcome | null } | null
+  >(null);
   const [taskActionError, setTaskActionError] = useState("");
   /**
    * The instant the model is built for, moved on a slow tick rather
@@ -439,6 +442,7 @@ export function SwarmBoard({
       ) : detail ? (
         <SwarmPage
           detail={detail}
+          publish={publish?.swarmId === detail.swarm.id ? publish : null}
           model={model}
           view={view}
           onView={(next) => {
@@ -475,7 +479,21 @@ export function SwarmBoard({
             onStop: () => selectedId && act(() => swarmApi.stopSwarm(selectedId)),
             onReleaseBranch: () => selectedId && act(() => swarmApi.releaseSwarmBranch(selectedId)),
             onRetryLanding: (taskId) => selectedId && act(() => swarmApi.retryLanding(selectedId, taskId), true),
-            onPublish: (mode) => selectedId && act(() => swarmApi.publishSwarm(selectedId, mode)),
+            onPublish: (mode) => {
+              if (!selectedId) return;
+              const swarmId = selectedId;
+              setPublish({ swarmId, inFlight: mode, outcome: null });
+              act(async () => {
+                try {
+                  setPublish({ swarmId, inFlight: null, outcome: await swarmApi.publishSwarm(swarmId, mode) });
+                } catch (err) {
+                  setPublish(null);
+                  // A publish cut off after GitHub opened the pull request still opened it.
+                  await loadDetail(swarmId).catch(() => {});
+                  throw err;
+                }
+              });
+            },
             onLoadLandings: loadLandings,
             onReopen: () => setReopening(true),
             onDelete: () => selectedId && setDeleting({ id: selectedId, name: detail.swarm.name }),

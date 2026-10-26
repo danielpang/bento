@@ -1,20 +1,22 @@
 import { after, before, beforeEach, test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import pg from "pg";
 import { eq, sql } from "drizzle-orm";
-import { createDb, createPool, repositories, runMigrations, swarmLandings, swarmTasks, swarms, type Db } from "@bento/db";
+import { createDb, createPool, repositories, runMigrations, sandboxes, swarmLandings, swarmTasks, swarms, type Db } from "@bento/db";
 import { WorktreeManager, type SandboxDriver } from "@bento/sandbox";
 import { singleDriver } from "../sandbox-driver.js";
+import { reapSwarmSandbox, SandboxReapDeferred } from "../reap-sandbox.js";
 import type { AppContext } from "../../context.js";
 import { EventBus } from "../../events.js";
 import { loadEnv } from "../../env.js";
 import { publishStackedPullRequests, publishSwarmCompletion } from "./complete.js";
 import { pushSwarmBranch, pushTaskBranch, remoteBranchBundles } from "./remote-branches.js";
+import { releaseSwarmBranch } from "./release-branch.js";
 import { swarmTaskWorkspaceKey, swarmWorkspaceKey } from "./sandbox.js";
 
 /**
@@ -308,4 +310,122 @@ test("a branch somebody else pushed to is refused rather than forced over", asyn
   await git(tree, ["commit", "--quiet", "-m", "more"]);
   await assert.rejects(pushSwarmBranch(ctx, swarm.id, undefined, options), /branch moved on GitHub/);
   assert.equal(await remoteHead(swarm.branchName!), their, "their commit is still there");
+});
+
+/**
+ * A machine on a clone driver, standing in for a sprite or a Modal box:
+ * its checkout is a directory the server can only read by export, and
+ * the reap destroys it for good.
+ */
+function cloneMachine(checkout: () => string) {
+  const destroyed: string[] = [];
+  const driver = {
+    provider: "modal",
+    workspace: "clone",
+    async exists() {
+      return !destroyed.length;
+    },
+    async destroy(handle: { externalId: string }) {
+      destroyed.push(handle.externalId);
+    },
+    async exportRepository(_handle: unknown, _name: string, base: string) {
+      const head = await git(checkout(), ["rev-parse", "HEAD"]);
+      const baseSha = await git(checkout(), ["merge-base", head, base]);
+      if (baseSha === head) return null;
+      const file = path.join(dataDir, `export-${Date.now()}.bundle`);
+      await git(checkout(), ["bundle", "create", file, "HEAD", `^${baseSha}`]);
+      return { baseSha, headSha: head, data: await readFile(file) };
+    },
+  } as unknown as SandboxDriver;
+  return { ctx: { ...ctx, drivers: singleDriver(driver) } as AppContext, destroyed };
+}
+
+async function finishedOnMachine(slug: string) {
+  const { swarm, tree } = await swarmOnHost(slug);
+  const [row] = await db
+    .insert(sandboxes)
+    .values({ projectId: PROJECT, swarmId: swarm.id, provider: "modal", externalId: `box-${slug}`, status: "ready", workdir: "/workspace" })
+    .returning();
+  await db.update(swarms).set({ sandboxId: row!.id }).where(eq(swarms.id, swarm.id));
+  const worker = await workerCommits(swarm, "Cart", "cart.ts", 0);
+  await land(tree, worker);
+  // The last landing's push never ran: the reap won the race, or every retry failed.
+  await db.update(swarms).set({ status: "done" }).where(eq(swarms.id, swarm.id));
+  return { swarm, tree, sandboxId: row!.id };
+}
+
+test("a finished swarm's machine is pushed before it is reaped, so the last landing is never lost", async () => {
+  const { swarm, tree, sandboxId } = await finishedOnMachine("reap-pushes");
+  const machine = cloneMachine(() => tree);
+
+  await reapSwarmSandbox(machine.ctx, swarm.id, { push: options });
+
+  assert.equal(await remoteHead(swarm.branchName!), await git(tree, ["rev-parse", "HEAD"]), "GitHub has the machine's head");
+  assert.deepEqual(machine.destroyed, ["box-reap-pushes"], "and only then is the machine destroyed");
+  const [row] = await db.select().from(sandboxes).where(eq(sandboxes.id, sandboxId));
+  assert.equal(row?.status, "destroyed");
+});
+
+test("a finished swarm's machine is kept while its branch cannot reach GitHub", async () => {
+  const { swarm, tree, sandboxId } = await finishedOnMachine("reap-keeps");
+  const machine = cloneMachine(() => tree);
+  const offline = {
+    publisher: { ...publisher, async pushToken() { throw new Error("GitHub is down"); } } as unknown as typeof publisher,
+    remoteUrl: () => remotePath,
+  };
+
+  await assert.rejects(reapSwarmSandbox(machine.ctx, swarm.id, { push: offline }), SandboxReapDeferred, "the reap waits");
+  // No GitHub connection at all is the same answer, not a skip.
+  await assert.rejects(reapSwarmSandbox(machine.ctx, swarm.id), /no GitHub connection/);
+
+  assert.deepEqual(machine.destroyed, [], "the machine, the only copy of the work, is still there");
+  const [row] = await db.select().from(sandboxes).where(eq(sandboxes.id, sandboxId));
+  assert.equal(row?.status, "ready");
+
+  // GitHub comes back: the next attempt pushes and only then reaps.
+  await reapSwarmSandbox(machine.ctx, swarm.id, { push: options });
+  assert.equal(await remoteHead(swarm.branchName!), await git(tree, ["rev-parse", "HEAD"]));
+  assert.deepEqual(machine.destroyed, ["box-reap-keeps"]);
+});
+
+test("a swarm whose branch was released for checkout still publishes, from the repository's own branch", async () => {
+  const { swarm, tree } = await swarmOnHost("released");
+  const worker = await workerCommits(swarm, "Cart", "cart.ts", 0);
+  const head = await land(tree, worker);
+  // The last commit was never pushed when the person released the branch.
+  await db.update(swarms).set({ status: "done" }).where(eq(swarms.id, swarm.id));
+  await git(repoPath, ["worktree", "remove", "--force", ctx.worktrees.worktreePath(swarmTaskWorkspaceKey(swarm.id, worker.task.id), "app")]);
+  await git(repoPath, ["worktree", "lock", "--reason", "Bento workspace", tree]);
+  await releaseSwarmBranch(ctx.worktrees, swarm.id, swarm.branchName!, [{ name: "app", localPath: repoPath }]);
+
+  const combined = await publishSwarmCompletion(ctx, await readSwarm(swarm.id), publisher, { remoteUrl: () => remotePath });
+  assert.deepEqual(combined.failures, []);
+  assert.equal(combined.published.length, 1, "a released worktree used to export nothing, silently");
+  assert.equal(await remoteHead(swarm.branchName!), head, "and what reached GitHub is the branch the repository kept");
+
+  opened = [];
+  const stacked = await publishStackedPullRequests(ctx, await readSwarm(swarm.id), publisher, { remoteUrl: () => remotePath });
+  assert.deepEqual(stacked.failures, []);
+  assert.equal(await remoteHead(worker.branch), head, "the task's landed form was pushed from the repository too");
+  assert.deepEqual(opened.map((pr) => [pr.head, pr.base]), [[worker.branch, "main"]]);
+});
+
+test("a pull request over a branch GitHub has only part of says so, rather than passing for the whole swarm", async () => {
+  const { swarm, tree } = await swarmOnHost("behind");
+  const first = await workerCommits(swarm, "Cart", "cart.ts", 0);
+  await land(tree, first);
+  await pushSwarmBranch(ctx, swarm.id, first.task.id, options);
+  const second = await workerCommits(swarm, "Totals", "totals.ts", 1);
+  await land(tree, second);
+  // The provider lost the machine before the second landing's push ran.
+  await db.update(swarms).set({ status: "done", sandboxId: null }).where(eq(swarms.id, swarm.id));
+  const lost = cloneMachine(() => tree).ctx;
+
+  const result = await publishSwarmCompletion(lost, await readSwarm(swarm.id), publisher, { remoteUrl: () => remotePath });
+  assert.equal(result.published.length, 1, "what GitHub has is still opened, since nothing else is left");
+  assert.equal(result.behind, true, "and the person is told it is missing work");
+
+  await pushSwarmBranch(ctx, swarm.id, second.task.id, options);
+  const current = await publishSwarmCompletion(lost, await readSwarm(swarm.id), publisher, { remoteUrl: () => remotePath });
+  assert.equal(current.behind, false, "a copy pushed after the last landing is whole");
 });

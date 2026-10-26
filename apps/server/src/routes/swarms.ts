@@ -1,5 +1,5 @@
 import { zValidator } from "@hono/zod-validator";
-import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { streamSSE } from "hono/streaming";
@@ -36,14 +36,14 @@ import { actor } from "../middleware/actor.js";
 import { deferAfterCommit, deferOnRollback, respondAfterCommit, tenantDb as db } from "../middleware/tenant.js";
 import { queueSwarmSandboxReap, reapSwarmSandbox } from "../orchestrator/reap-sandbox.js";
 import { enqueueTaskStartOver } from "../orchestrator/swarm/start-over.js";
-import { enqueueSwarmPublish } from "../orchestrator/swarm/complete.js";
+import { publishFinishedSwarm, type SwarmPublishResult } from "../orchestrator/swarm/complete.js";
 import { driverForProject, driverForSandbox } from "../orchestrator/sandbox-driver.js";
 import { markCancelled } from "../orchestrator/run-executor.js";
 import { requestRunAbort } from "../orchestrator/run-ownership.js";
 import { liveDeliveryOf, nudgeAndAwaitSent } from "../orchestrator/remote-live.js";
 import { enqueueSwarmTick } from "../orchestrator/swarm/coordinator.js";
 import { MAX_PLAN_DEPTH, MAX_SWARM_GOAL_CHARS, MAX_SWARM_WORKERS } from "@bento/core";
-import { requireSwarmCompute, requireSwarms } from "../orchestrator/swarm/gate.js";
+import { requireSwarmCompute, requireSwarms, swarmRepositoriesWithoutRemote } from "../orchestrator/swarm/gate.js";
 import { swarmBranchName } from "../orchestrator/swarm/sandbox.js";
 import { branchCheckoutPath, releaseSwarmBranch } from "../orchestrator/swarm/release-branch.js";
 import { isSafeBranchName, workerBranchName } from "../orchestrator/swarm/branches.js";
@@ -266,6 +266,22 @@ const CREATE_BODY_BYTES = 48 * 1024 * 1024;
 
 /** The media types the plan source content route lets a browser draw inline. Everything else downloads. */
 const PLAN_SOURCE_INLINE_MIMES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "text/plain", "text/markdown"]);
+
+/** How long a publish holds its swarm before another may start, should the first never finish. */
+const PUBLISH_CLAIM_INTERVAL = "10 minutes";
+
+const PUBLISH_IN_PROGRESS = "Already opening pull requests.";
+
+/** A reason written as a clause, as a sentence for the person. */
+function sentence(clause: string): string {
+  const text = clause.charAt(0).toUpperCase() + clause.slice(1);
+  return /[.!?]$/.test(text) ? text : `${text}.`;
+}
+
+/** A git or GitHub message with any `user:secret@` taken out of the addresses it quotes. */
+function withoutUrlCredentials(message: string): string {
+  return message.replace(/(\b[a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, "$1");
+}
 
 /** A source's own name, defanged for a header it travels inside. */
 function headerSafeName(name: string): string {
@@ -563,6 +579,16 @@ export function swarmRoutes(ctx: AppContext) {
       }
       if (!(await projectHasRepositories(db(c, ctx), project.id))) {
         return c.json({ error: NO_REPOSITORIES }, 409);
+      }
+      const remoteless = swarmRepositoriesWithoutRemote(
+        ctx,
+        await db(c, ctx).select({ name: repositories.name, repoUrl: repositories.repoUrl }).from(repositories).where(eq(repositories.projectId, project.id)),
+      );
+      if (remoteless.length > 0) {
+        return c.json({
+          error: `${remoteless.join(", ")} needs a GitHub repository to run swarms.`,
+          code: "SWARM_GITHUB_REQUIRED",
+        }, 409);
       }
 
       /*
@@ -1265,8 +1291,46 @@ export function swarmRoutes(ctx: AppContext) {
       if (!landed) {
         return c.json({ error: "Nothing has been committed to the swarm's branch yet, so there is nothing to open a pull request for." }, 409);
       }
-      deferAfterCommit(c, () => enqueueSwarmPublish(ctx, swarm.id, parsed.data.mode));
-      return c.json({ mode: parsed.data.mode, status: "queued" }, 202);
+      /*
+       * One publish per swarm at a time. Two at once race on the push
+       * lease, and the loser reports a failure for a pull request the
+       * winner opened. The claim lapses on its own, so a server that died
+       * mid publish does not hold it.
+       */
+      const [claimed] = await db(c, ctx)
+        .update(swarms)
+        .set({ publishingSince: sql`now()` })
+        .where(and(
+          eq(swarms.id, swarm.id),
+          or(isNull(swarms.publishingSince), lt(swarms.publishingSince, sql`now() - ${PUBLISH_CLAIM_INTERVAL}::interval`)),
+        ))
+        .returning({ id: swarms.id });
+      if (!claimed) return c.json({ error: PUBLISH_IN_PROGRESS }, 409);
+      // After the commit, so the push and the GitHub calls do not hold
+      // the request's pooled connection.
+      respondAfterCommit(c, async () => {
+        let result: SwarmPublishResult | null;
+        try {
+          result = await publishFinishedSwarm(ctx, swarm.id, parsed.data.mode);
+        } catch (err) {
+          console.error(`swarm ${swarm.id}: publish failed:`, err);
+          ctx.analytics?.captureException(err, null, swarm.organizationId, { source: "swarm_publish", swarm_id: swarm.id });
+          return c.json({ error: "Could not open the pull request." }, 502);
+        } finally {
+          await ctx.db.update(swarms).set({ publishingSince: null }).where(eq(swarms.id, swarm.id)).catch((err) => {
+            console.error(`swarm ${swarm.id}: could not release the publish claim:`, err);
+          });
+        }
+        if (!result) return c.json({ error: "not found" }, 404);
+        if (result.skipped) return c.json({ error: sentence(result.skipped) }, 409);
+        if (result.published.length === 0) {
+          const reasons = result.failures.map((failure) => `${failure.name}: ${withoutUrlCredentials(failure.reason)}`).join(" ");
+          return c.json({ error: `Could not open the pull request. ${reasons}`.trim() }, 502);
+        }
+        const failures = result.failures.map((failure) => ({ name: failure.name, reason: withoutUrlCredentials(failure.reason) }));
+        return c.json({ mode: parsed.data.mode, pullRequests: result.published, failures, behind: result.behind === true });
+      });
+      return c.json({ error: "Could not open the pull request." }, 500);
     })
     .post("/:id/planner/retry", async (c) => {
       const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));

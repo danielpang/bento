@@ -553,11 +553,35 @@ machine is made again on it (`swarmRestoreBundles`), a worker whose
 swarm machine is gone starts from it, and a landing whose worker machine
 is gone lands the worker's pushed branch.
 
+The queue is not the guarantee; the reap is. A push job can lose the
+race with the reap the finishing tick queues beside it, fail every
+retry, or skip a team whose GitHub connection was removed, and any of
+those once left the machine as the only copy when it was destroyed.
+So `reapSwarmSandbox` first pushes the swarm's branch from the machine
+itself (`saveSwarmBranch`) and destroys it only once GitHub holds it; a
+push it cannot make is a `SandboxReapDeferred`, captured as
+`swarm_branch_unsaved`, and the machine stays until one succeeds. That
+is why a hosted swarm (a clone driver) refuses to start without a
+GitHub connection and a GitHub remote on every repository
+(`SWARM_GITHUB_REQUIRED`): its work would have nowhere to go, and its
+machine would bill forever. A host driver's checkout outlives its
+machine and needs neither. Every push stamps `branch_pushed_at`, so a
+publish from GitHub's copy after a provider lost the machine says the
+pull request is missing the landings since (`behind`).
+
 Nothing opens a pull request when a swarm finishes. A person chooses on
 the swarm's header, through `POST /api/swarms/:id/publish`: `combined`
 is one pull request of the swarm's branch, `stacked` is one per landed
 task, each against the task that landed before it, recorded on the task
-as `pullRequests`.
+as `pullRequests`. The route does the work in the request, after its
+transaction commits, and answers with the pull requests it opened or
+the reason it opened none; it once queued a job on a queue nobody had
+created, and pg-boss dropped every send without a word. One publish
+per swarm at a time (`swarms.publishing_since`, lapsing after ten
+minutes). Pushes and `ensurePullRequest` are idempotent, so a publish
+cut off midway is finished by the next click. A host branch whose
+worktree was released for checkout is read from the repository's own
+branch (`hostBranchSource`), never skipped as if it had no commits.
 
 ## A swarm's planner and workers hold a live session, and stdin is what ends a run
 

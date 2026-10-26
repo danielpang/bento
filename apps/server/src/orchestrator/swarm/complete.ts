@@ -10,12 +10,10 @@ import {
 } from "@bento/db";
 import { parseRepoUrl, type GitHubPublisher } from "@bento/github";
 import type { SandboxDriver, SandboxHandle } from "@bento/sandbox";
-import { captureJobErrors } from "../../analytics.js";
 import type { AppContext } from "../../context.js";
 import { githubConnectionFor } from "../../github.js";
 import { SWARM_DESIGN_PATH } from "./design-document.js";
-import { publishSwarmBranches, type PublishableRepository, type PublishedPullRequest } from "../publish.js";
-import { QUEUE_POLL_SECONDS } from "../queue.js";
+import { hostBranchSource, publishSwarmBranches, type PublishableRepository, type PublishedPullRequest } from "../publish.js";
 import { swarmBranchName, swarmWorkspaceKey } from "./sandbox.js";
 import { workerBranchName } from "./branches.js";
 import { pushSwarmBranch } from "./remote-branches.js";
@@ -53,69 +51,19 @@ import { SandboxGone, wakeSwarmSandbox } from "../hibernate-sandbox.js";
  * pull request whose summary is the design note.
  */
 
-/** The queue a finished swarm's publish goes through. */
-export const SWARM_PUBLISH_QUEUE = "swarm.publish";
-
-/**
- * Which pg-boss instances already have a publish worker. Keyed by the
- * boss for the reason the tick and landing sets are: the tests run
- * many contexts in one process, each with its own.
- */
-const publishWorkers = new WeakSet<object>();
-
-/** What one completion did, for the log and for the tests. */
+/** What one publish did, for the person who asked and for the tests. */
 export interface SwarmPublishResult {
   published: PublishedPullRequest[];
   failures: { name: string; reason: string }[];
   /** Why nothing was attempted, when nothing was. */
   skipped: string | null;
-}
-
-/**
- * Starts the publish worker, if this process has not.
- *
- * Not at boot, and on the ordinary poll rather than the interactive
- * one, for the reasons the landing worker is neither: most deployments
- * have never finished a swarm, and the job is sent by the tick that
- * noticed the swarm was done, which is itself the end of an agent run
- * that took minutes. Ten seconds of pickup lag on top of that is not
- * something anybody can see.
- */
-export async function ensureSwarmPublishWorker(ctx: AppContext): Promise<void> {
-  if (publishWorkers.has(ctx.boss)) return;
-  publishWorkers.add(ctx.boss);
-  try {
-    await ctx.boss.work<{ swarmId: string; mode?: SwarmPublishMode }>(
-      SWARM_PUBLISH_QUEUE,
-      { batchSize: 1, pollingIntervalSeconds: QUEUE_POLL_SECONDS },
-      captureJobErrors(ctx.analytics, SWARM_PUBLISH_QUEUE, async (jobs) => {
-        for (const job of jobs) await publishFinishedSwarm(ctx, job.data.swarmId, job.data.mode ?? "combined");
-      }),
-    );
-  } catch (err) {
-    publishWorkers.delete(ctx.boss);
-    throw err;
-  }
-}
-
-/**
- * Asks for a finished swarm to be published.
- *
- * Called after the tick's transaction commits, never inside it, for
- * the reason enqueueLanding is: the row has to say "done" before a
- * worker reads it.
- *
- * Singleton on the swarm, so a swarm that settles, is re-ticked, and
- * settles again does not queue two publishes that race each other onto
- * the same branch.
- */
-export async function enqueueSwarmPublish(
-  ctx: AppContext,
-  swarmId: string,
-  mode: SwarmPublishMode = "combined",
-): Promise<void> {
-  await ensureSwarmPublishWorker(ctx);
-  await ctx.boss.send(SWARM_PUBLISH_QUEUE, { swarmId, mode }, { singletonKey: `${swarmId}:${mode}` });
+  /**
+   * The machine was lost after a task landed and before that landing
+   * reached GitHub, so the pull request was opened over a branch that
+   * is missing it. Never true when Bento reaped the machine, which it
+   * does only once GitHub has the branch.
+   */
+  behind?: boolean;
 }
 
 /**
@@ -129,7 +77,7 @@ export type SwarmPublishMode = "combined" | "stacked";
 /**
  * Pushes a finished swarm's branch and opens its pull requests.
  *
- * Safe to run twice, which is what a redelivered job is: the rows are
+ * Safe to run twice, which is what a second click is: the rows are
  * an upsert keyed by swarm and repository, and `ensurePullRequest`
  * finds the pull request it opened the first time rather than opening
  * a second.
@@ -354,7 +302,7 @@ export async function publishSwarmCompletion(
        */
       ...(handle && publishDriver?.exportRepository
         ? { exportBundle: () => publishDriver.exportRepository!(handle, row.name, row.defaultBranch) }
-        : { worktreePath: ctx.worktrees.worktreePath(workspace, row.name) }),
+        : hostBranchSource(ctx.worktrees.worktreePath(workspace, row.name), row, branch)),
     };
   });
 
@@ -368,9 +316,8 @@ export async function publishSwarmCompletion(
   await refreshSwarmPullRequests(ctx, swarm.id, publisher);
 
   for (const failure of result.failures) {
-    // Logged rather than thrown: a repository that could not be
-    // published does not undo the ones that were, and the job must not
-    // be retried into opening the same pull requests again.
+    // Returned rather than thrown: a repository that could not be
+    // published does not undo the ones that were.
     console.error(`swarm ${swarm.id}: could not publish ${failure.name}: ${failure.reason}`);
   }
   if (result.published.length > 0) {
@@ -418,6 +365,21 @@ async function publishPushedSwarmBranch(
 ): Promise<SwarmPublishResult> {
   const published: PublishedPullRequest[] = [];
   const failures: { name: string; reason: string }[] = [];
+  const [last] = await ctx.db
+    .select({ endedAt: swarmLandings.endedAt })
+    .from(swarmLandings)
+    .where(and(eq(swarmLandings.swarmId, swarm.id), eq(swarmLandings.status, "landed")))
+    .orderBy(desc(swarmLandings.endedAt))
+    .limit(1);
+  const behind = Boolean(last?.endedAt && (!swarm.branchPushedAt || swarm.branchPushedAt < last.endedAt));
+  if (behind) {
+    ctx.analytics?.captureException(
+      new Error(`swarm ${swarm.id}: its machine is gone and GitHub's copy of its branch predates its last landing`),
+      null,
+      swarm.organizationId,
+      { swarm_id: swarm.id, source: "swarm_branch_behind" },
+    );
+  }
   for (const repo of repoRows) {
     const headSha = repo.repoUrl ? swarm.pushedHeads?.[repo.repoUrl] : undefined;
     const parsed = repo.repoUrl ? parseRepoUrl(repo.repoUrl) : null;
@@ -451,7 +413,7 @@ async function publishPushedSwarmBranch(
   const skipped = published.length === 0 && failures.length === 0
     ? "the swarm's sandbox is gone and its branch was never pushed to GitHub"
     : null;
-  return { published, failures, skipped };
+  return { published, failures, skipped, behind };
 }
 
 async function combinedPullRequestBody(ctx: AppContext, swarm: typeof swarms.$inferSelect): Promise<string> {

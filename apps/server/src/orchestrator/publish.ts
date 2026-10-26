@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -124,6 +125,45 @@ export async function createRepositorySeed(
     return { bundle: await readFile(bundlePath), baseBranch: resolvedBranch };
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Where a host driver's branch is read from: its worktree, or, once
+ * that worktree is gone (a swarm's branch released for checkout), the
+ * branch in the repository itself, which Git kept with every commit.
+ * The fallback throws rather than returning nothing, because a read
+ * that failed must not look like a branch with no commits.
+ */
+export function hostBranchSource(
+  worktreePath: string,
+  repo: { localPath: string | null; defaultBranch: string },
+  branch: string,
+): Pick<PublishableRepository, "worktreePath" | "exportBundle"> {
+  if (existsSync(worktreePath) || !repo.localPath) return { worktreePath };
+  const localPath = repo.localPath;
+  return { exportBundle: () => bundleFromBranch(localPath, branch, repo.defaultBranch) };
+}
+
+async function bundleFromBranch(repoPath: string, branch: string, defaultBranch: string): Promise<RepositoryBundle | null> {
+  const { stdout: headOut } = await run("git", ["-C", repoPath, "rev-parse", "--verify", `refs/heads/${branch}^{commit}`]);
+  const headSha = headOut.trim();
+  const base = await resolveDefaultBranchRef(repoPath, defaultBranch);
+  const { stdout: baseOut } = await run("git", ["-C", repoPath, "merge-base", base, headSha]);
+  const baseSha = baseOut.trim();
+  if (baseSha === headSha) return null;
+  // The push fetches HEAD from the bundle, so the bundle is cut where
+  // HEAD is the branch: a detached worktree with nothing checked out.
+  const dir = await mkdtemp(path.join(tmpdir(), "bento-export-"));
+  const checkout = path.join(dir, "checkout");
+  const file = path.join(dir, "changes.bundle");
+  try {
+    await run("git", ["-C", repoPath, "worktree", "add", "--quiet", "--detach", "--no-checkout", checkout, headSha]);
+    await run("git", ["-C", checkout, "bundle", "create", file, "HEAD", `^${baseSha}`]);
+    return { baseSha, headSha, data: await readFile(file) };
+  } finally {
+    await run("git", ["-C", repoPath, "worktree", "remove", "--force", checkout]).catch(() => {});
+    await rm(dir, { recursive: true, force: true });
   }
 }
 
@@ -380,7 +420,7 @@ export async function recordPushedHead(
   }
   await db
     .update(swarms)
-    .set({ pushedHeads: sql`${swarms.pushedHeads} || ${entry}::jsonb` })
+    .set({ pushedHeads: sql`${swarms.pushedHeads} || ${entry}::jsonb`, branchPushedAt: sql`now()` })
     .where(eq(swarms.id, owner.swarmId));
 }
 
