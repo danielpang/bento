@@ -10,6 +10,19 @@ export function pullRequestMarker(id: string): string {
   return `<!-- bento-pr-update:${id} -->`;
 }
 
+/** GitHub refuses a pull request or comment body past 65536 characters. */
+export const GITHUB_BODY_MAX_CHARS = 65536;
+const TRUNCATED_NOTE = "\n\n(Cut short: the full text is longer than GitHub allows.)";
+
+/** Cuts a body to what GitHub takes, keeping `tail` (a marker, say) whole at the end. */
+export function fitPullRequestBody(body: string, tail = ""): string {
+  if (body.length + tail.length <= GITHUB_BODY_MAX_CHARS) return body + tail;
+  let end = GITHUB_BODY_MAX_CHARS - TRUNCATED_NOTE.length - tail.length;
+  const last = body.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return body.slice(0, end) + TRUNCATED_NOTE + tail;
+}
+
 export async function getPullRequestVia(octokit: Octokit, ref: PullRequestRef): Promise<PullRequestDetails> {
   const pr = await octokit.pulls.get({
     owner: ref.owner,
@@ -30,7 +43,7 @@ export async function updatePullRequestVia(octokit: Octokit, input: PullRequestU
     repo: input.repo,
     pull_number: input.prNumber,
     ...(input.title !== undefined ? { title: input.title } : {}),
-    ...(input.body !== undefined ? { body: input.body } : {}),
+    ...(input.body !== undefined ? { body: fitPullRequestBody(input.body) } : {}),
   });
 }
 
@@ -67,6 +80,6 @@ export async function createPullRequestCommentVia(
     owner: ref.owner,
     repo: ref.repo,
     issue_number: ref.prNumber,
-    body,
+    body: fitPullRequestBody(body),
   });
 }

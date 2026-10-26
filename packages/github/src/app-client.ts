@@ -21,6 +21,7 @@ import {
   markPullRequestReadyVia,
   pullRequestHasCommentVia,
   updatePullRequestVia,
+  fitPullRequestBody,
 } from "./pr-sync.js";
 
 export interface AppConfig {
@@ -319,7 +320,7 @@ export async function ensurePullRequestVia(octokit: Octokit, input: PullRequestI
     head: input.head,
     base: input.base,
     title: input.title,
-    body: input.body,
+    body: fitPullRequestBody(input.body),
     ...(input.draft ? { draft: true } : {}),
   });
   return { prNumber: created.data.number, url: created.data.html_url };

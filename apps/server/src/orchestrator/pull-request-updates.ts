@@ -1,7 +1,7 @@
 import { and, asc, eq, inArray, isNull } from "drizzle-orm";
 import { pullRequestUpdates } from "@bento/db";
 import type { Db } from "@bento/db";
-import { parseRepoUrl, pullRequestMarker, type GitHubPublisher } from "@bento/github";
+import { fitPullRequestBody, parseRepoUrl, pullRequestMarker, type GitHubPublisher } from "@bento/github";
 
 /**
  * A pull request an update can be applied to. Both the publish step
@@ -102,7 +102,7 @@ export async function applyPendingPullRequestUpdates(
         if (row.kind !== "comment") continue;
         const marker = pullRequestMarker(row.id);
         if (!(await publisher.pullRequestHasComment(ref, marker))) {
-          await publisher.createPullRequestComment(ref, `${row.body.trim()}\n\n${marker}`);
+          await publisher.createPullRequestComment(ref, fitPullRequestBody(row.body.trim(), `\n\n${marker}`));
           result.commented += 1;
         }
         result.appliedIds.push(row.id);
