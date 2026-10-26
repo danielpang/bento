@@ -586,6 +586,10 @@ The commit a push put on GitHub is saved as the next push's lease as
 soon as the push succeeds (`pushed`), not once the pull request opens:
 GitHub can refuse the pull request after taking the push, and a retry
 holding the older commit read Bento's own push as somebody else's.
+A card keeps it in `features.pushed_heads` (branch, then repository
+URL), because its `feature_pull_requests` row cannot exist before the
+pull request does; the lease reads that column first and the row's
+`head_sha` for cards published before it.
 
 The pull request's description is the planner's, not the goal's. The
 planner writes it before its first task (`write_pull_request_description`,

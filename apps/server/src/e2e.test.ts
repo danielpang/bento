@@ -5908,6 +5908,57 @@ test("the server pushes each repository the agent committed in", { timeout: 90_0
   assert.equal(mirrored?.prNumber, 42);
 });
 
+test("a card's first push is its lease even when GitHub refused the pull request", { timeout: 90_000 }, async () => {
+  const bare = await mkdtemp(path.join(tmpdir(), "bento-remote-refused-"));
+  await run("git", ["-C", bare, "init", "--bare", "-b", "main"]);
+  const work = await fixtureRepo("publishing-refused");
+  await run("git", ["-C", work, "push", bare, "main"]);
+  const branch = "feature/refused";
+  const commit = async (file: string) => {
+    await writeFile(path.join(work, file), `${file}\n`);
+    await run("git", ["-C", work, "add", "-A"]);
+    await run("git", ["-C", work, "-c", "user.email=test@bento.dev", "-c", "user.name=test", "commit", "-qm", file]);
+  };
+  await run("git", ["-C", work, "checkout", "-q", "-b", branch]);
+  await commit("first.md");
+
+  const { project } = await setupProject("Refused");
+  const feature = await createFeature(project.id, "Refused");
+  const plan = {
+    featureId: feature.id,
+    featureTitle: "Refused",
+    branch,
+    repositories: [{ id: null, name: "app", repoUrl: "https://github.com/acme/app", defaultBranch: "main", worktreePath: work }],
+  };
+  const refusing = {
+    async pushToken() {
+      return "not used by a path remote";
+    },
+    async ensurePullRequest(): Promise<never> {
+      throw new Error("Validation Failed: body is too long");
+    },
+  };
+  const first = await publishFeatureBranches(ctx.db, refusing, plan, { remoteUrl: () => bare });
+  assert.match(first.failures[0]?.reason ?? "", /body is too long/);
+  const pushed = (await run("git", ["-C", bare, "rev-parse", branch])).stdout.trim();
+  const [saved] = await ctx.db.select().from(features).where(eq(features.id, feature.id));
+  assert.deepEqual(saved?.pushedHeads, { [branch]: { "https://github.com/acme/app": pushed } });
+
+  // Somebody else's commit onto the branch, then more agent work.
+  const theirs = await mkdtemp(path.join(tmpdir(), "bento-theirs-"));
+  await run("git", ["clone", "-q", "--branch", branch, bare, theirs]);
+  await writeFile(path.join(theirs, "review.md"), "review fix\n");
+  await run("git", ["-C", theirs, "add", "-A"]);
+  await run("git", ["-C", theirs, "-c", "user.email=r@bento.dev", "-c", "user.name=r", "commit", "-qm", "review"]);
+  await run("git", ["-C", theirs, "push", "-q", "origin", branch]);
+  const theirHead = (await run("git", ["-C", theirs, "rev-parse", "HEAD"])).stdout.trim();
+  await commit("second.md");
+
+  const retry = await publishFeatureBranches(ctx.db, refusing, plan, { remoteUrl: () => bare });
+  assert.match(retry.failures[0]?.reason ?? "", /moved on GitHub since Bento last pushed it/);
+  assert.equal((await run("git", ["-C", bare, "rev-parse", branch])).stdout.trim(), theirHead, "their commit is kept");
+});
+
 test("publish succeeds when the feature branch forked before main moved forward", { timeout: 90_000 }, async () => {
   const bare = await mkdtemp(path.join(tmpdir(), "bento-remote-behind-"));
   await run("git", ["-C", bare, "init", "--bare", "-b", "main"]);

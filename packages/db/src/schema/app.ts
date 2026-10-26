@@ -289,6 +289,8 @@ export const features = pgTable(
    * requests; this is the one to show when there is only room for one.
    */
   prNumber: integer("pr_number"),
+  /** The commit Bento last pushed, by branch then repository URL: the lease the next push holds. */
+  pushedHeads: jsonb("pushed_heads").$type<Record<string, Record<string, string>>>().notNull().default({}),
   /**
    * The card this one was split out of, when the agent working that
    * card judged the task large and worth dividing.

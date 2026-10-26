@@ -267,6 +267,13 @@ export async function publishFeatureBranches(
      * push) falls back to the read-at-push behavior.
      */
     lease: async (repo) => {
+      const [feature] = await db
+        .select({ pushedHeads: features.pushedHeads })
+        .from(features)
+        .where(eq(features.id, args.featureId))
+        .limit(1);
+      const pushed = feature?.pushedHeads?.[args.branch]?.[repo.repoUrl];
+      if (pushed) return pushed;
       const [known] = await db
         .select({ headSha: featurePullRequests.headSha })
         .from(featurePullRequests)
@@ -286,15 +293,11 @@ export async function publishFeatureBranches(
     },
     pushed: async (repo, headSha) => {
       await db
-        .update(featurePullRequests)
-        .set({ headSha, updatedAt: new Date() })
-        .where(
-          and(
-            eq(featurePullRequests.featureId, args.featureId),
-            eq(featurePullRequests.repoUrl, repo.repoUrl),
-            eq(featurePullRequests.branch, args.branch),
-          ),
-        );
+        .update(features)
+        .set({
+          pushedHeads: sql`${features.pushedHeads} || jsonb_build_object(${args.branch}::text, coalesce(${features.pushedHeads}->${args.branch}::text, '{}'::jsonb) || jsonb_build_object(${repo.repoUrl}::text, ${headSha}::text))`,
+        })
+        .where(eq(features.id, args.featureId));
     },
     record: async (repo, pr) => {
       await db
