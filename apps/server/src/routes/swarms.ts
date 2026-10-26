@@ -43,7 +43,7 @@ import { requestRunAbort } from "../orchestrator/run-ownership.js";
 import { liveDeliveryOf, nudgeAndAwaitSent } from "../orchestrator/remote-live.js";
 import { enqueueSwarmTick } from "../orchestrator/swarm/coordinator.js";
 import { MAX_PLAN_DEPTH, MAX_SWARM_GOAL_CHARS, MAX_SWARM_WORKERS } from "@bento/core";
-import { requireSwarms } from "../orchestrator/swarm/gate.js";
+import { requireSwarmCompute, requireSwarms } from "../orchestrator/swarm/gate.js";
 import { swarmBranchName } from "../orchestrator/swarm/sandbox.js";
 import { branchCheckoutPath, releaseSwarmBranch } from "../orchestrator/swarm/release-branch.js";
 import { isSafeBranchName, workerBranchName } from "../orchestrator/swarm/branches.js";
@@ -555,7 +555,7 @@ export function swarmRoutes(ctx: AppContext) {
       }
       // The gate is asked about the team whose project this is, rather
       // than whichever tab the caller has open.
-      const refusal = await requireSwarms(ctx, c, project.organizationId);
+      const refusal = await requireSwarmCompute(ctx, c, project.organizationId);
       if (refusal) return c.json(refusal.body, refusal.status);
 
       if (project.executor === "runner") {
@@ -1001,9 +1001,15 @@ export function swarmRoutes(ctx: AppContext) {
     .patch("/:id", zValidator("json", updateSwarm), async (c) => {
       const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
       if (!swarm) return c.json({ error: "not found" }, 404);
-      const refusal = await requireSwarms(ctx, c, swarm.organizationId);
-      if (refusal) return c.json(refusal.body, refusal.status);
       const body = c.req.valid("json");
+      // A new ceiling, agent or setting can put agents back to work (a
+      // raised budget resumes a paused swarm), so only a rename or an
+      // archive is spared the waitlist.
+      const startsWork = Object.keys(body).some((key) => key !== "title" && key !== "archived");
+      const refusal = startsWork
+        ? await requireSwarmCompute(ctx, c, swarm.organizationId)
+        : await requireSwarms(ctx, c, swarm.organizationId);
+      if (refusal) return c.json(refusal.body, refusal.status);
       for (const profileId of [body.plannerProfileId, body.workerProfileId, body.judgeProfileId]) {
         if (profileId && !(await canUseProfile(ctx, c, swarm.organizationId, profileId))) {
           return c.json({ error: "agent not found" }, 404);
@@ -1265,7 +1271,7 @@ export function swarmRoutes(ctx: AppContext) {
     .post("/:id/planner/retry", async (c) => {
       const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
       if (!swarm) return c.json({ error: "not found" }, 404);
-      const refusal = await requireSwarms(ctx, c, swarm.organizationId);
+      const refusal = await requireSwarmCompute(ctx, c, swarm.organizationId);
       if (refusal) return c.json(refusal.body, refusal.status);
       if (swarm.status !== "planning") {
         return c.json({ error: "Only a swarm waiting for its first plan can retry the planner." }, 409);
@@ -1382,7 +1388,7 @@ export function swarmRoutes(ctx: AppContext) {
     .post("/:id/start", async (c) => {
       const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
       if (!swarm) return c.json({ error: "not found" }, 404);
-      const refusal = await requireSwarms(ctx, c, swarm.organizationId);
+      const refusal = await requireSwarmCompute(ctx, c, swarm.organizationId);
       if (refusal) return c.json(refusal.body, refusal.status);
 
       /*
@@ -1532,7 +1538,7 @@ export function swarmRoutes(ctx: AppContext) {
       async (c) => {
         const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
         if (!swarm) return c.json({ error: "not found" }, 404);
-        const refusal = await requireSwarms(ctx, c, swarm.organizationId);
+        const refusal = await requireSwarmCompute(ctx, c, swarm.organizationId);
         if (refusal) return c.json(refusal.body, refusal.status);
         const body = c.req.valid("json");
 
@@ -1725,7 +1731,7 @@ export function swarmRoutes(ctx: AppContext) {
       async (c) => {
         const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
         if (!swarm) return c.json({ error: "not found" }, 404);
-        const refusal = await requireSwarms(ctx, c, swarm.organizationId);
+        const refusal = await requireSwarmCompute(ctx, c, swarm.organizationId);
         if (refusal) return c.json(refusal.body, refusal.status);
         const body = c.req.valid("json");
 
@@ -1820,7 +1826,7 @@ export function swarmRoutes(ctx: AppContext) {
       async (c) => {
         const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
         if (!swarm) return c.json({ error: "not found" }, 404);
-        const refusal = await requireSwarms(ctx, c, swarm.organizationId);
+        const refusal = await requireSwarmCompute(ctx, c, swarm.organizationId);
         if (refusal) return c.json(refusal.body, refusal.status);
         const body = c.req.valid("json");
 
@@ -1987,7 +1993,7 @@ export function swarmRoutes(ctx: AppContext) {
     .post("/:id/tasks/:taskId/done", async (c) => {
       const swarm = await getAccessibleSwarm(ctx, c, c.req.param("id"));
       if (!swarm) return c.json({ error: "not found" }, 404);
-      const refusal = await requireSwarms(ctx, c, swarm.organizationId);
+      const refusal = await requireSwarmCompute(ctx, c, swarm.organizationId);
       if (refusal) return c.json(refusal.body, refusal.status);
 
       // Scoped to this swarm rather than looked up by id alone, so a
@@ -2085,7 +2091,7 @@ export function swarmRoutes(ctx: AppContext) {
      * two drift apart.
      */
     .post("/:id/tasks/:taskId/retry", async (c) => {
-      const found = await accessibleTask(ctx, c);
+      const found = await accessibleTask(ctx, c, { compute: true });
       if ("refusal" in found) return found.refusal;
       const { swarm, task } = found;
       const body = await c.req.json().catch(() => ({}));
@@ -2152,7 +2158,7 @@ export function swarmRoutes(ctx: AppContext) {
       return c.json(retried);
     })
     .post("/:id/tasks/:taskId/landing/retry", async (c) => {
-      const found = await accessibleTask(ctx, c);
+      const found = await accessibleTask(ctx, c, { compute: true });
       if ("refusal" in found) return found.refusal;
       const { swarm, task } = found;
       const [landing] = await db(c, ctx).select().from(swarmLandings)
@@ -2262,7 +2268,7 @@ export function swarmRoutes(ctx: AppContext) {
         }),
       ),
       async (c) => {
-        const found = await accessibleTask(ctx, c);
+        const found = await accessibleTask(ctx, c, { compute: true });
         if ("refusal" in found) return found.refusal;
         const { swarm, task } = found;
         // Allowed on a failed swarm for the reason cancel is: a leaf too
@@ -2297,7 +2303,7 @@ export function swarmRoutes(ctx: AppContext) {
       "/:id/tasks/:taskId/reassign",
       zValidator("json", z.object({ agentProfileId: z.string().uuid().nullable() })),
       async (c) => {
-        const found = await accessibleTask(ctx, c);
+        const found = await accessibleTask(ctx, c, { compute: true });
         if ("refusal" in found) return found.refusal;
         const { swarm, task } = found;
         const { agentProfileId } = c.req.valid("json");
@@ -2539,6 +2545,8 @@ export function swarmRoutes(ctx: AppContext) {
 async function accessibleTask(
   ctx: AppContext,
   c: Context,
+  /** The route starts an agent, so the hosted waitlist is asked too. */
+  { compute = false }: { compute?: boolean } = {},
 ): Promise<
   | { swarm: typeof swarms.$inferSelect; task: typeof swarmTasks.$inferSelect }
   | { refusal: Response }
@@ -2547,7 +2555,9 @@ async function accessibleTask(
   const taskId = c.req.param("taskId") ?? "";
   const swarm = await getAccessibleSwarm(ctx, c, swarmId);
   if (!swarm) return { refusal: c.json({ error: "not found" }, 404) };
-  const gate = await requireSwarms(ctx, c, swarm.organizationId);
+  const gate = compute
+    ? await requireSwarmCompute(ctx, c, swarm.organizationId)
+    : await requireSwarms(ctx, c, swarm.organizationId);
   if (gate) return { refusal: c.json(gate.body, gate.status) };
 
   const [task] = await db(c, ctx)

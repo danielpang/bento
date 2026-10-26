@@ -15,7 +15,6 @@ import {
   runServe,
   runSessions,
   runSpend,
-  runSwarm,
 } from "./headless.js";
 
 let options;
@@ -74,7 +73,9 @@ if (options.command === "update") {
 } else if (options.command === "sessions") {
   await runSessions(options);
 } else if (options.command === "swarm") {
-  await runSwarm(options);
+  // Not offered in the terminal yet: swarms open in the web console.
+  console.error("Swarms are not available in the terminal yet. Open them in the web console.");
+  process.exitCode = 1;
 } else if (options.command === "mcp") {
   await runMcp(options);
 } else {

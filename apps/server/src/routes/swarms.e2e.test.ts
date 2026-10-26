@@ -2273,37 +2273,22 @@ test("raising the time limit wakes the swarm the clock stopped", async () => {
 });
 
 /**
- * The Spend page is not a way around the allowlist.
- *
- * Every swarm route answers 404 to somebody who is not a beta tester,
- * because a 402 would tell them the feature exists. The project's usage
- * route is not a swarm route and was never gated, and it grew a section
- * listing every swarm's title, status and spend: the one page in the
- * console that would have told a non-tester swarms exist, and told them
- * what their colleagues had been spending on them.
- *
- * The cards are not beta, so the route still answers. The swarms come
- * off it, which is the same thing the console does with a section a
- * person may not see.
+ * The Spend page lists every swarm's spend, for everyone: the Swarms
+ * tab is shown to everyone, so there is nothing left to hide.
  */
-test("a person who is not a beta tester is not told the swarms exist", async () => {
+test("the spend page lists swarms whatever the beta flag says", async () => {
   const swarm = await createSwarm();
   await db
     .update(swarms)
     .set({ spentMeasuredUsd: "40", title: "Rewrite checkout" })
     .where(eq(swarms.id, swarm.id));
 
-  const asTester = await app.request(`/api/projects/${projectId}/usage`);
-  assert.equal(asTester.status, 200);
-  const seen = (await asTester.json()) as { bySwarm: { swarmId: string }[] };
-  assert.equal(seen.bySwarm.length, 1, "a tester sees the swarm section");
-
   ctx.env.BENTO_BETA_FEATURES = false;
   try {
     const res = await app.request(`/api/projects/${projectId}/usage`);
-    assert.equal(res.status, 200, "the cards on this page are not behind the flag");
-    const body = (await res.json()) as { bySwarm: unknown[] };
-    assert.deepEqual(body.bySwarm, [], "and the swarms are not on it at all");
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { bySwarm: { swarmId: string }[] };
+    assert.ok(body.bySwarm.some((row) => row.swarmId === swarm.id));
   } finally {
     ctx.env.BENTO_BETA_FEATURES = true;
   }

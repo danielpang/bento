@@ -44,6 +44,7 @@ import { SecretBox } from "./secrets.js";
 import { createAuth, type AuthHooks } from "./auth.js";
 import { reportAuthEvent } from "./auth-events.js";
 import { recordingAnalytics } from "./test-analytics.js";
+import { forgetSwarmAccess } from "./swarm-access.js";
 import { createDrivers, type AppContext } from "./context.js";
 import { EventBus } from "./events.js";
 import { loadEnv } from "./env.js";
@@ -141,6 +142,69 @@ function jsonPost(path: string, body: unknown, token?: string) {
   });
 }
 
+test("hosted swarms refuse to start for the waitlist through the whole app, whatever beta says", async () => {
+  const email = "swarm-waitlist@bento.test";
+  const signUp = await jsonPost("/api/auth/sign-up/email", { email, password: "correct-horse-battery", name: "Waiting" });
+  assert.equal(signUp.status, 200);
+  const headers = { authorization: `Bearer ${signUp.headers.get("set-auth-token")!}` };
+  const letIn: string[] = [];
+  let asked = 0;
+  const hosted = createApp({
+    ...ctx,
+    analytics: {
+      capture: () => {},
+      captureException: () => {},
+      shutdown: async () => {},
+      isFeatureEnabled: async (_flag, _userId, properties) => {
+        asked += 1;
+        return letIn.includes(properties.email ?? "");
+      },
+    },
+  });
+  const project = (await (await jsonPost("/api/projects", { name: "Swarm waitlist", localPath: "/tmp" }, signUp.headers.get("set-auth-token")!)).json()) as { id: string };
+  const start = () =>
+    hosted.request("/api/swarms", {
+      method: "POST",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({ projectId: project.id, title: "Checkout", goal: "Make it work" }),
+    });
+  const flags = async () => (await (await hosted.request("/api/flags", { headers })).json()) as Record<string, unknown>;
+
+  await setBetaFeatures([email], true);
+  forgetSwarmAccess();
+  const refused = await start();
+  assert.equal(refused.status, 403, "beta features are not a way in");
+  assert.equal(((await refused.json()) as { code: string }).code, "SWARM_WAITLIST");
+  const waiting = await flags();
+  assert.equal(waiting.swarms, "waitlist");
+
+  // Reading never asks PostHog, so the waitlist can still see and stop what it has.
+  forgetSwarmAccess();
+  asked = 0;
+  assert.equal((await hosted.request("/api/swarms", { headers })).status, 200);
+  assert.equal(asked, 0, "a read does not ask PostHog");
+  // A swarm they already have: renaming it is fine, but a new budget can
+  // put agents back to work, so the waitlist is asked.
+  const [existing] = await ctx.db
+    .insert(swarms)
+    .values({ workerIsolation: "worktree", projectId: project.id, slug: "waitlisted", title: "Old", status: "paused", branchName: "swarm/old" })
+    .returning();
+  const patch = (body: Record<string, unknown>) =>
+    hosted.request(`/api/swarms/${existing!.id}`, {
+      method: "PATCH",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  assert.equal((await patch({ title: "Renamed" })).status, 200);
+  assert.equal((await patch({ budgetUsd: 50 })).status, 403);
+
+  letIn.push(email);
+  forgetSwarmAccess();
+  assert.notEqual((await start()).status, 403, "an email on the flag is the way in");
+  assert.equal((await flags()).swarms, "open");
+  forgetSwarmAccess();
+});
+
 test("the API refuses unauthenticated requests in multi mode", async () => {
   const res = await app.request("/api/projects");
   assert.equal(res.status, 401);
@@ -165,21 +229,20 @@ test("beta features need the team to allow them and the person to turn them on",
   };
   const setOwn = (enabled: boolean) =>
     app.request("/api/account/beta", { method: "PATCH", headers: { ...auth, "content-type": "application/json" }, body: JSON.stringify({ enabled }) });
-  const swarms = () => app.request("/api/swarms", { headers: auth });
   const setTeam = (allowed: boolean, headers: Record<string, string>) =>
     app.request("/api/team/beta", { method: "PATCH", headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify({ allowed }) });
 
-  assert.deepEqual(await flags(), { betaTesters: false, betaFeatures: { enabled: false, allowed: false } });
+  assert.deepEqual(await flags(), { betaTesters: false, swarms: "open", betaFeatures: { enabled: false, allowed: false } });
 
   // Their own switch alone, with no team open, turns nothing on.
   assert.equal((await setOwn(true)).status, 200);
-  assert.deepEqual(await flags(), { betaTesters: false, betaFeatures: { enabled: true, allowed: false } });
+  assert.deepEqual(await flags(), { betaTesters: false, swarms: "open", betaFeatures: { enabled: true, allowed: false } });
 
   // Nor in a team that has not allowed it.
   const team = (await (await jsonPost("/api/auth/organization/create", { name: "Flags Team", slug: "flags-team" }, token)).json()) as { id: string };
   await jsonPost("/api/auth/organization/set-active", { organizationId: team.id }, token);
   assert.deepEqual(await (await app.request("/api/team/beta", { headers: auth })).json(), { allowed: false, canEdit: true });
-  assert.deepEqual(await flags(), { betaTesters: false, betaFeatures: { enabled: true, allowed: false } });
+  assert.deepEqual(await flags(), { betaTesters: false, swarms: "open", betaFeatures: { enabled: true, allowed: false } });
 
   // A member who is not an owner or admin cannot allow it.
   const memberSignUp = await jsonPost("/api/auth/sign-up/email", {
@@ -196,22 +259,19 @@ test("beta features need the team to allow them and the person to turn them on",
   assert.equal((await setTeam(true, memberAuth)).status, 403);
 
   // The owner allows it, and the switch now counts.
-  assert.equal((await swarms()).status, 404, "swarms stay hidden until both say yes");
   assert.equal((await setTeam(true, auth)).status, 200);
-  assert.deepEqual(await flags(), { betaTesters: true, betaFeatures: { enabled: true, allowed: true } });
-  assert.equal((await swarms()).status, 200, "and then open what beta gates");
+  assert.deepEqual(await flags(), { betaTesters: true, swarms: "open", betaFeatures: { enabled: true, allowed: true } });
 
   // Allowing it turned nothing on for the member, who has not chosen it.
   const memberFlags = await (await app.request("/api/flags", { headers: memberAuth })).json();
-  assert.deepEqual(memberFlags, { betaTesters: false, betaFeatures: { enabled: false, allowed: true } });
+  assert.deepEqual(memberFlags, { betaTesters: false, swarms: "open", betaFeatures: { enabled: false, allowed: true } });
 
   // Either one off turns it off.
   assert.equal((await setOwn(false)).status, 200);
-  assert.deepEqual(await flags(), { betaTesters: false, betaFeatures: { enabled: false, allowed: true } });
+  assert.deepEqual(await flags(), { betaTesters: false, swarms: "open", betaFeatures: { enabled: false, allowed: true } });
   assert.equal((await setOwn(true)).status, 200);
   assert.equal((await setTeam(false, auth)).status, 200);
-  assert.deepEqual(await flags(), { betaTesters: false, betaFeatures: { enabled: true, allowed: false } });
-  assert.equal((await swarms()).status, 404);
+  assert.deepEqual(await flags(), { betaTesters: false, swarms: "open", betaFeatures: { enabled: true, allowed: false } });
   assert.equal((await app.request("/api/account/beta", { method: "PATCH" })).status, 401);
 });
 

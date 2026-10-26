@@ -35,6 +35,8 @@ import { mcpWellKnownRoutes } from "./routes/mcp-well-known.js";
 import { contactRoutes } from "./routes/contact.js";
 import { accountRoutes } from "./routes/account.js";
 import { flagRoutes } from "./routes/flags.js";
+import { swarmWaitlistRoutes } from "./routes/swarm-waitlist.js";
+import { warmSwarmAccess } from "./swarm-access.js";
 import { posthogApiKey } from "./env.js";
 import { accountDeletionBlockedReason } from "./auth.js";
 import { BUILD_HEADER, cachedStatic, createWebShell } from "./web-shell.js";
@@ -345,9 +347,12 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
    * excluded for. Actor is the whole check; there is no tenant row.
    */
   app.route("/api/flags", flagRoutes(ctx));
+  // Waits on GitHub and SMTP, so it stays outside the tenant transaction too.
+  app.route("/api/swarm-waitlist", new Hono().use("*", actorMiddleware(ctx)).route("/", swarmWaitlistRoutes(ctx)));
 
   const api = new Hono()
     .use("*", actorMiddleware(ctx))
+    .use("*", warmSwarmAccess(ctx))
     .use("*", tenantMiddleware(ctx))
     .route("/projects", projectRoutes(ctx))
     .route("/board", boardEventRoutes(ctx))

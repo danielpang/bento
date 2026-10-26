@@ -6,17 +6,17 @@ import { createDb, createPool, runMigrations, type Db } from "@bento/db";
 import type { AppContext, Entitlements } from "../../context.js";
 import { loadEnv } from "../../env.js";
 import { actorMiddleware } from "../../middleware/actor.js";
-import { requireSwarms } from "./gate.js";
+import { forgetSwarmAccess, HOSTED_SWARMS_FLAG } from "../../swarm-access.js";
+import { requireSwarmCompute, requireSwarms } from "./gate.js";
 
 /**
  * The swarm gate, against a real database and a real request.
  *
  * Two things are worth checking here rather than in a unit test. The
- * order of the two refusals: a person without beta features has to
- * get 404, because 402 would tell them the feature exists. And that
- * local mode, which registers no entitlements module, answers only to
- * the switch: a check that reads the plan has to answer "allowed"
- * without one.
+ * order of the two refusals: a plan without swarms says so before the
+ * hosted waitlist is asked about. And that local mode,
+ * which registers no entitlements module and has no waitlist, answers
+ * "allowed" whatever its beta flag says.
  */
 const adminUrl = process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5439/app";
 const testDbName = "swarm_gate_test";
@@ -49,17 +49,30 @@ after(async () => {
   await pool?.end();
 });
 
-/** Turns one user's beta features switch on or off. */
-async function setBeta(userId: string, enabled: boolean): Promise<void> {
-  await pool.query(`update identity."user" set beta_features = $2 where id = $1`, [userId, enabled]);
+/** PostHog, answering the hosted swarms flag for the emails it lets in. */
+function posthog(letIn: string[], seen: Record<string, string>[] = []) {
+  return {
+    capture: () => {},
+    captureException: () => {},
+    shutdown: async () => {},
+    isFeatureEnabled: async (flag: string, _userId: string, properties: Record<string, string>) => {
+      assert.equal(flag, HOSTED_SWARMS_FLAG);
+      seen.push(properties);
+      return letIn.includes(properties.email ?? "");
+    },
+  };
 }
 
-/** Allows beta features in the team, or not. */
-async function setTeamBeta(allowed: boolean): Promise<void> {
-  await pool.query(`update identity.organization set beta_features_allowed = $1 where id = 'org-a'`, [allowed]);
-}
+/** PostHog that never answers. */
+const silentPosthog = {
+  capture: () => {},
+  captureException: () => {},
+  shutdown: async () => {},
+  isFeatureEnabled: () => new Promise<boolean | undefined>(() => {}),
+};
 
-function multiCtx(overrides: { entitlements?: Entitlements } = {}): AppContext {
+function multiCtx(overrides: { entitlements?: Entitlements; analytics?: AppContext["analytics"] } = {}): AppContext {
+  forgetSwarmAccess();
   return {
     env: loadEnv({ BENTO_MODE: "multi", DATABASE_URL: testUrl } as NodeJS.ProcessEnv),
     db,
@@ -89,7 +102,7 @@ function localCtx(beta: boolean, overrides: { entitlements?: Entitlements } = {}
 /** Runs one request through the gate and reports what a route would send. */
 async function ask(ctx: AppContext): Promise<{ status: number; body: unknown }> {
   const app = new Hono().use("*", actorMiddleware(ctx)).get("/", async (c) => {
-    const refusal = await requireSwarms(ctx, c);
+    const refusal = await requireSwarmCompute(ctx, c);
     if (refusal) return c.json(refusal.body, refusal.status);
     return c.json({ allowed: true });
   });
@@ -110,25 +123,27 @@ const allowingPlan = {
   canUseSwarms: async () => null,
 } as unknown as Entitlements;
 
-test("a beta tester on a plan that includes swarms is allowed", async () => {
-  await setBeta("u1", true);
-  const answer = await ask(multiCtx({ entitlements: allowingPlan }));
+test("somebody whose email is on the flag, on a plan that includes swarms, is allowed", async () => {
+  const seen: Record<string, string>[] = [];
+  const answer = await ask(multiCtx({ entitlements: allowingPlan, analytics: posthog(["u@x.test"], seen) }));
   assert.equal(answer.status, 200);
   assert.deepEqual(answer.body, { allowed: true });
+  assert.deepEqual(seen, [{ email: "u@x.test" }], "the flag is asked by email alone");
 });
 
-test("a non tester is told nothing, even on a plan that would refuse", async () => {
-  // Both gates would fire. The flag has to win, or the 402 announces a
-  // feature this person is not supposed to know about.
-  await setBeta("u1", false);
-  const answer = await ask(multiCtx({ entitlements: refusingPlan }));
-  assert.equal(answer.status, 404, "a non tester must not be able to tell that swarms exist");
-  assert.deepEqual(answer.body, { error: "not found" });
+test("turning beta features on does not get past the waitlist", async () => {
+  await pool.query(`update identity."user" set beta_features = true where id = 'u1'`);
+  try {
+    const answer = await ask(multiCtx({ entitlements: allowingPlan, analytics: posthog([]) }));
+    assert.equal(answer.status, 403);
+    assert.equal((answer.body as { code: string }).code, "SWARM_WAITLIST");
+  } finally {
+    await pool.query(`update identity."user" set beta_features = false where id = 'u1'`);
+  }
 });
 
-test("a tester whose plan does not include swarms gets PLAN_LIMIT", async () => {
-  await setBeta("u1", true);
-  const answer = await ask(multiCtx({ entitlements: refusingPlan }));
+test("a plan without swarms says so before the waitlist is asked about", async () => {
+  const answer = await ask(multiCtx({ entitlements: refusingPlan, analytics: posthog([]) }));
   assert.equal(answer.status, 402);
   const body = answer.body as { code: string; error: string; message: string };
   assert.equal(body.code, "PLAN_LIMIT");
@@ -136,34 +151,34 @@ test("a tester whose plan does not include swarms gets PLAN_LIMIT", async () => 
   assert.equal(body.message, body.error, "both spellings carry the sentence a person reads");
 });
 
-test("a person's switch is not enough in a team that has not allowed beta", async () => {
-  await setBeta("u1", true);
-  await setTeamBeta(false);
-  try {
-    assert.equal((await ask(multiCtx({ entitlements: allowingPlan }))).status, 404);
-  } finally {
-    await setTeamBeta(true);
-  }
+test("the plan alone, which reading and stopping ask, never asks PostHog", async () => {
+  const seen: Record<string, string>[] = [];
+  const ctx = multiCtx({ entitlements: allowingPlan, analytics: posthog([], seen) });
+  const app = new Hono().use("*", actorMiddleware(ctx)).get("/", async (c) => {
+    const refusal = await requireSwarms(ctx, c);
+    return refusal ? c.json(refusal.body, refusal.status) : c.json({ allowed: true });
+  });
+  assert.equal((await app.request("/")).status, 200, "somebody on the waitlist can still read their swarms");
+  assert.deepEqual(seen, []);
 });
 
-test("multi mode without a billing module has no plan to refuse", async () => {
-  // The open source install: the switch decides, and nothing else does.
-  await setBeta("u1", true);
+test("PostHog that does not answer in time is unavailable, never the waitlist", async () => {
+  const started = Date.now();
+  const answer = await ask(multiCtx({ entitlements: allowingPlan, analytics: silentPosthog }));
+  assert.equal(answer.status, 503);
+  assert.equal((answer.body as { code: string }).code, "SWARM_ACCESS_UNAVAILABLE");
+  assert.ok(Date.now() - started < 5000, "the gate does not wait on PostHog for long");
+});
+
+test("multi mode without PostHog or a billing module is open", async () => {
+  // Somebody's own install, on their own sandboxes: nothing to waitlist.
   const answer = await ask(multiCtx());
   assert.equal(answer.status, 200);
 });
 
-test("local mode is hidden unless it was started with beta on", async () => {
-  // The database switch means nothing locally: the startup flag decides.
-  await setBeta("local-user", true);
-  assert.equal((await ask(localCtx(false))).status, 404);
-});
-
-test("local mode started with beta on is allowed with no entitlements", async () => {
-  await setBeta("local-user", false);
-  const answer = await ask(localCtx(true));
-  assert.equal(answer.status, 200);
-  assert.deepEqual(answer.body, { allowed: true });
+test("local mode is open whatever its beta flag says", async () => {
+  assert.equal((await ask(localCtx(false))).status, 200);
+  assert.equal((await ask(localCtx(true))).status, 200);
 });
 
 test("local mode is still allowed if a module somehow refuses", async () => {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { creationNotes, modeSurfaces, swarmAccess } from "./swarm/plan.js";
+import { creationNotes, modeSurfaces, swarmAccess, swarmGate } from "./swarm/plan.js";
 import { ComputeBanner } from "./components/SwarmPage.js";
 import { OutOfCompute } from "./components/OutOfCompute.js";
 import type { PlanState } from "./components/billing-plan.js";
@@ -42,55 +42,47 @@ function plan(overrides: Partial<PlanState> = {}): PlanState {
 
 test("local mode has nothing to gate on, so swarms are simply open", () => {
   const access = swarmAccess({ mode: "local", plan: null, absent: true });
-  assert.deepEqual(access, { show: true, included: true, canUpgrade: false, prompt: null });
+  assert.deepEqual(access, { plan: "included", canUpgrade: false });
+  assert.equal(swarmGate(access, "open"), "open");
 });
 
 test("an install with no billing module at all is open too", () => {
-  const access = swarmAccess({ mode: "multi", plan: null, absent: true });
-  assert.equal(access.show, true);
-  assert.equal(access.included, true);
+  assert.equal(swarmAccess({ mode: "multi", plan: null, absent: true }).plan, "included");
 });
 
-test("nothing renders while the plan is still in flight", () => {
-  const access = swarmAccess({ mode: "multi", plan: null, absent: false });
-  assert.equal(access.show, false);
-  assert.equal(access.included, false);
-  assert.equal(access.prompt, null);
+test("the gate waits while the plan or the flags are still in flight", () => {
+  const loading = swarmAccess({ mode: "multi", plan: null, absent: false });
+  assert.equal(loading.plan, "loading");
+  assert.equal(swarmGate(loading, "open"), "loading");
+  assert.equal(swarmGate({ plan: "included", canUpgrade: false }, null), "loading");
 });
 
 test("a plan that says nothing about swarms is not a plan that refuses them", () => {
-  const access = swarmAccess({ mode: "multi", plan: plan(), absent: false });
-  assert.equal(access.included, true);
-  assert.equal(access.show, true);
+  assert.equal(swarmAccess({ mode: "multi", plan: plan(), absent: false }).plan, "included");
 });
 
-test("a plan with swarms on it opens the board with no prompt", () => {
-  const access = swarmAccess({ mode: "multi", plan: plan({ swarms: { included: true } }), absent: false });
-  assert.equal(access.included, true);
-  assert.equal(access.prompt, null);
-});
-
-test("a plan without swarms offers the upgrade only to whoever could take it", () => {
+test("a plan without swarms asks for a subscription before any waitlist", () => {
   const owner = swarmAccess({
     mode: "multi",
     plan: plan({ swarms: { included: false }, canManageBilling: true }),
     absent: false,
   });
-  assert.equal(owner.show, true);
-  assert.equal(owner.included, false);
-  assert.equal(owner.canUpgrade, true);
-  assert.match(owner.prompt ?? "", /Pro/);
-  assert.ok(!(owner.prompt ?? "").includes(" - "));
+  assert.deepEqual(owner, { plan: "excluded", canUpgrade: true });
+  assert.equal(swarmGate(owner, "waitlist"), "subscribe");
 
   const member = swarmAccess({
     mode: "multi",
     plan: plan({ swarms: { included: false }, canManageBilling: false }),
     absent: false,
   });
-  // A control that can only ever refuse them is an advertisement.
-  assert.equal(member.show, false);
-  assert.equal(member.included, false);
-  assert.equal(member.prompt, null);
+  assert.deepEqual(member, { plan: "excluded", canUpgrade: false });
+});
+
+test("a subscribed team follows the flag, and a flag that never came is not allowed", () => {
+  const access = swarmAccess({ mode: "multi", plan: plan({ swarms: { included: true } }), absent: false });
+  assert.equal(swarmGate(access, "open"), "open");
+  assert.equal(swarmGate(access, "waitlist"), "waitlist");
+  assert.equal(swarmGate(access, "unavailable"), "unavailable", "a flag the server could not read either");
 });
 
 test("local mode drops the plan footer, drops the agent hours line, and keeps the estimate", () => {

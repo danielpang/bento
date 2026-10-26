@@ -18,3 +18,4 @@ export * from "./plan-files.js";
 export * from "./model-providers.js";
 export * from "./network-allowlist.js";
 export * from "./sandbox-capacity.js";
+export * from "./swarm-access.js";

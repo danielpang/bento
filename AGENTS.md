@@ -1181,7 +1181,7 @@ serves one. Do not gate a change because it is new. When it is unclear
 whether a feature is large enough, ask rather than gate it by default.
 
 What turns beta on depends on the mode, and nothing else turns it on;
-there is no PostHog flag. `hasBetaFeatures` in `feature-flags.ts` is the
+no PostHog flag turns on beta. `hasBetaFeatures` in `feature-flags.ts` is the
 one place that decides:
 
 - Local Bento reads its startup flag, `BENTO_BETA_FEATURES`, which the
@@ -1221,6 +1221,44 @@ When a feature is gated:
   API changes it.
 
 Do not mint a flag for "show this to testers". This switch is that.
+The one exception is hosted Swarms, below: a flag that decides who
+runs on Bento's sandboxes, which is about cost, not about testing.
+
+## Swarms are shown to everyone, and hosted Bento waitlists them
+
+The Swarms tab is shown to everyone, and beta features never decide
+who runs swarms. Local Bento always opens it, because its swarms run in
+the person's own Docker. On a hosted server two things come first, in
+this order: the team's plan has to include swarms (Pro and above, from
+the billing module; 402 `PLAN_LIMIT`, and the tab says to subscribe),
+and then the person's email has to be on the `hosted-swarms` PostHog
+flag (403 `SWARM_WAITLIST`, and the tab offers the waitlist). The
+console gates the page on both. The server asks the plan on every swarm
+route (`requireSwarms`) but the flag only on the routes that start
+agents (`requireSwarmCompute`: create, start, reopen, a message, a
+retry, a split, a reassign, done, a planner retry, and any change to
+a swarm's budget, limits, agents or settings, since a raised ceiling
+resumes a paused swarm), because those are
+what spend sandbox time; reading, stopping, archiving and deleting
+never wait on PostHog, and a person taken off the flag can still stop
+what they started. `swarmAccessFor` in `apps/server/src/swarm-access.ts`
+is the one rule; a server with no PostHog key is somebody's own install
+and is open. PostHog gets three seconds, and a flag it could not answer
+is "unavailable" (503 `SWARM_ACCESS_UNAVAILABLE`, and the tab offers
+Try again), never allowed and never the waitlist; the console reads a
+failed `/api/flags` the same way. The answer is cached per person for a
+minute (ten seconds when it failed), and `warmSwarmAccess` asks before
+the tenant transaction opens for every write under `/api/swarms` and
+keeps it on the request, so the round trip never holds a pooled
+connection.
+
+Join waitlist mails `waitlist@usebento.ai` (`POST /api/swarm-waitlist`)
+with the person's email and GitHub username, once per person, claimed
+in `user.swarm_waitlist_requested_at` before the mail goes. The landing
+page links to the console with `?waitlist=swarms`: it is kept in local
+storage, and sign in carries it in the callback address too, so a
+verification link opened in another browser still brings it, and the
+board joins once it knows the person is waitlisted.
 
 ## Verify against something real before calling it done
 

@@ -1,7 +1,3 @@
-import { useState } from "react";
-import { BetaOnly } from "../beta.js";
-import { Modal } from "./Modal.js";
-import { BILLING_HREF, type SwarmAccess } from "../swarm/plan.js";
 import type { BoardMode } from "../swarm/view-state.js";
 
 /**
@@ -19,62 +15,22 @@ import type { BoardMode } from "../swarm/view-state.js";
  */
 export function BoardModeToggle({
   mode,
-  access,
+  locked,
   onSelect,
   hrefFor,
 }: {
   mode: BoardMode;
-  access: SwarmAccess;
+  /** The team's plan does not include swarms; the Swarms page says so. */
+  locked: boolean;
   onSelect: (mode: BoardMode) => void;
   /** The address each segment points at, so the choice is in the URL. */
   hrefFor?: (mode: BoardMode) => string;
 }) {
-  const [prompt, setPrompt] = useState(false);
-  if (!access.show) return null;
-
   return (
-    <BetaOnly>
-      <div className="seg" role="group" aria-label="Board">
-        <Segment
-          id="pipeline"
-          label="Pipeline"
-          mode={mode}
-          onSelect={onSelect}
-          hrefFor={hrefFor}
-        />
-        <Segment
-          id="swarms"
-          label="Swarms"
-          mode={mode}
-          locked={!access.included}
-          onSelect={access.included ? onSelect : () => setPrompt(true)}
-          hrefFor={access.included ? hrefFor : undefined}
-        />
-      </div>
-
-      {prompt && access.prompt && (
-        <Modal
-          title="Swarms are not on this plan"
-          description={access.prompt}
-          onClose={() => setPrompt(false)}
-          actions={
-            <>
-              <button className="btn btn-ghost" onClick={() => setPrompt(false)}>
-                Not now
-              </button>
-              <a className="btn btn-primary" href={BILLING_HREF}>
-                See plans
-              </a>
-            </>
-          }
-        >
-          <p className="muted">
-            A swarm takes one goal, splits it into a tree of tasks, and works them in parallel. The
-            pipeline board is unaffected either way.
-          </p>
-        </Modal>
-      )}
-    </BetaOnly>
+    <div className="seg" role="group" aria-label="Board">
+      <Segment id="pipeline" label="Pipeline" mode={mode} onSelect={onSelect} hrefFor={hrefFor} />
+      <Segment id="swarms" label="Swarms" mode={mode} locked={locked} onSelect={onSelect} hrefFor={hrefFor} />
+    </div>
   );
 }
 
@@ -109,6 +65,7 @@ function Segment({
         href={href}
         aria-current={current ? "page" : undefined}
         data-on={current ? "" : undefined}
+        data-locked={locked ? "" : undefined}
         onClick={(e) => {
           if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
           e.preventDefault();
@@ -116,6 +73,7 @@ function Segment({
         }}
       >
         {label}
+        {locked && <Lock />}
       </a>
     );
   }
@@ -129,12 +87,16 @@ function Segment({
       onClick={() => onSelect(id)}
     >
       {label}
-      {locked && (
-        <span className="seg-lock" aria-hidden="true" title="Not on this plan">
-          <LockMark />
-        </span>
-      )}
+      {locked && <Lock />}
     </button>
+  );
+}
+
+function Lock() {
+  return (
+    <span className="seg-lock" aria-hidden="true" title="Not on this plan">
+      <LockMark />
+    </span>
   );
 }
 

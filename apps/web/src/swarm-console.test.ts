@@ -5,6 +5,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { BentoClient } from "@bento/api-client";
 import { BetaTestersScope } from "./beta.js";
+import { SwarmSubscribe, SwarmUnavailable, SwarmWaitlist } from "./components/SwarmGatePage.js";
 import { BoardModeToggle } from "./components/BoardModeToggle.js";
 import { MergeQueue } from "./components/MergeQueue.js";
 import { SwarmEmpty, SwarmStrip } from "./components/SwarmStrip.js";
@@ -513,57 +514,53 @@ test("a retry refusal is visible inside the open task drawer", () => {
   assert.match(html, /<p class="error-box" role="alert">This swarm has finished/);
 });
 
-test("the mode toggle is two segments, and only for a tester", () => {
-  const access = { show: true, included: true, canUpgrade: false, prompt: null };
-  const off = renderToStaticMarkup(
-    createElement(BetaTestersScope, {
-      enabled: false,
-      children: createElement(BoardModeToggle, { mode: "pipeline", access, onSelect: () => {} }),
-    }),
-  );
-  assert.equal(off, "");
-
-  const on = renderToStaticMarkup(
-    createElement(BetaTestersScope, {
-      enabled: true,
-      children: createElement(BoardModeToggle, { mode: "pipeline", access, onSelect: () => {} }),
-    }),
-  );
+test("the mode toggle is two segments, for everyone", () => {
+  const on = renderToStaticMarkup(createElement(BoardModeToggle, { mode: "pipeline", locked: false, onSelect: () => {} }));
   assert.match(on, /Pipeline/);
   assert.match(on, /Swarms/);
   // Pipeline is the one marked, because it is where everybody starts.
   assert.match(on, /data-on=""[^>]*>Pipeline|Pipeline/);
   assert.match(on, /aria-current="page"/);
+  assert.doesNotMatch(on, /data-locked/);
   assertNoDashes(on, "the toggle");
 });
 
-test("a plan without swarms shows a locked segment, and a plan still loading shows nothing", () => {
+test("a plan without swarms still shows the segment, with a lock", () => {
   const locked = renderToStaticMarkup(
-    createElement(BetaTestersScope, {
-      enabled: true,
-      children: createElement(BoardModeToggle, {
-        mode: "pipeline",
-        access: { show: true, included: false, canUpgrade: true, prompt: "Swarms are not on the Pro plan." },
-        onSelect: () => {},
-      }),
+    createElement(BoardModeToggle, {
+      mode: "pipeline",
+      locked: true,
+      onSelect: () => {},
+      hrefFor: (mode) => `/?mode=${mode}`,
     }),
   );
+  assert.match(locked, /href="\/\?mode=swarms"/, "it still opens the Swarms page, which says why");
   assert.match(locked, /data-locked/);
   assert.match(locked, /Not on this plan/);
-
-  const hidden = renderToStaticMarkup(
-    createElement(BetaTestersScope, {
-      enabled: true,
-      children: createElement(BoardModeToggle, {
-        mode: "pipeline",
-        access: { show: false, included: false, canUpgrade: false, prompt: null },
-        onSelect: () => {},
-      }),
-    }),
-  );
-  assert.equal(hidden, "");
 });
 
+test("the pages behind the Swarms tab", () => {
+  const subscribe = renderToStaticMarkup(createElement(SwarmSubscribe, { canUpgrade: true }));
+  assert.match(subscribe, /only available on paid plans, subscribe to get access/);
+  assert.match(subscribe, />Subscribe</);
+  const member = renderToStaticMarkup(createElement(SwarmSubscribe, { canUpgrade: false }));
+  assert.doesNotMatch(member, />Subscribe</);
+  assert.match(member, /Ask an owner or admin to subscribe/);
+
+  const waitlist = renderToStaticMarkup(createElement(SwarmWaitlist, { state: "idle", onJoin: () => {} }));
+  assert.match(waitlist, /Join waitlist/);
+  assert.match(waitlist, /href="https:\/\/usebento.ai\/download"/);
+  assert.match(waitlist, /updating access daily/);
+  const joined = renderToStaticMarkup(createElement(SwarmWaitlist, { state: "joined", onJoin: () => {} }));
+  assert.match(joined, /Added to waitlist/);
+  const already = renderToStaticMarkup(createElement(SwarmWaitlist, { state: "already", onJoin: () => {} }));
+  assert.match(already, /already on the waitlist/);
+  assert.match(already, /Join waitlist/, "the button stays, so asking again gets an answer");
+
+  const unavailable = renderToStaticMarkup(createElement(SwarmUnavailable, { onRetry: () => {} }));
+  assert.match(unavailable, /Try again/);
+  for (const html of [subscribe, member, waitlist, joined, already, unavailable]) assertNoDashes(html, "a swarm gate page");
+});
 
 const NOW = Date.parse("2026-09-04T12:00:00.000Z");
 

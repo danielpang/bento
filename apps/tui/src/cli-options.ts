@@ -58,20 +58,6 @@ export interface CliOptions {
   url?: string;
   /** MCP API key for `mcp add`. */
   mcpKey?: string;
-  /** What a swarm is for, on `swarm new`. */
-  goal?: string;
-  /** What a follow up should do, on `swarm reopen`. */
-  instruction?: string;
-  /** A branch that already exists, to start a swarm from. */
-  branch?: string;
-  /** A swarm's budget in dollars, on `swarm new` and `swarm reopen`. */
-  budget?: number;
-  /** Files holding a plan the person already has, on `swarm new`. Read as text. */
-  plan?: string[];
-  /** Pages holding that plan, which the server fetches. */
-  planUrl?: string[];
-  /** Whether those files and pages (or the goal) are the plan to implement. */
-  existingPlan: boolean;
   /** Silence the local stack's startup progress, for scripts. */
   quiet: boolean;
   help: boolean;
@@ -136,27 +122,6 @@ Commands
                        place, so a live board keeps its cards where they are.
   spend                Agent spend for the project, one line per card.
   sessions             Conversations in the project, newest activity first.
-  swarm [list]         Swarms in the project, one per line: name, state,
-                       tasks done, what is waiting on you, and spend.
-  swarm new <title> --goal <goal> [--branch <name>] [--budget <usd>]
-                       [--plan <file>]... [--plan-url <url>]... [--existing-plan]
-                       Start a swarm. Its planner begins at once; nothing
-                       else starts until you have read the plan and run
-                       swarm start. Give a branch that already exists to
-                       carry on from it, review comments included. Give
-                       --plan files or --plan-url pages the planner should
-                       read first, and --existing-plan to have it build the
-                       task tree from them rather than plan from scratch.
-  swarm status <swarm> Print the plan as a tree, once.
-  swarm watch <swarm>  The same tree, redrawn as the swarm works. Ends
-                       when the swarm does, or on Ctrl+C.
-  swarm start <swarm>  Say the plan is worth running. Also resumes one
-                       that was paused.
-  swarm stop <swarm>   Stop it, agents included. What landed is kept.
-  swarm reopen <swarm> --instruction <text> [--budget <usd>]
-                       Add a follow up to a swarm that has finished, on
-                       the same branch, so the pull requests it opened
-                       are updated rather than joined by a second set.
   mcp [list]           MCP servers agents can call, one per line.
   mcp add <name> --url <url> [--key <value>]
                        Add a custom server. Pass --key for API key auth.
@@ -257,11 +222,13 @@ export function parseCliOptions(argv: string[]): CliOptions {
       first !== "swarm"
     ) {
       throw new Error(
-        `unknown command "${first}". Use setup, serve, runner, login, update, uninstall, repos, pipeline, agents, spend, sessions, swarm, or mcp, or no command for the board.`,
+        `unknown command "${first}". Use setup, serve, runner, login, update, uninstall, repos, pipeline, agents, spend, sessions, or mcp, or no command for the board.`,
       );
     }
     command = first;
-    args = argv.slice(1);
+    // Not offered in the terminal yet; whatever follows is ignored so
+    // cli.tsx can say so rather than fail on a flag.
+    args = first === "swarm" ? [] : argv.slice(1);
   }
 
   // `repos` and `agents` take bare words after the subcommand. They are
@@ -272,8 +239,7 @@ export function parseCliOptions(argv: string[]): CliOptions {
     command === "repos" ||
     command === "agents" ||
     command === "pipeline" ||
-    command === "mcp" ||
-    command === "swarm"
+    command === "mcp"
   ) {
     while (args[0] && !args[0].startsWith("-")) {
       positionals.push(args[0]);
@@ -309,13 +275,6 @@ export function parseCliOptions(argv: string[]): CliOptions {
       "base-branch": { type: "string" },
       url: { type: "string" },
       key: { type: "string" },
-      goal: { type: "string" },
-      instruction: { type: "string" },
-      branch: { type: "string" },
-      budget: { type: "string" },
-      plan: { type: "string", multiple: true },
-      "plan-url": { type: "string", multiple: true },
-      "existing-plan": { type: "boolean" },
     },
     allowPositionals: false,
   });
@@ -338,16 +297,6 @@ export function parseCliOptions(argv: string[]): CliOptions {
   }
   if (command === "login" && !server) {
     throw new Error("login needs --server <url>: there is nothing to sign in to otherwise");
-  }
-
-  /*
-   * A budget is dollars, and a figure that is not one is refused here
-   * rather than sent: a swarm created with NaN for a cap is a swarm
-   * whose cap nothing enforces.
-   */
-  const budget = values.budget === undefined ? undefined : Number(values.budget.replace(/^\$/, ""));
-  if (budget !== undefined && (!Number.isFinite(budget) || budget < 0)) {
-    throw new Error(`--budget must be an amount in dollars, not "${values.budget}"`);
   }
 
   const port = values.port ? Number(values.port) : 0;
@@ -377,13 +326,6 @@ export function parseCliOptions(argv: string[]): CliOptions {
     ...(values.name ? { agentName: values.name } : {}),
     ...(values.url ? { url: values.url } : {}),
     ...(values.key ? { mcpKey: values.key } : {}),
-    ...(values.goal !== undefined ? { goal: values.goal } : {}),
-    ...(values.instruction !== undefined ? { instruction: values.instruction } : {}),
-    ...(values.branch !== undefined ? { branch: values.branch } : {}),
-    ...(budget !== undefined ? { budget } : {}),
-    ...(values.plan?.length ? { plan: values.plan } : {}),
-    ...(values["plan-url"]?.length ? { planUrl: values["plan-url"] } : {}),
-    existingPlan: values["existing-plan"] ?? false,
     positionals,
     quiet: values.quiet ?? false,
     help: values.help ?? false,

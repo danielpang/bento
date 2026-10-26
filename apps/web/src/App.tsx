@@ -33,9 +33,11 @@ import {
 import { useGitHubOutcome } from "./components/GitHubIdentity.js";
 import { SignOutButton } from "./components/IconButtons.js";
 import { CHANGELOG_URL } from "./changelog.js";
-import { BetaTestersProvider, useBetaTesters } from "./beta.js";
+import { FlagsProvider, useBetaTesters, useSwarmFlag } from "./beta.js";
+import { SwarmSubscribe, SwarmUnavailable, SwarmWaitlist, type WaitlistState } from "./components/SwarmGatePage.js";
+import { signInCallbackURL, takeWaitlistIntent } from "./swarm/waitlist-intent.js";
 import { BoardModeToggle } from "./components/BoardModeToggle.js";
-import { useSwarmPlan } from "./swarm/plan.js";
+import { swarmGate, useSwarmPlan } from "./swarm/plan.js";
 import { isSwarmEvent } from "./swarm/events.js";
 import {
   boardHref,
@@ -195,11 +197,11 @@ export function App() {
     }
   }, [isPending, session]);
   return (
-    <BetaTestersProvider client={client} userId={session?.user.id}>
+    <FlagsProvider client={client} userId={session?.user.id}>
       <Suspense fallback={<RouteFallback />}>
         <Route catalogEpoch={catalogEpoch} />
       </Suspense>
-    </BetaTestersProvider>
+    </FlagsProvider>
   );
 }
 
@@ -280,7 +282,7 @@ function Console() {
     );
   }
   // Local mode runs as a single user with no sign in.
-  if (mode === "multi" && !session) return <SignIn social={social} />;
+  if (mode === "multi" && !session) return <SignIn social={social} callbackURL={signInCallbackURL()} />;
   if (mode === "multi" && session) {
     return <FirstTeamGate userName={session.user.name ?? ""} />;
   }
@@ -494,10 +496,35 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
     readBoardMode(window.location.search, swarmStorage),
   );
   const { access: swarmAccess, surfaces: swarmSurfaces } = useSwarmPlan(mode);
-  const betaTester = useBetaTesters();
-  /** Swarms only render for a tester on a plan that includes them. */
-  const swarmsOpen = betaTester && swarmAccess.included;
-  const swarming = boardMode === "swarms" && swarmsOpen && screen === "board";
+  const swarmFlag = useSwarmFlag();
+  /** Behind the tab, which everyone sees: a subscription, then the hosted waitlist. */
+  const swarmGateState = swarmGate(swarmAccess, swarmFlag.state);
+  const swarming = boardMode === "swarms" && screen === "board";
+  const [waitlistRequest, setWaitlist] = useState<WaitlistState>("idle");
+  const waitlist: WaitlistState = waitlistRequest === "idle" && swarmFlag.joined ? "already" : waitlistRequest;
+  const joinWaitlist = useCallback(() => {
+    setWaitlist("sending");
+    client.joinSwarmWaitlist().then(
+      ({ alreadyJoined }) => setWaitlist(alreadyJoined ? "already" : "joined"),
+      () => setWaitlist("failed"),
+    );
+  }, []);
+  /*
+   * Arrived from the landing page's Join waitlist button: open the
+   * Swarms tab, and join for them once the gate says they are
+   * waitlisted. Kept while the answer is unknown, and while the team has
+   * no subscription, so it still joins them once the team has one.
+   */
+  const waitlistIntent = useRef(false);
+  useEffect(() => {
+    if (swarmGateState === "loading" || swarmGateState === "unavailable" || swarmGateState === "subscribe") return;
+    if (waitlistIntent.current || !takeWaitlistIntent()) return;
+    waitlistIntent.current = true;
+    setBoardMode("swarms");
+    rememberBoardMode(swarmStorage, "swarms");
+    window.history.replaceState(null, "", boardHref(window.location.pathname, window.location.search, { mode: "swarms" }));
+    if (swarmGateState === "waitlist") joinWaitlist();
+  }, [swarmGateState, swarmStorage, joinWaitlist]);
 
   const [stages, setStages] = useState<Stage[]>([]);
   const [pipelineId, setPipelineId] = useState<string | null>(null);
@@ -1220,7 +1247,7 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
     screen === "board" ? (
       <BoardModeToggle
         mode={boardMode}
-        access={swarmAccess}
+        locked={swarmAccess.plan === "excluded"}
         hrefFor={(next) => boardHref(window.location.pathname, window.location.search, { mode: next })}
         onSelect={(next) => {
           setBoardMode(next);
@@ -1233,6 +1260,18 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
         }}
       />
     ) : undefined;
+
+  /** What the Swarms tab shows in place of the board, or null when it opens. */
+  const swarmGatePage =
+    swarmGateState === "loading" ? (
+      <SwarmPageSkeleton />
+    ) : swarmGateState === "subscribe" ? (
+      <SwarmSubscribe canUpgrade={swarmAccess.canUpgrade} />
+    ) : swarmGateState === "waitlist" ? (
+      <SwarmWaitlist state={waitlist} onJoin={joinWaitlist} />
+    ) : swarmGateState === "unavailable" ? (
+      <SwarmUnavailable onRetry={swarmFlag.retry} />
+    ) : null;
 
   const hasProjects = (projects?.length ?? 0) > 0;
   /**
@@ -1270,7 +1309,7 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
    * whose project list fails to load got a topbar with no Board, no
    * Sessions and no toggle: nothing but the URL bar to get out with.
    */
-  const onSwarmBoard = swarming && projectId !== null && hasProjects;
+  const onSwarmBoard = swarming && projectId !== null && hasProjects && swarmGateState === "open";
   const actions: NavAction[] = onSwarmBoard
     ? [
         { id: "agents", label: "Agents", onSelect: () => { setAgentsIntent(null); setPanel("agents"); } },
@@ -1347,22 +1386,27 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
           actions={actions}
           meta={spend}
           onContact={() => setContactOpen(true)}
+          boardToggle={boardToggle}
           primary={
             <button className="btn btn-primary" onClick={() => setDialog("project")}>
               New project
             </button>
           }
         />
-        <div className="empty-state empty-project">
-          <div className="empty-pipeline" aria-hidden="true">
-            <span>Brief</span><span>Build</span><span>Review</span><span>Ship</span>
+        {swarming && swarmGatePage ? (
+          swarmGatePage
+        ) : (
+          <div className="empty-state empty-project">
+            <div className="empty-pipeline" aria-hidden="true">
+              <span>Brief</span><span>Build</span><span>Review</span><span>Ship</span>
+            </div>
+            <h1>Your next feature starts here.</h1>
+            <p className="muted">Connect a repository, describe the work, and let your agents take it through the pipeline. You decide when it moves forward.</p>
+            <button className="btn btn-primary" onClick={() => setDialog("project")}>
+              New project
+            </button>
           </div>
-          <h1>Your next feature starts here.</h1>
-          <p className="muted">Connect a repository, describe the work, and let your agents take it through the pipeline. You decide when it moves forward.</p>
-          <button className="btn btn-primary" onClick={() => setDialog("project")}>
-            New project
-          </button>
-        </div>
+        )}
         {panels}
         {dialogs}
         {bottom}
@@ -1451,6 +1495,8 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
         <Suspense fallback={<SpendPageSkeleton />}>
           <SpendPage client={client} projectId={projectId} />
         </Suspense>
+      ) : swarming && swarmGatePage ? (
+        swarmGatePage
       ) : swarming && projectId ? (
         /* A second board of the same project. Its own boundary, like
            the panels: the chunk arrives without blanking the chrome. A

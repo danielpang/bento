@@ -3,11 +3,12 @@ import { zValidator } from "@hono/zod-validator";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
-import { account, githubInstallations, member, organizationPolicies } from "@bento/db";
+import { githubInstallations, member, organizationPolicies } from "@bento/db";
 import type { AppContext } from "../context.js";
 import { actor, activeOrg } from "../middleware/actor.js";
 import { tenantDb as db } from "../middleware/tenant.js";
 import { githubConnectionFor } from "../github.js";
+import { githubUserHeaders, linkedGitHubToken } from "../github-user.js";
 import { readSettings, shouldIncludeStageNotes, writeSettings } from "../settings.js";
 
 type InstallState = { userId: string; organizationId: string; expiresAt: number };
@@ -336,12 +337,7 @@ type Refusal = "missing" | "stale" | "unseen";
 
 /** Whether a GitHub account is attached at all, without asking GitHub. */
 async function hasLinkedIdentity(ctx: AppContext, userId: string): Promise<boolean> {
-  const [row] = await ctx.db
-    .select({ accessToken: account.accessToken })
-    .from(account)
-    .where(and(eq(account.userId, userId), eq(account.providerId, "github")))
-    .limit(1);
-  return Boolean(row?.accessToken);
+  return Boolean(await linkedGitHubToken(ctx, userId));
 }
 
 /**
@@ -355,21 +351,13 @@ async function hasLinkedIdentity(ctx: AppContext, userId: string): Promise<boole
  * was already built on.
  */
 async function githubIdentity(ctx: AppContext, userId: string): Promise<GitHubIdentity> {
-  const [githubAccount] = await ctx.db
-    .select({ accessToken: account.accessToken })
-    .from(account)
-    .where(and(eq(account.userId, userId), eq(account.providerId, "github")))
-    .limit(1);
-  if (!githubAccount?.accessToken) return { state: "missing" };
+  const token = await linkedGitHubToken(ctx, userId);
+  if (!token) return { state: "missing" };
 
   const found: AccessibleInstallation[] = [];
   for (let page = 1; page <= 10; page += 1) {
     const response = await fetch(`https://api.github.com/user/installations?per_page=100&page=${page}`, {
-      headers: {
-        accept: "application/vnd.github+json",
-        authorization: `Bearer ${githubAccount.accessToken}`,
-        "x-github-api-version": "2022-11-28",
-      },
+      headers: githubUserHeaders(token),
     });
     // 401 is the one answer that means the stored token is no longer an
     // identity: revoked, or expired if the App issues expiring user

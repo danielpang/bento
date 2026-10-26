@@ -1,5 +1,6 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
 import type { BentoClient } from "@bento/api-client";
+import type { SwarmAccessState } from "@bento/core";
 
 /**
  * Whether the signed-in user turned beta features on (Settings, Account).
@@ -15,7 +16,24 @@ const BetaTestersContext = createContext<{ ready: boolean; enabled: boolean; set
   set: () => {},
 });
 
-export function BetaTestersProvider({
+/**
+ * Whether swarms open here, from the same `/api/flags` answer. Not
+ * beta: the Swarms tab is shown to everyone. Null while in flight, and
+ * "unavailable" when the answer never came or the server could not
+ * read the flag, which is never read as allowed.
+ */
+export type SwarmFlag = SwarmAccessState;
+
+interface SwarmFlagValue {
+  state: SwarmFlag | null;
+  /** Whether this person already asked to join the hosted waitlist. */
+  joined: boolean;
+  retry: () => void;
+}
+
+const SwarmFlagContext = createContext<SwarmFlagValue>({ state: null, joined: false, retry: () => {} });
+
+export function FlagsProvider({
   client,
   userId,
   children,
@@ -27,28 +45,36 @@ export function BetaTestersProvider({
 }) {
   const [ready, setReady] = useState(false);
   const [enabled, setEnabled] = useState(false);
+  const [swarm, setSwarm] = useState<{ state: SwarmFlag | null; joined: boolean }>({ state: null, joined: false });
+  const [attempt, setAttempt] = useState(0);
+  const retry = useCallback(() => setAttempt((n) => n + 1), []);
 
   useEffect(() => {
     let cancelled = false;
+    setSwarm({ state: null, joined: false });
     void client
       .flags()
       .then((snapshot) => {
         if (cancelled) return;
         setEnabled(snapshot.betaTesters);
+        setSwarm({ state: snapshot.swarms ?? "unavailable", joined: snapshot.swarmWaitlistJoined === true });
         setReady(true);
       })
       .catch(() => {
         if (cancelled) return;
         setEnabled(false);
+        setSwarm({ state: "unavailable", joined: false });
         setReady(true);
       });
     return () => {
       cancelled = true;
     };
-  }, [client, userId]);
+  }, [client, userId, attempt]);
 
   return (
-    <BetaTestersContext.Provider value={{ ready, enabled, set: setEnabled }}>{children}</BetaTestersContext.Provider>
+    <BetaTestersContext.Provider value={{ ready, enabled, set: setEnabled }}>
+      <SwarmFlagContext.Provider value={{ ...swarm, retry }}>{children}</SwarmFlagContext.Provider>
+    </BetaTestersContext.Provider>
   );
 }
 
@@ -67,6 +93,11 @@ export function useSetBetaTesters(): (enabled: boolean) => void {
 export function useBetaTesters(): boolean {
   const { ready, enabled } = useContext(BetaTestersContext);
   return ready && enabled;
+}
+
+/** Whether swarms open, wait on the waitlist, or could not be checked. */
+export function useSwarmFlag(): SwarmFlagValue {
+  return useContext(SwarmFlagContext);
 }
 
 /** Renders children only for users with beta features on. */

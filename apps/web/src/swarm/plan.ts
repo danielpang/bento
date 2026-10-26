@@ -1,3 +1,4 @@
+import type { SwarmFlag } from "../beta.js";
 import { useBillingPlan, type PlanState } from "../components/billing-plan.js";
 import { estimateLine } from "./money.js";
 import type { SwarmSpend } from "./types.js";
@@ -17,30 +18,24 @@ import type { SwarmSpend } from "./types.js";
 export type BentoMode = "local" | "multi";
 
 export interface SwarmAccess {
-  /** Whether the mode toggle is rendered at all. */
-  show: boolean;
-  /** Whether picking Swarms opens a board rather than an upgrade prompt. */
-  included: boolean;
+  /** Whether this team's plan includes swarms, or the plan is still in flight. */
+  plan: "loading" | "included" | "excluded";
   /** Whether this person is the one who could change that. */
   canUpgrade: boolean;
-  /** The prompt's sentence, or null when there is nothing to prompt. */
-  prompt: string | null;
 }
 
 /** Where the prompt sends somebody. The same deep link billing emails use. */
 export const BILLING_HREF = "/settings?tab=billing";
 
 /**
- * The gate.
+ * The plan's half of the gate.
  *
- * Four answers, and the quiet one matters most: while the plan is
- * still in flight nothing renders, the same way the beta flag hides
- * until it has resolved. A toggle that appears and then turns into an
- * upgrade prompt is worse than one that arrives a moment late.
- *
- * A team without swarms on its plan sees the toggle only if somebody
- * there can act on it. Showing a member a control that can only ever
- * refuse them is an advertisement, not a feature.
+ * Local mode has one user, no organization and no plan, so nothing is
+ * gated there; neither is an install with no billing module. A plan
+ * from a billing module that predates swarms says nothing about them,
+ * and absent is not "no": refusing on a field the module has not
+ * started sending yet would turn a deploy order into a feature being
+ * switched off.
  */
 export function swarmAccess(input: {
   mode: BentoMode;
@@ -48,32 +43,26 @@ export function swarmAccess(input: {
   /** True on an install with no billing module at all. */
   absent: boolean;
 }): SwarmAccess {
-  const open: SwarmAccess = { show: true, included: true, canUpgrade: false, prompt: null };
-  // One user, no organization, no plan: nothing to gate on.
+  const open: SwarmAccess = { plan: "included", canUpgrade: false };
   if (input.mode === "local") return open;
-  // An install that carries no billing module has no plan ladder, so
-  // the server's own gate is the only gate there is.
   if (input.absent) return open;
-  if (!input.plan) {
-    return { show: false, included: false, canUpgrade: false, prompt: null };
-  }
-  /*
-   * A plan from a billing module that predates swarms says nothing
-   * about them. Absent is not "no": refusing on a field the module
-   * has not started sending yet would turn a deploy order into a
-   * feature being switched off.
-   */
-  if (input.plan.swarms === undefined) return open;
-  if (input.plan.swarms.included) return open;
-  const canUpgrade = input.plan.canManageBilling;
-  return {
-    show: canUpgrade,
-    included: false,
-    canUpgrade,
-    prompt: canUpgrade
-      ? `Swarms are not on the ${input.plan.planName} plan. Upgrading turns them on for this team.`
-      : null,
-  };
+  if (!input.plan) return { plan: "loading", canUpgrade: false };
+  if (input.plan.swarms === undefined || input.plan.swarms.included) return open;
+  return { plan: "excluded", canUpgrade: input.plan.canManageBilling };
+}
+
+/**
+ * What the Swarms tab shows. The tab is there for everyone; this says
+ * what is behind it. A subscription comes first, then the hosted
+ * waitlist, and a flag that could not be read is never read as allowed.
+ */
+export type SwarmGate = "loading" | "open" | "subscribe" | "waitlist" | "unavailable";
+
+export function swarmGate(access: SwarmAccess, flag: SwarmFlag | null): SwarmGate {
+  if (access.plan === "loading") return "loading";
+  if (access.plan === "excluded") return "subscribe";
+  if (flag === null) return "loading";
+  return flag;
 }
 
 /**
