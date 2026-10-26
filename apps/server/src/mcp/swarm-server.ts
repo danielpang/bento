@@ -155,7 +155,9 @@ const shapes = {
   ask_user: z.object({ taskId: uuidArg.nullish(), question: z.string().min(1).max(4000) }).strip(),
   write_design: z.object({ content: z.string().min(1).max(200_000) }).strip(),
   read_design: z.object({}).strip(),
-  write_pull_request_description: z.object({ content: z.string().min(1).max(PULL_REQUEST_DESCRIPTION_MAX_CHARS) }).strip(),
+  write_pull_request_description: z
+    .object({ content: z.string().trim().min(1, "the description is empty").max(PULL_REQUEST_DESCRIPTION_MAX_CHARS) })
+    .strip(),
   read_plan: z.object({ source: z.number().int().min(1).optional() }).strip(),
   read_report: z.object({ taskId: uuidArg }).strip(),
   read_transcript_tail: z
@@ -1336,7 +1338,7 @@ async function writePullRequestDescription(
 ): Promise<string> {
   await ctx.db
     .update(swarms)
-    .set({ pullRequestDescription: args.content.trim(), updatedAt: new Date() })
+    .set({ pullRequestDescription: args.content, updatedAt: new Date() })
     .where(eq(swarms.id, caller.swarmId));
   return "Pull request description saved. Write it again if the plan changes what the pull request will contain.";
 }

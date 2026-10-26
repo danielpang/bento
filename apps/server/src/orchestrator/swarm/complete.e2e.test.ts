@@ -458,17 +458,15 @@ test("the body names the goal, the plan and the landed work even with nothing el
   assert.match(body, /Nothing was merged through the merge queue\./);
 });
 
-test("the planner's description replaces the goal and the design note in the body", () => {
+test("the planner's description replaces the goal, and the design note follows it", () => {
   const body = swarmPullRequestBody({
     title: "Rewrite the checkout",
     goal: "x".repeat(80_000),
-    writeUp: "y".repeat(80_000),
+    writeUp: "One page, one form.",
     tasks: [],
     landedTaskIds: [],
     description: "Moves checkout to one page.",
   });
-  assert.match(body, /## Summary\n\nMoves checkout to one page\./);
-  assert.doesNotMatch(body, /## Goal|## What the planner wrote/);
-  assert.match(body, /design note is in docs\/bento\/swarm\/design\.md on this branch/);
-  assert.ok(body.length < 1000);
+  assert.match(body, /## Summary\n\nMoves checkout to one page\.\n\n## What the planner wrote\n\nOne page, one form\./);
+  assert.doesNotMatch(body, /## Goal|xxxx/);
 });

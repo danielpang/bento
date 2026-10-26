@@ -658,6 +658,11 @@ test("the planner's pull request description is kept on the swarm, replaced rath
   await call(token, "write_pull_request_description", { content: "  Adds dark mode and a toggle.  " });
   const [swarm] = await db.select().from(swarms).where(eq(swarms.id, swarmId));
   assert.equal(swarm!.pullRequestDescription, "Adds dark mode and a toggle.");
+
+  const empty = await rpc(token, "tools/call", { name: "write_pull_request_description", arguments: { content: "   " } });
+  assert.match(JSON.stringify(empty.body), /the description is empty/);
+  const [kept] = await db.select().from(swarms).where(eq(swarms.id, swarmId));
+  assert.equal(kept!.pullRequestDescription, "Adds dark mode and a toggle.", "an empty one does not replace it");
 });
 
 test("what an agent wrote comes back quoted and labelled, never as instructions", async () => {

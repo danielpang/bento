@@ -591,10 +591,10 @@ The pull request's description is the planner's, not the goal's. The
 planner writes it before its first task (`write_pull_request_description`,
 kept in `swarms.pull_request_description`, at most
 `PULL_REQUEST_DESCRIPTION_MAX_CHARS`), and the body puts it in place of
-the goal and the design note, which a person can paste or a planner can
-write past GitHub's 65536 character limit. A swarm without one falls back
-to the goal and the design note, and `fitPullRequestBody` cuts any body
-to the limit.
+the goal, which a person can paste past GitHub's 65536 character limit.
+The design note follows it in the body, because the push strips
+`docs/bento` from the branch and the body is the only place a reviewer
+can read it. `fitPullRequestBody` cuts any body to the limit.
 
 ## A swarm's planner and workers hold a live session, and stdin is what ends a run
 
