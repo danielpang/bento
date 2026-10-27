@@ -333,7 +333,23 @@ export function featureRoutes(ctx: AppContext) {
       const projectId = c.req.query("projectId");
       if (!projectId) return c.json({ error: "projectId is required" }, 400);
       if (!(await canAccessProject(ctx, c, projectId))) return c.json({ error: "not found" }, 404);
-      const rows = await db(c, ctx).select().from(features).where(eq(features.projectId, projectId));
+      const rows = await db(c, ctx)
+        .select()
+        .from(features)
+        .where(and(
+          eq(features.projectId, projectId),
+          // A card can be completed, reopened, and completed again, so
+          // its status-change log is the completion clock. updated_at
+          // also moves for unrelated edits and cannot answer this.
+          sql`${features.status} <> 'done' or exists (
+            select 1
+            from ${featureEvents}
+            where ${featureEvents.featureId} = ${features.id}
+              and ${featureEvents.kind} = 'status_changed'
+              and ${featureEvents.toStatus} = 'done'
+              and ${featureEvents.at} >= now() - interval '14 days'
+          )`,
+        ));
       return c.json(await withPullRequestUrls(c, ctx, rows));
     })
     .post("/", zValidator("json", createFeature), async (c) => {
