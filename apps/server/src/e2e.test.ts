@@ -4029,6 +4029,45 @@ test("the board lists only cards completed in the last two weeks", async () => {
   assert.ok(!ids.has(otherRecent.id), "another project's recent completion stays on its own board");
 });
 
+test("the board two-week window follows the database fourteen-day boundary", async () => {
+  const { project } = await setupProject("board completion boundary");
+  const onBoundary = await createFeature(project.id, "done exactly fourteen days ago");
+  const justOutside = await createFeature(project.id, "done just outside the window");
+
+  await ctx.db.execute(sql`
+    insert into ${featureEvents} (feature_id, kind, from_status, to_status, trigger, at)
+    values
+      (${onBoundary.id}, 'status_changed', 'active', 'done', 'manual', now() - interval '14 days' + interval '1 second'),
+      (${justOutside.id}, 'status_changed', 'active', 'done', 'manual', now() - interval '14 days' - interval '1 second')
+  `);
+  await ctx.db
+    .update(features)
+    .set({ status: "done" })
+    .where(inArray(features.id, [onBoundary.id, justOutside.id]));
+
+  const listed = await json<Array<{ id: string }>>(
+    await app.request(`/api/features?projectId=${project.id}`),
+  );
+  const ids = new Set(listed.map((row) => row.id));
+
+  assert.ok(ids.has(onBoundary.id), "a completion just inside the fourteen-day cutoff is shown");
+  assert.ok(!ids.has(justOutside.id), "a completion one second past the cutoff is hidden");
+});
+
+test("a done card without a completion event is hidden from the board list", async () => {
+  const { project } = await setupProject("done without completion event");
+  const orphaned = await createFeature(project.id, "marked done with no event");
+
+  await ctx.db.update(features).set({ status: "done" }).where(eq(features.id, orphaned.id));
+
+  const listed = await json<Array<{ id: string }>>(
+    await app.request(`/api/features?projectId=${project.id}`),
+  );
+  const ids = new Set(listed.map((row) => row.id));
+
+  assert.ok(!ids.has(orphaned.id), "status alone does not count as a recent completion");
+});
+
 test("webhooks are rejected without a valid signature", async () => {
   const res = await app.request("/api/webhooks/github", {
     method: "POST",
