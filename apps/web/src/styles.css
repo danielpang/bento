@@ -4481,7 +4481,7 @@ a.pr-row:hover .pr-external {
   box-sizing: border-box;
 }
 .analytics-intro {
-  margin: 0 0 20px;
+  margin: 0 0 16px;
 }
 .analytics-back {
   display: inline-flex;
@@ -4501,13 +4501,6 @@ a.pr-row:hover .pr-external {
   font-size: 22px;
   font-weight: 650;
   letter-spacing: -0.02em;
-}
-.analytics-lede {
-  margin: 8px 0 0;
-  max-width: 62ch;
-  color: var(--text-dim);
-  font-size: 13.5px;
-  line-height: 1.45;
 }
 /* The window picker: one row above everything it scopes. */
 .analytics-filters {
@@ -4639,20 +4632,15 @@ a.pr-row:hover .pr-external {
   gap: 12px;
   flex-wrap: wrap;
 }
+.analytics-section-head .analytics-section-title {
+  margin-bottom: 0;
+}
 .analytics-section-title {
-  margin: 0;
+  margin: 0 0 12px;
   font-family: var(--sans);
   font-size: 16px;
   font-weight: 650;
   letter-spacing: -0.01em;
-}
-.analytics-coverage {
-  font-family: var(--sans);
-  font-size: 12px;
-  color: var(--text-faint);
-}
-.analytics-section .analytics-lede {
-  margin-bottom: 12px;
 }
 .analytics-chart-total {
   margin: 10px 0 0;

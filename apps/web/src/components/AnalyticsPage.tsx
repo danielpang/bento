@@ -34,7 +34,10 @@ import { AnalyticsPageSkeleton } from "./Skeleton.js";
  * topbar is the way in, and the project picker still chooses whose
  * board this is. One window scopes everything on the page, chosen
  * once above the figures, so no two numbers here disagree about the
- * period they cover. It opens on the last month.
+ * period they cover. It opens on the last month. The figures carry
+ * no explanatory copy: each tile's note and the window line under
+ * the picker say what is being counted, and the rest has to be
+ * obvious from its label.
  */
 export function AnalyticsPage({ client, projectId }: { client: BentoClient; projectId: string | null }) {
   const toast = useToast();
@@ -117,11 +120,6 @@ export function AnalyticsPage({ client, projectId }: { client: BentoClient; proj
           <span aria-hidden="true">←</span> Back to board
         </a>
         <h1 className="analytics-title">Analytics</h1>
-        <p className="analytics-lede">
-          How this board moved: cards created, moved between stages and completed, the agent runs
-          behind them, and what those runs reported spending. Every figure covers the window chosen
-          here.
-        </p>
       </header>
       <WindowPicker choice={choice} onChange={setChoice} />
       {data && <p className="analytics-window-note">{describeWindow(data.window)}</p>}
@@ -392,10 +390,6 @@ export function StageFlow({ rows }: { rows: ProjectAnalytics["byStage"] }) {
       <h2 id="analytics-stages" className="analytics-section-title">
         Moves into each stage
       </h2>
-      <p className="analytics-lede">
-        Every time a card entered a stage in the window, from either direction. The count on the
-        right is how many cards sit in that stage now.
-      </p>
       <div className="analytics-stages">
         {rows.map((row) => (
           <div key={row.stageId ?? "done"} className="analytics-stage-row">
@@ -430,22 +424,11 @@ function SpendByCard({
   sort: SpendSort;
   onSort: (sort: SpendSort) => void;
 }) {
-  const { reporting, silent } = spendReportingTools();
   return (
     <section className="analytics-section" aria-labelledby="analytics-cards">
-      <div className="analytics-section-head">
-        <h2 id="analytics-cards" className="analytics-section-title">
-          Spend by card
-        </h2>
-        <span className="analytics-coverage">
-          Reported by {reporting.join(", ")}. Not reported by {silent.join(", ")}.
-        </span>
-      </div>
-      <p className="analytics-lede">
-        Costs the agent tools reported for runs that ended in the window. A plus sign means some
-        runs on that card reported nothing, so the figure is a floor. Unreported runs do not count
-        toward dollar caps.
-      </p>
+      <h2 id="analytics-cards" className="analytics-section-title">
+        Spend by card
+      </h2>
       {rows.length === 0 ? (
         <p className="muted">No card ran or moved in this window.</p>
       ) : (
@@ -517,11 +500,6 @@ export function SwarmTable({ rows }: { rows: ProjectAnalytics["bySwarm"] }) {
       <h2 id="analytics-swarms" className="analytics-section-title">
         Swarms
       </h2>
-      <p className="analytics-lede">
-        One row per swarm with runs in the window. Measured costs come from the agent, and
-        unreported runs have no dollar amount. A swarm's own page shows its estimated and notional
-        costs.
-      </p>
       <table className="spend-table">
         <thead>
           <tr>
