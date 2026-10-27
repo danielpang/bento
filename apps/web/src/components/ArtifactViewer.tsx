@@ -13,7 +13,7 @@ function clampZoom(value: number): number {
   return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(value * 100) / 100));
 }
 
-function artifactBaseName(path: string): string {
+export function artifactBaseName(path: string): string {
   const base = path.split("/").pop();
   return base && base.length > 0 ? base : path;
 }
@@ -145,20 +145,42 @@ export function ArtifactPage({ client, artifactId }: { client: BentoClient; arti
   );
 }
 
-function useArtifactCanvas(client: BentoClient, artifact: RunArtifact | null) {
+/**
+ * Fetches and renders one artifact, under the rules in CLAUDE.md that
+ * keep agent bytes off the console's origin: markdown through
+ * react-markdown with raw HTML off, a diagram drawn from its source,
+ * HTML only inside the sandboxed iframe, an image by its content URL,
+ * other text as text, and everything else as a download.
+ *
+ * The one renderer for every artifact viewer: this modal, the tab of
+ * its own, and the swarm page's drawer. A second copy would be a
+ * second place for those rules to be got wrong.
+ *
+ * `hasSource` says there is source worth showing beside the rendering
+ * (markdown, a diagram, HTML); `showSource` switches the body to it.
+ */
+export function useArtifactCanvas(client: BentoClient, artifact: RunArtifact | null) {
   const needsText =
     !!artifact && artifact.kind !== "image" && (artifact.kind !== "file" || artifact.mime.startsWith("text/"));
   const [text, setText] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
   const [showSource, setShowSource] = useState(false);
 
+  /*
+   * Keyed by the artifact's id, never the row object: the swarm page
+   * refetches its artifact list on every event the stream delivers,
+   * and the row it hands the drawer is a new object each time. Keyed
+   * by the object, every event cleared the text, flipped Source back
+   * to Preview and remounted the HTML frame under the reader.
+   */
+  const artifactId = artifact?.id ?? null;
   useEffect(() => {
     setText(null);
     setFailed(false);
     setShowSource(false);
-    if (!artifact || !needsText) return;
+    if (!artifactId || !needsText) return;
     let cancelled = false;
-    client.getArtifactText(artifact.id).then(
+    client.getArtifactText(artifactId).then(
       (body) => {
         if (!cancelled) setText(body);
       },
@@ -169,7 +191,7 @@ function useArtifactCanvas(client: BentoClient, artifact: RunArtifact | null) {
     return () => {
       cancelled = true;
     };
-  }, [client, artifact, needsText]);
+  }, [client, artifactId, needsText]);
 
   const sourceToggle =
     artifact?.kind === "html" && text !== null ? (
@@ -177,6 +199,9 @@ function useArtifactCanvas(client: BentoClient, artifact: RunArtifact | null) {
         {showSource ? "Preview" : "View source"}
       </button>
     ) : null;
+
+  const hasSource =
+    text !== null && (artifact?.kind === "markdown" || artifact?.kind === "mermaid" || artifact?.kind === "html");
 
   let body: ReactNode = null;
   if (!artifact) {
@@ -200,6 +225,8 @@ function useArtifactCanvas(client: BentoClient, artifact: RunArtifact | null) {
     );
   } else if (needsText && text === null) {
     body = <ArtifactTextSkeleton />;
+  } else if (showSource && hasSource) {
+    body = <pre className="artifact artifact-source">{text}</pre>;
   } else if (artifact.kind === "markdown") {
     body = <Markdown text={text!} />;
   } else if (artifact.kind === "mermaid") {
@@ -209,18 +236,14 @@ function useArtifactCanvas(client: BentoClient, artifact: RunArtifact | null) {
       </ZoomPane>
     );
   } else if (artifact.kind === "html") {
-    body = showSource ? (
-      <pre className="artifact artifact-source">{text}</pre>
-    ) : (
-      <HtmlPreview text={text!} title={artifact.path} />
-    );
+    body = <HtmlPreview text={text!} title={artifact.path} />;
   } else if (needsText) {
     body = <pre className="artifact artifact-source">{text}</pre>;
   } else {
     body = <p className="muted">This file has no preview. Download it to look at it.</p>;
   }
 
-  return { body, sourceToggle };
+  return { body, sourceToggle, hasSource, showSource, setShowSource };
 }
 
 function HtmlPreview({ text, title }: { text: string; title: string }) {
@@ -416,7 +439,7 @@ function ShrinkMark() {
   );
 }
 
-function PopOutMark() {
+export function PopOutMark() {
   return (
     <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false">
       <path d="M7 3H3.5v10H13V9" />

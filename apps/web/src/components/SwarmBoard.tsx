@@ -1,18 +1,19 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { BentoClient, RunArtifact } from "@bento/api-client";
-import { NewSwarmDialog } from "./NewSwarmDialog.js";
+import type { BentoClient } from "@bento/api-client";
+import { SwarmComposer } from "./SwarmComposer.js";
 import { SwarmSettingsDialog } from "./SwarmSettingsFields.js";
 import { DeleteSwarmDialog } from "./DeleteSwarmDialog.js";
 import { ReopenDialog } from "./ReopenDialog.js";
-import { SwarmEmpty, SwarmStrip } from "./SwarmStrip.js";
+import { SwarmStrip } from "./SwarmStrip.js";
 import { SwarmNodeDrawer } from "./SwarmNodeDrawer.js";
 import { SwarmRunOutput, SwarmRunOutputDrawer, SwarmWorkerOutputDrawer } from "./SwarmRunOutput.js";
-import { SwarmPage } from "./SwarmPage.js";
+import { orderArtifacts, SwarmPage } from "./SwarmPage.js";
 import { SwarmPageSkeleton } from "./Skeleton.js";
 import { swarmApi, type SwarmAgent, type SwarmPublishOutcome } from "../swarm/client.js";
 import { createModelCache } from "../swarm/layout.js";
 import { searchSwarmNodes } from "../swarm/search.js";
+import { artifactsAfterRefetch } from "../swarm/artifacts.js";
 import { leafStartBlocker } from "../swarm/waiting.js";
 import type { ModeSurfaces } from "../swarm/plan.js";
 import type {
@@ -34,15 +35,35 @@ import {
 } from "../swarm/view-state.js";
 
 /**
- * The artifact viewer, loaded when somebody opens one.
+ * The artifact drawer, loaded when somebody opens one.
  *
- * Lazily, the way the card drawer loads it: it carries a markdown
- * renderer and a diagram renderer, and a swarm page that never opens
- * an artifact should not pay for either.
+ * Lazily, the way the card drawer loads its viewer: it renders through
+ * the viewer's canvas, which carries a markdown renderer and a diagram
+ * renderer, and a swarm page that never opens an artifact should not
+ * pay for either.
  */
-const ArtifactViewer = lazy(() =>
-  import("./ArtifactViewer.js").then((m) => ({ default: m.ArtifactViewer })),
+const SwarmArtifactDrawer = lazy(() =>
+  import("./SwarmArtifactDrawer.js").then((m) => ({ default: m.SwarmArtifactDrawer })),
 );
+
+/**
+ * Whether the board is at the phone breakpoint, asked of CSS rather
+ * than answered again here: styles.css sets `--swarm-phone` on the
+ * board inside the same max-width: 720px query that lays the page out
+ * for a phone, so the breakpoint has one home. A phone draws only the
+ * outline, whatever this browser remembers for a wider screen.
+ */
+function usePhoneLayout(board: HTMLElement | null): boolean {
+  const [phone, setPhone] = useState(false);
+  useEffect(() => {
+    if (!board) return;
+    const read = () => setPhone(getComputedStyle(board).getPropertyValue("--swarm-phone").trim() === "1");
+    read();
+    window.addEventListener("resize", read);
+    return () => window.removeEventListener("resize", read);
+  }, [board]);
+  return phone;
+}
 
 const WORKING_NODE_REFRESH_MS = 60_000;
 
@@ -69,6 +90,8 @@ export function SwarmBoard({
   surfaces,
   repositoriesMissing = false,
   onAddRepository,
+  onNewAgent,
+  onManageAgents,
   agentProfiles,
 }: {
   projectId: string;
@@ -86,12 +109,18 @@ export function SwarmBoard({
   surfaces: ModeSurfaces;
   /** A swarm cannot start until the project has a checkout. */
   repositoriesMissing?: boolean;
-  /** Opens Repositories, from the warning inside New swarm. */
+  /** Opens Repositories, from the warning on the composer. */
   onAddRepository?: () => void;
+  /** Opens the Agents panel on a new agent, from the composer's agent pickers. */
+  onNewAgent?: () => void;
+  /** Opens the Agents panel, from the composer's agent pickers. */
+  onManageAgents?: () => void;
   /** The project's agents, so an edit in the Agents panel reaches the pickers here. */
   agentProfiles?: unknown;
 }) {
   const storage = useMemo(() => browserStorage(), []);
+  const [board, setBoard] = useState<HTMLDivElement | null>(null);
+  const phone = usePhoneLayout(board);
   const [swarms, setSwarms] = useState<SwarmSummary[] | null>(null);
   const [switcherSlot, setSwitcherSlot] = useState<HTMLElement | null>(null);
   useEffect(() => {
@@ -211,8 +240,11 @@ export function SwarmBoard({
   const loadArtifacts = useCallback((swarmId: string) => {
     void swarmApi
       .listArtifacts(swarmId)
-      .then(setArtifacts)
-      .catch(() => setArtifacts([]));
+      // A refetch that failed keeps the list the page has, and one
+      // that brought the same rows keeps the same array, so the open
+      // artifact is never rebuilt under its reader.
+      .then((rows) => setArtifacts((previous) => artifactsAfterRefetch(previous, rows)))
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -331,7 +363,7 @@ export function SwarmBoard({
   const [reopening, setReopening] = useState(false);
   /** What this swarm produced for people to read, and the one that is open. */
   const [artifacts, setArtifacts] = useState<SwarmArtifact[]>([]);
-  const [openArtifact, setOpenArtifact] = useState<RunArtifact | null>(null);
+  const [openArtifact, setOpenArtifact] = useState<string | null>(null);
   const [plannerOutputOpen, setPlannerOutputOpen] = useState(false);
   const [workerOutput, setWorkerOutput] = useState<{ runId: string; taskTitle: string } | null>(null);
 
@@ -404,8 +436,15 @@ export function SwarmBoard({
   const task = taskId ? detail?.tasks.find((row) => row.id === taskId) ?? null : null;
   const layoutNode = taskId ? model.byId.get(taskId) ?? null : null;
 
+  const selectSwarm = (id: string) => {
+    setCreating(false);
+    setSelectedId(id);
+  };
+  const listedArtifacts = detail ? orderArtifacts(artifacts, detail.swarm.deliverable) : [];
+  const openArtifactIndex = openArtifact ? listedArtifacts.findIndex((artifact) => artifact.id === openArtifact) : -1;
+
   return (
-    <div className="swarm-board">
+    <div className="swarm-board" ref={setBoard}>
       {switcherSlot && createPortal(
         <SwarmStrip
           swarms={swarms}
@@ -415,7 +454,7 @@ export function SwarmBoard({
           completionFor={(swarm) =>
             swarm.id === selectedId && detail ? model.root.completion : swarm.completion
           }
-          onSelect={setSelectedId}
+          onSelect={selectSwarm}
           onNew={() => setCreating(true)}
         />,
         switcherSlot,
@@ -437,14 +476,48 @@ export function SwarmBoard({
         </div>
       )}
 
-      {swarms.length === 0 ? (
-        <SwarmEmpty onNew={() => setCreating(true)} />
+      {creating || swarms.length === 0 ? (
+        <SwarmComposer
+          key={projectId}
+          projectId={projectId}
+          agents={agents}
+          surfaces={surfaces}
+          swarms={swarms}
+          busy={busy}
+          now={now}
+          repositoriesMissing={repositoriesMissing}
+          onAddRepository={onAddRepository}
+          onNewAgent={onNewAgent}
+          onManageAgents={onManageAgents}
+          onSelectSwarm={selectSwarm}
+          // Only once there is a swarm to go back to. A project's first
+          // swarm has nothing behind the composer.
+          onCancel={swarms.length > 0 ? () => setCreating(false) : undefined}
+          onCreate={async (input: NewSwarmInput) => {
+            setBusy(true);
+            try {
+              const created = await swarmApi.createSwarm(input);
+              setSelectedId(created.swarm.id);
+              setCreating(false);
+              // Busy until the list has the new swarm. The composer
+              // stays mounted while a project's first swarm is not yet
+              // in the list, and a Create that was enabled again in
+              // that gap made the same swarm twice.
+              await loadSwarms(created.swarm.id);
+            } finally {
+              setBusy(false);
+            }
+          }}
+        />
       ) : detail ? (
         <SwarmPage
           detail={detail}
           publish={publish?.swarmId === detail.swarm.id ? publish : null}
           model={model}
-          view={view}
+          agents={agents}
+          // A phone draws the outline only. What is remembered for a
+          // wider screen is left as it is.
+          view={phone ? "outline" : view}
           onView={(next) => {
             setView(next);
             rememberSwarmView(storage, next);
@@ -465,12 +538,13 @@ export function SwarmBoard({
           busy={busy}
           artifacts={artifacts}
           /*
-           * Handed to the viewer that draws a card's artifacts, which
-           * is where the rules about agent bytes live. The row the
-           * list route sends is the shape that viewer takes, so it is
-           * passed through rather than re-fetched.
+           * Opened in the drawer, which renders through the canvas a
+           * card's artifacts use, where the rules about agent bytes
+           * live. The row the list route sends is the shape that
+           * canvas takes, so it is passed through rather than
+           * re-fetched.
            */
-          onOpenArtifact={(artifact) => setOpenArtifact(artifact as RunArtifact)}
+          onOpenArtifact={(artifact) => setOpenArtifact(artifact.id)}
           onOpenPlannerOutput={() => setPlannerOutputOpen(true)}
           actions={{
             onPause: () => selectedId && act(() => swarmApi.pauseSwarm(selectedId)),
@@ -593,9 +667,17 @@ export function SwarmBoard({
         />
       )}
 
-      {openArtifact && (
+      {openArtifactIndex >= 0 && detail && (
         <Suspense fallback={null}>
-          <ArtifactViewer client={client} artifact={openArtifact} onClose={() => setOpenArtifact(null)} />
+          <SwarmArtifactDrawer
+            client={client}
+            artifacts={listedArtifacts}
+            index={openArtifactIndex}
+            tasks={detail.tasks}
+            now={now}
+            onIndex={(at) => setOpenArtifact(listedArtifacts[at]?.id ?? null)}
+            onClose={() => setOpenArtifact(null)}
+          />
         </Suspense>
       )}
 
@@ -640,36 +722,6 @@ export function SwarmBoard({
               })
               .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
               .finally(() => setBusy(false));
-          }}
-        />
-      )}
-
-      {creating && (
-        <NewSwarmDialog
-          projectId={projectId}
-          agents={agents}
-          surfaces={surfaces}
-          busy={busy}
-          repositoriesMissing={repositoriesMissing}
-          onAddRepository={
-            onAddRepository
-              ? () => {
-                  setCreating(false);
-                  onAddRepository();
-                }
-              : undefined
-          }
-          onClose={() => setCreating(false)}
-          onCreate={async (input: NewSwarmInput) => {
-            setBusy(true);
-            try {
-              const created = await swarmApi.createSwarm(input);
-              setCreating(false);
-              loadSwarms(created.swarm.id);
-              setSelectedId(created.swarm.id);
-            } finally {
-              setBusy(false);
-            }
           }}
         />
       )}

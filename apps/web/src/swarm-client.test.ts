@@ -3,7 +3,7 @@ import test from "node:test";
 import { fixtureSwarmApi } from "./swarm/client.js";
 import { generateSwarmTasks, seedSwarms } from "./swarm/fixtures.js";
 import { buildSwarmModel } from "./swarm/layout.js";
-import { base64Bytes, clampWorkers, existingPlanHelp, newSourceLabel, planSourceRefusal, readPlanFile, suggestBranch, toBase64, withPlanSource } from "./components/NewSwarmDialog.js";
+import { attachmentName, attachmentSize, base64Bytes, clampWorkers, existingPlanHelp, planSourceRefusal, readPlanFile, suggestBranch, toBase64, withPlanSource } from "./swarm/new-swarm.js";
 import { planFileMime } from "@bento/core";
 import { goalExcerpt, planSourceLabel, planSourceSize } from "./components/SwarmPage.js";
 import { parseBudget, parseTimeLimit } from "./components/SwarmSettingsFields.js";
@@ -252,8 +252,9 @@ test("a PDF or an image travels as bytes, is sized in bytes, and is refused past
   assert.equal(base64Bytes(""), 0);
 
   assert.equal(planSourceRefusal([], { kind: "file", name: "plan.pdf", mime: "application/pdf", data }), null);
-  assert.equal(newSourceLabel({ kind: "file", name: "plan.pdf", mime: "application/pdf", data }), "PDF");
-  assert.equal(newSourceLabel({ kind: "file", name: "shot.png", mime: "image/png", data }), "Image");
+  // The chip names the file and sizes it in bytes, whatever kind it is.
+  assert.equal(attachmentName({ kind: "file", name: "plan.pdf", mime: "application/pdf", data }), "plan.pdf");
+  assert.equal(attachmentSize({ kind: "file", name: "shot.png", mime: "image/png", data }), "5 bytes");
   assert.match(planSourceRefusal([], { kind: "file", name: "empty.pdf", mime: "application/pdf", data: "" })!, /is empty/);
   const big = "A".repeat(Math.ceil((10 * 1024 * 1024 + 3) / 3) * 4);
   assert.match(planSourceRefusal([], { kind: "file", name: "big.pdf", mime: "application/pdf", data: big })!, /at most 10\.0 MB/);

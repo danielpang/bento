@@ -142,7 +142,7 @@ const SWARM_SKELETON_HEIGHT = ROW_PITCH + NODE_HEIGHT;
 /**
  * A swarm's page, before the list or the open swarm has arrived.
  *
- * The header, the goal, the diagram bar and a tree, in the page's own
+ * The title row, the figures, the goal, the diagram bar and a tree, in the page's own
  * classes, so the real swarm sits down where this was. A swarm has no
  * lanes, which is why this is not the board's skeleton.
  */
@@ -150,32 +150,35 @@ export function SwarmPageSkeleton() {
   return (
     <div className="swarm-page swarm-page-skeleton" aria-busy="true" aria-label="Loading swarm">
       <LoadingStatus label="Loading swarm" />
-      <header className="swarm-head" aria-hidden="true">
-        <div className="swarm-head-lead">
-          <Skeleton width={40} height={40} radius="50%" />
-          <div className="swarm-head-copy">
+      <div className="swarm-top" aria-hidden="true">
+        <header className="swarm-title-row">
+          <div className="swarm-title-copy">
             <Skeleton height={26} width="13rem" radius={6} />
-            <div className="swarm-head-chips">
-              <Skeleton height={12} width="4.2rem" />
+            <div className="swarm-title-meta">
               <Skeleton height={12} width="7.4rem" />
-              <Skeleton height={12} width="3.6rem" />
+              <Skeleton height={12} width="9rem" />
             </div>
           </div>
-        </div>
-        <div className="swarm-head-actions">
-          <Skeleton className="skeleton-btn" width="6.4rem" />
-          <Skeleton className="skeleton-btn" width="4.8rem" />
-          <Skeleton className="skeleton-btn" width="2.6rem" />
-        </div>
-      </header>
+          <div className="swarm-title-actions">
+            <Skeleton className="skeleton-btn" width="4.8rem" />
+            <Skeleton className="skeleton-btn" width="5.2rem" />
+            <Skeleton className="skeleton-btn" width="6.4rem" />
+          </div>
+        </header>
 
-      <section className="swarm-brief" aria-hidden="true">
-        <div className="swarm-brief-head">
-          <Skeleton height={11} width="2.4rem" />
-          <Skeleton className="swarm-skeleton-excerpt" height={12} width="56%" />
+        <div className="swarm-stats">
+          {[0, 1, 2, 3, 4, 5].map((cell) => (
+            <div key={cell} className="swarm-stat">
+              <Skeleton height={11} width="3.6rem" />
+              <Skeleton height={18} width="5rem" />
+            </div>
+          ))}
         </div>
-      </section>
 
+      </div>
+
+      <div className="swarm-body" aria-hidden="true">
+        <div className="swarm-main">
       <div className="swarm-viewbar" aria-hidden="true">
         <Skeleton height={13} width="4.4rem" />
         <Skeleton height={28} width="8.6rem" radius={6} />
@@ -226,6 +229,21 @@ export function SwarmPageSkeleton() {
             </div>
           ))}
         </div>
+      </div>
+        </div>
+        <aside className="swarm-rail" aria-hidden="true">
+          <div className="swarm-rail-head">
+            <Skeleton height={11} width="2.8rem" />
+          </div>
+          <section className="swarm-card">
+            <div className="swarm-card-head">
+              <Skeleton height={11} width="2.4rem" />
+            </div>
+            <div className="swarm-goal-text">
+              <Skeleton className="swarm-skeleton-excerpt" height={12} width="86%" />
+            </div>
+          </section>
+        </aside>
       </div>
     </div>
   );

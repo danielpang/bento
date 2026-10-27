@@ -112,24 +112,3 @@ function SwarmItem({
     </Menu.RadioItem>
   );
 }
-
-/**
- * A project with no swarms yet.
- *
- * One action, because there is exactly one thing to do here, and the
- * sentence above it says what a swarm is rather than assuming the
- * word already means something.
- */
-export function SwarmEmpty({ onNew }: { onNew: () => void }) {
-  return (
-    <div className="empty-state">
-      <p className="muted">
-        No swarms yet. A swarm takes one goal, splits it into a tree of tasks, and works them in
-        parallel.
-      </p>
-      <button className="btn btn-primary" onClick={onNew}>
-        Create swarm
-      </button>
-    </div>
-  );
-}

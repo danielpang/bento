@@ -1508,6 +1508,14 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
             surfaces={swarmSurfaces}
             repositoriesMissing={repoCount === 0}
             onAddRepository={() => setPanel("repos")}
+            onNewAgent={() => {
+              setAgentsIntent({ new: true });
+              setPanel("agents");
+            }}
+            onManageAgents={() => {
+              setAgentsIntent(null);
+              setPanel("agents");
+            }}
             agentProfiles={profiles}
           />
         </Suspense>

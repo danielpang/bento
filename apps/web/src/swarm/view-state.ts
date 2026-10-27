@@ -24,7 +24,7 @@ export const VIEW_PARAM = "view";
 export const BOARD_MODE_KEY = "bento:boardMode";
 export const SWARM_VIEW_KEY = "bento:swarmView";
 /** Whether the goal and plan sit open above the diagram, or folded to one line. */
-export const SWARM_BRIEF_KEY = "bento:swarmBrief";
+export const SWARM_RAIL_KEY = "bento:swarmRail";
 /** Per project: the swarm you were last in is a fact about that board. */
 export function swarmKey(projectId: string): string {
   return `bento:swarm:${projectId}`;
@@ -123,21 +123,21 @@ export function rememberSwarmView(storage: StorageLike | null, view: SwarmView):
 }
 
 /**
- * Whether the brief (the goal, the plan it came from, the spend and
- * the worker stepper) is open above the diagram.
+ * Whether the details rail (the goal, the plan it came from, the
+ * artifacts and the pull request) is open beside the diagram.
  *
  * Open by default: a person opening a swarm for the first time should
- * see what it is for before they see its tree. Folded is a choice
- * about screen, not about this swarm, so it is remembered once for
- * every swarm rather than per swarm, and it is never in the address: a
- * link somebody follows should show them the goal.
+ * see what it is for beside its tree. Hidden is a choice about screen,
+ * not about this swarm, so it is remembered once for every swarm
+ * rather than per swarm, and it is never in the address: a link
+ * somebody follows should show them the goal.
  */
-export function readBriefOpen(storage: StorageLike | null): boolean {
-  return read(storage, SWARM_BRIEF_KEY) !== "closed";
+export function readRailOpen(storage: StorageLike | null): boolean {
+  return read(storage, SWARM_RAIL_KEY) !== "closed";
 }
 
-export function rememberBriefOpen(storage: StorageLike | null, open: boolean): void {
-  write(storage, SWARM_BRIEF_KEY, open ? "open" : "closed");
+export function rememberRailOpen(storage: StorageLike | null, open: boolean): void {
+  write(storage, SWARM_RAIL_KEY, open ? "open" : "closed");
 }
 
 /**

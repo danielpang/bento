@@ -26,20 +26,22 @@ A hosted swarm keeps its work on GitHub, so it needs a GitHub connection ("Conne
 
 ## Creating a swarm
 
-Press **Create swarm**. A name and a goal are enough; everything else starts with a sensible default.
+The Swarms tab opens on the composer when a project has no swarms yet; otherwise press **Create swarm** in the swarm switcher. A goal is enough; everything else starts with a sensible default. Press **Cmd+Enter** (**Ctrl+Enter** on Windows and Linux) or the send button to create the swarm. Enter starts a new line.
 
-| Field | What it does |
+| Control | What it does |
 | --- | --- |
-| Name | Names the swarm and its branch (`bento/<name>`) |
 | Goal | What should be true when the swarm is finished |
-| Plan | Optional. **Upload files** (text, PDFs, images) or **Add website**. Turn on **Use existing plan** to have the planner build the tree from your plan instead of writing its own |
-| Planner agent, Worker agent | Swarm Planner and Swarm Worker by default, created for you if missing |
-| Workers at once | Up to 10. Four on hosted Bento, two on local. Change it while the swarm runs |
-| Budget | In dollars. Empty means no cap |
-| Time limit | In minutes. Empty means no limit |
-| Start from a branch | Empty for a new branch, or an existing branch to continue its work and pull request comments |
+| Attach (the **+** button) | Optional. **Upload files** (text, PDFs, images) or **Add website**. Attachments appear as chips inside the composer |
+| Attachments are the plan | Turn it on to have the planner build the tree from your attachments (or from the goal itself) instead of writing its own plan |
+| Name | Taken from the first words of the goal. Press **edit** to change it. It names the swarm and its branch (`bento/<name>`) |
+| Planner, Worker | Swarm Planner and Swarm Worker by default, created for you if missing |
+| Workers | Up to 10. Four on hosted Bento, two on local. Change it while the swarm runs |
 
-**More settings** holds the rest, and you can change all of it later under **Settings** on the swarm:
+**Defaults** (the gear on the composer, or the link under it) holds the rest. The line under the composer summarises what is set, and you can change all of it later under **Settings** on the swarm:
+
+- **Budget:** in dollars. Empty means no cap.
+- **Time limit:** in minutes. Empty means no limit.
+- **Start from a branch:** empty for a new branch, or an existing branch to continue its work and pull request comments.
 
 - **What it produces:** a **Code change** (workers' branches merge into the swarm's branch) or a **Document** (each worker writes a section and the planner assembles one file).
 - **Final check:** a **Judge agent** and a **Command that must pass** (for example `pnpm test`).
@@ -48,7 +50,7 @@ Press **Create swarm**. A name and a goal are enough; everything else starts wit
 
 ## Following a swarm
 
-The header shows the status, the branch, agent time, and how many tasks are done. Switch the diagram between **Tree** and **Outline**. In the tree, **Search nodes by title or ID** finds a task anywhere in the plan, including folded parts; Enter and Shift+Enter step through matches.
+The title row shows the status and the branch (with a button that copies it), and the figures under it show tasks done, agent time, spend, workers, how long the swarm has run, and which agents it uses. The goal card below folds out of the way, and lists what the plan was built from. Artifacts and the pull request sit beside each other under it; an artifact opens in a drawer from the left, where the arrow keys step through them. Switch the diagram between **Tree** and **Outline**. In the tree, **Search nodes by title or ID** finds a task anywhere in the plan, including folded parts; Enter and Shift+Enter step through matches.
 
 When nothing is moving, the header says why: a report waiting for the planner, failed tasks to retry, tasks waiting on a task they depend on, or no worker agent set. A swarm that says it is waiting for you highlights the tasks that need you. When the planner asks a question, it appears above the diagram; answer it there.
 
@@ -95,14 +97,14 @@ When a project has a GitHub connection, Bento pushes as work happens: a worker's
 
 Nothing opens a pull request automatically. Once any task is committed to the swarm's branch, the swarm page offers:
 
-- **One pull request:** one pull request of the swarm's branch. Opened before the swarm is done, it is a draft, its description follows every later merge, and it is marked ready for review once the swarm is done.
-- **One per task, stacked:** one pull request per committed task, each against the task committed before it. Tasks committed later are offered as **Add them to the stack**.
+- **Open pull request:** one pull request of the swarm's branch. Opened before the swarm is done, it is a draft, its description follows every later merge, and it is marked ready for review once the swarm is done.
+- **Open one per task:** one pull request per committed task, each against the task committed before it. Tasks committed later are offered as **Add them to the stack**.
 
 The description is the planner's summary for reviewers, cut to fit GitHub's length limit. If opening was cut off midway, click again to finish it. If the sandbox was lost before some tasks reached GitHub, the result lists them as missing.
 
 ## Cost and agent hours
 
-The goal panel shows a **Spend estimate** once agents report a cost or the swarm has a budget. Each drawer shows its own task's spend. On hosted Bento, sandbox time counts against the team's agent hours, the same as a card's run. A run that failed because of Bento or its sandbox is not charged. On local Bento, runs that use your own signed in agent show their cost as notional; the budget then warns rather than stops the swarm.
+The figures under the title show a **Spend estimate** once agents report a cost or the swarm has a budget. Each drawer shows its own task's spend. On hosted Bento, sandbox time counts against the team's agent hours, the same as a card's run. A run that failed because of Bento or its sandbox is not charged. On local Bento, runs that use your own signed in agent show their cost as notional; the budget then warns rather than stops the swarm.
 
 ## Sandboxes after a swarm ends
 

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  readBriefOpen,
-  rememberBriefOpen,
+  readRailOpen,
+  rememberRailOpen,
   BOARD_MODE_KEY,
   SWARM_VIEW_KEY,
   boardHref,
@@ -73,14 +73,15 @@ test("the view round trips the same way, and defaults to the tree", () => {
   assert.equal(readSwarmView("?view=tree", storage), "tree");
 });
 
-test("the brief is open until this browser folds it, and the fold is remembered for every swarm", () => {
+test("the details rail is open until this browser hides it, and the choice is remembered for every swarm", () => {
   const storage = memoryStorage();
-  assert.equal(readBriefOpen(storage), true, "open by default, so a first look at a swarm shows what it is for");
-  rememberBriefOpen(storage, false);
-  assert.equal(readBriefOpen(storage), false);
-  rememberBriefOpen(storage, true);
-  assert.equal(readBriefOpen(storage), true);
-  assert.equal(readBriefOpen(null), true, "a browser that refuses storage shows the goal");
+  assert.equal(readRailOpen(storage), true, "open by default, so a first look at a swarm shows what it is for");
+  rememberRailOpen(storage, false);
+  assert.equal(readRailOpen(storage), false);
+  assert.equal(storage.getItem("bento:swarmRail"), "closed", "remembered in this browser, never in the address");
+  rememberRailOpen(storage, true);
+  assert.equal(readRailOpen(storage), true);
+  assert.equal(readRailOpen(null), true, "a browser that refuses storage shows the goal");
 });
 
 test("a browser that refuses storage still resolves every choice", () => {

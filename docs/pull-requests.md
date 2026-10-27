@@ -16,7 +16,7 @@ The card lists open pull requests by repository. Multi-repo cards require a PR i
 
 ## Swarm pull requests
 
-A swarm opens no pull request by itself. Its branches are pushed to GitHub as work lands, and you publish from the swarm's header when you choose, even before the swarm finishes: **One pull request** opens one of the swarm's branch (a draft until the swarm is done), and **One per task, stacked** opens one per committed task, each against the task committed before it. Clicking again finishes a publish that was cut off and updates the same pull requests. See [Swarms](./swarms.md).
+A swarm opens no pull request by itself. Its branches are pushed to GitHub as work lands, and you publish from the swarm's header when you choose, even before the swarm finishes: **Open pull request** opens one of the swarm's branch (a draft until the swarm is done), and **Open one per task** opens one per committed task, each against the task committed before it. Clicking again finishes a publish that was cut off and updates the same pull requests. See [Swarms](./swarms.md).
 
 ## Stage artifacts in pull requests
 

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { copyText } from "../clipboard.js";
 import type { LandingPage } from "../swarm/client.js";
 import type { SwarmLanding, SwarmStatus, SwarmTask } from "../swarm/types.js";
 import { MERGE_QUEUE_FAILURE, landingFailureWords } from "../swarm/failures.js";
@@ -45,34 +46,6 @@ const WORDS: Record<SwarmLanding["status"], { label: string; tone: string }> = {
 
 /** Past this many rows the panel offers a search, because scrolling for one branch is slow. */
 const SEARCH_FROM = 10;
-
-/** The local OrbStack HTTP origin may not expose the Clipboard API. */
-async function copyBranchName(branchName: string): Promise<void> {
-  if (navigator.clipboard?.writeText) {
-    try {
-      await navigator.clipboard.writeText(branchName);
-      return;
-    } catch {
-      // A browser can expose the API but still refuse this origin.
-    }
-  }
-
-  const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-  const field = document.createElement("textarea");
-  field.value = branchName;
-  field.readOnly = true;
-  field.style.position = "fixed";
-  field.style.opacity = "0";
-  document.body.append(field);
-  try {
-    field.focus();
-    field.select();
-    if (!document.execCommand("copy")) throw new Error("Clipboard access was denied");
-  } finally {
-    field.remove();
-    previousFocus?.focus();
-  }
-}
 
 function CopyIcon({ copied }: { copied: boolean }) {
   return copied ? (
@@ -158,7 +131,7 @@ export function MergeQueue({
   async function copyCommand() {
     if (!destination) return;
     try {
-      await copyBranchName(`git switch ${destination}`);
+      await copyText(`git switch ${destination}`);
       setCommandCopyState("copied");
     } catch {
       setCommandCopyState("failed");
@@ -340,7 +313,7 @@ function Row({
   async function copyBranch() {
     if (!landing.branchName) return;
     try {
-      await copyBranchName(landing.branchName);
+      await copyText(landing.branchName);
       setCopyState("copied");
     } catch {
       setCopyState("failed");
