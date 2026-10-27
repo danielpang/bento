@@ -31,6 +31,7 @@ import { releaseOwnedRuns } from "./orchestrator/run-ownership.js";
 import { refreshModelCatalog } from "./orchestrator/model-catalog.js";
 import { QUEUE_POLL_SECONDS } from "./orchestrator/queue.js";
 import { applyInitialAgentAuthSharing } from "./settings.js";
+import { createCloudPool } from "./cloud-pool.js";
 import { createDiskSpaceMonitor } from "./disk-space.js";
 
 export interface StartOptions {
@@ -96,6 +97,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
    * the embedded TUI catches a failed boot and keeps running, so a
    * throw must take those installs back out on its way up.
    */
+  let cloudPool: ReturnType<typeof createPool> | undefined;
   try {
     const slots = runSlots(env);
     const poolMax = poolMaxForRuns(slots);
@@ -304,8 +306,14 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
       if (typeof mod.registerCloud !== "function") {
         throw new Error(`BENTO_CLOUD_MODULE ${name} does not export registerCloud`);
       }
+      /*
+       * Not the app pool. Entitlement checks run while a request
+       * already holds a tenant-transaction client, and a second
+       * checkout from that same pool deadlocks it. See createCloudPool.
+       */
+      cloudPool = createCloudPool(env.DATABASE_URL);
       const registered = await mod.registerCloud({
-        db,
+        db: createDb(cloudPool),
         mailer,
         /**
          * Mail in Bento's own envelope. The module supplies copy and
@@ -414,6 +422,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
         await analytics?.shutdown().catch(() => {});
         await logExport?.stop().catch(() => {});
         await bossPool.end().catch(() => {});
+        await cloudPool?.end().catch(() => {});
         await pool.end().catch(() => {});
       },
     };
@@ -421,6 +430,7 @@ export async function startServer(options: StartOptions = {}): Promise<RunningSe
     analytics?.captureException(err, null, null, { source: "boot" });
     await analytics?.shutdown().catch(() => {});
     await logExport?.stop().catch(() => {});
+    await cloudPool?.end().catch(() => {});
     throw err;
   }
 }
