@@ -22,6 +22,7 @@ const testUrl = adminUrl.replace(/\/[^/]+$/, `/${testDbName}`);
 let pool: ReturnType<typeof createPool>;
 let db: Db;
 const realFetch = globalThis.fetch;
+let tokenStale = false;
 
 before(async () => {
   const admin = new pg.Client({ connectionString: adminUrl });
@@ -37,8 +38,16 @@ before(async () => {
   await pool.query(
     `insert into identity.account (id,account_id,provider_id,user_id,access_token) values ('a1','42','github','u1','gho_test')`,
   );
+  // GitHub: the saved token works unless a test says it went stale, and
+  // the public profile of account 42 always names its owner.
   globalThis.fetch = (async (input: RequestInfo | URL) => {
-    assert.equal(String(input), "https://api.github.com/user");
+    const url = String(input);
+    if (url === "https://api.github.com/user") {
+      return tokenStale
+        ? new Response("{}", { status: 401 })
+        : new Response(JSON.stringify({ login: "una-codes" }), { status: 200 });
+    }
+    assert.equal(url, "https://api.github.com/user/42");
     return new Response(JSON.stringify({ login: "una-codes" }), { status: 200 });
   }) as typeof fetch;
 });
@@ -108,6 +117,19 @@ test("joining mails the inbox once with the email and GitHub username, and is re
   assert.match(mailer.sent[0]!.text, /una@x\.test/);
   assert.match(mailer.sent[0]!.text, /una-codes/);
   assert.ok(await requestedAt());
+});
+
+test("a GitHub token that went stale still names the account, from its public profile", async () => {
+  await pool.query(`update identity."user" set swarm_waitlist_requested_at = null where id = 'u1'`);
+  tokenStale = true;
+  try {
+    const mailer = recordingMailer();
+    assert.equal(await join(hosted([]), mailer), 200);
+    assert.match(mailer.sent[0]!.text, /una-codes/);
+    assert.doesNotMatch(mailer.sent[0]!.text, /not linked/);
+  } finally {
+    tokenStale = false;
+  }
 });
 
 test("somebody already let in is not put on the waitlist", async () => {
