@@ -1,5 +1,5 @@
 import { zValidator } from "@hono/zod-validator";
-import { and, asc, desc, eq, inArray, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, ne, or, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { messageAttachments, writeMessageAttachments } from "../message-attachments.js";
@@ -380,14 +380,20 @@ export function featureRoutes(ctx: AppContext) {
           // A card can be completed, reopened, and completed again, so
           // its status-change log is the completion clock. updated_at
           // also moves for unrelated edits and cannot answer this.
-          sql`${features.status} <> 'done' or exists (
-            select 1
-            from ${featureEvents}
-            where ${featureEvents.featureId} = ${features.id}
-              and ${featureEvents.kind} = 'status_changed'
-              and ${featureEvents.toStatus} = 'done'
-              and ${featureEvents.at} >= now() - interval '14 days'
-          )`,
+          // `or()` parenthesizes the disjunction so AND cannot bind
+          // only to `status <> done` and let a recent completion in
+          // another project satisfy the whole WHERE.
+          or(
+            ne(features.status, "done"),
+            sql`exists (
+              select 1
+              from ${featureEvents}
+              where ${featureEvents.featureId} = ${features.id}
+                and ${featureEvents.kind} = 'status_changed'
+                and ${featureEvents.toStatus} = 'done'
+                and ${featureEvents.at} >= now() - interval '14 days'
+            )`,
+          ),
         ));
       return c.json(await withPullRequestUrls(c, ctx, rows));
     })

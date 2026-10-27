@@ -3983,6 +3983,7 @@ test("completions count done cards once, at their latest completion", async () =
 
 test("the board lists only cards completed in the last two weeks", async () => {
   const { project } = await setupProject("recent board completions");
+  const { project: other } = await setupProject("other board completions");
   const now = Date.now();
   const recent = new Date(now - 13 * 24 * 60 * 60 * 1000);
   const old = new Date(now - 15 * 24 * 60 * 60 * 1000);
@@ -3992,6 +3993,7 @@ test("the board lists only cards completed in the last two weeks", async () => {
   const doneAgain = await createFeature(project.id, "done again recently");
   const longDone = await createFeature(project.id, "done long ago");
   const cancelled = await createFeature(project.id, "cancelled card");
+  const otherRecent = await createFeature(other.id, "done on another project");
   const finish = (featureId: string, at: Date) => ({
     featureId,
     kind: "status_changed" as const,
@@ -4006,11 +4008,12 @@ test("the board lists only cards completed in the last two weeks", async () => {
     finish(doneAgain.id, old),
     finish(doneAgain.id, recent),
     finish(longDone.id, old),
+    finish(otherRecent.id, recent),
   ]);
   await ctx.db
     .update(features)
     .set({ status: "done" })
-    .where(inArray(features.id, [recentlyDone.id, doneAgain.id, longDone.id]));
+    .where(inArray(features.id, [recentlyDone.id, doneAgain.id, longDone.id, otherRecent.id]));
   await ctx.db.update(features).set({ status: "cancelled" }).where(eq(features.id, cancelled.id));
 
   const listed = await json<Array<{ id: string }>>(
@@ -4023,6 +4026,7 @@ test("the board lists only cards completed in the last two weeks", async () => {
   assert.ok(ids.has(doneAgain.id), "the latest completion controls the window");
   assert.ok(!ids.has(longDone.id), "a completion older than two weeks is hidden");
   assert.ok(ids.has(cancelled.id), "cancelled cards are not completed work");
+  assert.ok(!ids.has(otherRecent.id), "another project's recent completion stays on its own board");
 });
 
 test("webhooks are rejected without a valid signature", async () => {
