@@ -19,7 +19,7 @@ With Bento, You define the stages of your software development process, for exam
 
 ## Mac application
 
-[Download Bento for Mac](https://usebento.ai/download) (Apple Silicon and Intel). The Mac app supports Bento local or a remote server.
+[Download Bento for Mac](https://usebento.ai/download) (Apple Silicon and Intel). The Mac app runs Bento locally or signs in to hosted Bento.
 
 See the [Mac application guide](./apps/desktop/README.md) for packaging and setup.
 
@@ -67,11 +67,11 @@ Create a project and add your repositories (ensure you set `BENTO_REPOS` and you
 
 ### 2. Give the agents a model API key
 
-Under **Settings**, save a provider API key. Or under **Agents**, paste a Claude subscription token from `claude setup-token`. Either is stored encrypted and never shown again. For which tool needs which credential, see [docs/agents.md](./docs/agents.md).
+Under **Agents → Model provider keys** (or the model provider step when you first sign in), save a provider API key. Keys are stored encrypted, never shown again, and personal by default; a team owner or admin can share a key with the whole team. Or connect your own Claude or ChatGPT subscription under **Agents → Your personal subscriptions**. In local mode you can also paste a Claude token from `claude setup-token`. For which tool needs which credential, see [docs/agents.md](./docs/agents.md).
 
 ### 3. Check the existing agents
 
-A new project starts with six default stages and an agent on each. Open the **Agents** tab to see them.
+A new project starts with three stages (engineering requirements, implementation, code review), each with an agent and each opening a pull request. The Product Manager, Product Designer, and QA Engineer agents are created too, ready for a stage you add. Open the **Agents** tab to see them.
 
 An agent is a harness, model, and a **skill**. The skill is its standing instructions, sent with every agent start. Use it to say what the stage's write-up must contain and what outcome or actions the agent must produce. The defaults are short on purpose so that you can start immediately, but over time you will want to fine tune the skills for your own process.
 
@@ -104,6 +104,7 @@ Turn on "Create a pull request" for a stage and a successful run there pushes th
 | [Coding agents](./docs/agents.md)          | What each tool can do, how each authenticates, talking to a working agent |
 | [Security](./docs/security.md)             | Proxy tokens, the MCP gateway, git access, network access                 |
 | [Pull requests](./docs/pull-requests.md)   | Publishing, what stays out of the diff, connecting GitHub                 |
+| [Swarms](./docs/swarms.md)                 | A planner and workers on one feature tree, the merge queue, publishing    |
 | [Web app setup](./docs/web-app.md)         | Running it for a team, multi mode, troubleshooting, contributing          |
 | [macOS app](./apps/desktop/README.md)      | Electron desktop setup, packaging, and verification                       |
 
@@ -114,7 +115,7 @@ The sandbox is the security model. Agents can run any command they generate but 
 
 - Never expose the host Docker socket, host SSH keys, or host git config to a sandbox.
 - Git access uses short-lived GitHub App installation tokens, scoped to one repository.
-- Prefer API keys over mounting subscription credential files. A prompt-injected agent can read anything the sandbox can.
+- Prefer proxied API keys or personal account connections over mounting subscription credential files. A prompt-injected agent can read anything the sandbox can.
 
 What a sandbox holds and can reach, model keys, MCP credentials and the network lock included: [Security](./docs/security.md).
 

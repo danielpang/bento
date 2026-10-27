@@ -1,6 +1,6 @@
 <h1 align="center">Other clients</h1>
 
-Bento has two clients: the web console (`apps/web`) and the terminal (`apps/tui`). Both use the same API. The web console has the broadest feature set. The TUI is still in development and probably doesn't even work. I wouldn't try it unless you want to help build it. The Mac app (`apps/desktop`) is the web console in a window; see the [Mac application guide](../apps/desktop/README.md).
+Bento has two clients: the web console (`apps/web`) and the terminal (`apps/tui`). Both use the same API. The web console has the broadest feature set. The terminal covers the day to day board, pipeline and team work; see the [Bento CLI guide](./tui.md) for install, setup and every shortcut. The Mac app (`apps/desktop`) is the web console in a window; see the [Mac application guide](../apps/desktop/README.md).
 
 ## Terminal
 
@@ -31,11 +31,11 @@ bento pipeline export team-pipeline.yaml
 | Set a repository's setup and test commands    | Yes                   | `bento repos set`                |
 | Export and import a pipeline as YAML          | Yes                   | `bento pipeline`                 |
 | Export and import agents as YAML              | Yes                   | `bento agents export` / `import` |
-| Add a card                                    | Yes                   | No                               |
+| Add a card                                    | Yes                   | `n`                              |
 | Add, edit and remove agents                   | Yes                   | Yes                              |
 | Assign an agent to a stage                    | Yes                   | Yes                              |
 | Add, remove and rename stages                 | Yes                   | Yes                              |
-| Reorder stages                                | Drag, or arrow keys   | No                               |
+| Reorder stages                                | Drag, or arrow keys   | Move stage earlier / later       |
 | Switch a stage between manual and automatic   | Yes                   | Yes                              |
 | Edit stage requirements, judge agent included | Yes                   | Yes                              |
 | Turn a stage's pull request on or off         | Yes                   | Yes                              |
@@ -43,7 +43,8 @@ bento pipeline export team-pipeline.yaml
 | Move a card between stages                    | Drag it between lanes | `a` and `b` keys, one step       |
 | Start, stop, and continue an agent            | Yes                   | Yes                              |
 | Save and remove provider API keys             | Yes                   | Yes                              |
-| Manage the team and its credentials           | Yes                   | No                               |
+| Invite and remove members, network access     | Yes                   | Yes                              |
+| Share a model key with the team               | Yes                   | No                               |
 
 
 Team management and stored credentials require multi mode. Local mode has one user and no organization.

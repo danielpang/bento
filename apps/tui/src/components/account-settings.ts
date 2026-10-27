@@ -137,7 +137,7 @@ export function accountSettings(
             list("Agent network access", [
               choice("status", policy.restrictNetwork ? "Restricted network" : "Unrestricted network", () =>
                 read("Network policy", [
-                  "Restricted agents run with no route to the internet. This can prevent package installs and documentation access.",
+                  "Restricted agents can reach only Bento and the sites your team allows (edit the list in the web console, where this deployment supports it). This can prevent package installs and documentation access.",
                   policy.supported
                     ? "This deployment supports network restrictions."
                     : "This deployment does not support network restrictions.",

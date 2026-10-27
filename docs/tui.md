@@ -167,7 +167,7 @@ Open **Settings** with `,` or `bento setup`.
 
 1. **Repositories:** connect a Git checkout. Paths refer to your machine for local agents, or the server for cloud agents.
 2. **Agents:** choose a harness and model, edit the prompt or load a `SKILL.md`, then save. “Add Claude Code” and similar entries create agents using that harness.
-3. **Model provider keys:** save credentials for the selected model, or enable local sign-in sharing below.
+3. **Model provider keys:** save credentials for the selected model, or enable local sign-in sharing below. Keys you save here are yours; an owner or admin shares a key with the team from the web console.
 4. **Pipeline:** assign agents to stages. Start with manual approval; enable automatic advancement when your requirements are ready.
 5. Return to the board.
 
@@ -237,8 +237,11 @@ Automatic stages advance when their requirements pass. A successful run alone do
 | `s`, `x`, `c`          | Start agent, stop run, message agent          |
 | `a`, `R`, `r`          | Approve/advance, reject, recheck requirements |
 | `b`                    | Send back or reopen                           |
+| `f`                    | Mark the card done                            |
+| `m`                    | Resolve merge conflicts                       |
+| `D`                    | Delete the card                               |
 | `d`, `h`               | Diff, history                                 |
-| `v`, `u`               | Sessions, spend                               |
+| `v` or `e`, `u`        | Sessions, spend                               |
 | `/`                    | Find card                                     |
 | `p`, `,`               | Projects, settings                            |
 | `:`, Ctrl+P, `?`       | Commands and help                             |

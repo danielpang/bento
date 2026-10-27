@@ -19,7 +19,7 @@ A stage with an assigned agent starts when a card arrives. Sending a card back s
 
 **Hold conditions:** agent failure or stop, failed requirement, or no assigned agent. After the last stage, the card is done (no further stage actions or agent runs). **Reopen** returns the card to the stage it finished in.
 
-**Early completion:** drag to Done or use **Mark done** in the drawer. Intermediate stages are skipped. The card retains its current stage for **Reopen** (backlog if never started).
+**Early completion:** drag to Completed or use **Mark completed** in the drawer. Intermediate stages are skipped. The card retains its current stage for **Reopen** (backlog if never started).
 
 ## Gates
 

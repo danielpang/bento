@@ -123,7 +123,6 @@ BENTO_MODE=multi
 BENTO_SECRET_KEY=...      # openssl rand -hex 32
 BETTER_AUTH_SECRET=...    # openssl rand -hex 32
 BETTER_AUTH_URL=http://your-bento-url..
-SPRITES_TOKEN="<fly sprites token>"
 ```
 
 Server startup fails in multi mode without `BENTO_SECRET_KEY`.
@@ -137,13 +136,19 @@ The board loads without a sandbox. Agent runs require one.
 | ------------------ | ---------------------------------------------------------------- |
 | `docker` (default) | Isolated containers. Build: `docker compose build sandbox-image` |
 | `local-process`    | No isolation. Development and CI only                            |
-| `sprite`           | Hosted (Fly) deployments                                         |
+| `sprite`           | Hosted (Fly) deployments. Needs `SPRITES_TOKEN`                  |
+
+With `sprite` as the driver and `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` also set, new sandboxes try a Fly Sprite first and fall back to a Modal sandbox when the sprite cannot be made. A team with the network lock on runs on Modal, because a sprite cannot restrict egress. A `docker` or `local-process` deployment keeps its driver even when it holds those tokens.
+
+### Web and worker processes
+
+One process serves the console and drives agent runs by default (`BENTO_ROLE=all`). To split them, run the same image twice: `BENTO_ROLE=web` serves HTTP and drives no runs, `BENTO_ROLE=worker` drives runs and serves no console. Set the slot count (`BENTO_MAX_CONCURRENT_RUNS`) on the worker; a web process that sets it is refused at boot. When `DATABASE_URL` is a transaction mode pooler, set `BENTO_DIRECT_DATABASE_URL` to a direct connection for the event bus and the migration lock.
 
 ### Network lock on Docker
 
 A team can block its agents' network access (**Settings, Team**). On Docker, Bento honors that only when the operator provides a network with no route out, named in `BENTO_SANDBOX_RESTRICTED_NETWORK`; without it the setting cannot be turned on. Bento does not manage that network's rules, so it must allow:
 
-- **Bento's own address.** In multi mode, model calls go through Bento's model proxy, so a sandbox that cannot reach Bento cannot reach its model, and every locked run fails at its first model call. The sandbox uses `BENTO_MCP_GATEWAY_URL`, or `BETTER_AUTH_URL` when that is unset; a `localhost` address is rewritten to `host.docker.internal`, which the driver maps to the host gateway in every sandbox, so the network's rules must let traffic reach the host on the server's port.
+- **Bento's own address.** Model calls go through Bento's model proxy (always in multi mode, and by default in local mode), so a sandbox that cannot reach Bento cannot reach its model, and every locked run fails at its first model call. The sandbox uses `BENTO_MCP_GATEWAY_URL`, or `BETTER_AUTH_URL` when that is unset; a `localhost` address is rewritten to `host.docker.internal`, which the driver maps to the host gateway in every sandbox, so the network's rules must let traffic reach the host on the server's port.
 - **The project's git remotes**, and the hosts of any model keys that are not proxied (see [agents.md](./agents.md#model-provider-keys-stay-out-of-agent-sandboxes)).
 
 The team's Allowed sites list applies only to Modal, and locked Docker runs attach no MCP servers. See [security.md](./security.md).
@@ -165,7 +170,7 @@ When enabled, Bento mounts local tool config directories read-only into the sand
 
 `local-process` inherits the host environment regardless of this setting.
 
-Docker-hosted servers cannot access host Keychain or `~/.claude`. Use `claude setup-token` → **Agents** or `CLAUDE_CODE_OAUTH_TOKEN` in `.env`.
+Docker-hosted servers cannot access host Keychain or `~/.claude`. Connect your subscription under **Agents → Your personal subscriptions** (local and hosted), or use `claude setup-token` → **Agents** or `CLAUDE_CODE_OAUTH_TOKEN` in `.env`.
 
 ## Docker compose constraints
 
@@ -277,11 +282,11 @@ Updates via SSE: `/api/board/:id/events`.
 
 ## Implementation notes
 
-**Done lane:** status-driven, not a stored stage. **Mark done** and drag-to-Done skip remaining stages. **Reopen** restores prior stage.
+**Completed lane:** status-driven, not a stored stage. **Mark completed** and drag-to-Completed skip remaining stages. **Reopen** restores prior stage.
 
 **Search:** filtered in `Board.tsx` via `matchesQuery` (`apps/web/src/search.test.ts`). Punctuation-normalized matching.
 
-**Board and Sessions (beta):** Board shows the pipeline; Sessions is the grouped card list and conversation workspace. There is no separate Board/List toggle. Both share search and the remembered All cards, Needs you, and Running filters. Sessions retains the latest agent, run count, activity date, and reported cost, with recent conversations first within each group. Cards awaiting their first run appear under Up next. These controls are beta. In the desktop app, tick "Try beta and experimental features" under Advanced settings before Start. On a hosted server, a team owner or admin allows beta features in Settings, Team, and each member turns them on in Settings, Account.
+**Board and Sessions (beta):** Board shows the pipeline; Sessions is the grouped card list and conversation workspace. There is no separate Board/List toggle. Both share search and the remembered All cards, Needs you, and Running filters. Sessions retains the latest agent, run count, activity date, and reported cost, with recent conversations first within each group. Cards awaiting their first run appear under Up next. These controls are beta. In the desktop app, tick "Try beta and experimental features" under Advanced settings; if local Bento is already running, Start becomes "Restart to save these settings" and restarts it. On a hosted server, a team owner or admin allows beta features in Settings, Team, and each member turns them on in Settings, Account.
 
 **Board focus (beta):** Needs you includes held cards and failed or stopped runs, excluding completed cards and cards with an active agent.
 
