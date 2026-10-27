@@ -39,12 +39,24 @@ export const MAX_CUSTOM_DAYS = 1096;
  * shows beside the inputs, or null when it can. Empty fields are not a
  * problem to announce: the person has not finished.
  */
+/**
+ * A date as midnight UTC, or null when it is not a real day. The same
+ * round trip the server does: Date.parse reads Feb 30 as Mar 2, and a
+ * window the page accepted that the route then refuses would show as
+ * a failure toast instead of the line beside the fields.
+ */
+function utcDay(value: string): number | null {
+  const ms = Date.parse(`${value}T00:00:00.000Z`);
+  if (Number.isNaN(ms)) return null;
+  return new Date(ms).toISOString().slice(0, 10) === value ? ms : null;
+}
+
 export function customRangeProblem(from: string, to: string, today: Date = new Date()): string | null {
   if (!from || !to) return null;
   if (!DATE_ONLY.test(from) || !DATE_ONLY.test(to)) return "Enter both dates as YYYY-MM-DD.";
-  const start = Date.parse(`${from}T00:00:00.000Z`);
-  const end = Date.parse(`${to}T00:00:00.000Z`);
-  if (Number.isNaN(start) || Number.isNaN(end)) return "Enter both dates as YYYY-MM-DD.";
+  const start = utcDay(from);
+  const end = utcDay(to);
+  if (start === null || end === null) return "Enter both dates as YYYY-MM-DD.";
   if (end < start) return "The end date comes before the start.";
   if (start > today.getTime()) return "The window starts in the future.";
   if (end + DAY_MS - start > MAX_CUSTOM_DAYS * DAY_MS) return "A window can cover at most three years.";
@@ -99,12 +111,6 @@ export function describeDelta(
   const diff = current - previous;
   const lead = diff === 0 ? "Same as previous" : `${diff > 0 ? "▲" : "▼"} ${Math.abs(diff)} vs previous`;
   return { text: `${lead} ${daysPhrase(days)}`, short: lead, tone: diff === 0 ? "flat" : diff > 0 ? "good" : "bad" };
-}
-
-/** A dollar figure for a tile or a cell. A plus marks a floor: some runs reported nothing. */
-export function formatSpend(usd: number, runsWithoutCost: number): string {
-  const figure = usd > 0 && usd < 0.01 ? "<$0.01" : `$${usd.toFixed(2)}`;
-  return runsWithoutCost > 0 ? `${figure}+` : figure;
 }
 
 /** The chart's series, one at a time: what the picker above it offers. */

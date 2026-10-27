@@ -20,11 +20,22 @@ export function compareFeatureSpend(a: FeatureSpend, b: FeatureSpend, sort: Spen
   return diff !== 0 ? diff : a.title.localeCompare(b.title);
 }
 
+/**
+ * A dollar figure. A cost under a cent is not nothing, and "$0.00"
+ * would say it was, so it prints as a floor. Every spend figure on the
+ * console comes through here, so a tile and a table never disagree
+ * about the same dollars.
+ */
+export function spendFigure(usd: number): string {
+  if (usd > 0 && usd < 0.005) return "<$0.01";
+  return `$${usd.toFixed(2)}`;
+}
+
 /** What the spend column says, including how much of it is actually known. */
-export function formatFeatureSpend(row: FeatureSpend): string {
+export function formatFeatureSpend(row: Pick<FeatureSpend, "runs" | "costUsd" | "runsWithoutCost">): string {
   if (row.runs === 0) return "No runs";
   if (row.costUsd === null) return "Not reported";
-  const figure = `$${row.costUsd.toFixed(2)}`;
+  const figure = spendFigure(row.costUsd);
   return row.runsWithoutCost > 0 ? `${figure}+` : figure;
 }
 
@@ -37,6 +48,6 @@ export function formatCardSpend(
   row: Pick<FeatureSpend, "costUsd" | "runsWithoutCost"> | undefined,
 ): string | null {
   if (!row || row.costUsd === null) return null;
-  const figure = `$${row.costUsd.toFixed(2)}`;
+  const figure = spendFigure(row.costUsd);
   return row.runsWithoutCost > 0 ? `${figure}+` : figure;
 }

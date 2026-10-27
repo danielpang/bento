@@ -14,7 +14,6 @@ import {
   defaultCustomRange,
   describeDelta,
   describeWindow,
-  formatSpend,
   queryFor,
   SERIES,
   windowDays,
@@ -111,6 +110,7 @@ test("a custom window says what is wrong with it, and nothing while it is unfini
   assert.match(customRangeProblem("2026-11-01", "2026-11-02", today) ?? "", /future/);
   assert.match(customRangeProblem("2020-01-01", "2026-10-27", today) ?? "", /three years/);
   assert.match(customRangeProblem("27/10/2026", "2026-10-27", today) ?? "", /YYYY-MM-DD/);
+  assert.match(customRangeProblem("2026-02-30", "2026-03-01", today) ?? "", /YYYY-MM-DD/, "Feb 30 is not a day");
   assert.deepEqual(defaultCustomRange(today), { from: "2026-09-28", to: "2026-10-27" });
 });
 
@@ -134,9 +134,13 @@ test("a delta is signed against the previous window of the same length, and only
   assert.deepEqual(describeDelta(8, 12, 7), { text: "▼ 4 vs previous 7 days", short: "▼ 4 vs previous", tone: "bad" });
   assert.deepEqual(describeDelta(3, 3, 14), { text: "Same as previous 14 days", short: "Same as previous", tone: "flat" });
   assert.equal(describeDelta(2, 1, 1).text, "▲ 1 vs previous day");
-  assert.equal(formatSpend(4.2, 0), "$4.20");
-  assert.equal(formatSpend(4.2, 2), "$4.20+", "a floor wears a plus");
-  assert.equal(formatSpend(0.004, 0), "<$0.01");
+});
+
+test("a cost under a cent is a floor everywhere, never zero", () => {
+  assert.equal(formatFeatureSpend(row("tiny", 0.004)), "<$0.01");
+  assert.equal(formatFeatureSpend(row("tiny floor", 0.004, { runs: 2, runsWithoutCost: 1 })), "<$0.01+");
+  assert.equal(formatCardSpend(row("tiny", 0.004)), "<$0.01");
+  assert.equal(formatFeatureSpend(row("nothing", 0)), "$0.00", "a reported zero is zero");
 });
 
 const totals: AnalyticsTotals = {
@@ -183,6 +187,13 @@ test("the figures render as tiles against the window before, with the stages und
   assert.match(tiles, /58 succeeded, 6 failed/);
   assert.match(tiles, /\$42\.18<\/span>|\$42\.18\+/, "spend is a floor when runs went unreported");
   assert.match(tiles, /12 of 64 runs reported no cost/);
+
+  // A window with no runs says so once: the value is "No runs" and no
+  // note claims every run reported a cost.
+  const empty = { ...totals, runs: 0, runsSucceeded: 0, runsFailed: 0, spendUsd: 0, runsWithoutCost: 0 };
+  const quiet = renderToStaticMarkup(createElement(Tiles, { totals: empty, previous: analytics.previous, days: 30 }));
+  assert.match(quiet, /Spend.*>No runs</s);
+  assert.doesNotMatch(quiet, /Every run reported a cost|0 of 0 runs/);
 
   const stages = renderToStaticMarkup(createElement(StageFlow, { rows: analytics.byStage }));
   assert.match(stages, /Implementation.*width:100%.*>16<.*4 cards now.*>4 now</s);

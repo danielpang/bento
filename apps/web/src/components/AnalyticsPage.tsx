@@ -14,7 +14,6 @@ import {
   defaultCustomRange,
   describeDelta,
   describeWindow,
-  formatSpend,
   queryFor,
   seriesTotal,
   windowDays,
@@ -48,6 +47,11 @@ export function AnalyticsPage({ client, projectId }: { client: BentoClient; proj
   const [choice, setChoice] = useState<WindowChoice>({ kind: "preset", range: DEFAULT_RANGE });
   const [data, setData] = useState<ProjectAnalytics | null>(null);
   const [loading, setLoading] = useState(true);
+  // Which window the figures on screen belong to. A refetch for the
+  // same window (a board event) replaces them in place; only a fetch
+  // for a different window dims them, since those are the figures
+  // that are about to be wrong.
+  const [loadedKey, setLoadedKey] = useState<string | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
   const [series, setSeries] = useState<Series>("completed");
   const [sort, setSort] = useState<SpendSort>("spend-desc");
@@ -67,6 +71,7 @@ export function AnalyticsPage({ client, projectId }: { client: BentoClient; proj
       const next = await client.getAnalytics(projectId, JSON.parse(queryKey));
       if (!gate.current.isCurrent(seq)) return;
       setData(next);
+      setLoadedKey(queryKey);
       setLoadFailed(false);
       setLoading(false);
     } catch (err) {
@@ -76,9 +81,14 @@ export function AnalyticsPage({ client, projectId }: { client: BentoClient; proj
       setLoading(false);
     }
   }, [client, projectId, queryKey]);
+  // The board stream calls the latest refresh through this ref, so
+  // choosing a window never closes and reopens the stream.
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
 
   useEffect(() => {
     setData(null);
+    setLoadedKey(null);
     setLoadFailed(false);
   }, [projectId]);
 
@@ -95,7 +105,7 @@ export function AnalyticsPage({ client, projectId }: { client: BentoClient; proj
     const schedule = () => {
       timer ??= window.setTimeout(() => {
         timer = null;
-        void refresh();
+        void refreshRef.current();
       }, 250);
     };
     const stop = client.streamBoard(
@@ -110,7 +120,7 @@ export function AnalyticsPage({ client, projectId }: { client: BentoClient; proj
       stop();
       if (timer !== null) clearTimeout(timer);
     };
-  }, [client, projectId, refresh]);
+  }, [client, projectId]);
 
   const cards = useMemo(() => {
     if (!data) return [];
@@ -137,7 +147,7 @@ export function AnalyticsPage({ client, projectId }: { client: BentoClient; proj
       ) : data === null ? (
         <AnalyticsPageSkeleton framed={false} />
       ) : (
-        <div className="analytics-body" data-loading={loading ? "" : undefined}>
+        <div className="analytics-body" data-loading={loading && loadedKey !== queryKey ? "" : undefined}>
           <Tiles totals={data.totals} previous={data.previous} days={windowDays(data.window)} />
           <section className="analytics-section" aria-labelledby="analytics-over-time">
             <div className="analytics-section-head">
@@ -309,11 +319,13 @@ export function Tiles({ totals, previous, days }: { totals: AnalyticsTotals; pre
       />
       <Tile
         label="Spend"
-        value={totals.runs === 0 ? "No runs" : totals.runsWithoutCost === totals.runs ? "Not reported" : formatSpend(totals.spendUsd, totals.runsWithoutCost)}
+        value={formatFeatureSpend(spendRow(totals))}
         note={
-          totals.runsWithoutCost > 0
-            ? `${totals.runsWithoutCost} of ${totals.runs} run${totals.runs === 1 ? "" : "s"} reported no cost`
-            : "Every run reported a cost"
+          totals.runs === 0
+            ? undefined
+            : totals.runsWithoutCost > 0
+              ? `${totals.runsWithoutCost} of ${totals.runs} run${totals.runs === 1 ? "" : "s"} reported no cost`
+              : "Every run reported a cost"
         }
         title={`Costs are reported by ${reporting.join(", ")} and not by ${silent.join(", ")}. Unreported runs do not count toward dollar caps.`}
       />
@@ -588,7 +600,7 @@ export function SwarmTable({ rows }: { rows: ProjectAnalytics["bySwarm"] }) {
                     {row.title}
                   </a>
                 </td>
-                <td className="spend-col spend-tier-cell">{dollars(row.costUsd)}</td>
+                <td className="spend-col spend-tier-cell">{formatFeatureSpend(spendRow(row))}</td>
                 <td className="spend-col">{row.runsWithoutCost}</td>
                 <td className="spend-col">{row.runs}</td>
               </tr>
@@ -600,11 +612,19 @@ export function SwarmTable({ rows }: { rows: ProjectAnalytics["bySwarm"] }) {
   );
 }
 
-/** A figure, or a dash where there is nothing in that tier at all. */
-function dollars(usd: number): string {
-  if (!Number.isFinite(usd) || usd <= 0) return "0";
-  if (usd < 0.01) return "<$0.01";
-  return `$${usd.toFixed(2)}`;
+/**
+ * A total as the row shape the spend column formats, so the tile, the
+ * card table and the swarm table print the same dollars the same way.
+ * sum() skips nulls, so a total whose every run reported nothing is
+ * "Not reported", never $0.00.
+ */
+function spendRow(total: { runs: number; runsWithoutCost: number } & ({ spendUsd: number } | { costUsd: number | null })) {
+  const usd = "spendUsd" in total ? total.spendUsd : total.costUsd;
+  return {
+    runs: total.runs,
+    runsWithoutCost: total.runsWithoutCost,
+    costUsd: total.runs > 0 && total.runsWithoutCost === total.runs ? null : usd,
+  };
 }
 
 function titleSort(sort: SpendSort): "ascending" | "descending" | "none" {

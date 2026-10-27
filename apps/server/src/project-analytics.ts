@@ -239,8 +239,15 @@ async function totalsFor(db: Db, projectId: string, from: Date, to: Date): Promi
 
 /**
  * The bucket grid: the first bucket is the one holding `from`, the
- * last the one holding the instant before `to`, on Postgres's own
- * boundaries. Unit and step come from the table here, never the
+ * last the one holding the instant before `to`, on UTC boundaries.
+ *
+ * The arithmetic is done in UTC timestamp space (`at time zone
+ * 'UTC'` strips the zone, and puts it back on the way out) rather
+ * than on timestamptz, because date_trunc and date_bin on a
+ * timestamptz truncate in the session's TimeZone: a database whose
+ * zone is not UTC would cut Sep 1 00:00Z into the bucket of Aug 31,
+ * one bucket more than the window has days, under labels the console
+ * writes in UTC. Unit and step come from the table here, never the
  * request, so they are safe to splice in as literals.
  */
 function bucketGrid(unit: BucketUnit, from: Date, to: Date) {
@@ -252,17 +259,26 @@ function bucketGrid(unit: BucketUnit, from: Date, to: Date) {
         : unit === "week"
           ? sql.raw("interval '1 week'")
           : sql.raw("interval '1 month'");
-  const first =
+  /** A timestamptz as a UTC wall clock timestamp. */
+  const utc = (at: SQL | PgColumn) => sql`(${at} at time zone 'UTC')`;
+  const fromUtc = utc(sql`${from}::timestamptz`);
+  const toUtc = utc(sql`${to}::timestamptz`);
+  /** The start of the bucket holding a UTC wall clock timestamp. */
+  const binOf = (at: SQL) =>
     unit === "6h"
-      ? sql`date_bin(${step}, ${from}::timestamptz, date_trunc('day', ${from}::timestamptz))`
+      ? sql`date_bin(${step}, ${at}, date_trunc('day', ${fromUtc}))`
       : unit === "day"
-        ? sql`date_trunc('day', ${from}::timestamptz)`
+        ? sql`date_trunc('day', ${at})`
         : unit === "week"
-          ? sql`date_trunc('week', ${from}::timestamptz)`
-          : sql`date_trunc('month', ${from}::timestamptz)`;
+          ? sql`date_trunc('week', ${at})`
+          : sql`date_trunc('month', ${at})`;
   return {
-    step,
-    series: sql`generate_series(${first}, ${to}::timestamptz - interval '1 microsecond', ${step}) as b(bucket)`,
+    /** The bucket a timestamptz falls in, as a UTC wall clock timestamp. */
+    bucketOf: (at: SQL | PgColumn) => binOf(utc(at)),
+    /** Every bucket of the window, oldest first, as UTC wall clock timestamps. */
+    series: sql`generate_series(${binOf(fromUtc)}, ${toUtc} - interval '1 microsecond', ${step}) as g(bucket)`,
+    /** A grid bucket back as a timestamptz, which node-postgres reads correctly. */
+    asTimestamptz: (bucket: SQL) => sql`(${bucket} at time zone 'UTC')`,
   };
 }
 
@@ -276,21 +292,44 @@ export async function projectAnalytics(db: Db, projectId: string, window: Analyt
     totalsFor(db, projectId, previousFrom, from),
   ]);
 
-  const { step, series } = bucketGrid(bucketUnit, from, to);
-  const inBucket = (at: SQL | PgColumn) =>
-    sql`${at} >= b.bucket and ${at} < b.bucket + ${step} and ${at} >= ${from} and ${at} < ${to}`;
+  /**
+   * Each source is counted per bucket once, in a GROUP BY, and the
+   * counts are joined onto the grid, so an empty bucket is a zero
+   * rather than a hole. Every source is clipped to the window first:
+   * the first and last bucket of a preset window are partial, and the
+   * sum of the bars has to be the tile.
+   */
+  const { bucketOf, series, asTimestamptz } = bucketGrid(bucketUnit, from, to);
+  const inWindow = (at: SQL | PgColumn) => sql`${at} >= ${from} and ${at} < ${to}`;
   const bucketRows = await db.execute(sql`
-    with runs as (${runsOfProject(projectId)}),
+    with grid as (select g.bucket from ${series}),
+      runs as (${runsOfProject(projectId)}),
       completions as (${completionsOfProject(projectId)}),
-      moves as (${stageMovesOfProject(projectId)})
-    select b.bucket as bucket,
-      (select count(*) from completions c where ${inBucket(sql`c.at`)})::int as completed,
-      (select count(*) from ${features}
-        where ${features.projectId} = ${projectId} and ${inBucket(features.createdAt)})::int as created,
-      (select count(*) from moves m where ${inBucket(sql`m.at`)})::int as stage_moves,
-      (select count(*) from runs r where ${inBucket(sql`r.at`)})::int as runs
-    from ${series}
-    order by b.bucket
+      moves as (${stageMovesOfProject(projectId)}),
+      per_run as (
+        select ${bucketOf(sql`r.at`)} as bucket, count(*)::int as n
+        from runs r where ${inWindow(sql`r.at`)} group by 1),
+      per_completion as (
+        select ${bucketOf(sql`c.at`)} as bucket, count(*)::int as n
+        from completions c where ${inWindow(sql`c.at`)} group by 1),
+      per_move as (
+        select ${bucketOf(sql`m.at`)} as bucket, count(*)::int as n
+        from moves m where ${inWindow(sql`m.at`)} group by 1),
+      per_card as (
+        select ${bucketOf(features.createdAt)} as bucket, count(*)::int as n
+        from ${features}
+        where ${features.projectId} = ${projectId} and ${inWindow(features.createdAt)} group by 1)
+    select ${asTimestamptz(sql`grid.bucket`)} as bucket,
+      coalesce(per_completion.n, 0) as completed,
+      coalesce(per_card.n, 0) as created,
+      coalesce(per_move.n, 0) as stage_moves,
+      coalesce(per_run.n, 0) as runs
+    from grid
+    left join per_completion on per_completion.bucket = grid.bucket
+    left join per_card on per_card.bucket = grid.bucket
+    left join per_move on per_move.bucket = grid.bucket
+    left join per_run on per_run.bucket = grid.bucket
+    order by grid.bucket
   `);
   const buckets = (bucketRows.rows as { bucket: Date; completed: number; created: number; stage_moves: number; runs: number }[]).map(
     (row) => ({
@@ -349,28 +388,41 @@ export async function projectAnalytics(db: Db, projectId: string, window: Analyt
    * it, or any stage move. An idle card is not a row here; the board
    * lists those. Spend is the window's, so a card's figure here can
    * be lower than the all time figure on its face.
+   *
+   * The runs and the moves are each aggregated per card once, inside
+   * the window, and then joined to the cards, so the work grows with
+   * what happened in the window rather than with the size of the
+   * board. The first version asked four correlated subqueries per
+   * card over a materialized runs CTE, cards that never ran included,
+   * which took twenty seconds on a board of three thousand cards and
+   * was refetched on every board event.
    */
   const cardRows = await db.execute(sql`
     with runs as (${runsOfProject(projectId)}),
-      moves as (
-        select ${featureEvents.featureId} as feature_id, ${featureEvents.at} as at
+      per_card_runs as (
+        select r.feature_id,
+          count(*)::int as runs,
+          sum(r.cost_usd)::float as cost_usd,
+          count(*) filter (where r.cost_usd is null)::int as runs_without_cost
+        from runs r
+        where r.feature_id is not null and ${inWindow(sql`r.at`)}
+        group by r.feature_id),
+      per_card_moves as (
+        select ${featureEvents.featureId} as feature_id, count(*)::int as stage_moves
         from ${featureEvents}
-        where ${featureEvents.kind} = 'stage_moved' and ${featureEvents.at} >= ${from} and ${featureEvents.at} < ${to}
-      ),
-      card as (
-        select ${features.id} as feature_id, ${features.title} as title,
-          (select count(*) from runs r
-            where r.feature_id = ${features.id} and r.at >= ${from} and r.at < ${to})::int as runs,
-          (select sum(r.cost_usd) from runs r
-            where r.feature_id = ${features.id} and r.at >= ${from} and r.at < ${to})::float as cost_usd,
-          (select count(*) from runs r
-            where r.feature_id = ${features.id} and r.at >= ${from} and r.at < ${to} and r.cost_usd is null)::int as runs_without_cost,
-          (select count(*) from moves m where m.feature_id = ${features.id})::int as stage_moves
-        from ${features}
-        where ${features.projectId} = ${projectId}
-      )
-    select * from card where runs > 0 or stage_moves > 0
-    order by cost_usd desc nulls last, runs desc, title
+        where ${featureEvents.kind} = 'stage_moved' and ${inWindow(featureEvents.at)}
+        group by ${featureEvents.featureId})
+    select ${features.id} as feature_id, ${features.title} as title,
+      coalesce(pr.runs, 0) as runs,
+      pr.cost_usd as cost_usd,
+      coalesce(pr.runs_without_cost, 0) as runs_without_cost,
+      coalesce(pm.stage_moves, 0) as stage_moves
+    from ${features}
+    left join per_card_runs pr on pr.feature_id = ${features.id}
+    left join per_card_moves pm on pm.feature_id = ${features.id}
+    where ${features.projectId} = ${projectId}
+      and (pr.feature_id is not null or pm.feature_id is not null)
+    order by pr.cost_usd desc nulls last, pr.runs desc nulls last, ${features.title}
   `);
   const byFeature = (
     cardRows.rows as {
