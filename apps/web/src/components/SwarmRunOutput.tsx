@@ -1,6 +1,6 @@
 import { isSandboxCapacityError } from "@bento/core";
 import { CapacityNotice } from "./CapacityNotice.js";
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import type { BentoClient } from "@bento/api-client";
 import type { RecordedRunEvent } from "@bento/core";
 import type { SwarmApi, SwarmPlannerMessage } from "../swarm/client.js";
@@ -147,14 +147,12 @@ export function SwarmRunOutput({ client, runId, agentName, plannerMessages, plan
   return (
     <div className="swarm-run-output" aria-label={`${agentName} output`}>
       <div className="chat swarm-output-chat" ref={chatRef} onScroll={readPosition}>
-        {historyRunIds.map((id) => (
-          <PlannerRunHistory key={id} client={client} runId={id} agentName={agentName}
-            messages={messagesFor(id) ?? []}
-            onLoaded={() => {
-              const chat = chatRef.current;
-              if (chat && stickToBottom.current) chat.scrollTop = chat.scrollHeight;
-            }} />
-        ))}
+        <PlannerHistory client={client} runIds={historyRunIds} agentName={agentName}
+          messagesFor={(id) => messagesFor(id) ?? []}
+          onLoaded={() => {
+            const chat = chatRef.current;
+            if (chat && stickToBottom.current) chat.scrollTop = chat.scrollHeight;
+          }} />
         <RunConversationRows events={events} runId={runId} agentName={agentName} messages={messagesFor(runId)} running={running} />
         {error && <p className="error" role="alert">{error}</p>}
         {/* Nothing said yet and the agent is in its sandbox: the large
@@ -196,51 +194,140 @@ export function RunConversationRows({ events, runId, agentName, messages, runnin
   })}</>;
 }
 
+const EARLIEST_SEQ = 2_147_483_647;
+
+type HistoryPage = { events: RecordedRunEvent[]; firstSeq: number | null; earlier: number };
+type HistorySlot =
+  | { status: "loading" }
+  | { status: "error"; page: HistoryPage | null }
+  | { status: "ready"; page: HistoryPage; loadingEarlier: boolean };
+
+/**
+ * One line for every earlier planner run. Each run used to announce
+ * its own load and its own failure, so a long history was a stack of
+ * the same sentence.
+ */
+export function EarlierPlannerNotice({ pending, failed, onRetry }: {
+  pending: boolean;
+  failed: boolean;
+  onRetry: () => void;
+}) {
+  if (pending) return <p className="muted">Loading earlier planner output...</p>;
+  if (!failed) return null;
+  return (
+    <p className="error" role="alert">
+      Could not load earlier planner output. <button type="button" className="btn btn-ghost" onClick={onRetry}>Try again</button>
+    </p>
+  );
+}
+
 /** Finished runs use paged reads, never another live stream. */
-function PlannerRunHistory({ client, runId, agentName, messages, onLoaded }: {
+function PlannerHistory({ client, runIds, agentName, messagesFor, onLoaded }: {
   client: BentoClient;
-  runId: string;
+  runIds: string[];
   agentName: string;
-  messages: SwarmPlannerMessage[];
+  messagesFor: (id: string) => SwarmPlannerMessage[];
   onLoaded: () => void;
 }) {
-  const [page, setPage] = useState<{ events: RecordedRunEvent[]; firstSeq: number | null; earlier: number } | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(false);
+  const [slots, setSlots] = useState<Record<string, HistorySlot>>({});
   const [attempt, setAttempt] = useState(0);
+  const slotsRef = useRef(slots);
+  slotsRef.current = slots;
   const onLoadedRef = useRef(onLoaded);
   onLoadedRef.current = onLoaded;
-  useEffect(() => {
-    let cancelled = false;
-    setError(false);
-    void client.getEventsBefore(runId, 2_147_483_647).then((result) => {
-      if (!cancelled) {
-        setPage(result);
-        requestAnimationFrame(() => { if (!cancelled) onLoadedRef.current(); });
-      }
-    }).catch(() => { if (!cancelled) setError(true); });
-    return () => { cancelled = true; };
-  }, [client, runId, attempt]);
+  const idsKey = runIds.join("\0");
 
-  async function loadEarlier() {
-    if (!page?.firstSeq || loading) return;
-    setLoading(true);
-    setError(false);
+  useEffect(() => {
+    const ids = idsKey ? idsKey.split("\0") : [];
+    // A run that already has a page keeps it. Retrying the first page
+    // would drop lines the reader had already pulled in.
+    const todo = ids.filter((id) => {
+      const slot = slotsRef.current[id];
+      return !slot || slot.status === "loading" || (slot.status === "error" && !slot.page);
+    });
+    if (todo.length === 0) return;
+    let cancelled = false;
+    setSlots((current) => {
+      const next = { ...current };
+      for (const id of todo) next[id] = { status: "loading" };
+      return next;
+    });
+    for (const id of todo) {
+      void client.getEventsBefore(id, EARLIEST_SEQ).then((result) => {
+        if (cancelled) return;
+        setSlots((current) => ({ ...current, [id]: { status: "ready", page: result, loadingEarlier: false } }));
+        requestAnimationFrame(() => { if (!cancelled) onLoadedRef.current(); });
+      }).catch(() => {
+        if (!cancelled) setSlots((current) => ({ ...current, [id]: { status: "error", page: null } }));
+      });
+    }
+    return () => { cancelled = true; };
+  }, [client, idsKey, attempt]);
+
+  async function loadEarlier(id: string) {
+    const slot = slotsRef.current[id];
+    const page = pageOf(slot);
+    if (!page?.firstSeq || (slot?.status === "ready" && slot.loadingEarlier)) return;
+    setSlots((current) => {
+      const base = pageOf(current[id]);
+      if (!base) return current;
+      return { ...current, [id]: { status: "ready", page: base, loadingEarlier: true } };
+    });
     try {
-      const earlier = await client.getEventsBefore(runId, page.firstSeq);
-      setPage({ ...earlier, events: [...earlier.events, ...page.events] });
+      const earlier = await client.getEventsBefore(id, page.firstSeq);
+      setSlots((current) => {
+        const base = pageOf(current[id]);
+        if (!base) return current;
+        return { ...current, [id]: { status: "ready", loadingEarlier: false, page: { ...earlier, events: [...earlier.events, ...base.events] } } };
+      });
     } catch {
-      setError(true);
-    } finally {
-      setLoading(false);
+      setSlots((current) => {
+        const base = pageOf(current[id]);
+        if (!base) return current;
+        return { ...current, [id]: { status: "error", page: base } };
+      });
     }
   }
+
+  function retry() {
+    const refetchEarlier = runIds.filter((id) => {
+      const slot = slotsRef.current[id];
+      return slot?.status === "error" && Boolean(slot.page?.firstSeq);
+    });
+    for (const id of refetchEarlier) void loadEarlier(id);
+    const needsFirstPage = runIds.some((id) => {
+      const slot = slotsRef.current[id];
+      return !slot || slot.status === "loading" || (slot.status === "error" && !slot.page);
+    });
+    if (needsFirstPage) setAttempt((value) => value + 1);
+  }
+
+  if (runIds.length === 0) return null;
+  const pending = runIds.some((id) => slots[id]?.status !== "ready" && slots[id]?.status !== "error");
+  const failed = runIds.some((id) => slots[id]?.status === "error");
   return <>
-    {error && <p className="error" role="alert">Could not load earlier planner output. <button type="button" className="btn btn-ghost" onClick={() => page ? void loadEarlier() : setAttempt((value) => value + 1)}>Try again</button></p>}
-    {!page && !error && <p className="muted">Loading earlier planner output...</p>}
-    {page && page.earlier > 0 && <button type="button" className="btn btn-ghost" disabled={loading} onClick={() => void loadEarlier()}>{loading ? "Loading..." : "Load earlier output"}</button>}
-    <RunConversationRows events={page?.events ?? []} runId={runId} agentName={agentName} messages={messages} />
+    <EarlierPlannerNotice pending={pending} failed={failed} onRetry={retry} />
+    {runIds.map((id) => {
+      const slot = slots[id];
+      const page = pageOf(slot);
+      const loadingEarlier = slot?.status === "ready" && slot.loadingEarlier;
+      return (
+        <Fragment key={id}>
+          {page && page.earlier > 0 && (
+            <button type="button" className="btn btn-ghost" disabled={loadingEarlier} onClick={() => void loadEarlier(id)}>
+              {loadingEarlier ? "Loading..." : "Load earlier output"}
+            </button>
+          )}
+          <RunConversationRows events={page?.events ?? []} runId={id} agentName={agentName} messages={messagesFor(id)} />
+        </Fragment>
+      );
+    })}
   </>;
+}
+
+function pageOf(slot: HistorySlot | undefined): HistoryPage | null {
+  if (!slot || slot.status === "loading") return null;
+  return slot.page;
 }
 
 function PlannerMessageRow({ message }: { message: SwarmPlannerMessage }) {
