@@ -27,7 +27,7 @@ Local deployments use Docker containers (default) or an in-process driver with n
 
 ## Spend
 
-Spend is the model cost the tool reports, recorded per card and per project. Only Claude Code and pi report cost. Separately, hosted Bento bills agent hours against the team's plan and pauses work at the plan's limit. A run that Bento or its sandbox failed is not billed. Totals include a count of unmeasured runs; unmeasured runs are not treated as zero cost.
+Spend is the model cost the tool reports, recorded per card and per project. The console's Analytics page (the chip in the top bar) shows it beside how the board moved over a chosen window: cards created, moves into each stage, cards completed, and agent runs, over the last month by default or any window up to three years. Only Claude Code and pi report cost. Separately, hosted Bento bills agent hours against the team's plan and pauses work at the plan's limit. A run that Bento or its sandbox failed is not billed. Totals include a count of unmeasured runs; unmeasured runs are not treated as zero cost.
 
 ## Tenancy
 

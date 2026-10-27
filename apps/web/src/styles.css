@@ -1229,7 +1229,7 @@ select.input,
   color: var(--text-faint);
 }
 
-/* Spend is a destination, with the measured amount visible at a glance. */
+/* Analytics is a destination, with the measured spend visible at a glance. */
 .spend-button {
   display: inline-flex;
   align-items: center;
@@ -3916,7 +3916,7 @@ a.pr-row:hover .pr-external {
   html[data-sheet-open] .board,
   html[data-sheet-open] .board.work-list,
   html[data-sheet-open] .sessions-screen,
-  html[data-sheet-open] .spend-screen {
+  html[data-sheet-open] .analytics-screen {
     overflow: hidden;
   }
 
@@ -4464,24 +4464,26 @@ a.pr-row:hover .pr-external {
 }
 
 /*
- * Project spend: a page, not a tooltip. Same slab as Sessions (between
- * the topbar and the bottom bar), a short coverage note, then one row
- * per card so a long board can be ranked by what it actually cost.
+ * Analytics: a page, not a tooltip. Same slab as Sessions (between the
+ * topbar and the bottom bar): the intro, the window picker that scopes
+ * everything under it, a row of tiles, the chart, the stage flow, and
+ * then the spend tables, one row per card so a long board can be
+ * ranked by what it actually cost.
  */
-.spend-screen {
+.analytics-screen {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
   width: 100%;
   max-width: 960px;
   margin: 0 auto;
-  padding: 20px 16px 40px;
+  padding: 20px 16px 48px;
   box-sizing: border-box;
 }
-.spend-intro {
-  margin: 0 0 24px;
+.analytics-intro {
+  margin: 0 0 20px;
 }
-.spend-back {
+.analytics-back {
   display: inline-flex;
   align-items: center;
   gap: 7px;
@@ -4490,37 +4492,116 @@ a.pr-row:hover .pr-external {
   font-size: 13px;
   text-decoration: none;
 }
-.spend-back:hover {
+.analytics-back:hover {
   color: var(--text);
 }
-.spend-title {
+.analytics-title {
   margin: 0;
   font-family: var(--sans);
   font-size: 22px;
   font-weight: 650;
   letter-spacing: -0.02em;
 }
-.spend-lede {
+.analytics-lede {
   margin: 8px 0 0;
   max-width: 62ch;
   color: var(--text-dim);
   font-size: 13.5px;
   line-height: 1.45;
 }
-.spend-total {
-  margin: 12px 0 0;
+/* The window picker: one row above everything it scopes. */
+.analytics-filters {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.analytics-segmented {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.analytics-segmented button {
+  border: 0;
+  background: none;
+  color: var(--text-dim);
   font-family: var(--sans);
-  font-size: 14px;
+  font-size: 11.5px;
   font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 5px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.analytics-segmented button:hover {
+  color: var(--text);
+}
+.analytics-segmented button[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--brand) 16%, transparent);
+  color: var(--text);
+}
+.analytics-custom {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.analytics-custom label {
+  font-family: var(--sans);
+  font-size: 12px;
+  color: var(--text-faint);
+}
+.analytics-custom input {
+  width: 150px;
+  height: 30px;
+  padding-block: 0;
+  box-sizing: border-box;
+  font-size: 12.5px;
   font-variant-numeric: tabular-nums;
 }
-.spend-coverage {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px 24px;
-  margin: 16px 0 0;
+.analytics-custom-problem {
+  font-family: var(--sans);
+  font-size: 12px;
+  color: var(--failed);
 }
-.spend-coverage dt {
+.analytics-window-note {
+  margin: 10px 0 0;
+  font-family: var(--sans);
+  font-size: 12.5px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+/*
+ * Refetch keeps the frame: while a new window loads, the figures stay
+ * up at reduced opacity rather than collapsing into a skeleton.
+ */
+.analytics-body {
+  margin-top: 20px;
+  transition: opacity 0.15s ease;
+}
+.analytics-body[data-loading] {
+  opacity: 0.55;
+}
+/* The headline figures, five tiles across, each against the window before. */
+.analytics-tiles {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+}
+.analytics-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  box-sizing: border-box;
+  min-width: 0;
+}
+.analytics-tile-label {
   font-family: var(--sans);
   font-size: 11px;
   font-weight: 650;
@@ -4528,10 +4609,242 @@ a.pr-row:hover .pr-external {
   text-transform: uppercase;
   color: var(--text-faint);
 }
-.spend-coverage dd {
-  margin: 4px 0 0;
-  font-size: 13px;
+.analytics-tile-value {
+  font-family: var(--sans);
+  font-size: 28px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.analytics-tile-note {
+  font-family: var(--sans);
+  font-size: 12px;
   color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.analytics-tile-note[data-tone="good"] {
+  color: var(--succeeded);
+}
+.analytics-section {
+  margin: 32px 0 0;
+}
+.analytics-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.analytics-section-title {
+  margin: 0;
+  font-family: var(--sans);
+  font-size: 16px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+.analytics-coverage {
+  font-family: var(--sans);
+  font-size: 12px;
+  color: var(--text-faint);
+}
+.analytics-section .analytics-lede {
+  margin-bottom: 12px;
+}
+.analytics-chart-total {
+  margin: 10px 0 0;
+  font-family: var(--sans);
+  font-size: 13.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+/*
+ * The chart: one column per bucket, the brand hue carrying the one
+ * series shown. Text stays in text tokens; the series picker is
+ * ordinary buttons above the chart, not a chart mark.
+ */
+.analytics-chart {
+  margin-top: 14px;
+}
+.analytics-chart-plot {
+  position: relative;
+  height: 170px;
+  border-bottom: 1px solid var(--line-bright);
+}
+.analytics-chart-gridline {
+  position: absolute;
+  left: 0;
+  right: 0;
+  border-top: 1px solid var(--line);
+  pointer-events: none;
+}
+.analytics-chart-gridline span {
+  position: absolute;
+  top: 2px;
+  left: 0;
+  font-family: var(--sans);
+  font-size: 10.5px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+.analytics-chart-bars {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: flex-end;
+}
+.analytics-chart-slot {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: default;
+}
+.analytics-chart-bar {
+  width: min(70%, 24px);
+  background: var(--brand);
+  border-radius: 4px 4px 0 0;
+}
+.analytics-chart-bar:not([data-empty]) {
+  min-height: 3px;
+}
+.analytics-chart-slot:hover .analytics-chart-bar:not([data-empty]),
+.analytics-chart-slot:focus-visible .analytics-chart-bar:not([data-empty]) {
+  filter: brightness(1.15);
+}
+.analytics-chart-tip {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  transform: translateX(-50%);
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 5px 8px;
+  background: var(--panel-raised);
+  border: 1px solid var(--line-bright);
+  border-radius: var(--radius);
+  box-shadow: 0 2px 8px var(--shadow-1);
+  font-family: var(--sans);
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 2;
+}
+.analytics-chart-tip[data-edge="start"] {
+  transform: translateX(-8px);
+}
+.analytics-chart-tip[data-edge="end"] {
+  transform: translateX(calc(-100% + 8px));
+}
+.analytics-chart-tip strong {
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+.analytics-chart-tip span {
+  color: var(--text-dim);
+}
+.analytics-chart-axis {
+  display: flex;
+  margin-top: 6px;
+}
+.analytics-chart-axis span {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--sans);
+  font-size: 10.5px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+/* Moves into each stage: a bar per stage, longest first by pipeline order, not rank. */
+.analytics-stages {
+  display: grid;
+  grid-template-columns: minmax(120px, 200px) minmax(0, 1fr) auto auto;
+  gap: 10px 16px;
+  align-items: center;
+}
+.analytics-stage-row {
+  display: contents;
+}
+.analytics-stage-name {
+  font-family: var(--sans);
+  font-size: 13.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.analytics-stage-track {
+  display: block;
+  height: 10px;
+  border-radius: 4px;
+  background: var(--panel-raised);
+  overflow: hidden;
+}
+.analytics-stage-fill {
+  display: block;
+  height: 100%;
+  background: var(--brand);
+  border-radius: 4px;
+}
+.analytics-stage-count {
+  font-family: var(--sans);
+  font-size: 13.5px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  min-width: 2ch;
+}
+.analytics-stage-now {
+  font-family: var(--sans);
+  font-size: 12px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+@media (max-width: 900px) {
+  .analytics-tiles {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+@media (max-width: 640px) {
+  .analytics-tiles {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .analytics-tile:last-child {
+    grid-column: 1 / -1;
+  }
+  .analytics-tile-value {
+    font-size: 24px;
+  }
+  .analytics-segmented {
+    display: flex;
+    width: 100%;
+  }
+  .analytics-segmented button {
+    flex: 1;
+  }
+  .analytics-stages {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 6px 12px;
+  }
+  .analytics-stage-track {
+    grid-column: 1 / -1;
+    margin-bottom: 6px;
+  }
+  .analytics-stage-count {
+    display: none;
+  }
+  .analytics-stage-now::before {
+    content: attr(data-moves) " in, ";
+  }
 }
 .spend-table {
   width: 100%;
@@ -4589,167 +4902,6 @@ a.pr-row:hover .pr-external {
 }
 .spend-card-link:hover {
   text-decoration: underline;
-}
-@media (max-width: 640px) {
-  .spend-coverage {
-    grid-template-columns: 1fr;
-  }
-}
-/*
- * Completions: one column per bucket, the brand hue carrying the only
- * series. Text stays in text tokens; the window picker is ordinary
- * buttons above the chart, not a chart mark.
- */
-.spend-completions {
-  margin: 36px 0 0;
-}
-.spend-completions-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-.spend-completions-title {
-  margin: 0;
-  font-family: var(--sans);
-  font-size: 16px;
-  font-weight: 650;
-  letter-spacing: -0.01em;
-}
-.spend-range {
-  display: inline-flex;
-  gap: 2px;
-  padding: 2px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-}
-.spend-range button {
-  border: 0;
-  background: none;
-  color: var(--text-dim);
-  font-family: var(--sans);
-  font-size: 11.5px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  padding: 3px 8px;
-  border-radius: 4px;
-  cursor: pointer;
-}
-.spend-range button:hover {
-  color: var(--text);
-}
-.spend-range button[aria-pressed="true"] {
-  background: color-mix(in srgb, var(--brand) 16%, transparent);
-  color: var(--text);
-}
-.spend-completions-total {
-  margin: 10px 0 0;
-  font-family: var(--sans);
-  font-size: 13.5px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
-.spend-chart {
-  margin-top: 14px;
-}
-.spend-chart[data-loading] .spend-chart-plot {
-  opacity: 0.5;
-  transition: opacity 0.15s ease;
-}
-.spend-chart-plot {
-  position: relative;
-  height: 160px;
-  border-bottom: 1px solid var(--line-bright);
-}
-.spend-chart-gridline {
-  position: absolute;
-  left: 0;
-  right: 0;
-  border-top: 1px solid var(--line);
-  pointer-events: none;
-}
-.spend-chart-gridline span {
-  position: absolute;
-  top: 2px;
-  left: 0;
-  font-family: var(--sans);
-  font-size: 10.5px;
-  color: var(--text-faint);
-  font-variant-numeric: tabular-nums;
-}
-.spend-chart-bars {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: flex-end;
-}
-.spend-chart-slot {
-  flex: 1;
-  min-width: 0;
-  height: 100%;
-  display: flex;
-  align-items: flex-end;
-  justify-content: center;
-  padding: 0;
-  border: 0;
-  background: none;
-  cursor: default;
-}
-.spend-chart-bar {
-  width: min(70%, 24px);
-  background: var(--brand);
-  border-radius: 4px 4px 0 0;
-}
-.spend-chart-bar:not([data-empty]) {
-  min-height: 3px;
-}
-.spend-chart-slot:hover .spend-chart-bar:not([data-empty]),
-.spend-chart-slot:focus-visible .spend-chart-bar:not([data-empty]) {
-  filter: brightness(1.15);
-}
-.spend-chart-tip {
-  position: absolute;
-  bottom: calc(100% + 8px);
-  transform: translateX(-50%);
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  padding: 5px 8px;
-  background: var(--panel-raised);
-  border: 1px solid var(--line-bright);
-  border-radius: var(--radius);
-  box-shadow: 0 2px 8px var(--shadow-1);
-  font-family: var(--sans);
-  font-size: 12px;
-  white-space: nowrap;
-  pointer-events: none;
-  z-index: 2;
-}
-.spend-chart-tip[data-edge="start"] {
-  transform: translateX(-8px);
-}
-.spend-chart-tip[data-edge="end"] {
-  transform: translateX(calc(-100% + 8px));
-}
-.spend-chart-tip strong {
-  font-weight: 650;
-  font-variant-numeric: tabular-nums;
-}
-.spend-chart-tip span {
-  color: var(--text-dim);
-}
-.spend-chart-axis {
-  display: flex;
-  margin-top: 6px;
-}
-.spend-chart-axis span {
-  flex: 1;
-  min-width: 0;
-  font-family: var(--sans);
-  font-size: 10.5px;
-  color: var(--text-faint);
-  white-space: nowrap;
 }
 .sessions-list {
   display: flex;
@@ -9551,11 +9703,7 @@ a.hours-person-name:hover {
   margin-top: 10px;
 }
 
-/* The swarm section of the Spend page: one row per swarm, tiers apart. */
-.spend-swarms {
-  margin-top: 28px;
-}
-
+/* A measured dollar cell on the Analytics tables. */
 .spend-tier-cell {
   font-family: var(--mono);
   font-size: 12px;

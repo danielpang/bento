@@ -14,6 +14,7 @@ import type {
   QuestionChoice,
   RunQuestion,
   AgentTool,
+  AnalyticsQuery,
   CompletionRange,
   Feature,
   FeatureChanges,
@@ -26,6 +27,7 @@ import type {
   GateState,
   Pipeline,
   Project,
+  ProjectAnalytics,
   ProjectCompletions,
   ProjectSession,
   ProjectUsage,
@@ -1589,6 +1591,15 @@ export class BentoClient {
    */
   getCompletions(projectId: string, range: CompletionRange) {
     return this.request<ProjectCompletions>(`/api/projects/${projectId}/completions?range=${range}`);
+  }
+
+  /**
+   * The Analytics page's figures for one window: a preset, or two
+   * dates. Everything in the answer covers that one window.
+   */
+  getAnalytics(projectId: string, query: AnalyticsQuery) {
+    const params = new URLSearchParams("range" in query ? { range: query.range } : { from: query.from, to: query.to });
+    return this.request<ProjectAnalytics>(`/api/projects/${projectId}/analytics?${params}`);
   }
 
   listProfiles() {

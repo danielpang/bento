@@ -4021,6 +4021,157 @@ test("completions count done cards once, at their latest completion", async () =
   assert.equal(bad.status, 400, "an unknown window is refused, not guessed at");
 });
 
+/**
+ * The Analytics page reads one window for everything: the tiles, the
+ * bars under them, the stage flow and the card table all count what
+ * fell inside [from, to), so the bars sum to the tiles and a custom
+ * window of two dates covers exactly those days.
+ */
+test("analytics figures cover one window, and the bars sum to the tiles", async () => {
+  const { project, stages: projectStages } = await setupProject("analytics");
+  const profile = await fakeProfile("analytics agent");
+  const now = Date.now();
+  const hour = 60 * 60 * 1000;
+  const day = 24 * hour;
+  const hoursAgo = (n: number) => new Date(now - n * hour);
+  const daysAgo = (n: number) => new Date(now - n * day);
+
+  const recent = await createFeature(project.id, "done this week");
+  const moved = await createFeature(project.id, "moved last week");
+  const old = await createFeature(project.id, "done last month");
+  await createFeature(project.id, "untouched");
+
+  const [first, second] = projectStages;
+  await ctx.db.insert(featureEvents).values([
+    { featureId: recent.id, kind: "stage_moved", toStageId: first!.id, trigger: "manual", at: hoursAgo(2) },
+    { featureId: recent.id, kind: "stage_moved", fromStageId: first!.id, toStageId: second!.id, trigger: "gate_auto", at: hoursAgo(1) },
+    { featureId: recent.id, kind: "status_changed", fromStatus: "active", toStatus: "done", trigger: "manual", at: hoursAgo(1) },
+    { featureId: moved.id, kind: "stage_moved", toStageId: first!.id, trigger: "agent_run", at: daysAgo(10) },
+    { featureId: old.id, kind: "status_changed", fromStatus: "active", toStatus: "done", trigger: "manual", at: daysAgo(40) },
+  ]);
+  for (const id of [recent.id, old.id]) {
+    await ctx.db.update(features).set({ status: "done" }).where(eq(features.id, id));
+  }
+  const run = (featureId: string, status: "succeeded" | "failed", endedAt: Date, costUsd: string | null, role: "stage" | "judge" = "stage") => ({
+    type: "pipeline" as const,
+    featureId,
+    stageId: first!.id,
+    agentProfileId: profile.id,
+    prompt: "",
+    status,
+    executor: "server" as const,
+    role,
+    endedAt,
+    costUsd,
+  });
+  await ctx.db.insert(agentRuns).values([
+    run(recent.id, "succeeded", hoursAgo(1), "1.5"),
+    run(recent.id, "failed", hoursAgo(1), null),
+    // A judge's cost is nobody's spend, the rule the usage route keeps.
+    run(recent.id, "succeeded", hoursAgo(1), "9", "judge"),
+    run(moved.id, "succeeded", daysAgo(10), "2"),
+    run(old.id, "succeeded", daysAgo(40), "4"),
+  ]);
+
+  type Analytics = {
+    window: { range: string; from: string; to: string; bucketUnit: string };
+    totals: Record<string, number>;
+    previous: Record<string, number>;
+    buckets: { start: string; completed: number; created: number; stageMoves: number; runs: number }[];
+    byStage: { stageId: string | null; name: string; movesIn: number; cardsNow: number }[];
+    byFeature: { featureId: string; runs: number; costUsd: number | null; runsWithoutCost: number; stageMoves: number }[];
+    bySwarm: unknown[];
+  };
+  const sumOf = (a: Analytics, key: "completed" | "created" | "stageMoves" | "runs") =>
+    a.buckets.reduce((sum, b) => sum + b[key], 0);
+
+  const month = await json<Analytics>(await app.request(`/api/projects/${project.id}/analytics`));
+  assert.equal(month.window.range, "1m", "no window asked for means the last month");
+  assert.equal(month.window.bucketUnit, "day");
+  assert.deepEqual(
+    month.totals,
+    {
+      cardsCreated: 4,
+      cardsCompleted: 1,
+      stageMoves: 3,
+      stageMovesByHand: 1,
+      stageMovesAutomatic: 2,
+      runs: 3,
+      runsSucceeded: 2,
+      runsFailed: 1,
+      runsCancelled: 0,
+      spendUsd: 3.5,
+      runsWithoutCost: 1,
+    },
+    "a month holds this week's and last week's work, not the completion forty days back",
+  );
+  assert.equal(month.previous.cardsCompleted, 1, "the forty day old completion is in the window before");
+  assert.equal(month.previous.runs, 1);
+  assert.equal(month.previous.spendUsd, 4);
+  assert.equal(month.previous.cardsCreated, 0);
+  assert.ok(month.buckets.length === 30 || month.buckets.length === 31, `${month.buckets.length} day buckets, the first and last partial`);
+  for (const key of ["completed", "created", "stageMoves", "runs"] as const) {
+    const total = key === "completed" ? month.totals.cardsCompleted : key === "created" ? month.totals.cardsCreated : month.totals[key];
+    assert.equal(sumOf(month, key), total, `the ${key} bars sum to the tile`);
+  }
+  const starts = month.buckets.map((b) => Date.parse(b.start));
+  assert.deepEqual(starts, [...starts].sort((a, b) => a - b), "buckets arrive oldest first");
+
+  const byStage = month.byStage;
+  assert.equal(byStage[0]?.stageId, first!.id);
+  assert.equal(byStage[0]?.movesIn, 2, "two cards entered the first stage");
+  assert.equal(byStage[1]?.movesIn, 1);
+  const done = byStage[byStage.length - 1]!;
+  assert.equal(done.stageId, null);
+  assert.equal(done.name, "Done");
+  assert.equal(done.movesIn, 1, "Done counts the way the tile counts");
+  assert.equal(done.cardsNow, 2, "both done cards sit in Done now, whenever they got there");
+
+  assert.deepEqual(
+    month.byFeature.map((row) => [row.featureId, row.runs, row.costUsd, row.runsWithoutCost, row.stageMoves]),
+    [
+      [moved.id, 1, 2, 0, 1],
+      [recent.id, 2, 1.5, 1, 2],
+    ],
+    "cards worked in the window, dearest first; the untouched card and the old one are not rows",
+  );
+  assert.deepEqual(month.bySwarm, []);
+
+  const week = await json<Analytics>(await app.request(`/api/projects/${project.id}/analytics?range=1w`));
+  assert.equal(week.totals.stageMoves, 2, "last week's move is outside a week");
+  assert.equal(week.totals.runs, 2);
+  assert.equal(week.totals.spendUsd, 1.5);
+  assert.equal(week.previous.runs, 1, "the ten day old run is in the week before");
+
+  const days = await json<Analytics>(await app.request(`/api/projects/${project.id}/analytics?range=3d`));
+  assert.equal(days.window.bucketUnit, "6h", "three days are quarter days, not three bars");
+  assert.ok(days.buckets.length === 12 || days.buckets.length === 13, `${days.buckets.length} quarter day buckets`);
+  assert.equal(sumOf(days, "runs"), days.totals.runs);
+
+  // A custom window of two dates, the last one included: the days
+  // around the old completion and nothing else.
+  const iso = (d: Date) => d.toISOString().slice(0, 10);
+  const custom = await json<Analytics>(
+    await app.request(`/api/projects/${project.id}/analytics?from=${iso(daysAgo(45))}&to=${iso(daysAgo(35))}`),
+  );
+  assert.equal(custom.window.range, "custom");
+  assert.equal(custom.window.from, `${iso(daysAgo(45))}T00:00:00.000Z`);
+  assert.equal(custom.window.to, `${iso(daysAgo(34))}T00:00:00.000Z`, "the last day is inside the window");
+  assert.equal(custom.buckets.length, 11, "eleven whole days");
+  assert.equal(custom.totals.cardsCompleted, 1);
+  assert.equal(custom.totals.runs, 1);
+  assert.equal(custom.totals.spendUsd, 4);
+  assert.equal(custom.totals.cardsCreated, 0);
+  assert.equal(custom.totals.stageMoves, 0);
+
+  const unknown = await app.request(`/api/projects/${project.id}/analytics?range=1y`);
+  assert.equal(unknown.status, 400, "an unknown window is refused, not guessed at");
+  const backwards = await app.request(`/api/projects/${project.id}/analytics?from=2026-09-30&to=2026-09-01`);
+  assert.equal(backwards.status, 400);
+  const half = await app.request(`/api/projects/${project.id}/analytics?from=2026-09-01`);
+  assert.equal(half.status, 400, "one date is not a window");
+});
+
 test("webhooks are rejected without a valid signature", async () => {
   const res = await app.request("/api/webhooks/github", {
     method: "POST",

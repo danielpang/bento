@@ -48,7 +48,7 @@ export { SessionPage } from "./SessionPage.js";
 export { SessionsPage } from "./SessionsPage.js";
 export { SettingsPage } from "./SettingsPage.js";
 export { SignIn } from "./SignIn.js";
-export { SpendPage } from "./SpendPage.js";
+export { AnalyticsPage } from "./AnalyticsPage.js";
 export { StageConfig } from "./StageConfig.js";
 export { SwarmBoard } from "./SwarmBoard.js";
 export { SwarmComposer } from "./SwarmComposer.js";

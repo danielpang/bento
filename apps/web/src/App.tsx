@@ -27,7 +27,7 @@ import {
   SessionPageSkeleton,
   SettingsPageSkeleton,
   Skeleton,
-  SpendPageSkeleton,
+  AnalyticsPageSkeleton,
   SwarmPageSkeleton,
 } from "./components/Skeleton.js";
 import { useGitHubOutcome } from "./components/GitHubIdentity.js";
@@ -91,7 +91,7 @@ const ArtifactPage = lazy(() => import("./components/ArtifactViewer.js").then((m
 const SessionPage = lazy(() => import("./components/SessionPage.js").then((m) => ({ default: m.SessionPage })));
 const SessionsPage = lazy(() => import("./components/SessionsPage.js").then((m) => ({ default: m.SessionsPage })));
 const SettingsPage = lazy(() => import("./components/SettingsPage.js").then((m) => ({ default: m.SettingsPage })));
-const SpendPage = lazy(() => import("./components/SpendPage.js").then((m) => ({ default: m.SpendPage })));
+const AnalyticsPage = lazy(() => import("./components/AnalyticsPage.js").then((m) => ({ default: m.AnalyticsPage })));
 const StageConfig = lazy(() => import("./components/StageConfig.js").then((m) => ({ default: m.StageConfig })));
 /* The swarm board is a second board, and most people open the first
  * one: its tree, its outline and its dialog stay out of the bundle
@@ -124,14 +124,14 @@ function RouteFallback() {
       </div>
     );
   }
-  if (path === "/spend") {
+  if (path === "/analytics" || path === "/spend") {
     return (
       <div className="app" aria-busy="true">
         <header className="topbar">
           <BrandLockup />
           <span className="topbar-spacer" />
         </header>
-        <SpendPageSkeleton />
+        <AnalyticsPageSkeleton />
       </div>
     );
   }
@@ -455,7 +455,7 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
     media.addEventListener("change", update);
     return () => media.removeEventListener("change", update);
   }, []);
-  // Sessions and spend are sibling tabs of the board inside the same
+  // Sessions and analytics are sibling tabs of the board inside the same
   // chrome, so those addresses land here and only the slab between the
   // topbar and the bottom bar differs. Navigation is full page loads,
   // so reading the address once at render is the routing. Trailing
@@ -463,8 +463,9 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
   // and answering it with the board under a sessions address helped
   // nobody.
   const path = window.location.pathname.replace(/\/+$/, "") || "/";
-  const screen: "board" | "sessions" | "spend" =
-    path === "/sessions" ? "sessions" : path === "/spend" ? "spend" : "board";
+  // "/spend" is the old address of Analytics, kept for bookmarks.
+  const screen: "board" | "sessions" | "analytics" =
+    path === "/sessions" ? "sessions" : path === "/analytics" || path === "/spend" ? "analytics" : "board";
   const workScreen = screen === "board" || (beta && screen === "sessions");
   const [sessions, setSessions] = useState<ProjectSession[]>([]);
   /**
@@ -880,7 +881,7 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
   useEffect(() => {
     if (!desktop) return;
     const name = projects?.find(project => project.id === projectId)?.name;
-    const section = screen === "sessions" ? "Sessions" : screen === "spend" ? "Spend" : null;
+    const section = screen === "sessions" ? "Sessions" : screen === "analytics" ? "Analytics" : null;
     document.title = [name, section, "Bento"].filter(Boolean).join(" | ");
     return () => { document.title = "Bento"; };
   }, [projectId, projects, screen]);
@@ -1212,11 +1213,11 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
   const spend = projectId ? (
     <a
       className="spend-button"
-      href="/spend"
+      href="/analytics"
       aria-label={usage && usage.totalRuns > 0
-        ? `View project spend: ${usage.runsWithoutCost > 0 ? "at least " : ""}$${usage.totalUsd.toFixed(2)}`
-        : "View project spend"}
-      aria-current={screen === "spend" ? "page" : undefined}
+        ? `View project analytics. Spend so far: ${usage.runsWithoutCost > 0 ? "at least " : ""}$${usage.totalUsd.toFixed(2)}`
+        : "View project analytics"}
+      aria-current={screen === "analytics" ? "page" : undefined}
       // The tool list comes from the catalog, so it cannot drift
       // from which adapters actually report a figure.
       title={
@@ -1227,7 +1228,7 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
           : spendCoverageNote()
       }
     >
-      <span className="spend-button-label">Spend</span>
+      <span className="spend-button-label">Analytics</span>
       {usage && usage.totalRuns > 0 && (
         <span className="spend-button-amount">
           $<span className="spend-figure">{spendShown.toFixed(2)}</span>
@@ -1239,7 +1240,7 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
   ) : null;
 
   /*
-   * Rendered on the board screen only. Sessions and spend are not
+   * Rendered on the board screen only. Sessions and analytics are not
    * boards, and a toggle that changes something two screens away is
    * a control that lies about what it does.
    */
@@ -1364,8 +1365,8 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
         )}
         {screen === "sessions" ? (
           <SessionsListSkeleton framed />
-        ) : screen === "spend" ? (
-          <SpendPageSkeleton />
+        ) : screen === "analytics" ? (
+          <AnalyticsPageSkeleton />
         ) : swarming ? (
           <SwarmPageSkeleton />
         ) : (
@@ -1491,9 +1492,9 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
         <Suspense fallback={<SessionsListSkeleton framed />}>
           <SessionsPage client={client} projectId={projectId} profiles={profiles} />
         </Suspense>
-      ) : screen === "spend" ? (
-        <Suspense fallback={<SpendPageSkeleton />}>
-          <SpendPage client={client} projectId={projectId} />
+      ) : screen === "analytics" ? (
+        <Suspense fallback={<AnalyticsPageSkeleton />}>
+          <AnalyticsPage client={client} projectId={projectId} />
         </Suspense>
       ) : swarming && swarmGatePage ? (
         swarmGatePage

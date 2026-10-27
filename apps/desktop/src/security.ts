@@ -55,7 +55,7 @@ export function isApiPath(pathname: string): boolean {
 }
 
 export function isConsolePage(pathname: string): boolean {
-  return ["/", "/index.html", "/settings", "/sessions", "/spend", "/changelog", "/device", "/connect-mcp", "/accept-invitation", "/reset-password"].includes(pathname) ||
+  return ["/", "/index.html", "/settings", "/sessions", "/spend", "/analytics", "/changelog", "/device", "/connect-mcp", "/accept-invitation", "/reset-password"].includes(pathname) ||
     /^\/(session|artifact)\/[0-9a-f-]{36}$/.test(pathname);
 }
 

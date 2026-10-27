@@ -279,17 +279,31 @@ export function SessionsListSkeleton({
   return <div className="sessions-screen"><div className="surface-heading" aria-hidden="true"><div className="skeleton-lines"><Skeleton height={24} width="7rem" /><Skeleton height={13} width="14rem" /></div></div>{list}</div>;
 }
 
-/** Table rows for the spend page, without the intro (the intro is data-free). */
-export function SpendPageSkeleton({
+/**
+ * The Analytics page before its figures arrive: the row of tiles and
+ * the table under them. The intro and the window picker are data-free
+ * and render for real; `framed` adds them as bones for the route-level
+ * fallback, which has nothing else to show.
+ */
+export function AnalyticsPageSkeleton({
   rows = 6,
   framed = true,
 }: {
   rows?: number;
   framed?: boolean;
 }) {
-  const table = (
+  const body = (
     <>
-      <LoadingStatus label="Loading spend" />
+      <LoadingStatus label="Loading analytics" />
+      <div className="analytics-tiles" aria-hidden="true">
+        {Array.from({ length: 5 }, (_, i) => (
+          <div key={i} className="analytics-tile">
+            <Skeleton height={11} width="5.5rem" />
+            <Skeleton height={28} width="3rem" />
+            <Skeleton height={12} width="7rem" />
+          </div>
+        ))}
+      </div>
       <table className="spend-table" aria-hidden="true">
         <thead>
           <tr>
@@ -320,15 +334,15 @@ export function SpendPageSkeleton({
       </table>
     </>
   );
-  if (!framed) return table;
+  if (!framed) return body;
   return (
-    <div className="spend-screen" aria-busy="true">
-      <header className="spend-intro" aria-hidden="true">
+    <div className="analytics-screen" aria-busy="true">
+      <header className="analytics-intro" aria-hidden="true">
         <Skeleton height={22} width="6rem" />
         <Skeleton height={13} width="72%" />
         <Skeleton height={13} width="48%" />
       </header>
-      {table}
+      {body}
     </div>
   );
 }
