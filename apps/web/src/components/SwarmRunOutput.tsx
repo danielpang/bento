@@ -203,22 +203,26 @@ type HistorySlot =
   | { status: "ready"; page: HistoryPage; loadingEarlier: boolean };
 
 /**
- * One line for every earlier planner run. Each run used to announce
- * its own load and its own failure, so a long history was a stack of
- * the same sentence.
+ * One loading line and one failure line for the whole earlier history.
+ * Each run used to announce its own, so a long history was a stack of
+ * the same sentence. A run that already failed keeps its Try again
+ * while another read is still in flight: that read can stall, and the
+ * failure would otherwise have no retry.
  */
 export function EarlierPlannerNotice({ pending, failed, onRetry }: {
   pending: boolean;
   failed: boolean;
   onRetry: () => void;
 }) {
-  if (pending) return <p className="muted">Loading earlier planner output...</p>;
-  if (!failed) return null;
-  return (
-    <p className="error" role="alert">
-      Could not load earlier planner output. <button type="button" className="btn btn-ghost" onClick={onRetry}>Try again</button>
-    </p>
-  );
+  if (!pending && !failed) return null;
+  return <>
+    {failed && (
+      <p className="error" role="alert">
+        Could not load earlier planner output. <button type="button" className="btn btn-ghost" onClick={onRetry}>Try again</button>
+      </p>
+    )}
+    {pending && <p className="muted">Loading earlier planner output...</p>}
+  </>;
 }
 
 /** Finished runs use paged reads, never another live stream. */
@@ -236,6 +240,16 @@ function PlannerHistory({ client, runIds, agentName, messagesFor, onLoaded }: {
   const onLoadedRef = useRef(onLoaded);
   onLoadedRef.current = onLoaded;
   const idsKey = runIds.join("\0");
+  // Every in-flight read. Aborted when the drawer goes away, so a late
+  // answer cannot land on an unmounted history.
+  const liveReads = useRef(new Set<AbortController>());
+  // A second click before the next paint still sees the old slot. The
+  // set closes that gap, or the same page is prepended twice.
+  const earlierReads = useRef(new Set<string>());
+  useEffect(() => () => {
+    for (const controller of liveReads.current) controller.abort();
+    liveReads.current.clear();
+  }, []);
 
   useEffect(() => {
     const ids = idsKey ? idsKey.split("\0") : [];
@@ -246,46 +260,61 @@ function PlannerHistory({ client, runIds, agentName, messagesFor, onLoaded }: {
       return !slot || slot.status === "loading" || (slot.status === "error" && !slot.page);
     });
     if (todo.length === 0) return;
-    let cancelled = false;
+    const controller = new AbortController();
+    liveReads.current.add(controller);
     setSlots((current) => {
       const next = { ...current };
       for (const id of todo) next[id] = { status: "loading" };
       return next;
     });
     for (const id of todo) {
-      void client.getEventsBefore(id, EARLIEST_SEQ).then((result) => {
-        if (cancelled) return;
+      void client.getEventsBefore(id, EARLIEST_SEQ, 200, controller.signal).then((result) => {
+        if (controller.signal.aborted) return;
         setSlots((current) => ({ ...current, [id]: { status: "ready", page: result, loadingEarlier: false } }));
-        requestAnimationFrame(() => { if (!cancelled) onLoadedRef.current(); });
+        requestAnimationFrame(() => { if (!controller.signal.aborted) onLoadedRef.current(); });
       }).catch(() => {
-        if (!cancelled) setSlots((current) => ({ ...current, [id]: { status: "error", page: null } }));
+        if (controller.signal.aborted) return;
+        setSlots((current) => ({ ...current, [id]: { status: "error", page: null } }));
       });
     }
-    return () => { cancelled = true; };
+    return () => {
+      controller.abort();
+      liveReads.current.delete(controller);
+    };
   }, [client, idsKey, attempt]);
 
   async function loadEarlier(id: string) {
     const slot = slotsRef.current[id];
     const page = pageOf(slot);
-    if (!page?.firstSeq || (slot?.status === "ready" && slot.loadingEarlier)) return;
+    if (!page?.firstSeq || earlierReads.current.has(id) || (slot?.status === "ready" && slot.loadingEarlier)) return;
+    const cursor = page.firstSeq;
+    earlierReads.current.add(id);
+    const controller = new AbortController();
+    liveReads.current.add(controller);
     setSlots((current) => {
       const base = pageOf(current[id]);
-      if (!base) return current;
+      if (!base || base.firstSeq !== cursor) return current;
       return { ...current, [id]: { status: "ready", page: base, loadingEarlier: true } };
     });
     try {
-      const earlier = await client.getEventsBefore(id, page.firstSeq);
+      const earlier = await client.getEventsBefore(id, cursor, 200, controller.signal);
+      if (controller.signal.aborted) return;
       setSlots((current) => {
         const base = pageOf(current[id]);
-        if (!base) return current;
+        // The cursor moved: a newer read already took this page.
+        if (!base || base.firstSeq !== cursor) return current;
         return { ...current, [id]: { status: "ready", loadingEarlier: false, page: { ...earlier, events: [...earlier.events, ...base.events] } } };
       });
     } catch {
+      if (controller.signal.aborted) return;
       setSlots((current) => {
         const base = pageOf(current[id]);
-        if (!base) return current;
+        if (!base || base.firstSeq !== cursor) return current;
         return { ...current, [id]: { status: "error", page: base } };
       });
+    } finally {
+      earlierReads.current.delete(id);
+      liveReads.current.delete(controller);
     }
   }
 

@@ -985,11 +985,12 @@ test("earlier planner runs share one loading line and one failure line", () => {
   assert.match(failed, /Try again/);
   assert.doesNotMatch(failed, /[\u2013\u2014]/);
 
-  // A failure that is still in flight stays one loading line, not a
-  // loading line plus an error line for the same history.
+  // One run still reading does not hide a run that already failed, and
+  // neither sentence is repeated.
   const waiting = renderToStaticMarkup(createElement(EarlierPlannerNotice, { pending: true, failed: true, onRetry: () => {} }));
   assert.equal(waiting.split("Loading earlier planner output...").length - 1, 1);
-  assert.doesNotMatch(waiting, /Could not load earlier planner output/);
+  assert.equal(waiting.split("Could not load earlier planner output.").length - 1, 1);
+  assert.match(waiting, /Try again/);
 });
 
 test("a checkout failure offers retry and keeps its error in technical details", () => {

@@ -1218,9 +1218,10 @@ export class BentoClient {
    * A page of a finished run's events before a sequence number: what
    * the conversation left out of a long run's block, oldest first.
    */
-  getEventsBefore(runId: string, seq: number, limit = 200) {
+  getEventsBefore(runId: string, seq: number, limit = 200, signal?: AbortSignal) {
     return this.request<{ events: RecordedRunEvent[]; firstSeq: number | null; earlier: number }>(
       `/api/runs/${runId}/events/before?seq=${seq}&limit=${limit}`,
+      signal ? { signal } : {},
     );
   }
 
