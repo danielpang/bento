@@ -422,6 +422,12 @@ export async function recordPushedHead(
   owner: { swarmId: string } | { taskId: string },
   repoUrl: string,
   headSha: string,
+  /**
+   * Whether this push moves `branch_pushed_at`. A rebuild that pushes
+   * one repository and then fails the next must not stamp the swarm
+   * current, or the retry would skip the repository that never moved.
+   */
+  options: { stamp?: boolean } = {},
 ): Promise<void> {
   const entry = JSON.stringify({ [repoUrl]: headSha });
   if ("taskId" in owner) {
@@ -435,7 +441,10 @@ export async function recordPushedHead(
   }
   await db
     .update(swarms)
-    .set({ pushedHeads: sql`${swarms.pushedHeads} || ${entry}::jsonb`, branchPushedAt: sql`now()` })
+    .set({
+      pushedHeads: sql`${swarms.pushedHeads} || ${entry}::jsonb`,
+      ...(options.stamp === false ? {} : { branchPushedAt: sql`now()` }),
+    })
     .where(eq(swarms.id, owner.swarmId));
 }
 
@@ -539,14 +548,32 @@ export async function fetchRemoteBranchBundle(
     const { stdout: listed } = await run("git", [...credentialArguments(), "ls-remote", remote, `refs/heads/${branch}`], { env });
     if (!listed.trim()) return null;
     await cloneBaseBranch({ remote, label: `${parsed.owner}/${parsed.repo}`, baseBranch: repo.defaultBranch, checkout, env, flags: ["--no-checkout"] });
+    // HEAD names the default branch even with --no-checkout, and git
+    // refuses to fetch into the branch it names. Detach without
+    // touching the worktree, then the branch we want can be fetched
+    // and pointed at.
+    const { stdout: cloned } = await run("git", ["-C", checkout, "rev-parse", "HEAD"], { env });
+    await run("git", ["-C", checkout, "update-ref", "--no-deref", "HEAD", cloned.trim()], { env });
     await run("git", ["-C", checkout, ...credentialArguments(), "fetch", "--no-tags", remote, `+refs/heads/${branch}:refs/heads/${branch}`], { env });
     const { stdout: headOut } = await run("git", ["-C", checkout, "rev-parse", `refs/heads/${branch}^{commit}`], { env });
     const headSha = headOut.trim();
     const { stdout: baseOut } = await run("git", ["-C", checkout, "merge-base", `origin/${repo.defaultBranch}`, headSha], { env });
     const baseSha = baseOut.trim();
+    // HEAD in this clone is the default branch. A landing reads the
+    // bundle's HEAD, so it has to name the branch that was fetched.
+    await run("git", ["-C", checkout, "symbolic-ref", "HEAD", `refs/heads/${branch}`], { env });
     await run(
       "git",
-      ["-C", checkout, "bundle", "create", bundlePath, `refs/heads/${branch}`, ...(options.selfContained ? [] : [`^${baseSha}`])],
+      [
+        "-C",
+        checkout,
+        "bundle",
+        "create",
+        bundlePath,
+        "HEAD",
+        `refs/heads/${branch}`,
+        ...(options.selfContained ? [] : [`^${baseSha}`]),
+      ],
       { env },
     );
     return { baseSha, headSha, data: await readFile(bundlePath) };

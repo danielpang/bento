@@ -326,6 +326,13 @@ export async function landWorkerBundles(request: {
   worker: RepositoryBundle;
   policy: LandingPolicy;
   mergeMessage: string;
+  /**
+   * The result carries every object, so it can be the next landing's
+   * swarm snapshot. The import path wants the opposite: an incremental
+   * bundle whose base is the head it read, which the sandbox uses as
+   * its compare and swap.
+   */
+  selfContained?: boolean;
 }): Promise<BundleLandOutcome> {
   const root = await mkdtemp(path.join(tmpdir(), "bento-bundle-landing-"));
   const work = path.join(root, "checkout");
@@ -365,13 +372,26 @@ export async function landWorkerBundles(request: {
     const countOut = await git(work, ["rev-list", "--count", `${base}..${head}`]);
     const commits = Number(countOut) || 0;
     if (head === base || commits === 0) return { ok: true, base, head: base, commits: 0, bundle: null };
-    await git(work, ["bundle", "create", resultPath, "HEAD", `^${base}`]);
+    await git(work, [
+      "bundle",
+      "create",
+      resultPath,
+      "HEAD",
+      // Full history when the caller will land the next task on this
+      // result. The incremental form needs the previous head already
+      // present, which a fresh checkout of a lost machine does not have.
+      ...(request.selfContained ? [] : [`^${base}`]),
+    ]);
     return {
       ok: true,
       base,
       head,
       commits,
-      bundle: { baseSha: base, headSha: head, data: await readFile(resultPath) },
+      bundle: {
+        baseSha: request.selfContained ? request.swarm.baseSha : base,
+        headSha: head,
+        data: await readFile(resultPath),
+      },
     };
   } catch (err) {
     const detail = detailOf(err);
