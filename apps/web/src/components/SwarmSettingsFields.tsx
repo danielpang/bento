@@ -50,7 +50,7 @@ export function settingsFrom(draft: RunSettingsDraft): Omit<SwarmSettings, "plan
 }
 
 /** The planning choices, in words, from the one the planner does alone. */
-const PLAN_DEPTHS: { depth: number; label: string }[] = [
+export const PLAN_DEPTHS: { depth: number; label: string }[] = [
   { depth: 1, label: "The planner writes the whole plan" },
   { depth: 2, label: "The planner may hand a large part to a sub planner" },
   { depth: 3, label: "Sub planners may hand parts on once more" },

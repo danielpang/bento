@@ -3,7 +3,7 @@ import test from "node:test";
 import { fixtureSwarmApi } from "./swarm/client.js";
 import { generateSwarmTasks, seedSwarms } from "./swarm/fixtures.js";
 import { buildSwarmModel } from "./swarm/layout.js";
-import { base64Bytes, clampWorkers, existingPlanHelp, newSourceLabel, planSourceRefusal, readPlanFile, suggestBranch, toBase64, withPlanSource } from "./components/NewSwarmDialog.js";
+import { base64Bytes, clampWorkers, existingPlanHelp, newSourceLabel, planSourceRefusal, readPlanFile, suggestBranch, toBase64, withPlanSource } from "./swarm/new-swarm.js";
 import { planFileMime } from "@bento/core";
 import { goalExcerpt, planSourceLabel, planSourceSize } from "./components/SwarmPage.js";
 import { parseBudget, parseTimeLimit } from "./components/SwarmSettingsFields.js";

@@ -1,7 +1,7 @@
 import { isSandboxCapacityError } from "@bento/core";
 import { CapacityNotice } from "./CapacityNotice.js";
-import { Fragment, useEffect, useState, type ReactNode } from "react";
-import { CompletionRing } from "./CompletionRing.js";
+import { Fragment, useEffect, useState } from "react";
+import { capitalise, ChevronMark, DiagramMark, FileMark, GlobeMark, ImageMark } from "./SwarmMarks.js";
 import { MergeQueue } from "./MergeQueue.js";
 import { OutOfCompute } from "./OutOfCompute.js";
 import { SwarmOutline } from "./SwarmOutline.js";
@@ -9,11 +9,12 @@ import { SwarmTree, type SwarmTreeSearch } from "./SwarmTree.js";
 import { canPause, canReopen, canResume, canStop, ceilingAction, pausedWords, swarmTone, swarmWords } from "../swarm/status.js";
 import { idleWords } from "../swarm/waiting.js";
 import { cappedUsd, formatUsd, showSwarmSpend } from "../swarm/money.js";
-import { formatCompletion, type SwarmModel } from "../swarm/layout.js";
-import { formatElapsed } from "../swarm/time.js";
+import type { SwarmModel } from "../swarm/layout.js";
+import { elapsedSince, formatAge, formatDuration, formatElapsed, shortDate } from "../swarm/time.js";
+import { artifactSourceLabel, artifactTypeLabel, splitArtifactPath } from "../swarm/artifacts.js";
 import type { ModeSurfaces } from "../swarm/plan.js";
 import type { SwarmArtifact, SwarmDetail, SwarmPlanSource } from "../swarm/types.js";
-import type { LandingPage, SwarmPublishOutcome } from "../swarm/client.js";
+import type { LandingPage, SwarmAgent, SwarmPublishOutcome } from "../swarm/client.js";
 import { formatBytes } from "@bento/core";
 import { externalHttpUrl } from "../external-url.js";
 import { browserStorage, readBriefOpen, rememberBriefOpen, type StorageLike, type SwarmView } from "../swarm/view-state.js";
@@ -98,34 +99,53 @@ export interface SwarmActions {
  * What the plan was built from, under the goal.
  *
  * Nothing at all for the ordinary swarm, whose planner read the goal
- * and the code. A swarm handed a plan says so, and lists what was
- * handed over: a person reading the tree wants to know whether it was
- * the planner's idea or theirs, and which file it came from.
+ * and the code. A swarm handed files or pages lists them as a row of
+ * equal cells: a person reading the tree wants to know which file it
+ * came from, and a PDF, an image or a page is one click from opening.
+ * Whether they were the plan or material to plan from is said once,
+ * on the goal card's header.
+ *
+ * A text file opens nowhere: its words are the planner's to read, and
+ * the content route serves it as a download, which is not what a
+ * click on a name in a list should do.
  */
 export function SwarmPlanBrief({
-  planMode,
   sources,
 }: {
-  planMode: SwarmDetail["swarm"]["planMode"];
+  planMode?: SwarmDetail["swarm"]["planMode"];
   sources: NonNullable<SwarmDetail["planSources"]>;
 }) {
-  if (planMode !== "existing" && sources.length === 0) return null;
+  if (sources.length === 0) return null;
   return (
-    <div className="swarm-brief-plan">
-      <span className="label">{planMode === "existing" ? "Existing plan" : "Plan material"}</span>
-      <p className="muted">
-        {planMode === "existing"
-          ? sources.length > 0
-            ? "The planner builds the task tree from this plan rather than from the goal alone."
-            : "The goal is the plan. The planner builds the task tree from it rather than planning from scratch."
-          : "The planner reads these before it plans."}
-      </p>
-      {sources.length > 0 && (
-        <ul className="swarm-plan-sources" aria-label="Plan sources">
-          {planSourceRows(sources)}
-        </ul>
-      )}
-    </div>
+    <ul className="swarm-sources" aria-label="Plan sources">
+      {sources.map((source) => (
+        <li key={source.id} data-media={source.media}>
+          <PlanSourceCell source={source} />
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function PlanSourceCell({ source }: { source: SwarmPlanSource }) {
+  const size = planSourceSize(source);
+  const inner = (
+    <>
+      {source.kind === "website" ? <GlobeMark /> : source.media === "image" ? <ImageMark /> : <FileMark />}
+      <span className="visually-hidden">{planSourceLabel(source)}: </span>
+      <span className="swarm-source-name">{source.name}</span>
+      {size && <span className="swarm-source-size">{size}</span>}
+    </>
+  );
+  const href = source.kind === "website" ? source.url : source.media !== "text" ? source.contentPath : null;
+  return href ? (
+    <a className="swarm-source" href={href} target="_blank" rel="noreferrer noopener" title={source.url ?? source.name}>
+      {inner}
+    </a>
+  ) : (
+    <span className="swarm-source" title={source.name}>
+      {inner}
+    </span>
   );
 }
 
@@ -142,74 +162,6 @@ export function goalExcerpt(goal: string, max = 120): string {
   const cut = line.slice(0, max);
   const atWord = cut.lastIndexOf(" ");
   return `${(atWord > max / 2 ? cut.slice(0, atWord) : cut).trimEnd()}\u2026`;
-}
-
-/**
- * A text file handed over as the plan.
- *
- * Several of these share one label. A PDF, an image, or a website
- * stays its own row, because each of those is something to open.
- */
-function isPlanFile(source: Pick<SwarmPlanSource, "kind" | "media">): boolean {
-  return source.kind === "file" && source.media === "text";
-}
-
-/**
- * The sources, with every text file gathered under one label.
- *
- * The label is said once. Repeating it on each name is a column of
- * the same word, and the names are the part a person came to read.
- */
-function planSourceRows(sources: SwarmPlanSource[]): ReactNode[] {
-  const files = sources.filter(isPlanFile);
-  let filesListed = false;
-  const rows: ReactNode[] = [];
-  for (const source of sources) {
-    if (isPlanFile(source)) {
-      if (filesListed) continue;
-      filesListed = true;
-      rows.push(<PlanFiles key="files" files={files} />);
-      continue;
-    }
-    rows.push(<PlanSourceRow key={source.id} source={source} />);
-  }
-  return rows;
-}
-
-function PlanFiles({ files }: { files: SwarmPlanSource[] }) {
-  return (
-    <li className="swarm-plan-files">
-      <span className="swarm-plan-source-kind">{files.length === 1 ? "File" : "Files"}</span>
-      <ul className="swarm-plan-file-names">
-        {files.map((file) => (
-          <li key={file.id}>
-            <span className="swarm-plan-source-name" title={file.name}>{file.name}</span>
-          </li>
-        ))}
-      </ul>
-    </li>
-  );
-}
-
-function PlanSourceRow({ source }: { source: SwarmPlanSource }) {
-  const size = planSourceSize(source);
-  return (
-    <li data-media={source.media}>
-      {source.media === "image" && (
-        <img className="swarm-plan-source-thumb" src={source.contentPath} alt="" loading="lazy" />
-      )}
-      <span className="swarm-plan-source-kind">{planSourceLabel(source)}</span>
-      {source.url
-        ? <a className="swarm-plan-source-name" href={source.url} target="_blank" rel="noreferrer noopener" title={source.url}>{source.name}</a>
-        : <span className="swarm-plan-source-name" title={source.name}>{source.name}</span>}
-      {size && <span className="muted">{size}</span>}
-      {source.media !== "text" && (
-        <a className="swarm-plan-source-open" href={source.contentPath} target="_blank" rel="noreferrer noopener">
-          {source.media === "image" ? "Open" : "Download"}
-        </a>
-      )}
-    </li>
-  );
 }
 
 /** What a source is, as the list labels it. */
@@ -234,10 +186,13 @@ export function planSourceSize(source: Pick<SwarmPlanSource, "media" | "size" | 
 }
 
 /**
- * One swarm's page: the header, and the plan under it.
+ * One swarm's page: the title row, the figures, the goal, what it made
+ * and its pull request, and the plan under them.
  *
- * The header names the swarm and its next action. The brief beneath
- * it carries the goal, the spend estimate and the worker limit.
+ * The title row names the swarm, its state and its next action. The
+ * figures are one strip, so spend, workers and time are read in one
+ * glance rather than hunted for. The goal card folds; the figures and
+ * the sentence about what the swarm waits on never do.
  *
  * Tree and Outline are two renderings of one model. The toggle
  * changes the shape of the page and nothing else: same selection,
@@ -260,8 +215,11 @@ export function SwarmPage({
   onOpenArtifact,
   onOpenPlannerOutput,
   publish = null,
+  agents = [],
 }: {
   detail: SwarmDetail;
+  /** The agents the swarm can name, so the figures say who plans and who works. */
+  agents?: SwarmAgent[];
   /** The publish this person started here: the mode still running, or what it opened. */
   publish?: { inFlight: "combined" | "stacked" | null; outcome: SwarmPublishOutcome | null } | null;
   model: SwarmModel;
@@ -350,113 +308,124 @@ export function SwarmPage({
     ? "This swarm is waiting for you. Open the highlighted tasks in the diagram to see what each one needs."
     : idleWords(detail);
 
+  const tone = plannerFailed || swarm.status === "failed" ? "gated" : swarmTone(swarm.status);
+  const statusLabel = plannerAtCapacity ? "Waiting for capacity" : plannerFailed || swarm.status === "failed" ? "stalled" : swarmWords(swarm.status);
+  const showNextStep = waitingForPlan || planNeedsApproval;
+
   return (
     <div className="swarm-page">
       <ComputeBanner surfaces={surfaces} pausedReason={swarm.pausedReason} />
 
-      {/*
-       * Why this swarm is not starting anything, in a sentence.
-       *
-       * Four different things leave a swarm sitting still, and the
-       * status word is the same for two of them. What a person needs
-       * is which one and what it takes to move it, so the header says
-       * it rather than leaving them to guess from a greyed out button.
-       */}
-      {stopped && (
-        <p className="swarm-paused" role="status">
-          {stopped}
-        </p>
-      )}
-      {!stopped && stillWords && (
-        <p className="swarm-paused" role="status" data-kind="idle">
-          {stillWords}
-        </p>
-      )}
-
-      <header className="swarm-head">
-        <div className="swarm-head-lead">
-          <CompletionRing fraction={model.root.completion} size={40} stroke={3.2} showLabel />
-          <div className="swarm-head-copy">
-            <h1 className="swarm-name">{swarm.name}</h1>
-            <div className="swarm-head-chips">
-              <span className="status">
-                <span className="dot" data-state={plannerFailed || swarm.status === "failed" ? "gated" : swarmTone(swarm.status)} />
-                {plannerAtCapacity ? "Waiting for capacity" : plannerFailed || swarm.status === "failed" ? "stalled" : swarmWords(swarm.status)}
+      <div className="swarm-top">
+        <header className="swarm-title-row">
+          <div className="swarm-title-copy">
+            <div className="swarm-title-line">
+              <h1 className="swarm-name" title={swarm.name}>{swarm.name}</h1>
+              <span className="status swarm-badge" data-tone={tone}>
+                <span className="dot" data-state={tone} />
+                {capitalise(statusLabel)}
               </span>
-              {swarm.branchName && (
-                <span className="chip chip-clip" title={swarm.branchName}>
-                  {swarm.branchName}
-                </span>
-              )}
-              <span className="chip" title="Agent run time, excluding time spent waiting between runs">
-                {formatElapsed(detail.agentTimeMs ?? 0)} agent time
-              </span>
-              <span className="chip" title="Tasks done, out of the tasks planned">
-                {model.root.doneLeaves} of {model.root.totalLeaves} tasks
-              </span>
-              {/* That this is not the first pass, said on the header.
+            </div>
+            <div className="swarm-title-meta">
+              <span className="swarm-title-when">{whenWords(swarm, now)}</span>
+              {swarm.branchName && <BranchName name={swarm.branchName} />}
+              {/* That this is not the first pass, said on the title row.
                   The tree says which subtree each follow up is; this
                   says there were any. */}
               {swarm.reopenCount > 0 && (
-                <span
-                  className="chip"
-                  title="This swarm was reopened, so part of its tree is follow up work on the same branch."
-                >
+                <span title="This swarm was reopened, so part of its tree is follow up work on the same branch.">
                   {swarm.reopenCount === 1 ? "Reopened once" : `Reopened ${swarm.reopenCount} times`}
                 </span>
               )}
             </div>
           </div>
-        </div>
 
-        <div className="swarm-head-actions">
-          {primaryAction && <button className="btn btn-primary swarm-main-action" disabled={busy} onClick={primaryAction.onClick}>{primaryAction.label}</button>}
-          {waitingForPlan && plannerActive && <span className="swarm-awaiting-plan">{detail.plannerRun?.status === "queued" ? "Waiting to start" : detail.plannerRun?.status === "starting" ? "Starting planner" : "Planner at work"}</span>}
-          <button className="btn" disabled={busy} onClick={actions.onSettings}>Settings</button>
-          <details className="swarm-more-actions">
-            <summary className="btn" aria-label="More swarm actions">
-              <span>Actions</span>
-              <svg className="swarm-actions-chevron" viewBox="0 0 12 12" width="12" height="12" fill="none" aria-hidden="true">
-                <path d="m3 4.5 3 3 3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </summary>
-            <div className="swarm-more-menu">
-              {swarm.status === "planning" && plannerActive && canPause(swarm.status) && <button className="btn" disabled={busy} onClick={actions.onPause}>Pause planner</button>}
-              {(swarm.status === "running" || swarm.status === "waiting") && primaryAction?.label !== "Pause work" && (
-                <button className="btn" disabled={busy} onClick={actions.onPause}>Pause work</button>
-              )}
-              {canReopen(swarm.status) && primaryAction?.label !== "Add follow up" && (
-                <button className="btn" disabled={busy} onClick={actions.onReopen}>Add follow up</button>
-              )}
-              {canStop(swarm.status) && <button className="btn" disabled={busy} onClick={actions.onStop}>Stop swarm</button>}
-              {swarm.archivedAt ? (
-                <button className="btn" disabled={busy} onClick={actions.onRestore}>Restore</button>
-              ) : (
-                canReopen(swarm.status) && (
-                  <button className="btn" disabled={busy} onClick={actions.onArchive}>Archive</button>
-                )
-              )}
-              <button className="btn btn-danger-quiet" disabled={busy} onClick={actions.onDelete}>
-                Delete swarm
-              </button>
-            </div>
-          </details>
-        </div>
-
-      </header>
-
-      <section className="swarm-brief" aria-label="Swarm goal" data-open={briefOpen}>
-        <div className="swarm-brief-copy">
-          <div className="swarm-brief-head">
-            <span className="label">Goal</span>
-            {!briefOpen && <span className="swarm-brief-excerpt" title={swarm.goal}>{goalExcerpt(swarm.goal)}</span>}
-            {briefOpen && (
-              <div className="swarm-brief-metrics">
-                {showSwarmSpend(swarm.spend, swarm.budgetUsd) && (
-                  <div className="swarm-spend-summary"><span>Spend estimate</span><strong className="spend-figure">{formatUsd(cappedUsd(swarm.spend))}</strong><small>{swarm.budgetUsd === null ? "No budget cap" : `${formatUsd(swarm.budgetUsd)} budget`}</small></div>
+          <div className="swarm-title-actions" data-primary={primaryAction ? "" : undefined}>
+            {waitingForPlan && plannerActive && <span className="swarm-awaiting-plan">{detail.plannerRun?.status === "queued" ? "Waiting to start" : detail.plannerRun?.status === "starting" ? "Starting planner" : "Planner at work"}</span>}
+            <button className="btn swarm-settings-action" disabled={busy} onClick={actions.onSettings}>Settings</button>
+            <details className="swarm-more-actions">
+              <summary className="btn" aria-label="More swarm actions">
+                <span>Actions</span>
+                <svg className="swarm-actions-chevron" viewBox="0 0 12 12" width="12" height="12" fill="none" aria-hidden="true">
+                  <path d="m3 4.5 3 3 3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </summary>
+              <div className="swarm-more-menu">
+                {swarm.status === "planning" && plannerActive && canPause(swarm.status) && <button className="btn" disabled={busy} onClick={actions.onPause}>Pause planner</button>}
+                {(swarm.status === "running" || swarm.status === "waiting") && primaryAction?.label !== "Pause work" && (
+                  <button className="btn" disabled={busy} onClick={actions.onPause}>Pause work</button>
                 )}
-                <div className="swarm-worker-control"><span className="swarm-control-label">Workers</span><WorkerStepper workers={swarm.workers} active={swarm.workersActive} max={swarm.maxWorkers} disabledReason={busy ? "Wait for the current change to finish." : !canStop(swarm.status) ? "Worker count cannot change after the swarm ends." : null} onChange={actions.onWorkers} /></div>
+                {canReopen(swarm.status) && primaryAction?.label !== "Add follow up" && (
+                  <button className="btn" disabled={busy} onClick={actions.onReopen}>Add follow up</button>
+                )}
+                {canStop(swarm.status) && <button className="btn" disabled={busy} onClick={actions.onStop}>Stop swarm</button>}
+                {swarm.archivedAt ? (
+                  <button className="btn" disabled={busy} onClick={actions.onRestore}>Restore</button>
+                ) : (
+                  canReopen(swarm.status) && (
+                    <button className="btn" disabled={busy} onClick={actions.onArchive}>Archive</button>
+                  )
+                )}
+                <button className="btn btn-danger-quiet" disabled={busy} onClick={actions.onDelete}>
+                  Delete swarm
+                </button>
               </div>
+            </details>
+            {primaryAction && <button className="btn btn-primary swarm-main-action" disabled={busy} onClick={primaryAction.onClick}>{primaryAction.label}</button>}
+          </div>
+        </header>
+
+        {/*
+         * Why this swarm is not starting anything, in a sentence.
+         *
+         * Four different things leave a swarm sitting still, and the
+         * status word is the same for two of them. What a person needs
+         * is which one and what it takes to move it, so the page says
+         * it under the title rather than leaving them to guess from a
+         * greyed out button.
+         */}
+        {stopped && (
+          <p className="swarm-paused" role="status">
+            {stopped}
+          </p>
+        )}
+        {!stopped && stillWords && (
+          <p className="swarm-paused" role="status" data-kind="idle">
+            {stillWords}
+          </p>
+        )}
+        {/*
+         * What the fold must never hide: the one sentence that says
+         * what this swarm is waiting on a person for. It sits under the
+         * title, outside the goal card, because the fold is remembered
+         * for every swarm and the next swarm's trouble is not this one's.
+         */}
+        {showNextStep && <p className="swarm-next-step" role="status">{nextStep}</p>}
+
+        {swarm.question && (
+          <PlannerQuestionBanner
+            question={swarm.question}
+            busy={busy}
+            onAnswer={(text) => actions.onAnswer(swarm.question?.id ?? "", text)}
+          />
+        )}
+
+        {swarm.status === "failed" && swarm.updatedAt && (
+          <p className="muted swarm-grace-note">
+            This swarm&apos;s sandbox is kept until about {graceDate(swarm.updatedAt)} so its tasks and merge queue can be
+            retried. Its branches are also on GitHub when the project has a GitHub connection.
+          </p>
+        )}
+
+        <SwarmStats detail={detail} model={model} agents={agents} busy={busy} now={now} onWorkers={actions.onWorkers} />
+
+        <section className="swarm-brief" aria-label="Swarm goal" data-open={briefOpen}>
+          <div className="swarm-card-head">
+            <span className="swarm-card-title">Goal</span>
+            {!briefOpen && <span className="swarm-brief-excerpt" title={swarm.goal}>{goalExcerpt(swarm.goal)}</span>}
+            {briefOpen && <span className="swarm-card-spacer" />}
+            {briefOpen && planNote(swarm.planMode, detail.planSources ?? []) && (
+              <span className="swarm-card-note">{planNote(swarm.planMode, detail.planSources ?? [])}</span>
             )}
             <button
               type="button"
@@ -465,7 +434,7 @@ export function SwarmPage({
               aria-controls="swarm-brief-body"
               onClick={toggleBrief}
             >
-              {briefOpen ? "Hide" : "Show"}
+              {briefOpen ? "Collapse" : "Expand"}
               <svg className="swarm-brief-chevron" viewBox="0 0 12 12" width="12" height="12" fill="none" aria-hidden="true">
                 <path d="m3 4.5 3 3 3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
@@ -473,118 +442,34 @@ export function SwarmPage({
           </div>
           {briefOpen && (
             <div id="swarm-brief-body">
-              <p>{swarm.goal}</p>
+              <p className="swarm-goal-text">{swarm.goal}</p>
               <SwarmPlanBrief planMode={swarm.planMode} sources={detail.planSources ?? []} />
-              {(waitingForPlan || planNeedsApproval) && <p className="swarm-next-step" role="status">{nextStep}</p>}
             </div>
           )}
-        </div>
-        {/*
-          * What the fold must never hide: the one sentence that says
-          * what this swarm is waiting on a person for. Spend and the
-          * worker stepper fold with the goal; a failed planner or a
-          * plan waiting for approval stays on the page whatever this
-          * browser remembers, because the fold is remembered for every
-          * swarm and the next swarm's trouble is not this one's.
-          */}
-        {!briefOpen && (waitingForPlan || planNeedsApproval) && (
-          <p className="swarm-next-step swarm-next-step-folded" role="status">{nextStep}</p>
-        )}
-      </section>
+        </section>
 
-      {swarm.question && (
-        <PlannerQuestionBanner
-          question={swarm.question}
-          busy={busy}
-          onAnswer={(text) => actions.onAnswer(swarm.question?.id ?? "", text)}
-        />
-      )}
-
-      <SwarmArtifacts
-        artifacts={artifacts}
-        deliverable={swarm.deliverable}
-        onOpen={onOpenArtifact}
-      />
-
-      {swarm.status === "failed" && swarm.updatedAt && (
-        <p className="muted swarm-grace-note">
-          This swarm&apos;s sandbox is kept until about {graceDate(swarm.updatedAt)} so its tasks and merge queue can be
-          retried. Its branches are also on GitHub when the project has a GitHub connection.
-        </p>
-      )}
-
-      {publish?.outcome && <PublishOutcome outcome={publish.outcome} />}
-
-      {actions.onPublish && !publish?.outcome && (() => {
-        const offer = publishOffer(detail);
-        if (!offer) return null;
-        const inFlight = publish?.inFlight ?? null;
-        return (
-          <div className="swarm-publish" role="group" aria-label="Open pull requests" aria-busy={inFlight !== null}>
-            <p>{offer.words}</p>
-            <div className="actions">
-              {offer.stackOnly ? (
-                <button className="btn btn-primary" disabled={busy} onClick={() => actions.onPublish?.("stacked")}>
-                  {inFlight === "stacked" ? "Opening…" : "Add them to the stack"}
-                </button>
-              ) : (
-                <>
-                  <button className="btn btn-primary" disabled={busy} onClick={() => actions.onPublish?.("combined")}>
-                    {inFlight === "combined" ? "Opening…" : "One pull request"}
-                  </button>
-                  <button className="btn" disabled={busy} onClick={() => actions.onPublish?.("stacked")}>
-                    {inFlight === "stacked" ? "Opening…" : "One per task, stacked"}
-                  </button>
-                </>
-              )}
+        {(() => {
+          const artifactCard = artifacts.length > 0 ? (
+            <SwarmArtifacts artifacts={artifacts} deliverable={swarm.deliverable} tasks={detail.tasks} now={now} onOpen={onOpenArtifact} />
+          ) : null;
+          const prCard = (
+            <SwarmPullRequestCard
+              detail={detail}
+              publish={publish}
+              busy={busy}
+              onPublish={actions.onPublish}
+            />
+          );
+          const hasPr = pullRequestCardShown(detail, publish, Boolean(actions.onPublish));
+          if (!artifactCard && !hasPr) return null;
+          return (
+            <div className="swarm-grid" data-columns={artifactCard && hasPr ? "2" : "1"}>
+              {artifactCard}
+              {hasPr && prCard}
             </div>
-          </div>
-        );
-      })()}
-
-      {stackedPullRequests(detail.tasks).length > 0 && (
-        <div className="swarm-prs" aria-label="Stacked pull requests">
-          {stackedPullRequests(detail.tasks).map((pr) =>
-            pr.url ? (
-              <a key={pr.key} className="chip chip-link" href={pr.url} target="_blank" rel="noreferrer" title={pr.repoUrl}>
-                {pr.title} #{pr.number}
-              </a>
-            ) : (
-              <span key={pr.key} className="chip" title="This pull request's address is not a web link, so it is shown without one.">
-                {pr.title} #{pr.number}
-              </span>
-            ),
-          )}
-        </div>
-      )}
-
-      {detail.pullRequests.length > 0 && (
-        <div className="swarm-prs">
-          {/*
-           * A chip is a link only when the row carried an address the
-           * console would follow. `client.ts` nulls anything that is
-           * not http or https, because an href is the one place a
-           * string the agents' side of the world wrote could run as
-           * the console. Drawn as text instead, with the reason in the
-           * tooltip, so a pull request that exists is still visible.
-           */}
-          {detail.pullRequests.map((pr) =>
-            pr.url ? (
-              <a key={pr.id} className="chip chip-link" href={pr.url} target="_blank" rel="noreferrer">
-                {pr.repoUrl} #{pr.number}
-              </a>
-            ) : (
-              <span
-                key={pr.id}
-                className="chip"
-                title="This pull request's address is not a web link, so it is shown without one."
-              >
-                {pr.repoUrl} #{pr.number}
-              </span>
-            ),
-          )}
-        </div>
-      )}
+          );
+        })()}
+      </div>
 
       {plannerAtCapacity ? (
         <div className="swarm-capacity-stage">
@@ -595,7 +480,7 @@ export function SwarmPage({
       <>
       <div className="swarm-viewbar">
         <span className="swarm-section-title">Diagram</span>
-        <div className="seg" role="group" aria-label="View">
+        <div className="seg swarm-view-toggle" role="group" aria-label="View">
           <button
             type="button"
             className="seg-item"
@@ -650,6 +535,146 @@ export function SwarmPage({
   );
 }
 
+/** What the goal card's header says about where the plan came from, or nothing for an ordinary swarm. */
+function planNote(planMode: SwarmDetail["swarm"]["planMode"], sources: SwarmPlanSource[]): string | null {
+  if (planMode === "existing") return sources.length > 0 ? "Built from an existing plan" : "The goal is the plan";
+  return sources.length > 0 ? "Read before planning" : null;
+}
+
+/** When the swarm last moved, for the title row: finished, ended, started, or created. */
+function whenWords(swarm: SwarmDetail["swarm"], now: number): string {
+  if (swarm.endedAt) return `${swarm.status === "done" ? "Finished" : "Ended"} ${formatAge(swarm.endedAt, now)}`;
+  if (swarm.startedAt) return `Started ${formatAge(swarm.startedAt, now)}`;
+  return `Created ${formatAge(swarm.createdAt, now)}`;
+}
+
+/** The swarm's branch in mono, with a button that copies it. */
+function BranchName({ name }: { name: string }) {
+  const [copied, setCopied] = useCopied();
+  return (
+    <span className="swarm-branch" title={name}>
+      <BranchMark />
+      <span className="swarm-branch-name">{name}</span>
+      <button
+        type="button"
+        className="swarm-copy"
+        aria-label={copied ? "Branch name copied" : "Copy branch name"}
+        title={copied ? "Copied" : "Copy branch name"}
+        onClick={() => setCopied(name)}
+      >
+        {copied ? <TickMark /> : <CopyMark />}
+      </button>
+    </span>
+  );
+}
+
+/** Copies text, and says so for a moment. */
+function useCopied(): [boolean, (text: string) => void] {
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const id = setTimeout(() => setCopied(false), 1600);
+    return () => clearTimeout(id);
+  }, [copied]);
+  return [
+    copied,
+    (text: string) => {
+      void navigator.clipboard?.writeText(text).then(() => setCopied(true), () => {});
+    },
+  ];
+}
+
+/**
+ * The swarm's figures, as one strip.
+ *
+ * Tasks, agent time, spend, workers, how long it has run, and who is
+ * on it. Spend is drawn only when there is something to say about it:
+ * a figure the agents reported, or a budget to hold it against.
+ * Nothing here folds with the goal, because these are what a person
+ * checks on every visit.
+ */
+function SwarmStats({
+  detail,
+  model,
+  agents,
+  busy,
+  now,
+  onWorkers,
+}: {
+  detail: SwarmDetail;
+  model: SwarmModel;
+  agents: SwarmAgent[];
+  busy?: boolean;
+  now: number;
+  onWorkers: (workers: number) => void;
+}) {
+  const swarm = detail.swarm;
+  const leaves = model.nodes.filter((node) => node.nodeType === "leaf");
+  const open = leaves.filter((node) => node.status === "open").length;
+  const blocked = leaves.filter((node) => node.status === "blocked").length;
+  const started = swarm.startedAt ?? swarm.createdAt;
+  const ran = elapsedSince(started, swarm.endedAt ? new Date(swarm.endedAt).getTime() : now);
+  const nameOf = (id: string | null, fallback: string) =>
+    (id ? agents.find((agent) => agent.id === id)?.name : undefined) ?? fallback;
+  const planner = nameOf(swarm.settings.plannerProfileId, detail.plannerRun?.agent?.name ?? "Swarm Planner");
+  const worker = nameOf(swarm.settings.workerProfileId, "Swarm Worker");
+  const judge = swarm.settings.judgeProfileId ? nameOf(swarm.settings.judgeProfileId, "an agent") : null;
+
+  return (
+    <div className="swarm-stats" role="list" aria-label="Swarm figures">
+      <div className="swarm-stat" role="listitem" title="Tasks done, out of the tasks planned">
+        <span className="swarm-stat-label">Tasks</span>
+        <span className="swarm-stat-value">
+          {model.root.doneLeaves}
+          <span className="swarm-stat-of"> / {model.root.totalLeaves}</span>
+        </span>
+        <span className="swarm-stat-sub">{open} open · {blocked} blocked</span>
+      </div>
+      <div className="swarm-stat" role="listitem" title="Agent run time, excluding time spent waiting between runs">
+        <span className="swarm-stat-label">Agent time</span>
+        <span className="swarm-stat-value">{formatElapsed(detail.agentTimeMs ?? 0)}</span>
+        <span className="swarm-stat-sub">Not counting waits</span>
+      </div>
+      {showSwarmSpend(swarm.spend, swarm.budgetUsd) && (
+        <div className="swarm-stat swarm-spend-summary" role="listitem">
+          <span className="swarm-stat-label">Spend estimate</span><strong className="spend-figure">{formatUsd(cappedUsd(swarm.spend))}</strong>
+          <small className="swarm-stat-sub">{swarm.budgetUsd === null ? "No budget cap" : `${formatUsd(swarm.budgetUsd)} budget`}</small>
+        </div>
+      )}
+      <div className="swarm-stat swarm-worker-control" role="listitem">
+        <span className="swarm-stat-label">Workers</span>
+        <span className="swarm-stat-line">
+          <span className="swarm-stat-value">
+            {swarm.workers}
+            <span className="swarm-stat-of"> / {swarm.maxWorkers}</span>
+          </span>
+          <WorkerStepper
+            workers={swarm.workers}
+            active={swarm.workersActive}
+            max={swarm.maxWorkers}
+            disabledReason={busy ? "Wait for the current change to finish." : !canStop(swarm.status) ? "Worker count cannot change after the swarm ends." : null}
+            onChange={onWorkers}
+          />
+        </span>
+        <span className="swarm-stat-sub">{swarm.workersActive > 0 ? `${swarm.workersActive} active` : "None active"}</span>
+      </div>
+      <div className="swarm-stat" role="listitem">
+        <span className="swarm-stat-label">Duration</span>
+        <span className="swarm-stat-value">{formatDuration(ran)}</span>
+        <span className="swarm-stat-sub">Started {shortDate(started, now)}</span>
+      </div>
+      <div className="swarm-stat swarm-stat-agents" role="listitem" title={`Planner: ${planner}. Worker: ${worker}.`}>
+        <span className="swarm-stat-label">Agents</span>
+        <span className="swarm-stat-names">
+          <span>{planner}</span>
+          <span>{worker}</span>
+        </span>
+        <span className="swarm-stat-sub">{judge ? `Judge: ${judge}` : "Judge: none"}</span>
+      </div>
+    </div>
+  );
+}
+
 /**
  * Whether to offer pull requests, and in what words.
  *
@@ -662,7 +687,7 @@ export function SwarmPage({
  */
 function PublishOutcome({ outcome }: { outcome: SwarmPublishOutcome }) {
   return (
-    <div className="swarm-publish" role="status">
+    <div className="swarm-pr-outcome" role="status">
       {outcome.pullRequests.length > 0 && (
         <p>
           Opened{" "}
@@ -714,87 +739,316 @@ export function publishOffer(detail: SwarmDetail): { words: string; stackOnly: b
 }
 
 /**
- * What the swarm produced for people to read.
- *
- * On a document swarm this is the deliverable, so it is named as such
- * and sits first: the assembled file is what the swarm was for, and a
- * person opening the page after it finished is looking for it rather
- * than for the tree.
- *
- * Nothing here renders an artifact. Opening one hands it to the same
- * viewer a card's artifacts open in, which is where the rule lives
- * that keeps agent bytes off this origin: markdown through
- * react-markdown with raw HTML off, HTML only inside a sandboxed
- * iframe, everything else offered as a download. A second renderer
- * here would be a second place for that to be got wrong.
+ * Whether the pull request card has anything to say: a pull request,
+ * a stack, what a publish just did, or an offer to open one.
  */
-export function SwarmArtifacts({
-  artifacts,
-  deliverable,
-  onOpen,
+function pullRequestCardShown(
+  detail: SwarmDetail,
+  publish: { inFlight: "combined" | "stacked" | null; outcome: SwarmPublishOutcome | null } | null,
+  canPublish: boolean,
+): boolean {
+  return (
+    detail.pullRequests.length > 0 ||
+    stackedPullRequests(detail.tasks).length > 0 ||
+    Boolean(publish?.outcome) ||
+    (canPublish && publishOffer(detail) !== null)
+  );
+}
+
+/** A repository address as a person reads it: owner and name, without the host. */
+export function repoLabel(repoUrl: string): string {
+  return repoUrl
+    .replace(/^https?:\/\//i, "")
+    .replace(/^(www\.)?github\.com\//i, "")
+    .replace(/\.git$/i, "")
+    .replace(/\/+$/, "");
+}
+
+/**
+ * The swarm's pull request, or the offer to open one.
+ *
+ * One card whatever state it is in, so the place a person looks for
+ * the pull request is the same before it exists and after. Its rows
+ * are only what the console actually has: the repository and number,
+ * the swarm's branch, and the head commit the server recorded. Checks,
+ * reviews and line counts would be rows here too, and are not drawn
+ * because the swarm detail carries none of them; they can be added
+ * when the API does.
+ *
+ * A pull request is a link only when its row carried an address the
+ * console would follow. `client.ts` nulls anything that is not http or
+ * https, because an href is the one place a string the agents' side of
+ * the world wrote could run as the console. Drawn as text instead,
+ * with the reason in the tooltip, so a pull request that exists is
+ * still visible.
+ */
+function SwarmPullRequestCard({
+  detail,
+  publish,
+  busy,
+  onPublish,
 }: {
-  artifacts: SwarmArtifact[];
-  deliverable: SwarmDetail["swarm"]["deliverable"];
-  onOpen?: (artifact: SwarmArtifact) => void;
+  detail: SwarmDetail;
+  publish: { inFlight: "combined" | "stacked" | null; outcome: SwarmPublishOutcome | null } | null;
+  busy?: boolean;
+  onPublish?: (mode: "combined" | "stacked") => void;
 }) {
-  if (artifacts.length === 0) return null;
-  /*
-   * The assembled document is found by what it is, not by where it
-   * sits in the list. It was written last on a swarm's first pass, so
-   * newest first happened to put it at the top; a swarm reopened and
-   * worked again puts its workers' files above it, and the panel would
-   * then caption one of those "assembled from the sections in the
-   * plan".
-   */
-  const document =
-    deliverable === "document" ? artifacts.find((artifact) => artifact.stageSlug === "document") : undefined;
-  const rest = document ? artifacts.filter((artifact) => artifact.id !== document.id) : artifacts;
+  const swarm = detail.swarm;
+  const prs = detail.pullRequests;
+  const stacked = stackedPullRequests(detail.tasks);
+  const offer = onPublish && !publish?.outcome ? publishOffer(detail) : null;
+  const inFlight = publish?.inFlight ?? null;
+  const single = prs.length === 1 ? prs[0]! : null;
+  const [copied, copy] = useCopied();
+  const plural = prs.length > 1 || (prs.length === 0 && stacked.length > 0);
 
   return (
-    <section className="swarm-artifacts">
-      <span className="label">{deliverable === "document" ? "The document" : "Artifacts"}</span>
-      {document && (
-        <button
-          type="button"
-          className="swarm-artifact swarm-artifact-lead"
-          disabled={!onOpen}
-          onClick={() => onOpen?.(document)}
-        >
-          <span className="swarm-artifact-name">{document.path}</span>
-          <span className="muted">
-            Combined document, committed to the swarm branch.
-          </span>
-        </button>
+    <section
+      className="swarm-card swarm-pr-card"
+      aria-label={plural ? "Pull requests" : "Pull request"}
+      aria-busy={inFlight !== null}
+    >
+      <div className="swarm-card-head">
+        <span className="swarm-card-title">{plural ? "Pull requests" : "Pull request"}</span>
+        {plural && <span className="swarm-card-count">{prs.length > 0 ? prs.length : stacked.length}</span>}
+        <span className="swarm-card-spacer" />
+        {single?.url ? (
+          <a className="swarm-card-link" href={single.url} target="_blank" rel="noreferrer">
+            Open on GitHub <span aria-hidden="true">{"\u2197"}</span>
+          </a>
+        ) : prs.length === 0 && stacked.length > 0 ? (
+          <span className="swarm-card-note">Stacked, each on the one before</span>
+        ) : prs.length === 0 && !publish?.outcome ? (
+          <span className="swarm-card-note">Not opened yet</span>
+        ) : null}
+      </div>
+
+      {publish?.outcome && (
+        <div className="swarm-pr-body">
+          <PublishOutcome outcome={publish.outcome} />
+        </div>
       )}
-      {rest.length > 0 && (
-        <ul className="swarm-artifact-list">
-          {rest.map((artifact) => (
-            <li key={artifact.id}>
-              <button
-                type="button"
-                className="swarm-artifact"
-                disabled={!onOpen}
-                onClick={() => onOpen?.(artifact)}
-              >
-                <span className="swarm-artifact-name">{artifact.path}</span>
-                <span className="muted">{artifact.kind}</span>
-              </button>
+
+      {prs.map((pr) => (
+        <div key={pr.id} className="swarm-pr">
+          <div className="swarm-pr-title">
+            {pr.url ? (
+              <a className="swarm-pr-name" href={pr.url} target="_blank" rel="noreferrer">
+                {repoLabel(pr.repoUrl)} <span className="swarm-pr-number">#{pr.number}</span>
+              </a>
+            ) : (
+              <span className="swarm-pr-name" title="This pull request's address is not a web link, so it is shown without one.">
+                {repoLabel(pr.repoUrl)} <span className="swarm-pr-number">#{pr.number}</span>
+              </span>
+            )}
+            <span className="swarm-pr-sub">{pr.repoUrl}</span>
+          </div>
+          {/* Checks, review and change counts belong here once the API carries them. */}
+          <dl className="swarm-pr-rows">
+            {swarm.branchName && (
+              <>
+                <dt>Branch</dt>
+                <dd className="swarm-mono" title={swarm.branchName}>{swarm.branchName}</dd>
+              </>
+            )}
+            {pr.headSha && (
+              <>
+                <dt>Head commit</dt>
+                <dd className="swarm-mono" title={pr.headSha}>{pr.headSha.slice(0, 7)}</dd>
+              </>
+            )}
+          </dl>
+        </div>
+      ))}
+
+      {stacked.length > 0 && (
+        <ol className="swarm-pr-stack" aria-label="Stacked pull requests">
+          {stacked.map((pr, index) => (
+            <li key={pr.key}>
+              <span className="swarm-pr-stack-index swarm-mono">{index + 1}</span>
+              {pr.url ? (
+                <a className="swarm-pr-name" href={pr.url} target="_blank" rel="noreferrer" title={pr.repoUrl}>
+                  {pr.title} <span className="swarm-pr-number">#{pr.number}</span>
+                </a>
+              ) : (
+                <span className="swarm-pr-name" title="This pull request's address is not a web link, so it is shown without one.">
+                  {pr.title} <span className="swarm-pr-number">#{pr.number}</span>
+                </span>
+              )}
+              <span className="swarm-pr-stack-onto">{index > 0 ? `onto #${stacked[index - 1]!.number}` : ""}</span>
             </li>
           ))}
-        </ul>
+        </ol>
+      )}
+
+      {offer && (
+        <div className="swarm-pr-body" role="group" aria-label="Open pull requests">
+          {!offer.stackOnly && (
+            <span className="swarm-pr-offer-title">{swarm.status === "done" ? "Ready for review" : "Keep the work on GitHub"}</span>
+          )}
+          <p className="swarm-pr-offer">{offer.words}</p>
+        </div>
+      )}
+
+      {(offer || single?.url) && (
+        <div className="swarm-card-foot">
+          {offer ? (
+            offer.stackOnly ? (
+              <button className="btn btn-primary" disabled={busy} onClick={() => onPublish?.("stacked")}>
+                {inFlight === "stacked" ? "Opening\u2026" : "Add them to the stack"}
+              </button>
+            ) : (
+              <>
+                <button className="btn btn-primary" disabled={busy} onClick={() => onPublish?.("combined")}>
+                  {inFlight === "combined" ? "Opening\u2026" : "Open pull request"}
+                </button>
+                <button className="btn" disabled={busy} onClick={() => onPublish?.("stacked")}>
+                  {inFlight === "stacked" ? "Opening\u2026" : "Open one per task"}
+                </button>
+              </>
+            )
+          ) : (
+            single?.url && (
+              <button className="btn swarm-copy-link" onClick={() => copy(single.url!)} aria-label={copied ? "Link copied" : "Copy link"}>
+                {copied ? <TickMark /> : <CopyMark />}
+                <span className="swarm-copy-link-label">{copied ? "Copied" : "Copy link"}</span>
+              </button>
+            )
+          )}
+        </div>
       )}
     </section>
   );
 }
 
 /**
- * How many workers this swarm may run at once.
+ * What the swarm produced for people to read, as a table.
+ *
+ * On a document swarm the assembled file is the deliverable, so it is
+ * named as such and sits first: it is what the swarm was for, and a
+ * person opening the page after it finished is looking for it rather
+ * than for the tree. On a phone the same rows stack, the columns
+ * folded into one line under the name.
+ *
+ * Nothing here renders an artifact. Opening one hands it to the drawer,
+ * which renders through the same canvas a card's artifacts use: that is
+ * where the rule lives that keeps agent bytes off this origin, markdown
+ * through react-markdown with raw HTML off, HTML only inside a
+ * sandboxed iframe, everything else offered as a download. A second
+ * renderer here would be a second place for that to be got wrong.
+ */
+export function SwarmArtifacts({
+  artifacts,
+  deliverable,
+  tasks = [],
+  now = Date.now(),
+  onOpen,
+}: {
+  artifacts: SwarmArtifact[];
+  deliverable: SwarmDetail["swarm"]["deliverable"];
+  tasks?: SwarmDetail["tasks"];
+  now?: number;
+  onOpen?: (artifact: SwarmArtifact) => void;
+}) {
+  if (artifacts.length === 0) return null;
+  const ordered = orderArtifacts(artifacts, deliverable);
+  const lead = deliverable === "document" ? leadDocument(artifacts) : undefined;
+
+  return (
+    <section className="swarm-card swarm-artifacts" aria-label={lead ? "The document" : "Artifacts"}>
+      <div className="swarm-card-head">
+        <span className="swarm-card-title">{deliverable === "document" ? "The document" : "Artifacts"}</span>
+        <span className="swarm-card-count">{artifacts.length}</span>
+      </div>
+      <table className="swarm-art-table">
+        <thead>
+          <tr>
+            <th scope="col">Name</th>
+            <th scope="col" className="swarm-art-type">Type</th>
+            <th scope="col" className="swarm-art-num">Size</th>
+            <th scope="col" className="swarm-art-source">Source</th>
+            <th scope="col" className="swarm-art-num">Updated</th>
+          </tr>
+        </thead>
+        <tbody>
+          {ordered.map((artifact) => {
+            const { name, dir } = splitArtifactPath(artifact.path);
+            const isLead = artifact === lead;
+            const type = artifactTypeLabel(artifact.kind);
+            const source = artifactSourceLabel(artifact, tasks);
+            const age = formatAge(artifact.createdAt, now);
+            return (
+              <tr
+                key={artifact.id}
+                className="swarm-art-row"
+                data-lead={isLead ? "" : undefined}
+                data-openable={onOpen ? "" : undefined}
+                onClick={() => onOpen?.(artifact)}
+              >
+                <td>
+                  <button type="button" className="swarm-art-open" disabled={!onOpen} title={artifact.path}>
+                    <ArtifactMark kind={artifact.kind} />
+                    <span className="swarm-art-names">
+                      <span className="swarm-art-name">{name}</span>
+                      {isLead ? (
+                        <span className="swarm-art-caption">Combined document, committed to the swarm branch.</span>
+                      ) : (
+                        dir && <span className="swarm-art-dir">{dir}</span>
+                      )}
+                      <span className="swarm-art-meta">{[type, formatBytes(artifact.size), source, age].filter(Boolean).join(" · ")}</span>
+                    </span>
+                    <span className="swarm-art-go" aria-hidden="true"><ChevronMark right /></span>
+                  </button>
+                </td>
+                <td className="swarm-art-type">{type}</td>
+                <td className="swarm-art-num swarm-mono">{formatBytes(artifact.size)}</td>
+                <td className="swarm-art-source" title={source}>{source}</td>
+                <td className="swarm-art-num">{age}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </section>
+  );
+}
+
+/**
+ * The assembled document, found by what it is rather than by where it
+ * sits in the list. It was written last on a swarm's first pass, so
+ * newest first happened to put it at the top; a swarm reopened and
+ * worked again puts its workers' files above it, and the table would
+ * then caption one of those as the combined document.
+ */
+function leadDocument(artifacts: SwarmArtifact[]): SwarmArtifact | undefined {
+  return artifacts.find((artifact) => artifact.stageSlug === "document");
+}
+
+/**
+ * The artifacts in the order the page lists them, which is also the
+ * order the drawer steps through: a document swarm's assembled file
+ * first, then the rest as the route sent them, newest first.
+ */
+export function orderArtifacts(artifacts: SwarmArtifact[], deliverable: SwarmDetail["swarm"]["deliverable"]): SwarmArtifact[] {
+  const lead = deliverable === "document" ? leadDocument(artifacts) : undefined;
+  return lead ? [lead, ...artifacts.filter((artifact) => artifact.id !== lead.id)] : artifacts;
+}
+
+function ArtifactMark({ kind }: { kind: SwarmArtifact["kind"] }) {
+  if (kind === "image") return <ImageMark />;
+  if (kind === "mermaid") return <DiagramMark />;
+  return <FileMark />;
+}
+
+/**
+ * How many workers this swarm may run at once, one more or one fewer.
  *
  * A stepper rather than a field: the number is small, bounded by
- * MAX_SWARM_WORKERS, and changed by one more or one fewer far more
- * often than it is typed. What is already working is printed beside
- * it, because raising the ceiling while six workers are busy is a
- * different decision from raising it while none are.
+ * MAX_SWARM_WORKERS, and changed by one far more often than it is
+ * typed. The figure itself is printed beside it by whoever draws it,
+ * with what is already working, because raising the ceiling while six
+ * workers are busy is a different decision from raising it while none
+ * are.
  */
 export function WorkerStepper({
   workers,
@@ -812,11 +1066,11 @@ export function WorkerStepper({
   const decreaseReason = disabledReason ?? (workers <= 1 ? "A swarm needs at least one worker." : null);
   const increaseReason = disabledReason ?? (workers >= max ? `Maximum is ${max} workers.` : null);
   return (
-    <div className="swarm-workers" title={`${active} of ${workers} working, maximum ${max} workers`}>
+    <span className="swarm-stepper" role="group" aria-label="Workers" title={`${active} of ${workers} working, maximum ${max} workers`}>
       <span className="swarm-worker-step" title={decreaseReason ?? `Decrease to ${workers - 1} workers`}>
         <button
           type="button"
-          className="btn btn-ghost"
+          className="swarm-stepper-btn"
           aria-label="One fewer worker"
           disabled={Boolean(decreaseReason)}
           onClick={() => onChange(workers - 1)}
@@ -824,15 +1078,10 @@ export function WorkerStepper({
           <StepMark direction="down" />
         </button>
       </span>
-      <span className="swarm-workers-count">
-        <span className="spend-figure">{active}</span>
-        <span className="swarm-workers-of">of</span>
-        <span className="spend-figure">{workers}</span>
-      </span>
       <span className="swarm-worker-step" title={increaseReason ?? `Increase to ${workers + 1} workers`}>
         <button
           type="button"
-          className="btn btn-ghost"
+          className="swarm-stepper-btn"
           aria-label="One more worker"
           disabled={Boolean(increaseReason)}
           onClick={() => onChange(workers + 1)}
@@ -840,7 +1089,7 @@ export function WorkerStepper({
           <StepMark direction="up" />
         </button>
       </span>
-    </div>
+    </span>
   );
 }
 
@@ -860,6 +1109,34 @@ function StepMark({ direction }: { direction: "up" | "down" }) {
     >
       <path d="M3.5 8h9" />
       {direction === "up" && <path d="M8 3.5v9" />}
+    </svg>
+  );
+}
+
+function BranchMark() {
+  return (
+    <svg className="swarm-mark" width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true" focusable="false">
+      <circle cx="4.5" cy="3.5" r="1.5" />
+      <circle cx="4.5" cy="12.5" r="1.5" />
+      <circle cx="11.5" cy="5.5" r="1.5" />
+      <path d="M4.5 5v6M11.5 7c0 3-7 2-7 4" />
+    </svg>
+  );
+}
+
+function CopyMark() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      <rect x="5.5" y="5.5" width="8" height="8" rx="1.5" />
+      <path d="M10.5 5.5V3.5A1 1 0 0 0 9.5 2.5h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2" />
+    </svg>
+  );
+}
+
+function TickMark() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      <path d="m3 8.5 3 3 7-7" />
     </svg>
   );
 }
