@@ -1045,6 +1045,18 @@ run twice.
 A dedicated `pg.Client` (the LISTEN connection in `pg-bus.ts`) is
 outside this and has to handle its own reconnect.
 
+The billing module gets its own pool (`createCloudPool`), not the app
+pool. `canUseSwarms` reads `organization_plans` from inside the
+request's tenant transaction, which already holds one app-pool client.
+A second checkout from that same pool deadlocks it: the web process
+has 16 clients, a burst of swarm and run reads holds them all while
+each waits for another, and ten seconds later the plan query, the
+next request's transaction, and session lookup (`Failed to get
+session`) time out together. The lookup stays on its own pool, as the
+pool role, because the request transaction has already `SET ROLE` to
+`bento_user` and `organization_plans` is not a tenant table of this
+server. Do not point the module back at `ctx.db`.
+
 ## Personal subscription connections are never organization credentials
 
 `agent_accounts` and `agent_account_logins` use user RLS (`bento.user_id`),

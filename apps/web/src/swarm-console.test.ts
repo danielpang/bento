@@ -15,7 +15,7 @@ import { SwarmTree } from "./components/SwarmTree.js";
 import { SwarmOutline } from "./components/SwarmOutline.js";
 import { SwarmPlannerStep } from "./components/SwarmPlannerStep.js";
 import { SwarmNodeDrawer } from "./components/SwarmNodeDrawer.js";
-import { RunConversationRows, SwarmRunOutput, SwarmRunOutputDrawer, SwarmWorkerOutputDrawer } from "./components/SwarmRunOutput.js";
+import { EarlierPlannerNotice, RunConversationRows, SwarmRunOutput, SwarmRunOutputDrawer, SwarmWorkerOutputDrawer } from "./components/SwarmRunOutput.js";
 import type { SwarmPlannerMessage } from "./swarm/client.js";
 import { publishOffer, stackedPullRequests, SwarmArtifacts, SwarmPage, SwarmPlanBrief, WorkerStepper } from "./components/SwarmPage.js";
 import { ceilingRefusal, reopenEffectLines } from "./components/ReopenDialog.js";
@@ -963,6 +963,34 @@ test("planner guidance stays inline with replies across runs, not in an earlier-
   const ordered = [earlier.text, "I will preserve the API.", "The initial plan is ready.", current.text, "I will update the checkout plan."];
   for (let i = 1; i < ordered.length; i++) assert.ok(conversation.indexOf(ordered[i - 1]!) < conversation.indexOf(ordered[i]!));
   assert.equal(conversation.split(current.text).length - 1, 1, "a live turn's echoed guidance keeps its place, without a duplicate");
+});
+
+test("earlier planner runs share one loading line and one failure line", () => {
+  const runs = [1, 2, 3, 4, 5].map((index) => ({
+    id: `run-${index}`,
+    queuedAt: `2026-09-04T12:0${index}:00.000Z`,
+    endedAt: `2026-09-04T12:0${index}:30.000Z`,
+  }));
+  const html = renderToStaticMarkup(createElement(SwarmRunOutput, {
+    client: {} as BentoClient,
+    runId: "run-now",
+    agentName: "Staff Engineer",
+    plannerRuns: runs,
+  }));
+  assert.equal(html.split("Loading earlier planner output...").length - 1, 1);
+  assert.doesNotMatch(html, /Could not load earlier planner output/);
+
+  const failed = renderToStaticMarkup(createElement(EarlierPlannerNotice, { pending: false, failed: true, onRetry: () => {} }));
+  assert.equal(failed.split("Could not load earlier planner output.").length - 1, 1);
+  assert.match(failed, /Try again/);
+  assert.doesNotMatch(failed, /[\u2013\u2014]/);
+
+  // One run still reading does not hide a run that already failed, and
+  // neither sentence is repeated.
+  const waiting = renderToStaticMarkup(createElement(EarlierPlannerNotice, { pending: true, failed: true, onRetry: () => {} }));
+  assert.equal(waiting.split("Loading earlier planner output...").length - 1, 1);
+  assert.equal(waiting.split("Could not load earlier planner output.").length - 1, 1);
+  assert.match(waiting, /Try again/);
 });
 
 test("a checkout failure offers retry and keeps its error in technical details", () => {
