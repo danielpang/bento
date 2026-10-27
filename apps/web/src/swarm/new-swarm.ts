@@ -167,18 +167,6 @@ export function base64Bytes(data: string): number {
   return Math.max(0, Math.floor((data.length * 3) / 4) - padding);
 }
 
-/** What a source in the dialog's list is called. */
-export function newSourceLabel(source: NewPlanSource): string {
-  if (source.kind === "website") return "Website";
-  if (!("data" in source)) return "File";
-  return source.mime === "application/pdf" ? "PDF" : "Image";
-}
-
-/** How big a file in the dialog's list is, in the unit a person reads it by. */
-export function newSourceSize(source: Extract<NewPlanSource, { kind: "file" }>): string {
-  return "data" in source ? formatBytes(base64Bytes(source.data)) : formatChars(source.content.length);
-}
-
 /** What the dialog says about a branch name git would refuse. */
 export const branchNameRefusal =
   "A branch name has no spaces and no colons in it. Check what the branch is actually called, or leave this empty for a new one.";

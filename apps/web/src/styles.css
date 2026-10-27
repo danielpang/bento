@@ -10812,6 +10812,22 @@ a.hours-person-name:hover {
   line-height: 1.45;
 }
 
+/* The goal's length note is always in the document, for the field's
+   description; the block takes no room while it has nothing to say. */
+.swarm-composer-notes[data-empty] {
+  display: none;
+}
+
+.swarm-composer-cancel {
+  height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.swarm-composer-hint {
+  flex: none;
+}
+
 .swarm-composer-toolbar {
   display: flex;
   align-items: center;
@@ -11215,6 +11231,38 @@ a.hours-person-name:hover {
   color: var(--text-dim);
 }
 
+/* The settings dialog's fields, fitted to the popover's rhythm. */
+.swarm-defaults .swarm-settings-fields {
+  gap: 14px;
+}
+
+.swarm-defaults .swarm-settings-group {
+  gap: 6px;
+}
+
+.swarm-defaults .swarm-settings-group > legend.field-heading,
+.swarm-defaults .swarm-settings-group .field > .field-heading {
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: normal;
+  text-transform: none;
+  color: var(--text-faint);
+}
+
+.swarm-defaults .swarm-settings-group > legend.field-heading {
+  font-weight: 500;
+  color: var(--text);
+}
+
+.swarm-defaults .swarm-settings-group .field-row {
+  gap: 12px;
+}
+
+.swarm-defaults .swarm-settings-group .muted {
+  font-size: 12px;
+}
+
 .swarm-defaults-foot {
   display: flex;
   align-items: center;
@@ -11313,28 +11361,33 @@ a.hours-person-name:hover {
   font-size: 12px;
 }
 
-/* The branch gives way before the name does. */
-.swarm-composer-summary {
-  display: inline-flex;
-  flex: 0 4 auto;
-  gap: 8px;
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-}
-
-.swarm-composer-summary > span {
+.swarm-composer-branch {
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.swarm-composer-summary > .swarm-mono {
+/* The second line: the shortcut on the left, what Defaults is set to on the right. */
+.swarm-composer-foot {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  min-width: 0;
+  margin-top: -6px;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.swarm-composer-summary {
   flex: 0 1 auto;
-}
-
-.swarm-composer-summary > span:last-child {
-  flex: none;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
 }
 
 /* Recent swarms, under the composer. */
@@ -12657,9 +12710,14 @@ a.swarm-pr-name:hover {
   }
 
   .swarm-composer-divider,
-  .swarm-composer-summary,
+  .swarm-composer-branch,
   .swarm-composer-under > .swarm-composer-spacer {
     display: none;
+  }
+
+  /* The shortcut means nothing to a thumb; the settings line stays. */
+  .swarm-composer-foot {
+    margin-top: -2px;
   }
 
   .swarm-composer-name-value {
@@ -12685,8 +12743,17 @@ a.swarm-pr-name:hover {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .swarm-defaults-note {
+  .swarm-defaults-note,
+  .swarm-composer-hint {
     display: none;
+  }
+
+  .swarm-composer-summary {
+    text-align: left;
+  }
+
+  .swarm-composer-cancel {
+    height: 36px;
   }
 
   .swarm-recent {

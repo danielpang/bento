@@ -21,7 +21,7 @@ import type { SwarmArtifact, SwarmTask } from "../swarm/types.js";
  * anything else as a download. Nothing here draws an artifact itself.
  *
  * Escape and a press outside close it, as every drawer on the page
- * does. Left and right step through the swarm's artifacts in the order
+ * does. Like them it traps no focus, so it does not claim to be modal. Left and right step through the swarm's artifacts in the order
  * the page lists them, except while a field has the keys.
  */
 export function SwarmArtifactDrawer({
@@ -94,7 +94,6 @@ export function SwarmArtifactDrawer({
         ref={panel}
         className="swarm-adrawer"
         role="dialog"
-        aria-modal="true"
         aria-label={`Artifact ${name}`}
         tabIndex={-1}
       >

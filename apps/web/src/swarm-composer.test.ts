@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { attachmentName, attachmentSize, nameFromGoal, suggestBranch } from "./swarm/new-swarm.js";
 import { formatAge, formatDuration, shortDate } from "./swarm/time.js";
-import { artifactSourceLabel, artifactTypeLabel, splitArtifactPath } from "./swarm/artifacts.js";
+import { artifactSourceLabel, artifactTypeLabel, artifactsAfterRefetch, splitArtifactPath } from "./swarm/artifacts.js";
 import { summaryWords } from "./components/SwarmComposer.js";
+import { DEFAULT_RUN_SETTINGS, runSettingsSummary, type RunSettingsDraft } from "./components/SwarmSettingsFields.js";
+import { isApplePlatform, sendModifierName } from "./platform.js";
 import { orderArtifacts, repoLabel } from "./components/SwarmPage.js";
 import { seedSwarms } from "./swarm/fixtures.js";
 import type { SwarmArtifact } from "./swarm/types.js";
@@ -14,6 +16,11 @@ import type { SwarmArtifact } from "./swarm/types.js";
  */
 
 const NOW = Date.parse("2026-10-27T12:00:00.000Z");
+
+const AGENTS = [
+  { id: "agent-planner", name: "Swarm Planner", cli: "claude-code", model: "opus" },
+  { id: "agent-worker", name: "Swarm Worker", cli: "claude-code", model: "sonnet" },
+];
 
 test("a swarm is named from the first words of its goal", () => {
   assert.equal(nameFromGoal("Build an MVP for OpenBot according to the attached spec."), "Build an MVP for OpenBot");
@@ -44,14 +51,46 @@ test("an attachment's chip says its name and its size in bytes", () => {
   assert.equal(attachmentSize({ kind: "website", url: "https://example.com" }), null);
 });
 
-test("the line under the composer says what the defaults are", () => {
-  assert.equal(summaryWords({ continuing: false, deliverable: "code", budgetUsd: null, timeLimitMin: null }), "new branch · code · no cap");
+test("the line under the composer says what the defaults are, final check included", () => {
+  const settings = (draft: Partial<RunSettingsDraft> = {}, deliverable: "code" | "document" = "code") =>
+    runSettingsSummary({ ...DEFAULT_RUN_SETTINGS, ...draft }, AGENTS, deliverable);
   assert.equal(
-    summaryWords({ continuing: true, deliverable: "document", budgetUsd: 40, timeLimitMin: 90 }),
-    "existing branch · document · $40 cap · 90 min limit",
+    summaryWords({ continuing: false, budgetUsd: null, timeLimitMin: null, settings: settings() }),
+    "new branch · no cap · changes code, no final check, one planner",
+  );
+  assert.equal(
+    summaryWords({ continuing: true, budgetUsd: 40, timeLimitMin: 90, settings: settings({ completionCommand: "pnpm test", judgeProfileId: "agent-worker" }, "document") }),
+    "existing branch · $40 cap · 90 min limit · writes a document, final check by Swarm Worker after pnpm test, one planner",
   );
   // A budget still being typed wrong reads as no cap rather than as a number.
-  assert.equal(summaryWords({ continuing: false, deliverable: "code", budgetUsd: undefined, timeLimitMin: undefined }), "new branch · code · no cap");
+  assert.equal(
+    summaryWords({ continuing: false, budgetUsd: undefined, timeLimitMin: undefined, settings: "" }),
+    "new branch · no cap",
+  );
+});
+
+test("the shortcut is named for the keyboard in front of the person", () => {
+  assert.equal(isApplePlatform({ platform: "MacIntel" }), true);
+  assert.equal(isApplePlatform({ platform: "iPhone" }), true);
+  assert.equal(isApplePlatform({ platform: "Win32" }), false);
+  assert.equal(isApplePlatform({ platform: "Linux x86_64" }), false);
+  // The modern hint wins over the old one when a browser gives both.
+  assert.equal(isApplePlatform({ platform: "", userAgentData: { platform: "macOS" } }), true);
+  assert.equal(isApplePlatform({ platform: "MacIntel", userAgentData: { platform: "Windows" } }), false);
+  assert.equal(isApplePlatform({}), false);
+  assert.equal(sendModifierName(true), "Cmd");
+  assert.equal(sendModifierName(false), "Ctrl");
+});
+
+test("a refetch that failed keeps the artifacts, and one that changed nothing keeps the same list", () => {
+  const rows = [artifact({ id: "a" }), artifact({ id: "b", path: "docs/b.md" })];
+  assert.equal(artifactsAfterRefetch(rows, null), rows, "a failed refetch is not an empty swarm");
+  assert.equal(artifactsAfterRefetch(rows, rows.map((row) => ({ ...row }))), rows, "the same rows keep the same array");
+  const grown = [...rows, artifact({ id: "c", path: "docs/c.md" })];
+  assert.equal(artifactsAfterRefetch(rows, grown), grown);
+  const rewritten = [rows[0]!, { ...rows[1]!, size: rows[1]!.size + 1 }];
+  assert.equal(artifactsAfterRefetch(rows, rewritten), rewritten, "a rewritten file is a change");
+  assert.deepEqual(artifactsAfterRefetch([], []), []);
 });
 
 test("an age is a few characters, and a date once it is old", () => {

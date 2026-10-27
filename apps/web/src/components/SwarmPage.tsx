@@ -17,14 +17,24 @@ import type { SwarmArtifact, SwarmDetail, SwarmPlanSource } from "../swarm/types
 import type { LandingPage, SwarmAgent, SwarmPublishOutcome } from "../swarm/client.js";
 import { formatBytes } from "@bento/core";
 import { externalHttpUrl } from "../external-url.js";
+import { copyText } from "../clipboard.js";
 import { browserStorage, readBriefOpen, rememberBriefOpen, type StorageLike, type SwarmView } from "../swarm/view-state.js";
 
-/** Ticks the header's clock, and only while there is something running. */
+/**
+ * The page's clock: every second while something is running, and
+ * every thirty seconds otherwise.
+ *
+ * Never frozen, because the page is not keyed by swarm and the ages
+ * on it ("Finished 2h ago", the duration, when each artifact was
+ * written) are read against this. Set once at mount, a finished swarm
+ * left open said "just now" for as long as the tab lived, and one
+ * switched to from a live swarm kept the live swarm's clock.
+ */
 function useNow(live: boolean): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    if (!live) return;
-    const id = setInterval(() => setNow(Date.now()), 1000);
+    setNow(Date.now());
+    const id = setInterval(() => setNow(Date.now()), live ? 1000 : 30_000);
     return () => clearInterval(id);
   }, [live]);
   return now;
@@ -579,7 +589,7 @@ function useCopied(): [boolean, (text: string) => void] {
   return [
     copied,
     (text: string) => {
-      void navigator.clipboard?.writeText(text).then(() => setCopied(true), () => {});
+      void copyText(text).then(() => setCopied(true), () => setCopied(false));
     },
   ];
 }

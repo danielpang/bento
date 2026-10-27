@@ -166,13 +166,21 @@ export function useArtifactCanvas(client: BentoClient, artifact: RunArtifact | n
   const [failed, setFailed] = useState(false);
   const [showSource, setShowSource] = useState(false);
 
+  /*
+   * Keyed by the artifact's id, never the row object: the swarm page
+   * refetches its artifact list on every event the stream delivers,
+   * and the row it hands the drawer is a new object each time. Keyed
+   * by the object, every event cleared the text, flipped Source back
+   * to Preview and remounted the HTML frame under the reader.
+   */
+  const artifactId = artifact?.id ?? null;
   useEffect(() => {
     setText(null);
     setFailed(false);
     setShowSource(false);
-    if (!artifact || !needsText) return;
+    if (!artifactId || !needsText) return;
     let cancelled = false;
-    client.getArtifactText(artifact.id).then(
+    client.getArtifactText(artifactId).then(
       (body) => {
         if (!cancelled) setText(body);
       },
@@ -183,7 +191,7 @@ export function useArtifactCanvas(client: BentoClient, artifact: RunArtifact | n
     return () => {
       cancelled = true;
     };
-  }, [client, artifact, needsText]);
+  }, [client, artifactId, needsText]);
 
   const sourceToggle =
     artifact?.kind === "html" && text !== null ? (

@@ -1,20 +1,21 @@
 import * as Menu from "@radix-ui/react-dropdown-menu";
 import { MAX_SWARM_GOAL_CHARS, MAX_SWARM_WORKERS, MODEL_GUIDANCE } from "@bento/core";
-import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { growComposer, SendMark } from "./ChatComposer.js";
 import { capitalise, CheckMark, ChevronMark, CloseMark, FileMark, GearMark, GlobeMark, ImageMark, PlusMark, StepGlyph } from "./SwarmMarks.js";
-import { SwarmAgentSelect } from "./SwarmAgentSelect.js";
 import {
   DEFAULT_RUN_SETTINGS,
-  PLAN_DEPTHS,
+  SwarmRunSettingsFields,
   budgetHelp,
   parseBudget,
   parseTimeLimit,
+  runSettingsSummary,
   settingsFrom,
   timeLimitHelp,
   type RunSettingsDraft,
 } from "./SwarmSettingsFields.js";
 import { REPOSITORY_SETUP_ACTION } from "../repository-setup.js";
+import { isApplePlatform, sendModifierName } from "../platform.js";
 import type { ModeSurfaces } from "../swarm/plan.js";
 import type { SwarmAgent } from "../swarm/client.js";
 import type { NewPlanSource, NewSwarmInput, SwarmSummary } from "../swarm/types.js";
@@ -65,6 +66,7 @@ export function SwarmComposer({
   onNewAgent,
   onManageAgents,
   onSelectSwarm,
+  onCancel,
   onCreate,
   now = Date.now(),
 }: {
@@ -83,6 +85,8 @@ export function SwarmComposer({
   /** Opens the Agents panel. */
   onManageAgents?: () => void;
   onSelectSwarm?: (swarmId: string) => void;
+  /** Leaves the composer for the swarm that was open. Absent when there is none to go back to. */
+  onCancel?: () => void;
   onCreate: (input: NewSwarmInput) => Promise<void>;
   /** The clock the recent list's ages are read against. */
   now?: number;
@@ -142,6 +146,10 @@ export function SwarmComposer({
   const [defaultsOpen, setDefaultsOpen] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const siteInput = useRef<HTMLInputElement>(null);
+  /** Set while the attach menu closes onto the website field, so the menu does not take focus back. */
+  const siteFieldNext = useRef(false);
+  /** A create in flight, so a second press cannot send the same swarm twice. */
+  const sending = useRef(false);
   const goalInput = useRef<HTMLTextAreaElement>(null);
   const gear = useRef<HTMLButtonElement>(null);
   const ids = useId();
@@ -176,13 +184,23 @@ export function SwarmComposer({
   const workerName = agentName(agents, workerProfileId, "Swarm Worker");
   const agentsAreDefault = plannerProfileId === plannerDefault && workerProfileId === workerDefault;
 
+  /*
+   * Enter is a newline: a goal is a paragraph or two, and a swarm is
+   * not something to start by accident at the end of a line. The
+   * modifier and Enter, or the send button, creates it. Escape in an
+   * empty field goes back to the swarm that was open.
+   */
   const onGoalKey = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.nativeEvent.isComposing || event.keyCode === 229) return;
-    if (event.key === "Enter" && !event.shiftKey) {
+    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
       event.preventDefault();
       submit();
+    } else if (event.key === "Escape" && onCancel && goal.trim() === "" && planSources.length === 0) {
+      event.preventDefault();
+      onCancel();
     }
   };
+  const modifier = sendModifierName(isApplePlatform());
 
   return (
     <div className="swarm-composer-screen">
@@ -205,6 +223,7 @@ export function SwarmComposer({
             autoFocus
             placeholder={existingPlan ? "What should the swarm do with the plan?" : "What should be true when this is finished?"}
             aria-invalid={goalTooLong}
+            aria-describedby={`${ids}-goal-length`}
             onChange={(event) => setGoal(event.target.value)}
             onKeyDown={onGoalKey}
           />
@@ -267,17 +286,17 @@ export function SwarmComposer({
             </div>
           )}
 
-          {(reading > 0 || planRefusal || goalTooLong) && (
-            <div className="swarm-composer-notes">
-              {reading > 0 && <span className="muted" role="status">Reading {reading === 1 ? "a file" : `${reading} files`}.</span>}
-              {planRefusal && <span className="swarm-reopen-refusal" role="alert">{planRefusal}</span>}
-              {goalTooLong && (
-                <span className="error">
-                  {goalLength.toLocaleString()} / {MAX_SWARM_GOAL_CHARS.toLocaleString()} characters. Shorten the goal to create this swarm.
-                </span>
-              )}
-            </div>
-          )}
+          <div className="swarm-composer-notes" data-empty={reading > 0 || planRefusal || goalTooLong ? undefined : ""}>
+            {reading > 0 && <span className="muted" role="status">Reading {reading === 1 ? "a file" : `${reading} files`}.</span>}
+            {planRefusal && <span className="swarm-reopen-refusal" role="alert">{planRefusal}</span>}
+            {/* Always in the document, so the field's description points at
+                something; it says nothing until the goal is too long. */}
+            <span id={`${ids}-goal-length`} className="error" role={goalTooLong ? "alert" : undefined}>
+              {goalTooLong
+                ? `${goalLength.toLocaleString()} / ${MAX_SWARM_GOAL_CHARS.toLocaleString()} characters. Shorten the goal to create this swarm.`
+                : ""}
+            </span>
+          </div>
 
           <div className="swarm-composer-toolbar">
             <input
@@ -297,12 +316,32 @@ export function SwarmComposer({
                 <PlusMark />
               </Menu.Trigger>
               <Menu.Portal>
-                <Menu.Content className="picker-menu swarm-attach-menu" align="start" sideOffset={6} data-portal-layer="">
+                <Menu.Content
+                  className="picker-menu swarm-attach-menu"
+                  align="start"
+                  sideOffset={6}
+                  data-portal-layer=""
+                  // Radix gives focus back to the trigger a tick after the
+                  // menu closes, which would take it off the website field
+                  // the item just opened. The field keeps it instead.
+                  onCloseAutoFocus={(event) => {
+                    if (!siteFieldNext.current) return;
+                    siteFieldNext.current = false;
+                    event.preventDefault();
+                    siteInput.current?.focus();
+                  }}
+                >
                   <Menu.Item className="picker-item" onSelect={() => fileInput.current?.click()}>
                     <FileMark />
                     <span className="picker-item-name">Upload files</span>
                   </Menu.Item>
-                  <Menu.Item className="picker-item" onSelect={() => setAddingSite(true)}>
+                  <Menu.Item
+                    className="picker-item"
+                    onSelect={() => {
+                      siteFieldNext.current = true;
+                      setAddingSite(true);
+                    }}
+                  >
                     <GlobeMark />
                     <span className="picker-item-name">Add website</span>
                   </Menu.Item>
@@ -369,6 +408,11 @@ export function SwarmComposer({
 
             <span className="swarm-composer-spacer" />
 
+            {onCancel && (
+              <button type="button" className="btn btn-ghost swarm-composer-cancel" onClick={onCancel}>
+                Cancel
+              </button>
+            )}
             <button
               ref={gear}
               type="button"
@@ -387,7 +431,7 @@ export function SwarmComposer({
               type="button"
               className="swarm-send"
               aria-label="Create swarm"
-              title="Create swarm"
+              title={`Create swarm (${modifier}+Enter)`}
               disabled={!ready || busy}
               onClick={submit}
             >
@@ -495,10 +539,11 @@ export function SwarmComposer({
             )}
           </span>
           <span className="swarm-composer-spacer" />
-          <span className="swarm-composer-summary">
-            {(continuing || branchName) && <span className="swarm-mono" title={continuing ? "The branch this swarm continues" : "The branch the server will create"}>{continuing || branchName}</span>}
-            <span>{summaryWords({ continuing: continuing !== "", deliverable, budgetUsd, timeLimitMin })}</span>
-          </span>
+          {(continuing || branchName) && (
+            <span className="swarm-composer-branch swarm-mono" title={continuing ? "The branch this swarm continues" : "The branch the server will create"}>
+              {continuing || branchName}
+            </span>
+          )}
           <button
             type="button"
             className="swarm-link swarm-composer-defaults-link"
@@ -509,6 +554,16 @@ export function SwarmComposer({
           >
             Defaults
           </button>
+        </div>
+
+        {/* The second line: how to send, and what Defaults is set to, in
+            the settings dialog's own sentence so a judge or a command set
+            there is read here once the popover closes. */}
+        <div className="swarm-composer-foot">
+          <span className="swarm-composer-hint">{modifier}+Enter creates the swarm. Enter starts a new line.</span>
+          <span className="swarm-composer-summary" title={runSettingsSummary(runSettings, agents, deliverable)}>
+            {summaryWords({ continuing: continuing !== "", budgetUsd, timeLimitMin, settings: runSettingsSummary(runSettings, agents, deliverable) })}
+          </span>
         </div>
 
         {error && <p className="error error-box" role="alert">{error}</p>}
@@ -583,11 +638,12 @@ export function SwarmComposer({
    * only is how every swarm begins rather than a box to tick.
    */
   function submit() {
-    if (!ready || busy) {
+    if (!ready || busy || sending.current) {
       if (defaultsInvalid) setDefaultsOpen(true);
       return;
     }
     setError("");
+    sending.current = true;
     void onCreate({
       projectId,
       name: name.trim(),
@@ -603,23 +659,35 @@ export function SwarmComposer({
       timeLimitMin: timeLimitMin ?? null,
       workers,
       planOnly: true,
-    }).catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
+    })
+      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
+      .finally(() => {
+        sending.current = false;
+      });
   }
 }
 
-/** The line under the composer, after the branch: what kind of branch, what it makes, and its ceilings. */
+/**
+ * The line under the composer, after the branch: what kind of branch,
+ * its ceilings, and then what the run settings say (what it produces,
+ * the final check, planning, instructions), in the sentence the
+ * settings dialog uses, so a judge or a command set in Defaults is
+ * read here once the popover closes.
+ */
 export function summaryWords(input: {
   continuing: boolean;
-  deliverable: "code" | "document";
   budgetUsd: number | null | undefined;
   timeLimitMin: number | null | undefined;
+  /** `runSettingsSummary`'s sentence. */
+  settings: string;
 }): string {
   const parts = [
     input.continuing ? "existing branch" : "new branch",
-    input.deliverable === "document" ? "document" : "code",
     typeof input.budgetUsd === "number" ? `$${input.budgetUsd.toLocaleString()} cap` : "no cap",
   ];
   if (typeof input.timeLimitMin === "number") parts.push(`${input.timeLimitMin.toLocaleString()} min limit`);
+  const settings = input.settings.replace(/\.$/, "");
+  if (settings) parts.push(settings.charAt(0).toLowerCase() + settings.slice(1));
   return parts.join(" · ");
 }
 
@@ -839,9 +907,12 @@ function SwarmAgentsMenu({
  * in a popover under the composer: the ceilings, what it produces,
  * where it starts, the final check, planning, and instructions.
  *
- * The validation is the settings dialog's own (`parseBudget`,
- * `parseTimeLimit`, `isBranchName`), so a value refused here is the
- * value the swarm's settings would refuse too. Each field is used for
+ * The ceilings and the branch are this popover's own fields, checked
+ * by the settings dialog's rules (`parseBudget`, `parseTimeLimit`,
+ * `isBranchName`); what it produces, the final check, planning and
+ * the instructions are `SwarmRunSettingsFields`, the dialog's own
+ * fields, so a value refused or described here is the one the swarm's
+ * settings would refuse or describe too. Each field is used for
  * this swarm only; what can change after it exists is changed in the
  * swarm's own settings.
  */
@@ -887,11 +958,8 @@ function SwarmDefaultsPopover({
   const panel = useRef<HTMLDivElement>(null);
   const close = useRef(onClose);
   close.current = onClose;
-  const [plannerOpen, setPlannerOpen] = useState(draft.plannerInstructions.trim() !== "");
-  const [workerOpen, setWorkerOpen] = useState(draft.workerInstructions.trim() !== "");
   const budgetUsd = parseBudget(budget);
   const timeLimitMin = parseTimeLimit(timeLimit);
-  const set = (change: Partial<RunSettingsDraft>) => onDraft({ ...draft, ...change });
 
   useEffect(() => {
     panel.current?.querySelector<HTMLElement>("button, input, select, textarea")?.focus({ preventScroll: true });
@@ -960,124 +1028,32 @@ function SwarmDefaultsPopover({
         </label>
       </div>
 
-      <div className="swarm-defaults-row">
-        <div className="swarm-defaults-field">
-          <span className="swarm-defaults-label">Produces</span>
-          <div className="seg swarm-defaults-seg" role="group" aria-label="What it produces">
-            {(
-              [
-                ["code", "Code change"],
-                ["document", "Document"],
-              ] as const
-            ).map(([value, label]) => (
-              <button
-                key={value}
-                type="button"
-                className="seg-item"
-                aria-pressed={deliverable === value}
-                data-on={deliverable === value ? "" : undefined}
-                onClick={() => onDeliverable(value)}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </div>
-        <label className="swarm-defaults-field">
-          <span className="swarm-defaults-label">Start from a branch</span>
-          <input
-            className="input swarm-mono"
-            value={startBranch}
-            placeholder={branchPlaceholder}
-            spellCheck={false}
-            aria-invalid={branchRefusal !== null}
-            onChange={(event) => onStartBranch(event.target.value)}
-          />
-          {branchRefusal && <span className="swarm-reopen-refusal">{branchRefusal}</span>}
-        </label>
-      </div>
-
-      <div className="swarm-defaults-row">
-        <SwarmAgentSelect
-          label="Judge agent"
-          value={draft.judgeProfileId}
-          agents={agents}
-          onChange={(judgeProfileId) => set({ judgeProfileId })}
-          fallback="None"
-        />
-        <label className="swarm-defaults-field">
-          <span className="swarm-defaults-label">Command that must pass</span>
-          <input
-            className="input swarm-mono"
-            value={draft.completionCommand}
-            placeholder="pnpm test"
-            spellCheck={false}
-            onChange={(event) => set({ completionCommand: event.target.value })}
-          />
-        </label>
-      </div>
-
       <label className="swarm-defaults-field">
-        <span className="swarm-defaults-label">Planning</span>
-        <select
-          className="input"
-          value={draft.maxPlanDepth}
-          onChange={(event) => set({ maxPlanDepth: Number(event.target.value) })}
-        >
-          {PLAN_DEPTHS.map((option) => (
-            <option key={option.depth} value={option.depth}>
-              {option.label}
-            </option>
-          ))}
-        </select>
+        <span className="swarm-defaults-label">Start from a branch</span>
+        <input
+          className="input swarm-mono"
+          value={startBranch}
+          placeholder={branchPlaceholder}
+          spellCheck={false}
+          aria-invalid={branchRefusal !== null}
+          onChange={(event) => onStartBranch(event.target.value)}
+        />
+        {branchRefusal && <span className="swarm-reopen-refusal">{branchRefusal}</span>}
       </label>
 
-      {plannerOpen && (
-        <label className="swarm-defaults-field">
-          <span className="swarm-defaults-label">Planner instructions</span>
-          <textarea
-            className="input textarea-grow"
-            rows={2}
-            value={draft.plannerInstructions}
-            placeholder="Split the work by package."
-            onChange={(event) => set({ plannerInstructions: event.target.value })}
-          />
-        </label>
-      )}
-      {workerOpen && (
-        <label className="swarm-defaults-field">
-          <span className="swarm-defaults-label">Worker instructions</span>
-          <textarea
-            className="input textarea-grow"
-            rows={2}
-            value={draft.workerInstructions}
-            placeholder="Add a test for every change."
-            onChange={(event) => set({ workerInstructions: event.target.value })}
-          />
-        </label>
-      )}
+      {/* The rest is the settings dialog's own fields, so the two
+          cannot describe one setting differently. */}
+      <SwarmRunSettingsFields
+        draft={draft}
+        onChange={onDraft}
+        agents={agents}
+        deliverable={deliverable}
+        onDeliverable={onDeliverable}
+      />
 
       <div className="swarm-defaults-foot">
-        {!plannerOpen && (
-          <button type="button" className="swarm-link swarm-link-quiet" onClick={() => setPlannerOpen(true)}>
-            + Planner instructions
-          </button>
-        )}
-        {!workerOpen && (
-          <button type="button" className="swarm-link swarm-link-quiet" onClick={() => setWorkerOpen(true)}>
-            + Worker instructions
-          </button>
-        )}
         <span className="swarm-composer-spacer" />
-        <button
-          type="button"
-          className="btn"
-          onClick={() => {
-            onReset();
-            setPlannerOpen(false);
-            setWorkerOpen(false);
-          }}
-        >
+        <button type="button" className="btn" onClick={onReset}>
           Reset
         </button>
         <button type="button" className="btn btn-primary" onClick={() => onClose(true)}>

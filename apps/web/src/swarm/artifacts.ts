@@ -45,3 +45,27 @@ export function splitArtifactPath(path: string): { name: string; dir: string } {
   if (at < 0) return { name: trimmed || path, dir: "" };
   return { name: trimmed.slice(at + 1), dir: trimmed.slice(0, at + 1) };
 }
+
+/**
+ * The artifact list after a refetch.
+ *
+ * The swarm page refetches its artifacts on every event the stream
+ * delivers. A refetch that failed keeps what the page had, because an
+ * empty list would close the drawer somebody is reading in and open it
+ * again on the next event. A refetch that brought the same rows keeps
+ * the same array, so nothing downstream that is keyed by the list
+ * (the open artifact, the drawer's position) is rebuilt for nothing.
+ */
+export function artifactsAfterRefetch(previous: SwarmArtifact[], next: SwarmArtifact[] | null): SwarmArtifact[] {
+  if (next === null) return previous;
+  if (
+    next.length === previous.length &&
+    next.every((row, at) => {
+      const was = previous[at]!;
+      return row.id === was.id && row.size === was.size && row.createdAt === was.createdAt && row.path === was.path && row.kind === was.kind;
+    })
+  ) {
+    return previous;
+  }
+  return next;
+}

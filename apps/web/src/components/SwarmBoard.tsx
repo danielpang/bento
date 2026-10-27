@@ -13,6 +13,7 @@ import { SwarmPageSkeleton } from "./Skeleton.js";
 import { swarmApi, type SwarmAgent, type SwarmPublishOutcome } from "../swarm/client.js";
 import { createModelCache } from "../swarm/layout.js";
 import { searchSwarmNodes } from "../swarm/search.js";
+import { artifactsAfterRefetch } from "../swarm/artifacts.js";
 import { leafStartBlocker } from "../swarm/waiting.js";
 import type { ModeSurfaces } from "../swarm/plan.js";
 import type {
@@ -239,8 +240,11 @@ export function SwarmBoard({
   const loadArtifacts = useCallback((swarmId: string) => {
     void swarmApi
       .listArtifacts(swarmId)
-      .then(setArtifacts)
-      .catch(() => setArtifacts([]));
+      // A refetch that failed keeps the list the page has, and one
+      // that brought the same rows keeps the same array, so the open
+      // artifact is never rebuilt under its reader.
+      .then((rows) => setArtifacts((previous) => artifactsAfterRefetch(previous, rows)))
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -486,13 +490,20 @@ export function SwarmBoard({
           onNewAgent={onNewAgent}
           onManageAgents={onManageAgents}
           onSelectSwarm={selectSwarm}
+          // Only once there is a swarm to go back to. A project's first
+          // swarm has nothing behind the composer.
+          onCancel={swarms.length > 0 ? () => setCreating(false) : undefined}
           onCreate={async (input: NewSwarmInput) => {
             setBusy(true);
             try {
               const created = await swarmApi.createSwarm(input);
-              setCreating(false);
-              loadSwarms(created.swarm.id);
               setSelectedId(created.swarm.id);
+              setCreating(false);
+              // Busy until the list has the new swarm. The composer
+              // stays mounted while a project's first swarm is not yet
+              // in the list, and a Create that was enabled again in
+              // that gap made the same swarm twice.
+              await loadSwarms(created.swarm.id);
             } finally {
               setBusy(false);
             }
