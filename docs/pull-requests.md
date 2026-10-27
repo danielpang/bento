@@ -8,11 +8,15 @@ Agents commit in the sandbox. GitHub publication is a separate server-side step.
 
 A new card starts from the repository's configured base branch, not whichever branch is checked out on the host. Worktree-based sandboxes fetch `origin/<base>` before creating the branch. Repositories without an origin use the local base branch. If the base cannot be fetched or found, setup stops with an error instead of inheriting unrelated commits. Existing card worktrees retain their commits and unfinished work.
 
-The base branch is set when a repository is added, in the console, the Mac app, or the terminal. Left blank, Bento reads it from the checkout: what `origin/HEAD` points at, then `main` or `master`, then the branch that is checked out. A GitHub repository uses its GitHub default. Change it later beside the repository's setup and test commands; clearing it reads the checkout's default again.
+The base branch is set when a repository is added, in the console (or the Mac app) or the terminal. Left blank, Bento reads it from the checkout: what `origin/HEAD` points at, then `main` or `master`, then the branch that is checked out. A GitHub repository uses its GitHub default. Change it later beside the repository's setup and test commands; clearing it reads the checkout's default again.
 
-**You can also click the Create PR** button in the card drawer publishes current commits without waiting for stage completion.
+The **Create PR** button in the card drawer publishes current commits without waiting for the stage to complete.
 
 The card lists open pull requests by repository. Multi-repo cards require a PR in each repo for completion gates (`checks_pass`, `pr_comments_resolved`). Untouched repositories are skipped. Turn the flag off on a stage (an investigation stage, say) to keep its work in the worktree only.
+
+## Swarm pull requests
+
+A swarm opens no pull request by itself. Its branches are pushed to GitHub as work lands, and you publish from the swarm's header when you choose, even before the swarm finishes: **One pull request** opens one of the swarm's branch (a draft until the swarm is done), and **One per task, stacked** opens one per committed task, each against the task committed before it. Clicking again finishes a publish that was cut off and updates the same pull requests. See [Swarms](./swarms.md).
 
 ## Stage artifacts in pull requests
 
@@ -22,7 +26,7 @@ You can keep the artifacts under **Settings, GitHub**. On shared servers, the se
 
 ## Push and attribution
 
-The server pushes the changes; agents do not receive push credentials. Publishing rejects protected branches (`main`, `master`).
+The server pushes the changes; agents do not receive push credentials. Publishing rejects protected branches (`main`, `master`, `trunk`, `develop`).
 
 Commit author is configured under **Settings, GitHub**. Defaults to `Bento Agent <no-reply@usebento.ai>` if no values are set.
 

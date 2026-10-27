@@ -27,7 +27,7 @@ Keys are encrypted and **personal by default**, including keys saved through the
 
 ## Personal and shared API keys
 
-Open **Agents → Model provider keys**, select the provider, paste the key, and save. New keys and endpoint settings belong to you. You can also save your own key for a custom provider under **Agents → Custom provider keys** after an owner or admin defines the provider.
+Open **Agents → Model provider keys**, select the provider, paste the key, and save. New keys and endpoint settings belong to you. With beta features on, you can also save your own key for a custom provider under **Agents → Custom provider keys** after an owner or admin defines the provider.
 
 Owners and admins can turn on **Shared organization key** before saving. With the toggle off, the field is labeled **Personal API key**. Enabling the toggle shares that credential with the current team. The toggle selects where the next save goes; it does not move an existing key. To change an existing key's scope, save it in the desired scope and remove the old copy. Members can always manage their own keys, but cannot manage shared keys or anyone else's personal keys. Only share credentials licensed for team use; a subscription key intended for one person must remain personal.
 
@@ -58,7 +58,7 @@ The sandbox reaches the proxy at `BENTO_MCP_GATEWAY_URL` (or the server's own UR
 
 ## Custom model providers
 
-Beta testers can add a provider in **Settings, Providers**. Enter its API base URL, protocol, and model IDs, then save its API key there or in **Agents, Custom provider keys**. In multi mode, owners and admins manage provider definitions. Each user can save a personal key; only owners and admins can save a shared key. An agent model is selected as `provider-id/model-id`.
+With beta features on (locally, the launcher's **Try beta and experimental features** box; on hosted Bento, allowed by the team in **Settings, Team** and turned on by you in **Settings, Account**), you can add a provider in **Settings, Providers**. Enter its API base URL, protocol, and model IDs, then save its API key there or in **Agents, Custom provider keys**. In multi mode, owners and admins manage provider definitions. Each user can save a personal key; only owners and admins can save a shared key. An agent model is selected as `provider-id/model-id`.
 
 | Protocol | Harnesses |
 | --- | --- |
@@ -88,15 +88,15 @@ Export/import agents as YAML from **Agents**, **Settings, Config**, or `bento ag
 The card composer accepts input during runs. Behavior by tool:
 
 - **pi:** message delivered after the current tool call (steering). Manual stages keep the session open after a turn.
-- **Claude Code:** message queued for the next step in the same session. Manual stages keep the session open.
+- **Claude Code:** message queued, and runs as one more turn in the same session after the current one. Manual stages keep the session open.
 - **Codex:** message steers the running turn: Codex cuts the model call in flight and the next one carries the message. Manual stages keep the session open after a turn.
-- **opencode:** message queued for the next step in the same session. Manual stages keep the session open.
+- **opencode:** message carried by the next model call in the same session. Manual stages keep the session open.
 - **Cursor, Antigravity, Muse Code, fx, and Codex and opencode profiles that keep the one-shot command:** message delivered when the current run ends; next run resumes the session.
 - **pool, dsh:** message delivered when the current run ends; next run starts fresh with stage prompt and compacted transcript.
 
 If the session is unavailable (sandbox recreated or CLI session lost), Bento starts a new run with the same instructions and compacted transcript.
 
-**Stop** terminates the run immediately. Pending messages remain queued on the card.
+**Stop** on a tool without interrupts terminates the run immediately. Pending messages remain queued on the card.
 
 **Stop interrupts, and never ends the run (Claude Code, Codex, opencode and pi):** while the agent is working, Stop ends its current turn, as Escape does in a terminal, and the agent does no more work. It then waits for your next message, which continues the same session; while it waits, Stop has nothing to stop and rests. If nothing is sent within the stage's idle window, the run closes as stopped (not failed, and the card stays where it is). What the agent did before the stop still counts: its cost is recorded, and its commits are published if the stage creates a pull request. The sandbox is kept, and your next message continues the same session in a new run. This applies to a card's stage runs; Stop on a judge or a conflict resolution run ends it. For other tools, Stop ends the run at once: Cursor's headless mode, which Bento runs, takes no input once started, so the next message resumes its chat in a new run.
 

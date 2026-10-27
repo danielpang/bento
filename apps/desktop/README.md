@@ -11,14 +11,14 @@ pnpm install
 pnpm dev:desktop
 ```
 
-Pick **On this Mac** or **Connect to a server**. The choice persists across launches. **Bento → Connection Settings** (`Cmd+,`) to change it; failures stay on that screen with retry.
+Pick **Run locally** or **Sign in or sign up**. The choice persists across launches. **Bento → Connection Settings** (`Cmd+,`) to change it; failures stay on that screen with retry.
 
 | Mode | Needs |
 | --- | --- |
-| Local | Docker Desktop or OrbStack. App starts Postgres, migrates, builds sandbox image if missing (first build can take several minutes). Data in `~/.bento` by default; optional custom Postgres, data dir, or sandbox image. The start screen chooses the **Agent sandbox type**: Docker sandbox (default) or local process (dev-only, no isolation). **Advanced settings, Model proxy** (on by default, read at start) sends model calls through Bento so a Docker sandbox contains a proxy token rather than your key; it is disabled with a local process, which has no sandbox. |
-| Remote | Server URL only. HTTPS except localhost. Sign in via system browser (device flow). Agents run on the server. Remote board + local agents is not supported. |
+| Local | Docker Desktop or OrbStack. If neither is running, the app starts whichever is installed (OrbStack first). App starts Postgres, migrates, builds sandbox image if missing (first build can take several minutes). Data in `~/.bento` by default; optional custom Postgres, data dir, or sandbox image. The start screen chooses the **Agent sandbox type**: Docker sandbox (default) or local process (dev-only, no isolation). **Advanced settings, Model proxy** (on by default) sends model calls through Bento so a Docker sandbox contains a proxy token rather than your key; it is disabled with a local process, which has no sandbox. Advanced settings are read at start: change one while local Bento runs and Start becomes **Restart to save these settings**, which restarts it. |
+| Remote | Signs in to hosted Bento (`https://app.usebento.ai`) via the system browser (device flow). There is no server address to enter; the `--server <url>` launch argument connects to another server for development and tests. Agents run on the server. Remote board + local agents is not supported. |
 
-Everything else (keys, agents, pipelines, repos, team, integrations) is the same shared console as the web, including beta flags.
+Everything else (keys, agents, pipelines, repos, team, integrations) is the same shared console as the web. Beta features: locally, the launcher's **Try beta and experimental features** box; on hosted Bento, the team allows them (Settings, Team) and each person turns them on (Settings, Account).
 
 ## Desktop behavior
 
@@ -26,7 +26,7 @@ Everything else (keys, agents, pipelines, repos, team, integrations) is the same
 - Local mode: native folder picker on repository forms.
 - Pop-outs and external/OAuth links: system browser. Downloads: native save dialog. Integrations: connect in the browser (same org on shared servers), then return; the app refreshes status.
 - Native menus (edit, zoom, fullscreen, windows). Web shortcuts still work.
-- **File → New Window** (`Cmd+Shift+N`) opens another window. In the project picker, **Open project in new window** opens any project alongside the current one. Each window keeps its own selected project across reloads and navigation, and the native Window menu identifies windows by project name. All windows share the current connection and local server; changing the connection affects every window.
+- **File → New Window** (`Cmd+Shift+N`) opens another window. In the project picker, **Open project in new window** opens any project alongside the current one. Each window keeps its own selected project across reloads and navigation, and the native Window menu identifies windows by project name. Each window belongs to one connection, so a local window and a hosted window can sit side by side. **File → Switch Connection...** (`Alt+Cmd+N`) opens the start screen to open a window on another connection.
 - Traffic lights in the header (also the drag region). Theme follows console Light / Dark / Dark blue.
 - Close window: local server keeps running. **Quit Bento**: stops local server gracefully. Remote agents are unaffected.
 - **Updates:** unsigned builds → **Check for Updates** opens a newer stable DMG in the browser; replace `Bento.app` manually after quitting. Signed releases → background check every 6h; **Restart to Update** when ready (local server stops on restart; **Later** keeps it up).
@@ -114,11 +114,12 @@ Public `danielpang/bento` releases; no token; stable only. Manual mode opens DMG
 pnpm --filter @bento/desktop test
 pnpm --filter @bento/desktop typecheck
 pnpm --filter @bento/desktop test:updates
+DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5439/app pnpm --filter @bento/desktop test:restart
 DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5439/app pnpm --filter @bento/desktop test:e2e
 DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5439/app pnpm --filter @bento/desktop test:auth
 ```
 
-E2E: launches the real app, temp DB/profile, server/migrations/cards/SSE/auth/preferences; no paid APIs. Update smoke (macOS): loopback fixture, real updater/controller, consent, arch paths, checksum/metadata errors; set `BENTO_DESKTOP_EXECUTABLE` for the packaged update menu, toast themes, and dismissal across windows. CI runs this against the signed package and checks automatic download plus restart consent. Local unsigned packages exercise manual downloads. Fixture bytes are never installed by Squirrel.
+E2E: launches the real app, temp DB/profile, server/migrations/cards/SSE/auth/preferences; no paid APIs. Update smoke (macOS): loopback fixture, real updater/controller, consent, arch paths, checksum/metadata errors; set `BENTO_DESKTOP_EXECUTABLE` for the packaged update menu, toast themes, and dismissal across windows. CI runs this against the signed package and checks automatic download plus restart consent. Local unsigned packages exercise manual downloads. Fixture bytes are never installed by Squirrel. Restart smoke: changes a launcher setting while local Bento runs and checks it restarts with the new setting.
 
 After packaging both arch:
 
