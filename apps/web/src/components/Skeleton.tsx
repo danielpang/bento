@@ -175,14 +175,10 @@ export function SwarmPageSkeleton() {
           ))}
         </div>
 
-        <section className="swarm-brief">
-          <div className="swarm-card-head">
-            <Skeleton height={11} width="2.4rem" />
-            <Skeleton className="swarm-skeleton-excerpt" height={12} width="56%" />
-          </div>
-        </section>
       </div>
 
+      <div className="swarm-body" aria-hidden="true">
+        <div className="swarm-main">
       <div className="swarm-viewbar" aria-hidden="true">
         <Skeleton height={13} width="4.4rem" />
         <Skeleton height={28} width="8.6rem" radius={6} />
@@ -233,6 +229,21 @@ export function SwarmPageSkeleton() {
             </div>
           ))}
         </div>
+      </div>
+        </div>
+        <aside className="swarm-rail" aria-hidden="true">
+          <div className="swarm-rail-head">
+            <Skeleton height={11} width="2.8rem" />
+          </div>
+          <section className="swarm-card">
+            <div className="swarm-card-head">
+              <Skeleton height={11} width="2.4rem" />
+            </div>
+            <div className="swarm-goal-text">
+              <Skeleton className="swarm-skeleton-excerpt" height={12} width="86%" />
+            </div>
+          </section>
+        </aside>
       </div>
     </div>
   );

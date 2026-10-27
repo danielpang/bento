@@ -1,6 +1,6 @@
 import { isSandboxCapacityError } from "@bento/core";
 import { CapacityNotice } from "./CapacityNotice.js";
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { capitalise, ChevronMark, DiagramMark, FileMark, GlobeMark, ImageMark } from "./SwarmMarks.js";
 import { MergeQueue } from "./MergeQueue.js";
 import { OutOfCompute } from "./OutOfCompute.js";
@@ -18,7 +18,7 @@ import type { LandingPage, SwarmAgent, SwarmPublishOutcome } from "../swarm/clie
 import { formatBytes } from "@bento/core";
 import { externalHttpUrl } from "../external-url.js";
 import { copyText } from "../clipboard.js";
-import { browserStorage, readBriefOpen, rememberBriefOpen, type StorageLike, type SwarmView } from "../swarm/view-state.js";
+import { browserStorage, readRailOpen, rememberRailOpen, type StorageLike, type SwarmView } from "../swarm/view-state.js";
 
 /**
  * The page's clock: every second while something is running, and
@@ -109,15 +109,11 @@ export interface SwarmActions {
  * What the plan was built from, under the goal.
  *
  * Nothing at all for the ordinary swarm, whose planner read the goal
- * and the code. A swarm handed files or pages lists them as a row of
- * equal cells: a person reading the tree wants to know which file it
- * came from, and a PDF, an image or a page is one click from opening.
- * Whether they were the plan or material to plan from is said once,
- * on the goal card's header.
- *
- * A text file opens nowhere: its words are the planner's to read, and
- * the content route serves it as a download, which is not what a
- * click on a name in a list should do.
+ * and the code. A swarm handed files or pages lists them as small
+ * pills: a person reading the tree wants to know which file it came
+ * from, and each is one click from opening (a page at its address,
+ * a file from the content route). Whether they were the plan or
+ * material to plan from is said once, on the goal card's header.
  */
 export function SwarmPlanBrief({
   sources,
@@ -128,34 +124,25 @@ export function SwarmPlanBrief({
   if (sources.length === 0) return null;
   return (
     <ul className="swarm-sources" aria-label="Plan sources">
-      {sources.map((source) => (
-        <li key={source.id} data-media={source.media}>
-          <PlanSourceCell source={source} />
-        </li>
-      ))}
+      {sources.map((source) => {
+        const size = planSourceSize(source);
+        return (
+          <li key={source.id} data-media={source.media}>
+            <a
+              className="swarm-source"
+              href={source.kind === "website" ? source.url ?? source.contentPath : source.contentPath}
+              target="_blank"
+              rel="noreferrer noopener"
+              title={[source.url ?? source.name, size].filter(Boolean).join(", ")}
+            >
+              {source.kind === "website" ? <GlobeMark size={11} /> : source.media === "image" ? <ImageMark size={11} /> : <FileMark size={11} />}
+              <span className="visually-hidden">{planSourceLabel(source)}: </span>
+              <span className="swarm-source-name">{source.name}</span>
+            </a>
+          </li>
+        );
+      })}
     </ul>
-  );
-}
-
-function PlanSourceCell({ source }: { source: SwarmPlanSource }) {
-  const size = planSourceSize(source);
-  const inner = (
-    <>
-      {source.kind === "website" ? <GlobeMark /> : source.media === "image" ? <ImageMark /> : <FileMark />}
-      <span className="visually-hidden">{planSourceLabel(source)}: </span>
-      <span className="swarm-source-name">{source.name}</span>
-      {size && <span className="swarm-source-size">{size}</span>}
-    </>
-  );
-  const href = source.kind === "website" ? source.url : source.media !== "text" ? source.contentPath : null;
-  return href ? (
-    <a className="swarm-source" href={href} target="_blank" rel="noreferrer noopener" title={source.url ?? source.name}>
-      {inner}
-    </a>
-  ) : (
-    <span className="swarm-source" title={source.name}>
-      {inner}
-    </span>
   );
 }
 
@@ -221,7 +208,7 @@ export function SwarmPage({
   surfaces,
   busy,
   artifacts = [],
-  briefStorage,
+  railStorage,
   onOpenArtifact,
   onOpenPlannerOutput,
   publish = null,
@@ -247,20 +234,32 @@ export function SwarmPage({
   /** Opens one in the viewer every other artifact in Bento opens in. */
   onOpenArtifact?: (artifact: SwarmArtifact) => void;
   onOpenPlannerOutput?: () => void;
-  /** Where the fold is remembered. The browser's own unless a test says otherwise. */
-  briefStorage?: StorageLike | null;
+  /** Where the rail's fold is remembered. The browser's own unless a test says otherwise. */
+  railStorage?: StorageLike | null;
 }) {
   /*
-   * The brief folds to one line so the diagram gets the screen. The
+   * The details rail hides so the diagram gets the whole width. The
    * choice is this browser's, remembered across swarms, and never in
    * the address: whoever follows a link sees the goal.
    */
-  const storage = briefStorage === undefined ? browserStorage() : briefStorage;
-  const [briefOpen, setBriefOpen] = useState(() => readBriefOpen(storage));
-  const toggleBrief = () => {
-    const next = !briefOpen;
-    setBriefOpen(next);
-    rememberBriefOpen(storage, next);
+  const storage = railStorage === undefined ? browserStorage() : railStorage;
+  const [railOpen, setRailOpen] = useState(() => readRailOpen(storage));
+  const setRail = (open: boolean) => {
+    setRailOpen(open);
+    rememberRailOpen(storage, open);
+  };
+  /** A card to scroll to once the rail is open again, from the collapsed strip. */
+  const reveal = useRef<RailCard | null>(null);
+  const railRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (!railOpen || !reveal.current) return;
+    const card = railRef.current?.querySelector<HTMLElement>(`[data-rail-card="${reveal.current}"]`);
+    reveal.current = null;
+    card?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [railOpen]);
+  const showCard = (card: RailCard) => {
+    reveal.current = card;
+    setRail(true);
   };
   const swarm = detail.swarm;
   const live = canPause(swarm.status);
@@ -429,99 +428,132 @@ export function SwarmPage({
 
         <SwarmStats detail={detail} model={model} agents={agents} busy={busy} now={now} onWorkers={actions.onWorkers} />
 
-        <section className="swarm-brief" aria-label="Swarm goal" data-open={briefOpen}>
-          <div className="swarm-card-head">
-            <span className="swarm-card-title">Goal</span>
-            {!briefOpen && <span className="swarm-brief-excerpt" title={swarm.goal}>{goalExcerpt(swarm.goal)}</span>}
-            {briefOpen && <span className="swarm-card-spacer" />}
-            {briefOpen && planNote(swarm.planMode, detail.planSources ?? []) && (
-              <span className="swarm-card-note">{planNote(swarm.planMode, detail.planSources ?? [])}</span>
-            )}
+      </div>
+
+      {/*
+       * The diagram and the rail. The tree is what the page is for, so
+       * it is on screen at first paint with the goal, the artifacts and
+       * the pull request beside it, and the rail hides to give it the
+       * whole width. On a phone the rail's cards stack under the tree.
+       */}
+      <div className="swarm-body" data-rail={railOpen ? "open" : "closed"}>
+        <div className="swarm-main">
+          {plannerAtCapacity ? (
+            <div className="swarm-capacity-stage">
+              <CapacityNotice context="planner" busy={busy} onRetry={actions.onRetryPlanner} />
+              <p className="swarm-capacity-next">Once the planner starts, your task tree will appear here.</p>
+            </div>
+          ) : (
+            <>
+              <div className="swarm-viewbar">
+                <span className="swarm-section-title">Task tree</span>
+                <span className="swarm-viewbar-note">{treeWords(model, swarm.status, stillWords)}</span>
+                <div className="seg swarm-view-toggle" role="group" aria-label="View">
+                  <button
+                    type="button"
+                    className="seg-item"
+                    data-on={view === "tree" ? "" : undefined}
+                    aria-current={view === "tree" ? "page" : undefined}
+                    onClick={() => onView("tree")}
+                  >
+                    Tree
+                  </button>
+                  <button
+                    type="button"
+                    className="seg-item"
+                    data-on={view === "outline" ? "" : undefined}
+                    aria-current={view === "outline" ? "page" : undefined}
+                    onClick={() => onView("outline")}
+                  >
+                    Outline
+                  </button>
+                </div>
+              </div>
+
+              {view === "tree" ? (
+                <SwarmTree key={detail.swarm.id} model={model} selectedId={selectedId} onSelect={onSelect} onToggle={onToggleNode} search={search}
+                  plannerRun={detail.plannerRun} onRetryPlanner={actions.onRetryPlanner} onOpenPlannerOutput={onOpenPlannerOutput} canRetryPlanner={!planReady && swarm.status === "planning"} busy={busy} now={now} />
+              ) : (
+                <SwarmOutline model={model} selectedId={selectedId} onSelect={onSelect}
+                  plannerRun={detail.plannerRun} onRetryPlanner={actions.onRetryPlanner} onOpenPlannerOutput={onOpenPlannerOutput} canRetryPlanner={!planReady && swarm.status === "planning"} busy={busy} now={now} />
+              )}
+            </>
+          )}
+        </div>
+
+        {!railOpen && (
+          <div className="swarm-rail-strip" role="toolbar" aria-label="Swarm details, collapsed">
+            <button type="button" className="swarm-rail-show" aria-label="Show details" title="Show details" onClick={() => setRail(true)}>
+              <ChevronMark left />
+            </button>
+            <button type="button" className="swarm-rail-icon" aria-label="Goal and plan sources" title="Goal and plan sources" onClick={() => showCard("goal")}>
+              <GoalMark />
+            </button>
             <button
               type="button"
-              className="swarm-brief-toggle"
-              aria-expanded={briefOpen}
-              aria-controls="swarm-brief-body"
-              onClick={toggleBrief}
+              className="swarm-rail-icon"
+              aria-label={`Artifacts, ${artifacts.length}`}
+              title={`Artifacts, ${artifacts.length}`}
+              onClick={() => showCard("artifacts")}
             >
-              {briefOpen ? "Collapse" : "Expand"}
-              <svg className="swarm-brief-chevron" viewBox="0 0 12 12" width="12" height="12" fill="none" aria-hidden="true">
-                <path d="m3 4.5 3 3 3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
+              <FileMark size={15} />
+              {artifacts.length > 0 && <span className="swarm-rail-badge swarm-mono">{artifacts.length}</span>}
+            </button>
+            <button
+              type="button"
+              className="swarm-rail-icon"
+              data-tone={detail.pullRequests.length > 0 || stackedPullRequests(detail.tasks).length > 0 ? "succeeded" : undefined}
+              aria-label={pullRequestWords(detail)}
+              title={pullRequestWords(detail)}
+              onClick={() => showCard("pull-request")}
+            >
+              <PullRequestMark />
             </button>
           </div>
-          {briefOpen && (
-            <div id="swarm-brief-body">
-              <p className="swarm-goal-text">{swarm.goal}</p>
-              <SwarmPlanBrief planMode={swarm.planMode} sources={detail.planSources ?? []} />
-            </div>
-          )}
-        </section>
+        )}
 
-        {(() => {
-          const artifactCard = artifacts.length > 0 ? (
+        <aside ref={railRef} className="swarm-rail" aria-label="Swarm details">
+          <div className="swarm-rail-head">
+            <span className="swarm-rail-label">Details</span>
+            <button
+              type="button"
+              className="swarm-rail-hide"
+              aria-label="Hide details"
+              title="Hide details"
+              aria-expanded={railOpen}
+              onClick={() => setRail(false)}
+            >
+              Hide
+              <ChevronMark right />
+            </button>
+          </div>
+
+          <section className="swarm-card swarm-rail-goal" aria-label="Swarm goal" data-rail-card="goal">
+            <div className="swarm-card-head">
+              <span className="swarm-card-title">Goal</span>
+              <span className="swarm-card-spacer" />
+              {planNote(swarm.planMode, detail.planSources ?? []) && (
+                <span className="swarm-card-note">{planNote(swarm.planMode, detail.planSources ?? [])}</span>
+              )}
+            </div>
+            <p className="swarm-goal-text">{swarm.goal}</p>
+            <SwarmPlanBrief planMode={swarm.planMode} sources={detail.planSources ?? []} />
+          </section>
+
+          {artifacts.length > 0 && (
             <SwarmArtifacts artifacts={artifacts} deliverable={swarm.deliverable} tasks={detail.tasks} now={now} onOpen={onOpenArtifact} />
-          ) : null;
-          const prCard = (
+          )}
+
+          {pullRequestCardShown(detail, publish, Boolean(actions.onPublish)) && (
             <SwarmPullRequestCard
               detail={detail}
               publish={publish}
               busy={busy}
               onPublish={actions.onPublish}
             />
-          );
-          const hasPr = pullRequestCardShown(detail, publish, Boolean(actions.onPublish));
-          if (!artifactCard && !hasPr) return null;
-          return (
-            <div className="swarm-grid" data-columns={artifactCard && hasPr ? "2" : "1"}>
-              {artifactCard}
-              {hasPr && prCard}
-            </div>
-          );
-        })()}
+          )}
+        </aside>
       </div>
-
-      {plannerAtCapacity ? (
-        <div className="swarm-capacity-stage">
-          <CapacityNotice context="planner" busy={busy} onRetry={actions.onRetryPlanner} />
-          <p className="swarm-capacity-next">Once the planner starts, your task tree will appear here.</p>
-        </div>
-      ) : (
-      <>
-      <div className="swarm-viewbar">
-        <span className="swarm-section-title">Diagram</span>
-        <div className="seg swarm-view-toggle" role="group" aria-label="View">
-          <button
-            type="button"
-            className="seg-item"
-            data-on={view === "tree" ? "" : undefined}
-            aria-current={view === "tree" ? "page" : undefined}
-            onClick={() => onView("tree")}
-          >
-            Tree
-          </button>
-          <button
-            type="button"
-            className="seg-item"
-            data-on={view === "outline" ? "" : undefined}
-            aria-current={view === "outline" ? "page" : undefined}
-            onClick={() => onView("outline")}
-          >
-            Outline
-          </button>
-        </div>
-      </div>
-
-      {view === "tree" ? (
-        <SwarmTree key={detail.swarm.id} model={model} selectedId={selectedId} onSelect={onSelect} onToggle={onToggleNode} search={search}
-          plannerRun={detail.plannerRun} onRetryPlanner={actions.onRetryPlanner} onOpenPlannerOutput={onOpenPlannerOutput} canRetryPlanner={!planReady && swarm.status === "planning"} busy={busy} now={now} />
-      ) : (
-        <SwarmOutline model={model} selectedId={selectedId} onSelect={onSelect}
-          plannerRun={detail.plannerRun} onRetryPlanner={actions.onRetryPlanner} onOpenPlannerOutput={onOpenPlannerOutput} canRetryPlanner={!planReady && swarm.status === "planning"} busy={busy} now={now} />
-      )}
-
-      </>
-      )}
 
       {detail.landings.length > 0 && (
         <MergeQueue
@@ -547,8 +579,34 @@ export function SwarmPage({
 
 /** What the goal card's header says about where the plan came from, or nothing for an ordinary swarm. */
 function planNote(planMode: SwarmDetail["swarm"]["planMode"], sources: SwarmPlanSource[]): string | null {
-  if (planMode === "existing") return sources.length > 0 ? "Built from an existing plan" : "The goal is the plan";
+  if (planMode === "existing") return sources.length > 0 ? "Existing plan" : "The goal is the plan";
   return sources.length > 0 ? "Read before planning" : null;
+}
+
+/** The three cards on the rail, as the collapsed strip names them. */
+type RailCard = "goal" | "artifacts" | "pull-request";
+
+/**
+ * The line beside "Task tree": how far along, and whether anything
+ * waits on a person. The longer sentence about what is waiting stays
+ * under the title; this is the glance.
+ */
+export function treeWords(model: SwarmModel, status: SwarmDetail["swarm"]["status"], stillWords: string | null): string {
+  const done = `${model.root.doneLeaves} of ${model.root.totalLeaves} tasks done`;
+  if (status === "waiting") return `${done} · waiting on you`;
+  if (stillWords) return `${done} · nothing running`;
+  if (status === "done") return `${done} · nothing waiting on you`;
+  return done;
+}
+
+/** What the collapsed strip's pull request button is called. */
+function pullRequestWords(detail: SwarmDetail): string {
+  const prs = detail.pullRequests;
+  if (prs.length === 1) return `Pull request #${prs[0]!.number}`;
+  if (prs.length > 1) return `${prs.length} pull requests`;
+  const stacked = stackedPullRequests(detail.tasks);
+  if (stacked.length > 0) return `${stacked.length} stacked pull requests`;
+  return "Pull request, not opened yet";
 }
 
 /** When the swarm last moved, for the title row: finished, ended, started, or created. */
@@ -822,11 +880,7 @@ function SwarmPullRequestCard({
         <span className="swarm-card-title">{plural ? "Pull requests" : "Pull request"}</span>
         {plural && <span className="swarm-card-count">{prs.length > 0 ? prs.length : stacked.length}</span>}
         <span className="swarm-card-spacer" />
-        {single?.url ? (
-          <a className="swarm-card-link" href={single.url} target="_blank" rel="noreferrer">
-            Open on GitHub <span aria-hidden="true">{"\u2197"}</span>
-          </a>
-        ) : prs.length === 0 && stacked.length > 0 ? (
+        {prs.length === 0 && stacked.length > 0 ? (
           <span className="swarm-card-note">Stacked, each on the one before</span>
         ) : prs.length === 0 && !publish?.outcome ? (
           <span className="swarm-card-note">Not opened yet</span>
@@ -919,10 +973,19 @@ function SwarmPullRequestCard({
             )
           ) : (
             single?.url && (
-              <button className="btn swarm-copy-link" onClick={() => copy(single.url!)} aria-label={copied ? "Link copied" : "Copy link"}>
-                {copied ? <TickMark /> : <CopyMark />}
-                <span className="swarm-copy-link-label">{copied ? "Copied" : "Copy link"}</span>
-              </button>
+              <>
+                <a className="btn swarm-pr-open" href={single.url} target="_blank" rel="noreferrer">
+                  Open on GitHub <span aria-hidden="true">{"\u2197"}</span>
+                </a>
+                <button
+                  className="btn swarm-copy-link"
+                  onClick={() => copy(single.url!)}
+                  aria-label={copied ? "Link copied" : "Copy link"}
+                  title={copied ? "Link copied" : "Copy link"}
+                >
+                  {copied ? <TickMark /> : <CopyMark />}
+                </button>
+              </>
             )
           )}
         </div>
@@ -932,13 +995,14 @@ function SwarmPullRequestCard({
 }
 
 /**
- * What the swarm produced for people to read, as a table.
+ * What the swarm produced for people to read, as a list on the rail:
+ * the file's name, and one line saying what it is, how big, where it
+ * came from and when.
  *
  * On a document swarm the assembled file is the deliverable, so it is
  * named as such and sits first: it is what the swarm was for, and a
  * person opening the page after it finished is looking for it rather
- * than for the tree. On a phone the same rows stack, the columns
- * folded into one line under the name.
+ * than for the tree.
  *
  * Nothing here renders an artifact. Opening one hands it to the drawer,
  * which renders through the same canvas a card's artifacts use: that is
@@ -970,55 +1034,29 @@ export function SwarmArtifacts({
         <span className="swarm-card-title">{deliverable === "document" ? "The document" : "Artifacts"}</span>
         <span className="swarm-card-count">{artifacts.length}</span>
       </div>
-      <table className="swarm-art-table">
-        <thead>
-          <tr>
-            <th scope="col">Name</th>
-            <th scope="col" className="swarm-art-type">Type</th>
-            <th scope="col" className="swarm-art-num">Size</th>
-            <th scope="col" className="swarm-art-source">Source</th>
-            <th scope="col" className="swarm-art-num">Updated</th>
-          </tr>
-        </thead>
-        <tbody>
-          {ordered.map((artifact) => {
-            const { name, dir } = splitArtifactPath(artifact.path);
-            const isLead = artifact === lead;
-            const type = artifactTypeLabel(artifact.kind);
-            const source = artifactSourceLabel(artifact, tasks);
-            const age = formatAge(artifact.createdAt, now);
-            return (
-              <tr
-                key={artifact.id}
-                className="swarm-art-row"
-                data-lead={isLead ? "" : undefined}
-                data-openable={onOpen ? "" : undefined}
-                onClick={() => onOpen?.(artifact)}
-              >
-                <td>
-                  <button type="button" className="swarm-art-open" disabled={!onOpen} title={artifact.path}>
-                    <ArtifactMark kind={artifact.kind} />
-                    <span className="swarm-art-names">
-                      <span className="swarm-art-name">{name}</span>
-                      {isLead ? (
-                        <span className="swarm-art-caption">Combined document, committed to the swarm branch.</span>
-                      ) : (
-                        dir && <span className="swarm-art-dir">{dir}</span>
-                      )}
-                      <span className="swarm-art-meta">{[type, formatBytes(artifact.size), source, age].filter(Boolean).join(" · ")}</span>
-                    </span>
-                    <span className="swarm-art-go" aria-hidden="true"><ChevronMark right /></span>
-                  </button>
-                </td>
-                <td className="swarm-art-type">{type}</td>
-                <td className="swarm-art-num swarm-mono">{formatBytes(artifact.size)}</td>
-                <td className="swarm-art-source" title={source}>{source}</td>
-                <td className="swarm-art-num">{age}</td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
+      <ul className="swarm-art-list">
+        {ordered.map((artifact) => {
+          const { name } = splitArtifactPath(artifact.path);
+          const isLead = artifact === lead;
+          const type = artifactTypeLabel(artifact.kind);
+          const source = artifactSourceLabel(artifact, tasks);
+          const age = formatAge(artifact.createdAt, now);
+          return (
+            <li key={artifact.id} className="swarm-art-row" data-lead={isLead ? "" : undefined}>
+              <button type="button" className="swarm-art-open" disabled={!onOpen} title={artifact.path} onClick={() => onOpen?.(artifact)}>
+                <ArtifactMark kind={artifact.kind} />
+                <span className="swarm-art-names">
+                  <span className="swarm-art-name">{name}</span>
+                  <span className="swarm-art-meta" title={isLead ? "Combined document, committed to the swarm branch." : undefined}>
+                    {[isLead ? "Combined document" : type, formatBytes(artifact.size), isLead ? null : source, age].filter(Boolean).join(" \u00B7 ")}
+                  </span>
+                </span>
+                <span className="swarm-art-go" aria-hidden="true"><ChevronMark right /></span>
+              </button>
+            </li>
+          );
+        })}
+      </ul>
     </section>
   );
 }
@@ -1119,6 +1157,27 @@ function StepMark({ direction }: { direction: "up" | "down" }) {
     >
       <path d="M3.5 8h9" />
       {direction === "up" && <path d="M8 3.5v9" />}
+    </svg>
+  );
+}
+
+function GoalMark() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      <circle cx="8" cy="8" r="6" />
+      <circle cx="8" cy="8" r="2.5" />
+      <path d="M8 2v2M8 12v2M2 8h2M12 8h2" />
+    </svg>
+  );
+}
+
+function PullRequestMark() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      <circle cx="4" cy="3.5" r="1.5" />
+      <circle cx="4" cy="12.5" r="1.5" />
+      <circle cx="12" cy="12.5" r="1.5" />
+      <path d="M4 5v6M12 11V7a2 2 0 0 0-2-2H8.5M10 3 8 5l2 2" />
     </svg>
   );
 }

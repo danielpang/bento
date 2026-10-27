@@ -212,6 +212,7 @@ test("a loading swarm draws the swarm page's shape, not the board's lanes", () =
   assert.match(html, /role="status">Loading swarm</);
   assert.match(html, /class="swarm-title-row"/);
   assert.match(html, /class="swarm-stats"/);
+  assert.match(html, /class="swarm-body"/);
   assert.match(html, /class="swarm-viewbar"/);
   assert.equal(html.match(/class="swarm-skeleton-node"/g)?.length, 4, "a root and three children");
   assert.equal(html.match(/class="swarm-edge swarm-skeleton-edge"/g)?.length, 3, "one edge per child");
@@ -327,10 +328,10 @@ test("an existing plan lists the file and not how many characters it holds", () 
   assert.match(html, /hub\.css/);
   assert.match(html, />File: </, "what it is, for a reader that cannot see the mark");
   assert.doesNotMatch(html, /characters|12,463/);
-  assert.doesNotMatch(html, /<a /, "a text file is the planner's to read, not a link");
+  assert.match(html, /href="\/api\/swarms\/s\/plan-sources\/src-1\/content"/, "a pill opens the file");
 });
 
-test("every plan source is its own cell, and only what can be opened is a link", () => {
+test("every plan source is its own pill, opening at its address or its content route", () => {
   const html = renderToStaticMarkup(createElement(SwarmPlanBrief, {
     planMode: "existing",
     sources: [
@@ -352,15 +353,15 @@ test("every plan source is its own cell, and only what can be opened is a link",
       },
     ],
   }));
-  assert.equal(html.match(/class="swarm-source"/g)?.length, 4, "one equal cell per source");
+  assert.equal(html.match(/class="swarm-source"/g)?.length, 4, "one pill per source");
   assert.equal(html.match(/>File: </g)?.length, 3);
   assert.match(html, /hub\.css/);
   assert.match(html, /hub\.js/);
   assert.match(html, /index\.html/);
   assert.match(html, />Image: </);
-  assert.match(html, /4 KB/);
+  assert.match(html, /title="mockup\.png, 4 KB"/, "the image's size is on hover");
   assert.match(html, /href="\/api\/swarms\/s\/plan-sources\/src-4\/content"/, "an image opens its content");
-  assert.equal(html.match(/<a /g)?.length, 1, "and only the image is a link");
+  assert.equal(html.match(/<a /g)?.length, 4, "every pill opens something");
   assert.doesNotMatch(html, /characters|12,463|8,402|3,104/);
 });
 
@@ -1714,7 +1715,7 @@ test("a document swarm names its deliverable and offers to open it", () => {
  * The brief folds, so the diagram gets the screen.
  * ---------------------------------------------------------------- */
 
-test("the brief opens with the goal and a button that folds it, and nothing of the goal is lost to the fold", () => {
+test("the details rail opens beside the tree with the goal in full, and hiding it leaves a strip that brings it back", () => {
   const detail = seedSwarms("p1", NOW).find((entry) => entry.swarm.id === "sw-api")!;
   const html = renderToStaticMarkup(
     createElement(SwarmPage, {
@@ -1740,18 +1741,18 @@ test("the brief opens with the goal and a button that folds it, and nothing of t
       },
     }),
   );
-  // Open by default, in a test as in a browser that has never folded it.
-  assert.match(html, /class="swarm-brief"[^>]*data-open="true"/);
-  assert.match(html, /class="swarm-brief-toggle" aria-expanded="true" aria-controls="swarm-brief-body"/);
-  assert.ok(html.includes(">Collapse<"), "the button says what it does");
+  // Open by default, in a test as in a browser that has never hidden it.
+  assert.match(html, /class="swarm-body" data-rail="open"/);
+  assert.match(html, /aria-label="Hide details" title="Hide details" aria-expanded="true"/);
   assert.ok(html.includes(detail.swarm.goal), "the goal is on the page in full");
-  assert.ok(html.includes('id="swarm-brief-body"'));
-  assert.ok(html.includes("swarm-spend-summary"), "the figures are on the page while the goal is open");
-  assert.ok(!html.includes("swarm-brief-excerpt"), "no excerpt while the whole goal is showing");
+  assert.ok(html.indexOf('class="swarm-main"') < html.indexOf('class="swarm-rail"'), "the tree comes first, the rail beside it");
+  assert.ok(html.includes("swarm-spend-summary"), "the figures are on the page above both");
+  assert.doesNotMatch(html, /swarm-rail-strip/, "no strip while the rail is open");
+  assert.match(html, /<span class="swarm-section-title">Task tree<\/span>/);
 
-  // Folded by this browser: the goal and the plan fold away. The
-  // figures are their own strip now and stay, and so does the one
-  // sentence about what the swarm waits on.
+  // Hidden by this browser: the strip stands in for the rail, with a
+  // button per card, and the one sentence about what the swarm waits
+  // on stays above both.
   const waiting = { ...detail, swarm: { ...detail.swarm, status: "planning" as const }, plannerRun: { ...detail.plannerRun!, status: "failed" as const, error: "spawn failed" } };
   const folded = renderToStaticMarkup(
     createElement(SwarmPage, {
@@ -1763,7 +1764,7 @@ test("the brief opens with the goal and a button that folds it, and nothing of t
       onSelect: () => {},
       onToggleNode: () => {},
       surfaces: modeSurfaces("multi"),
-      briefStorage: memoryStorage({ "bento:swarmBrief": "closed" }),
+      railStorage: memoryStorage({ "bento:swarmRail": "closed" }),
       actions: {
         onPause: () => {},
         onResume: () => {},
@@ -1778,11 +1779,14 @@ test("the brief opens with the goal and a button that folds it, and nothing of t
       },
     }),
   );
-  assert.match(folded, /class="swarm-brief"[^>]*data-open="false"/);
-  assert.ok(folded.includes(">Expand<"));
-  assert.ok(folded.includes("swarm-brief-excerpt"), "the goal's first line stands in for it");
-  assert.ok(!folded.includes('id="swarm-brief-body"'));
-  assert.ok(folded.includes("swarm-spend-summary") && folded.includes("swarm-worker-control"), "spend and workers never fold with the goal");
+  assert.match(folded, /class="swarm-body" data-rail="closed"/);
+  assert.match(folded, /class="swarm-rail-strip" role="toolbar" aria-label="Swarm details, collapsed"/);
+  assert.match(folded, /aria-label="Show details"/);
+  assert.match(folded, /aria-label="Goal and plan sources"/);
+  assert.match(folded, /aria-label="Artifacts, 0"/);
+  assert.match(folded, /aria-label="Pull request #4127"/, "the strip names the pull request this swarm opened");
+  assert.doesNotMatch(folded, /aria-label="Hide details"[^>]*aria-expanded="true"/);
+  assert.ok(folded.includes("swarm-spend-summary") && folded.includes("swarm-worker-control"), "spend and workers never fold with the rail");
   // This swarm has a plan and a planner that stopped, so what it waits
   // on is approval of the saved plan; that sentence is on the page.
   assert.ok(folded.includes("Review the diagram, then approve the plan to start ready workers."), "what the swarm waits on a person for is never folded away");
