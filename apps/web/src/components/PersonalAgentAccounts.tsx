@@ -39,7 +39,7 @@ export function PersonalAgentAccounts({ client }: { client: BentoClient }) {
     finally { setBusy(false); }
   }
   return <section className="section settings-card">
-    <h3 className="settings-title">Your personal subscriptions</h3>
+    <h3 className="settings-title">Personal subscriptions</h3>
     <p className="muted">Connect your own Claude or ChatGPT account for Claude Code, Codex, and Pi. Only runs you start use these connections. Your team cannot use your login. Background stages, swarms, and remote runners keep using their existing credentials.</p>
     <p className="muted">Connected subscriptions take priority for matching models. Custom provider URLs keep using their API keys. Disconnect to return to API keys. Usage remains subject to your subscription limits.</p>
     {error && <p className="error" role="alert">{error}</p>}

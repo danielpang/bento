@@ -52,7 +52,10 @@ function growSkill(el: HTMLTextAreaElement | null): void {
   el.style.height = "0px";
   const content = el.scrollHeight;
   el.style.height = `${Math.min(content, SKILL_MAX_HEIGHT)}px`;
-  el.style.overflowY = content > SKILL_MAX_HEIGHT ? "auto" : "hidden";
+  // Keep the textarea a native wheel-scroll target even when the dialog
+  // constrains its visible height. At its boundary the wheel can scroll
+  // the surrounding editor instead.
+  el.style.overflowY = "auto";
 }
 
 /**
@@ -386,7 +389,7 @@ export function AgentsPanel({
           />
         </section>
 
-        <div hidden={beta && section !== "connections"}>
+        <div className="agent-connections" hidden={beta && section !== "connections"}>
         <PersonalAgentAccounts client={client} />
         {machine && (
           <section className="section settings-card">

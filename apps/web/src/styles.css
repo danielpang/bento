@@ -4946,7 +4946,7 @@ a.pr-row:hover .pr-external {
   font-family: var(--sans);
   line-height: 1.5;
   overflow-wrap: anywhere;
-  overflow-y: hidden;
+  overflow-y: auto;
   min-width: 0;
   max-width: 100%;
   box-sizing: border-box;
@@ -5702,6 +5702,8 @@ button.session-expand[aria-pressed="true"] {
 }
 .management-drawer .drawer-title-row { align-items: center; }
 .management-drawer .drawer-body { gap: 20px; }
+.agent-connections { display: flex; flex-direction: column; gap: 20px; }
+.agent-connections[hidden] { display: none; }
 .management-drawer .drawer-head > .muted { max-width: 58ch; }
 .management-drawer .field > .label,
 .settings-content .field > .label {
