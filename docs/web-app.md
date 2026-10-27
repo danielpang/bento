@@ -282,7 +282,7 @@ Updates via SSE: `/api/board/:id/events`.
 
 ## Implementation notes
 
-**Done lane:** status-driven, not a stored stage. **Mark done** and drag-to-Done skip remaining stages. **Reopen** restores prior stage.
+**Completed lane:** status-driven, not a stored stage. **Mark completed** and drag-to-Completed skip remaining stages. **Reopen** restores prior stage.
 
 **Search:** filtered in `Board.tsx` via `matchesQuery` (`apps/web/src/search.test.ts`). Punctuation-normalized matching.
 
