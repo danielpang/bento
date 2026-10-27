@@ -3,7 +3,7 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { AnalyticsTotals, FeatureSpend, ProjectAnalytics } from "@bento/api-client";
-import { AnalyticsPage, StageFlow, SwarmTable, Tiles } from "./components/AnalyticsPage.js";
+import { AnalyticsPage, SeriesPicker, StageFlow, SwarmTable, Tiles } from "./components/AnalyticsPage.js";
 import {
   ANALYTICS_WINDOWS,
   axisIndices,
@@ -16,7 +16,8 @@ import {
   describeWindow,
   formatSpend,
   queryFor,
-  windowPhrase,
+  SERIES,
+  windowDays,
 } from "./components/analytics-format.js";
 import { compareFeatureSpend, formatCardSpend, formatFeatureSpend } from "./components/spend-format.js";
 
@@ -98,7 +99,6 @@ test("a preset is a range and a custom window is two dates, once both are valid"
   });
   assert.equal(queryFor({ kind: "custom", from: "2026-09-01", to: "" }), null, "a half typed window asks for nothing");
   assert.equal(queryFor({ kind: "custom", from: "2026-09-30", to: "2026-09-01" }), null);
-  assert.equal(windowPhrase("3d"), "3 days");
   assert.equal(ANALYTICS_WINDOWS.length, 4);
 });
 
@@ -115,22 +115,25 @@ test("a custom window says what is wrong with it, and nothing while it is unfini
 });
 
 test("the window note names the days covered and the comparison, in UTC", () => {
-  assert.equal(
-    describeWindow({ range: "1w", from: "2026-10-20T14:05:00.000Z", to: "2026-10-27T14:05:00.000Z", bucketUnit: "day" }),
-    "The last 7 days, Oct 20 to Oct 27, compared with the 7 days before.",
-  );
+  const week = { range: "1w", from: "2026-10-20T14:05:00.000Z", to: "2026-10-27T14:05:00.000Z", bucketUnit: "day" } as const;
+  assert.equal(describeWindow(week), "Oct 20 to Oct 27, compared with the 7 days before");
+  assert.equal(windowDays(week), 7);
   // A custom window closes at the next midnight, so its last day is
   // the one asked for, not the day after.
+  const september = { range: "custom", from: "2026-09-01T00:00:00.000Z", to: "2026-10-01T00:00:00.000Z", bucketUnit: "day" } as const;
+  assert.equal(describeWindow(september), "Sep 1 to Sep 30, compared with the 30 days before");
   assert.equal(
-    describeWindow({ range: "custom", from: "2026-09-01T00:00:00.000Z", to: "2026-10-01T00:00:00.000Z", bucketUnit: "day" }),
-    "Sep 1 to Sep 30, compared with the 30 days before.",
+    describeWindow({ range: "custom", from: "2026-10-27T00:00:00.000Z", to: "2026-10-28T00:00:00.000Z", bucketUnit: "6h" }),
+    "Oct 27 to Oct 27, compared with the day before",
+    "one day is not \"1 days\"",
   );
 });
 
-test("a delta is signed against the window before, and only a rise is good news", () => {
-  assert.deepEqual(describeDelta(12, 8), { text: "▲ 4 vs the window before", tone: "good" });
-  assert.deepEqual(describeDelta(8, 12), { text: "▼ 4 vs the window before", tone: "bad" });
-  assert.deepEqual(describeDelta(3, 3), { text: "Same as the window before", tone: "flat" });
+test("a delta is signed against the previous window of the same length, and only a rise is good news", () => {
+  assert.deepEqual(describeDelta(12, 8, 30), { text: "▲ 4 vs previous 30 days", short: "▲ 4 vs previous", tone: "good" });
+  assert.deepEqual(describeDelta(8, 12, 7), { text: "▼ 4 vs previous 7 days", short: "▼ 4 vs previous", tone: "bad" });
+  assert.deepEqual(describeDelta(3, 3, 14), { text: "Same as previous 14 days", short: "Same as previous", tone: "flat" });
+  assert.equal(describeDelta(2, 1, 1).text, "▲ 1 vs previous day");
   assert.equal(formatSpend(4.2, 0), "$4.20");
   assert.equal(formatSpend(4.2, 2), "$4.20+", "a floor wears a plus");
   assert.equal(formatSpend(0.004, 0), "<$0.01");
@@ -168,19 +171,34 @@ const analytics: ProjectAnalytics = {
  * cannot disagree with itself about the window.
  */
 test("the figures render as tiles against the window before, with the stages under them", () => {
-  const tiles = renderToStaticMarkup(createElement(Tiles, { totals, previous: analytics.previous }));
-  assert.match(tiles, /Cards completed.*>12<.*\u25B2 4 vs the window before/s);
+  const tiles = renderToStaticMarkup(createElement(Tiles, { totals, previous: analytics.previous, days: 30 }));
+  assert.match(tiles, /Cards completed.*>12<.*\u25B2 4 vs previous 30 days/s);
   assert.match(tiles, /data-tone="good"/, "more completions is colored as good news");
-  assert.match(tiles, /Cards created.*>18<.*\u25BC 2 vs the window before/s);
-  assert.doesNotMatch(tiles, /data-tone="good"[^>]*>\u25BC/, "fewer cards created is not colored as bad news");
+  assert.match(tiles, /Cards created.*>18<.*\u25BC 2 vs previous 30 days/s);
+  assert.doesNotMatch(tiles, /data-tone="good"[^>]*>(<span[^>]*>)?\u25BC/, "fewer cards created is not colored as bad news");
+  // A phone gets the short forms, one of each pair hidden by CSS.
+  assert.match(tiles, /class="analytics-narrow">Completed</);
+  assert.match(tiles, /class="analytics-narrow">\u25B2 4 vs previous</);
   assert.match(tiles, /41 automatic, 16 by hand/);
   assert.match(tiles, /58 succeeded, 6 failed/);
   assert.match(tiles, /\$42\.18<\/span>|\$42\.18\+/, "spend is a floor when runs went unreported");
   assert.match(tiles, /12 of 64 runs reported no cost/);
 
   const stages = renderToStaticMarkup(createElement(StageFlow, { rows: analytics.byStage }));
-  assert.match(stages, /Implementation.*width:100%.*>16<.*4 cards now/s);
+  assert.match(stages, /Implementation.*width:100%.*>16<.*4 cards now.*>4 now</s);
   assert.match(stages, /Done.*width:75%.*>12<.*12 cards now/s);
+});
+
+/**
+ * A phone has no room for "Stage moves" in the series picker or for
+ * the stage moves column, so it shows "Moves" and drops the column.
+ * The button keeps its full name for a screen reader.
+ */
+test("a phone gets the short series label, and the button keeps its full name", () => {
+  assert.equal(SERIES.find((s) => s.key === "stageMoves")?.short, "Moves");
+  const html = renderToStaticMarkup(createElement(SeriesPicker, { series: "completed", onChange: () => {} }));
+  assert.match(html, /aria-label="Stage moves"[^>]*><span class="analytics-wide">Stage moves<\/span><span class="analytics-narrow">Moves<\/span>/);
+  assert.match(html, /aria-pressed="true"[^>]*>Completed</, "a label with no short form is just the label");
 });
 
 /** One swarm with money on it, and no cards at all. */

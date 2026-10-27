@@ -4471,6 +4471,9 @@ a.pr-row:hover .pr-external {
  * ranked by what it actually cost.
  */
 .analytics-screen {
+  /* The space between the page's blocks: intro, picker, tiles, and
+     each section under them. */
+  --analytics-gap: 28px;
   flex: 1;
   min-height: 0;
   overflow-y: auto;
@@ -4481,14 +4484,18 @@ a.pr-row:hover .pr-external {
   box-sizing: border-box;
 }
 .analytics-intro {
-  margin: 0 0 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 0 var(--analytics-gap);
 }
 .analytics-back {
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  margin: 0 0 16px;
   color: var(--text-dim);
+  font-family: var(--sans);
   font-size: 13px;
   text-decoration: none;
 }
@@ -4496,17 +4503,24 @@ a.pr-row:hover .pr-external {
   color: var(--text);
 }
 .analytics-title {
-  margin: 0;
+  margin: 8px 0 0;
   font-family: var(--sans);
   font-size: 22px;
   font-weight: 650;
   letter-spacing: -0.02em;
 }
-/* The window picker: one row above everything it scopes. */
+/*
+ * A label with a shorter form for a phone: one of the pair is always
+ * display: none, so a screen reader hears only the one on screen.
+ */
+.analytics-narrow {
+  display: none;
+}
+/* The window picker: one row above everything it scopes, the dates it covers at its end. */
 .analytics-filters {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px 12px;
   flex-wrap: wrap;
 }
 .analytics-segmented {
@@ -4535,6 +4549,11 @@ a.pr-row:hover .pr-external {
   background: color-mix(in srgb, var(--brand) 16%, transparent);
   color: var(--text);
 }
+/* The series picker is words, not a scale, so it is set without tracking. */
+.analytics-series button {
+  letter-spacing: normal;
+  padding: 4px 10px;
+}
 .analytics-custom {
   display: inline-flex;
   align-items: center;
@@ -4547,9 +4566,9 @@ a.pr-row:hover .pr-external {
   color: var(--text-faint);
 }
 .analytics-custom input {
-  width: 150px;
+  width: auto;
   height: 30px;
-  padding-block: 0;
+  padding: 0 8px;
   box-sizing: border-box;
   font-size: 12.5px;
   font-variant-numeric: tabular-nums;
@@ -4560,7 +4579,7 @@ a.pr-row:hover .pr-external {
   color: var(--failed);
 }
 .analytics-window-note {
-  margin: 10px 0 0;
+  margin: 0 0 0 auto;
   font-family: var(--sans);
   font-size: 12.5px;
   color: var(--text-faint);
@@ -4571,7 +4590,7 @@ a.pr-row:hover .pr-external {
  * up at reduced opacity rather than collapsing into a skeleton.
  */
 .analytics-body {
-  margin-top: 20px;
+  margin-top: var(--analytics-gap);
   transition: opacity 0.15s ease;
 }
 .analytics-body[data-loading] {
@@ -4604,7 +4623,7 @@ a.pr-row:hover .pr-external {
 }
 .analytics-tile-value {
   font-family: var(--sans);
-  font-size: 28px;
+  font-size: 30px;
   font-weight: 600;
   letter-spacing: -0.02em;
   line-height: 1.1;
@@ -4623,27 +4642,30 @@ a.pr-row:hover .pr-external {
   color: var(--succeeded);
 }
 .analytics-section {
-  margin: 32px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: var(--analytics-gap) 0 0;
+}
+.analytics-section > .muted {
+  margin: 0;
 }
 .analytics-section-head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 12px;
+  gap: 10px 12px;
   flex-wrap: wrap;
 }
-.analytics-section-head .analytics-section-title {
-  margin-bottom: 0;
-}
 .analytics-section-title {
-  margin: 0 0 12px;
+  margin: 0;
   font-family: var(--sans);
   font-size: 16px;
   font-weight: 650;
   letter-spacing: -0.01em;
 }
 .analytics-chart-total {
-  margin: 10px 0 0;
+  margin: 0;
   font-family: var(--sans);
   font-size: 13.5px;
   font-weight: 600;
@@ -4655,11 +4677,11 @@ a.pr-row:hover .pr-external {
  * ordinary buttons above the chart, not a chart mark.
  */
 .analytics-chart {
-  margin-top: 14px;
+  margin-top: 6px;
 }
 .analytics-chart-plot {
   position: relative;
-  height: 170px;
+  height: 180px;
   border-bottom: 1px solid var(--line-bright);
 }
 .analytics-chart-gridline {
@@ -4683,6 +4705,7 @@ a.pr-row:hover .pr-external {
   inset: 0;
   display: flex;
   align-items: flex-end;
+  gap: 2px;
 }
 .analytics-chart-slot {
   flex: 1;
@@ -4708,9 +4731,9 @@ a.pr-row:hover .pr-external {
 .analytics-chart-slot:focus-visible .analytics-chart-bar:not([data-empty]) {
   filter: brightness(1.15);
 }
+/* The tip floats just above the bar it names; its bottom is set inline from the bar's height. */
 .analytics-chart-tip {
   position: absolute;
-  bottom: calc(100% + 8px);
   transform: translateX(-50%);
   display: flex;
   align-items: baseline;
@@ -4741,7 +4764,8 @@ a.pr-row:hover .pr-external {
 }
 .analytics-chart-axis {
   display: flex;
-  margin-top: 6px;
+  gap: 2px;
+  margin-top: 12px;
 }
 .analytics-chart-axis span {
   flex: 1;
@@ -4751,12 +4775,13 @@ a.pr-row:hover .pr-external {
   color: var(--text-faint);
   white-space: nowrap;
 }
-/* Moves into each stage: a bar per stage, longest first by pipeline order, not rank. */
+/* Moves into each stage: a bar per stage, in pipeline order, not ranked. */
 .analytics-stages {
   display: grid;
-  grid-template-columns: minmax(120px, 200px) minmax(0, 1fr) auto auto;
+  grid-template-columns: 200px minmax(0, 1fr) 72px 110px;
   gap: 10px 16px;
   align-items: center;
+  margin-top: 4px;
 }
 .analytics-stage-row {
   display: contents;
@@ -4787,7 +4812,6 @@ a.pr-row:hover .pr-external {
   font-size: 13.5px;
   font-variant-numeric: tabular-nums;
   text-align: right;
-  min-width: 2ch;
 }
 .analytics-stage-now {
   font-family: var(--sans);
@@ -4797,20 +4821,29 @@ a.pr-row:hover .pr-external {
   text-align: right;
   white-space: nowrap;
 }
+/* A table wider than a phone scrolls inside its own box, not the page. */
+.analytics-table-scroll {
+  margin-top: 4px;
+  overflow-x: auto;
+}
 @media (max-width: 900px) {
   .analytics-tiles {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 @media (max-width: 640px) {
-  .analytics-tiles {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+  .analytics-screen {
+    --analytics-gap: 22px;
+    padding: 16px 16px 40px;
   }
-  .analytics-tile:last-child {
-    grid-column: 1 / -1;
+  .analytics-title {
+    margin-top: 6px;
   }
-  .analytics-tile-value {
-    font-size: 24px;
+  .analytics-wide {
+    display: none;
+  }
+  .analytics-narrow {
+    display: inline;
   }
   .analytics-segmented {
     display: flex;
@@ -4818,20 +4851,87 @@ a.pr-row:hover .pr-external {
   }
   .analytics-segmented button {
     flex: 1;
+    padding: 7px 0;
   }
-  .analytics-stages {
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: 6px 12px;
+  .analytics-series button {
+    padding: 6px 0;
   }
-  .analytics-stage-track {
+  .analytics-window-note {
+    flex-basis: 100%;
+    margin: 0;
+  }
+  .analytics-tiles {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+  .analytics-tile {
+    gap: 4px;
+    padding: 12px 14px;
+  }
+  .analytics-tile:last-child {
     grid-column: 1 / -1;
-    margin-bottom: 6px;
+  }
+  .analytics-tile-value {
+    font-size: 26px;
+  }
+  .analytics-chart {
+    margin-top: 0;
+  }
+  .analytics-chart-plot {
+    height: 140px;
+  }
+  .analytics-chart-bar {
+    width: 70%;
+    border-radius: 3px 3px 0 0;
+  }
+  /* Each stage is a line, name on the left and "16 · 4 now" on the right, with its bar under it. */
+  .analytics-stages {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+    margin-top: 0;
+  }
+  .analytics-stage-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-areas:
+      "name count now"
+      "track track track";
+    gap: 5px 4px;
+    align-items: baseline;
+  }
+  .analytics-stage-name {
+    grid-area: name;
+    margin-right: 4px;
+    font-size: 13px;
   }
   .analytics-stage-count {
-    display: none;
+    grid-area: count;
+    font-size: 13px;
+  }
+  .analytics-stage-now {
+    grid-area: now;
+    font-size: 13px;
   }
   .analytics-stage-now::before {
-    content: attr(data-moves) " in, ";
+    content: "· ";
+    /* A separator to see, not to hear. */
+    content: "· " / "";
+  }
+  .analytics-stage-track {
+    grid-area: track;
+    height: 8px;
+  }
+  .analytics-table-scroll {
+    margin-top: 0;
+  }
+  .analytics-table-scroll .spend-table th,
+  .analytics-table-scroll .spend-table td {
+    padding: 10px 6px;
+  }
+  .analytics-table-scroll .spend-table td {
+    font-size: 13px;
   }
 }
 .spend-table {

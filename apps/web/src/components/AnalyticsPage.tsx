@@ -17,6 +17,7 @@ import {
   formatSpend,
   queryFor,
   seriesTotal,
+  windowDays,
   type Series,
   type WindowChoice,
 } from "./analytics-format.js";
@@ -35,9 +36,12 @@ import { AnalyticsPageSkeleton } from "./Skeleton.js";
  * board this is. One window scopes everything on the page, chosen
  * once above the figures, so no two numbers here disagree about the
  * period they cover. It opens on the last month. The figures carry
- * no explanatory copy: each tile's note and the window line under
+ * no explanatory copy: each tile's note and the window line beside
  * the picker say what is being counted, and the rest has to be
- * obvious from its label.
+ * obvious from its label. A phone gets the same page with shorter
+ * labels where the long ones would wrap (`analytics-wide` and
+ * `analytics-narrow`, one of which is always display: none, so a
+ * screen reader hears only the one shown).
  */
 export function AnalyticsPage({ client, projectId }: { client: BentoClient; projectId: string | null }) {
   const toast = useToast();
@@ -121,8 +125,7 @@ export function AnalyticsPage({ client, projectId }: { client: BentoClient; proj
         </a>
         <h1 className="analytics-title">Analytics</h1>
       </header>
-      <WindowPicker choice={choice} onChange={setChoice} />
-      {data && <p className="analytics-window-note">{describeWindow(data.window)}</p>}
+      <WindowPicker choice={choice} onChange={setChoice} note={data ? describeWindow(data.window) : null} />
       {loadFailed && data === null ? (
         <>
           <p className="error">Could not load analytics.</p>
@@ -135,24 +138,13 @@ export function AnalyticsPage({ client, projectId }: { client: BentoClient; proj
         <AnalyticsPageSkeleton framed={false} />
       ) : (
         <div className="analytics-body" data-loading={loading ? "" : undefined}>
-          <Tiles totals={data.totals} previous={data.previous} />
+          <Tiles totals={data.totals} previous={data.previous} days={windowDays(data.window)} />
           <section className="analytics-section" aria-labelledby="analytics-over-time">
             <div className="analytics-section-head">
               <h2 id="analytics-over-time" className="analytics-section-title">
                 Over time
               </h2>
-              <div className="analytics-segmented" role="group" aria-label="Series">
-                {SERIES.map((s) => (
-                  <button
-                    key={s.key}
-                    type="button"
-                    aria-pressed={s.key === series}
-                    onClick={() => setSeries(s.key)}
-                  >
-                    {s.label}
-                  </button>
-                ))}
-              </div>
+              <SeriesPicker series={series} onChange={setSeries} />
             </div>
             <p className="analytics-chart-total" aria-live="polite">
               {chartHeadline(data, series)}
@@ -169,11 +161,56 @@ export function AnalyticsPage({ client, projectId }: { client: BentoClient; proj
 }
 
 /**
+ * Which series the chart shows. A phone shows a label's short form
+ * where the long one would wrap; the button keeps its full name.
+ */
+export function SeriesPicker({ series, onChange }: { series: Series; onChange: (next: Series) => void }) {
+  return (
+    <div className="analytics-segmented analytics-series" role="group" aria-label="Series">
+      {SERIES.map((s) => (
+        <button
+          key={s.key}
+          type="button"
+          aria-pressed={s.key === series}
+          aria-label={s.short ? s.label : undefined}
+          onClick={() => onChange(s.key)}
+        >
+          <Narrowable wide={s.label} narrow={s.short} />
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * Text with a shorter form for a phone. Without a short form it is
+ * just the text.
+ */
+function Narrowable({ wide, narrow }: { wide: string; narrow?: string }) {
+  if (!narrow || narrow === wide) return <>{wide}</>;
+  return (
+    <>
+      <span className="analytics-wide">{wide}</span>
+      <span className="analytics-narrow">{narrow}</span>
+    </>
+  );
+}
+
+/**
  * The window, chosen once for the whole page. Presets first, because
  * they are what almost everybody wants; Custom opens two date fields
- * that ask for nothing until both hold a day.
+ * that ask for nothing until both hold a day, and then apply at once.
+ * The dates the figures cover sit at the end of the same row.
  */
-function WindowPicker({ choice, onChange }: { choice: WindowChoice; onChange: (next: WindowChoice) => void }) {
+function WindowPicker({
+  choice,
+  onChange,
+  note,
+}: {
+  choice: WindowChoice;
+  onChange: (next: WindowChoice) => void;
+  note: string | null;
+}) {
   const custom = choice.kind === "custom" ? choice : null;
   const problem = custom ? customRangeProblem(custom.from, custom.to) : null;
   return (
@@ -227,23 +264,37 @@ function WindowPicker({ choice, onChange }: { choice: WindowChoice; onChange: (n
           )}
         </div>
       )}
+      {note && <p className="analytics-window-note">{note}</p>}
     </div>
   );
 }
 
 /**
- * The headline figures, each against the window before. Only the
- * delta's good direction is colored: more completions is good, and a
- * change in anything else is just a change.
+ * The headline figures, each against the previous window of the same
+ * length (`days`). Only the delta's good direction is colored: more
+ * completions is good, and a change in anything else is just a change.
  */
-export function Tiles({ totals, previous }: { totals: AnalyticsTotals; previous: AnalyticsTotals }) {
+export function Tiles({ totals, previous, days }: { totals: AnalyticsTotals; previous: AnalyticsTotals; days: number }) {
   const { reporting, silent } = spendReportingTools();
-  const completed = describeDelta(totals.cardsCompleted, previous.cardsCompleted);
-  const created = describeDelta(totals.cardsCreated, previous.cardsCreated);
+  const completed = describeDelta(totals.cardsCompleted, previous.cardsCompleted, days);
+  const created = describeDelta(totals.cardsCreated, previous.cardsCreated, days);
   return (
     <section className="analytics-tiles" aria-label="Headline figures">
-      <Tile label="Cards completed" value={String(totals.cardsCompleted)} note={completed?.text} tone={completed?.tone} />
-      <Tile label="Cards created" value={String(totals.cardsCreated)} note={created?.text} />
+      <Tile
+        label="Cards completed"
+        shortLabel="Completed"
+        value={String(totals.cardsCompleted)}
+        note={completed.text}
+        shortNote={completed.short}
+        tone={completed.tone}
+      />
+      <Tile
+        label="Cards created"
+        shortLabel="Created"
+        value={String(totals.cardsCreated)}
+        note={created.text}
+        shortNote={created.short}
+      />
       <Tile
         label="Stage moves"
         value={String(totals.stageMoves)}
@@ -272,24 +323,30 @@ export function Tiles({ totals, previous }: { totals: AnalyticsTotals; previous:
 
 function Tile({
   label,
+  shortLabel,
   value,
   note,
+  shortNote,
   tone,
   title,
 }: {
   label: string;
+  shortLabel?: string;
   value: string;
   note?: string;
+  shortNote?: string;
   tone?: "good" | "bad" | "flat";
   title?: string;
 }) {
   return (
     <div className="analytics-tile" title={title}>
-      <span className="analytics-tile-label">{label}</span>
+      <span className="analytics-tile-label">
+        <Narrowable wide={label} narrow={shortLabel} />
+      </span>
       <span className="analytics-tile-value">{value}</span>
       {note && (
         <span className="analytics-tile-note" data-tone={tone === "good" ? "good" : undefined}>
-          {note}
+          <Narrowable wide={note} narrow={shortNote} />
         </span>
       )}
     </div>
@@ -360,7 +417,10 @@ function Chart({ data, series }: { data: ProjectAnalytics; series: Series }) {
           <div
             className="analytics-chart-tip"
             data-edge={hovered < 2 ? "start" : hovered >= buckets.length - 2 ? "end" : undefined}
-            style={{ left: `${((hovered + 0.5) / buckets.length) * 100}%` }}
+            style={{
+              left: `${((hovered + 0.5) / buckets.length) * 100}%`,
+              bottom: `calc(${((values[hovered] ?? 0) / scale) * 100}% + 8px)`,
+            }}
           >
             <strong>
               {values[hovered] ?? 0} {noun(values[hovered] ?? 0)}
@@ -400,8 +460,8 @@ export function StageFlow({ rows }: { rows: ProjectAnalytics["byStage"] }) {
             <span className="analytics-stage-count" aria-label={`${row.movesIn} moved in`}>
               {row.movesIn}
             </span>
-            <span className="analytics-stage-now" data-moves={row.movesIn}>
-              {row.cardsNow} card{row.cardsNow === 1 ? "" : "s"} now
+            <span className="analytics-stage-now">
+              <Narrowable wide={`${row.cardsNow} card${row.cardsNow === 1 ? "" : "s"} now`} narrow={`${row.cardsNow} now`} />
             </span>
           </div>
         ))}
@@ -432,54 +492,56 @@ function SpendByCard({
       {rows.length === 0 ? (
         <p className="muted">No card ran or moved in this window.</p>
       ) : (
-        <table className="spend-table">
-          <thead>
-            <tr>
-              <th scope="col" aria-sort={titleSort(sort)}>
-                <button type="button" className="spend-sort" onClick={() => onSort(nextTitleSort(sort))}>
-                  Card
-                  <SortMark active={sort === "title-asc" || sort === "title-desc"} descending={sort === "title-desc"} />
-                </button>
-              </th>
-              <th scope="col" aria-sort={spendSort(sort)} className="spend-col">
-                <button type="button" className="spend-sort" onClick={() => onSort(nextSpendSort(sort))}>
-                  Spend
-                  <SortMark active={sort === "spend-asc" || sort === "spend-desc"} descending={sort === "spend-desc"} />
-                </button>
-              </th>
-              <th scope="col" className="spend-col">
-                Runs
-              </th>
-              <th scope="col" className="spend-col">
-                Stage moves
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row) => (
-              <tr key={row.featureId}>
-                <td>
-                  <a className="spend-card-link" href={`/?feature=${row.featureId}`} title="Open this card">
-                    {row.title}
-                  </a>
-                </td>
-                <td className="spend-col">
-                  <span
-                    title={
-                      row.runsWithoutCost > 0
-                        ? `${row.runsWithoutCost} of ${row.runs} run${row.runs === 1 ? "" : "s"} reported no cost, so this is a floor, not a total.`
-                        : undefined
-                    }
-                  >
-                    {formatFeatureSpend(row)}
-                  </span>
-                </td>
-                <td className="spend-col">{row.runs}</td>
-                <td className="spend-col">{row.stageMoves}</td>
+        <div className="analytics-table-scroll">
+          <table className="spend-table">
+            <thead>
+              <tr>
+                <th scope="col" aria-sort={titleSort(sort)}>
+                  <button type="button" className="spend-sort" onClick={() => onSort(nextTitleSort(sort))}>
+                    Card
+                    <SortMark active={sort === "title-asc" || sort === "title-desc"} descending={sort === "title-desc"} />
+                  </button>
+                </th>
+                <th scope="col" aria-sort={spendSort(sort)} className="spend-col">
+                  <button type="button" className="spend-sort" onClick={() => onSort(nextSpendSort(sort))}>
+                    Spend
+                    <SortMark active={sort === "spend-asc" || sort === "spend-desc"} descending={sort === "spend-desc"} />
+                  </button>
+                </th>
+                <th scope="col" className="spend-col">
+                  Runs
+                </th>
+                <th scope="col" className="spend-col analytics-wide">
+                  Stage moves
+                </th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {rows.map((row) => (
+                <tr key={row.featureId}>
+                  <td>
+                    <a className="spend-card-link" href={`/?feature=${row.featureId}`} title="Open this card">
+                      {row.title}
+                    </a>
+                  </td>
+                  <td className="spend-col">
+                    <span
+                      title={
+                        row.runsWithoutCost > 0
+                          ? `${row.runsWithoutCost} of ${row.runs} run${row.runs === 1 ? "" : "s"} reported no cost, so this is a floor, not a total.`
+                          : undefined
+                      }
+                    >
+                      {formatFeatureSpend(row)}
+                    </span>
+                  </td>
+                  <td className="spend-col">{row.runs}</td>
+                  <td className="spend-col analytics-wide">{row.stageMoves}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </section>
   );
@@ -500,38 +562,40 @@ export function SwarmTable({ rows }: { rows: ProjectAnalytics["bySwarm"] }) {
       <h2 id="analytics-swarms" className="analytics-section-title">
         Swarms
       </h2>
-      <table className="spend-table">
-        <thead>
-          <tr>
-            <th scope="col">Swarm</th>
-            <th scope="col" className="spend-col">
-              Measured
-            </th>
-            <th scope="col" className="spend-col">
-              Unreported
-            </th>
-            <th scope="col" className="spend-col">
-              Runs
-            </th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => (
-            <tr key={row.swarmId}>
-              <td>
-                {/* The console reads the board from `board`; `mode` is
-                    a parameter nothing has ever read. */}
-                <a className="spend-card-link" href={`/?board=swarms&swarm=${row.swarmId}`} title="Open this swarm">
-                  {row.title}
-                </a>
-              </td>
-              <td className="spend-col spend-tier-cell">{dollars(row.costUsd)}</td>
-              <td className="spend-col">{row.runsWithoutCost}</td>
-              <td className="spend-col">{row.runs}</td>
+      <div className="analytics-table-scroll">
+        <table className="spend-table">
+          <thead>
+            <tr>
+              <th scope="col">Swarm</th>
+              <th scope="col" className="spend-col">
+                Measured
+              </th>
+              <th scope="col" className="spend-col">
+                Unreported
+              </th>
+              <th scope="col" className="spend-col">
+                Runs
+              </th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.swarmId}>
+                <td>
+                  {/* The console reads the board from `board`; `mode` is
+                      a parameter nothing has ever read. */}
+                  <a className="spend-card-link" href={`/?board=swarms&swarm=${row.swarmId}`} title="Open this swarm">
+                    {row.title}
+                  </a>
+                </td>
+                <td className="spend-col spend-tier-cell">{dollars(row.costUsd)}</td>
+                <td className="spend-col">{row.runsWithoutCost}</td>
+                <td className="spend-col">{row.runs}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </section>
   );
 }

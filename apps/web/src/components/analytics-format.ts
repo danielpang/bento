@@ -15,10 +15,6 @@ export const ANALYTICS_WINDOWS: { range: AnalyticsRange; label: string; window: 
 
 export const DEFAULT_RANGE: AnalyticsRange = "1m";
 
-export function windowPhrase(range: AnalyticsRange): string {
-  return ANALYTICS_WINDOWS.find((w) => w.range === range)?.window ?? range;
-}
-
 /**
  * What the page is looking at, as the picker holds it. A custom window
  * is kept as the two date strings the inputs hold, so a half typed
@@ -62,9 +58,20 @@ export function defaultCustomRange(today: Date = new Date()): { from: string; to
   return { from, to };
 }
 
+/** How many days a window covers, which is also how long the window before it is. */
+export function windowDays(window: ProjectAnalytics["window"]): number {
+  return Math.max(1, Math.round((new Date(window.to).getTime() - new Date(window.from).getTime()) / DAY_MS));
+}
+
+/** "30 days", or "day" for one, as in "the previous day". */
+function daysPhrase(days: number): string {
+  return days === 1 ? "day" : `${days} days`;
+}
+
 /**
- * The sentence under the picker: which days the figures cover and
- * what the deltas compare against. Both ends are formatted in UTC,
+ * The line beside the picker: which days the figures cover and what
+ * the deltas compare against. The picker already says which preset is
+ * on, so this names only the dates. Both ends are formatted in UTC,
  * because the window's boundaries are.
  */
 export function describeWindow(window: ProjectAnalytics["window"]): string {
@@ -72,29 +79,26 @@ export function describeWindow(window: ProjectAnalytics["window"]): string {
   // The window is half open, so the last day it covers is the day
   // before `to`: a custom window to Oct 27 closes at Oct 28 00:00.
   const last = new Date(new Date(window.to).getTime() - 1);
-  const days = Math.max(1, Math.round((new Date(window.to).getTime() - from.getTime()) / DAY_MS));
   const span = utcFormat(from, { month: "short", day: "numeric" }) + " to " + utcFormat(last, { month: "short", day: "numeric" });
-  if (window.range === "custom") {
-    return `${span}, compared with the ${days} days before.`;
-  }
-  return `The last ${windowPhrase(window.range)}, ${span}, compared with the ${days} days before.`;
+  return `${span}, compared with the ${daysPhrase(windowDays(window))} before`;
 }
 
 /**
  * The line under a tile's figure: the change against the previous
- * window, in the same unit. `up` says whether a rise is good news;
- * the page colors only the good direction, because a drop in cards
- * created is not a failure and a rise in failed runs is not progress.
+ * window of the same length. `short` drops the length, for a phone,
+ * where the line beside the picker already says it. `tone` says which
+ * way it went; the page colors only a rise in completions, because a
+ * drop in cards created is not a failure and a rise in failed runs is
+ * not progress.
  */
 export function describeDelta(
   current: number,
   previous: number,
-  format: (n: number) => string = (n) => String(n),
-): { text: string; tone: "good" | "bad" | "flat" } | null {
+  days: number,
+): { text: string; short: string; tone: "good" | "bad" | "flat" } {
   const diff = current - previous;
-  if (diff === 0) return { text: "Same as the window before", tone: "flat" };
-  const arrow = diff > 0 ? "▲" : "▼";
-  return { text: `${arrow} ${format(Math.abs(diff))} vs the window before`, tone: diff > 0 ? "good" : "bad" };
+  const lead = diff === 0 ? "Same as previous" : `${diff > 0 ? "▲" : "▼"} ${Math.abs(diff)} vs previous`;
+  return { text: `${lead} ${daysPhrase(days)}`, short: lead, tone: diff === 0 ? "flat" : diff > 0 ? "good" : "bad" };
 }
 
 /** A dollar figure for a tile or a cell. A plus marks a floor: some runs reported nothing. */
@@ -106,10 +110,11 @@ export function formatSpend(usd: number, runsWithoutCost: number): string {
 /** The chart's series, one at a time: what the picker above it offers. */
 export type Series = "completed" | "created" | "stageMoves" | "runs";
 
-export const SERIES: { key: Series; label: string; noun: (n: number) => string }[] = [
+/** `short` is what a phone shows when the label does not fit; the button's name stays `label`. */
+export const SERIES: { key: Series; label: string; short?: string; noun: (n: number) => string }[] = [
   { key: "completed", label: "Completed", noun: (n) => `card${n === 1 ? "" : "s"} completed` },
   { key: "created", label: "Created", noun: (n) => `card${n === 1 ? "" : "s"} created` },
-  { key: "stageMoves", label: "Stage moves", noun: (n) => `stage move${n === 1 ? "" : "s"}` },
+  { key: "stageMoves", label: "Stage moves", short: "Moves", noun: (n) => `stage move${n === 1 ? "" : "s"}` },
   { key: "runs", label: "Runs", noun: (n) => `run${n === 1 ? "" : "s"} finished` },
 ];
 
