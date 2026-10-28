@@ -429,3 +429,179 @@ test("a pull request over a branch GitHub has only part of says so, rather than 
   const current = await publishSwarmCompletion(lost, await readSwarm(swarm.id), publisher, { remoteUrl: () => remotePath });
   assert.equal(current.behind, false, "a copy pushed after the last landing is whole");
 });
+
+test("a lost machine's later landing is rebuilt from the task branch before the pull request opens", async () => {
+  const { swarm, tree } = await swarmOnHost("rebuild");
+  const first = await workerCommits(swarm, "Cart", "cart.ts", 0);
+  await pushTaskBranch(ctx, first.task.id, options);
+  await land(tree, first);
+  await pushSwarmBranch(ctx, swarm.id, first.task.id, options);
+
+  const second = await workerCommits(swarm, "Totals", "totals.ts", 1);
+  // The worker's branch leaves when the run ends, which is before the
+  // landing. The swarm's own push is what the lost machine never made.
+  await pushTaskBranch(ctx, second.task.id, options);
+  const secondHead = await land(tree, second);
+  await db.update(swarms).set({ status: "done", sandboxId: null }).where(eq(swarms.id, swarm.id));
+  const lost = cloneMachine(() => tree).ctx;
+
+  const result = await publishSwarmCompletion(lost, await readSwarm(swarm.id), publisher, { remoteUrl: () => remotePath });
+  assert.equal(result.behind, false, "the landing was replayed, so the pull request is whole");
+  assert.equal(result.published.length, 1);
+  assert.equal(await remoteHead(swarm.branchName!), secondHead);
+  assert.equal(await git(remotePath, ["show", `${swarm.branchName}:totals.ts`]), "Totals");
+});
+
+test("a push stamp that only looks older than the landing is not reported as missing work", async () => {
+  const { swarm, tree } = await swarmOnHost("skew");
+  const worker = await workerCommits(swarm, "Cart", "cart.ts", 0);
+  await pushTaskBranch(ctx, worker.task.id, options);
+  const head = await land(tree, worker);
+  await pushSwarmBranch(ctx, swarm.id, worker.task.id, options);
+  const before = await remoteHead(swarm.branchName!);
+  await db
+    .update(swarms)
+    .set({ status: "done", sandboxId: null, branchPushedAt: new Date(0) })
+    .where(eq(swarms.id, swarm.id));
+  const lost = cloneMachine(() => tree).ctx;
+
+  const result = await publishSwarmCompletion(lost, await readSwarm(swarm.id), publisher, { remoteUrl: () => remotePath });
+  assert.equal(result.behind, false, "git found the landing already on the branch");
+  assert.equal(await remoteHead(swarm.branchName!), before);
+  assert.equal(before, head);
+});
+
+test("a machine already gone is rebuilt from the task branch, and the reap does not need it", async () => {
+  const { swarm, tree } = await swarmOnHost("reap-gone");
+  const worker = await workerCommits(swarm, "Cart", "cart.ts", 0);
+  await pushTaskBranch(ctx, worker.task.id, options);
+  const head = await land(tree, worker);
+  const [row] = await db
+    .insert(sandboxes)
+    .values({
+      projectId: PROJECT,
+      swarmId: swarm.id,
+      provider: "modal",
+      externalId: "box-reap-gone",
+      status: "destroyed",
+      workdir: "/workspace",
+    })
+    .returning();
+  await db.update(swarms).set({ status: "done", sandboxId: row!.id }).where(eq(swarms.id, swarm.id));
+  const machine = cloneMachine(() => tree);
+
+  await reapSwarmSandbox(machine.ctx, swarm.id, { push: options });
+
+  assert.equal(await remoteHead(swarm.branchName!), head, "the landing reached GitHub without the machine");
+  assert.deepEqual(machine.destroyed, [], "a row that is already destroyed is not destroyed again");
+});
+
+test("a gone machine whose landed task never reached GitHub keeps the reap waiting", async () => {
+  const { swarm, sandboxId } = await finishedOnMachine("reap-unpushed");
+  await db.update(sandboxes).set({ status: "destroyed" }).where(eq(sandboxes.id, sandboxId));
+  const machine = cloneMachine(() => {
+    throw new Error("the machine is gone; nothing may be read from it");
+  });
+
+  await assert.rejects(reapSwarmSandbox(machine.ctx, swarm.id, { push: options }), SandboxReapDeferred);
+  assert.deepEqual(machine.destroyed, []);
+});
+
+test("a swarm branch already on GitHub is kept when the push was never recorded", async () => {
+  const { swarm, tree } = await swarmOnHost("kept");
+  const worker = await workerCommits(swarm, "Cart", "cart.ts", 0);
+  await pushTaskBranch(ctx, worker.task.id, options);
+  await land(tree, worker);
+  await writeFile(path.join(tree, "planner.ts"), "planner\n");
+  await git(tree, ["add", "."]);
+  await git(tree, ["commit", "--quiet", "-m", "planner"]);
+  await git(tree, ["push", "--quiet", remotePath, `HEAD:refs/heads/${swarm.branchName}`]);
+  const head = await git(tree, ["rev-parse", "HEAD"]);
+  await db.update(swarms).set({ status: "done", sandboxId: null, pushedHeads: {}, branchPushedAt: null }).where(eq(swarms.id, swarm.id));
+  const lost = cloneMachine(() => tree).ctx;
+
+  const result = await publishSwarmCompletion(lost, await readSwarm(swarm.id), publisher, { remoteUrl: () => remotePath });
+  assert.equal(result.behind, false, "the landed commit is already on the branch");
+  assert.equal(await remoteHead(swarm.branchName!), head, "the branch was not rebuilt from the default branch");
+  assert.equal(await git(remotePath, ["show", `${swarm.branchName}:planner.ts`]), "planner");
+});
+
+test("a replay that is not the landed commit is pushed and still reported as missing work", async () => {
+  const { swarm, tree } = await swarmOnHost("unproven");
+  const worker = await workerCommits(swarm, "Cart", "cart.ts", 0);
+  await pushTaskBranch(ctx, worker.task.id, options);
+  await land(tree, worker);
+  await writeFile(path.join(tree, "planner.ts"), "planner\n");
+  await git(tree, ["add", "."]);
+  await git(tree, ["commit", "--quiet", "-m", "planner"]);
+  const landed = await git(tree, ["rev-parse", "HEAD"]);
+  await db
+    .update(swarmTasks)
+    .set({ flags: sql`jsonb_set(${swarmTasks.flags}, '{landedHeads,app}', ${JSON.stringify(landed)}::jsonb)` })
+    .where(eq(swarmTasks.id, worker.task.id));
+  await db.update(swarms).set({ status: "done", sandboxId: null }).where(eq(swarms.id, swarm.id));
+  const lost = cloneMachine(() => tree).ctx;
+
+  const result = await publishSwarmCompletion(lost, await readSwarm(swarm.id), publisher, { remoteUrl: () => remotePath });
+  assert.equal(result.behind, true, "the planner commit existed only on the machine");
+  assert.equal(await git(remotePath, ["show", `${swarm.branchName}:cart.ts`]), "Cart", "the task's own commit was still pushed");
+  await assert.rejects(git(remotePath, ["cat-file", "-e", `${landed}^{commit}`]));
+  assert.equal((await readSwarm(swarm.id)).branchPushedAt, null);
+});
+
+test("a task branch that moved is not replayed onto the swarm branch", async () => {
+  const { swarm, tree } = await swarmOnHost("moved-task");
+  const worker = await workerCommits(swarm, "Cart", "cart.ts", 0);
+  await pushTaskBranch(ctx, worker.task.id, options);
+  await land(tree, worker);
+  await pushSwarmBranch(ctx, swarm.id, worker.task.id, options);
+  const head = await remoteHead(swarm.branchName!);
+  const theirs = path.join(dataDir, "moved-task");
+  await exec("git", ["clone", "--quiet", "--branch", worker.branch, remotePath, theirs]);
+  await writeFile(path.join(theirs, "extra.ts"), "extra\n");
+  await git(theirs, ["add", "."]);
+  await git(theirs, ["commit", "--quiet", "-m", "extra"]);
+  await git(theirs, ["push", "--quiet", "origin", worker.branch]);
+  await db
+    .update(swarms)
+    .set({ status: "done", sandboxId: null, branchPushedAt: new Date(0) })
+    .where(eq(swarms.id, swarm.id));
+  const lost = cloneMachine(() => tree).ctx;
+
+  const result = await publishSwarmCompletion(lost, await readSwarm(swarm.id), publisher, { remoteUrl: () => remotePath });
+  assert.equal(result.behind, true);
+  assert.equal(await remoteHead(swarm.branchName!), head, "the extra commit was not landed");
+  await assert.rejects(git(remotePath, ["show", `${swarm.branchName}:extra.ts`]));
+});
+
+test("a later push does not move the branch stamp backward", async () => {
+  const { swarm, tree } = await swarmOnHost("stamp");
+  const worker = await workerCommits(swarm, "Cart", "cart.ts", 0);
+  await land(tree, worker);
+  await pushSwarmBranch(ctx, swarm.id, worker.task.id, options);
+  const ahead = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  await db.update(swarms).set({ branchPushedAt: ahead }).where(eq(swarms.id, swarm.id));
+  await writeFile(path.join(tree, "more.ts"), "more\n");
+  await git(tree, ["add", "."]);
+  await git(tree, ["commit", "--quiet", "-m", "more"]);
+  await pushSwarmBranch(ctx, swarm.id, undefined, options);
+
+  const stamped = (await readSwarm(swarm.id)).branchPushedAt;
+  assert.ok(stamped);
+  assert.ok(stamped.getTime() >= ahead.getTime() - 1000, "the stamp stayed at the later time");
+});
+
+test("a git failure while rebuilding a gone machine keeps the reap waiting", async () => {
+  const { swarm, sandboxId } = await finishedOnMachine("reap-blip");
+  await db.update(sandboxes).set({ status: "destroyed" }).where(eq(sandboxes.id, sandboxId));
+  const machine = cloneMachine(() => {
+    throw new Error("the machine is gone; nothing may be read from it");
+  });
+  const offline = {
+    publisher: { ...publisher, async pushToken() { throw new Error("GitHub is down"); } } as unknown as typeof publisher,
+    remoteUrl: () => remotePath,
+  };
+
+  await assert.rejects(reapSwarmSandbox(machine.ctx, swarm.id, { push: offline }), SandboxReapDeferred);
+  assert.deepEqual(machine.destroyed, []);
+});

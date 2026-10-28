@@ -6,7 +6,7 @@ import path from "node:path";
 import { after, before, describe, test } from "node:test";
 import { promisify } from "node:util";
 import { taskTrailer } from "./branches.js";
-import { commitsForTask, isRetryableFastForward, landWorkerBranch, landWorkerBundles } from "./landing-git.js";
+import { bundleContainsCommit, commitsForTask, isRetryableFastForward, landWorkerBranch, landWorkerBundles } from "./landing-git.js";
 import type { RepositoryBundle } from "@bento/sandbox";
 
 const exec = promisify(execFile);
@@ -137,6 +137,71 @@ test("self-contained sandbox bundles reconcile without access to either source r
     assert.ok(retried.ok, `expected an idempotent retry, got ${JSON.stringify(retried)}`);
     assert.equal(retried.commits, 0);
     assert.equal(retried.bundle, null);
+  } finally {
+    await rm(fx.root, { recursive: true, force: true });
+  }
+});
+
+test("a self-contained replay lands one worker and then the next onto that result", async () => {
+  const fx = await fixture();
+  try {
+    await workerCommit(fx, "swarm/demo-chain-a", TASK_A, "a.txt", "from a\n");
+    await workerCommit(fx, "swarm/demo-chain-b", TASK_B, "b.txt", "from b\n");
+    const base = await fullBundle(fx.swarmWorktree, path.join(fx.root, "base.bundle"));
+    const workerA = await fullBundle(path.join(fx.root, "swarm_demo-chain-a"), path.join(fx.root, "a.bundle"));
+    const workerB = await fullBundle(path.join(fx.root, "swarm_demo-chain-b"), path.join(fx.root, "b.bundle"));
+
+    const first = await landWorkerBundles({
+      swarm: base,
+      worker: workerA,
+      policy: "rebase",
+      mergeMessage: "unused",
+      selfContained: true,
+    });
+    assert.ok(first.ok && first.bundle, `expected a bundle, got ${JSON.stringify(first)}`);
+    const second = await landWorkerBundles({
+      swarm: first.bundle,
+      worker: workerB,
+      policy: "rebase",
+      mergeMessage: "unused",
+      selfContained: true,
+    });
+    assert.ok(second.ok && second.bundle, `expected a second bundle, got ${JSON.stringify(second)}`);
+
+    // The result has to stand alone: a fresh repository with nothing
+    // of the originals can read both files out of it.
+    const fresh = path.join(fx.root, "fresh");
+    const file = path.join(fx.root, "chain.bundle");
+    await writeFile(file, second.bundle.data);
+    await exec("git", ["init", "--quiet", fresh]);
+    await git(fresh, ["fetch", "--quiet", file, "+HEAD:refs/heads/swarm"]);
+    await git(fresh, ["checkout", "--quiet", "swarm"]);
+    assert.equal(await git(fresh, ["show", "HEAD:a.txt"]), "from a");
+    assert.equal(await git(fresh, ["show", "HEAD:b.txt"]), "from b");
+
+    const again = await landWorkerBundles({
+      swarm: second.bundle,
+      worker: workerA,
+      policy: "rebase",
+      mergeMessage: "unused",
+      selfContained: true,
+    });
+    assert.ok(again.ok, `expected the first worker to already be contained, got ${JSON.stringify(again)}`);
+    assert.equal(again.commits, 0);
+  } finally {
+    await rm(fx.root, { recursive: true, force: true });
+  }
+});
+
+test("a bundle contains its head and not a commit it never had", async () => {
+  const fx = await fixture();
+  try {
+    const bundle = await fullBundle(fx.swarmWorktree, path.join(fx.root, "base.bundle"));
+    assert.equal(await bundleContainsCommit(bundle, bundle.headSha), true);
+    await workerCommit(fx, "swarm/demo-chain-a", TASK_A, "a.txt", "from a\n");
+    const other = await git(path.join(fx.root, "swarm_demo-chain-a"), ["rev-parse", "HEAD"]);
+    assert.equal(await bundleContainsCommit(bundle, other), false);
+    assert.equal(await bundleContainsCommit(bundle, "0123456789abcdef0123456789abcdef01234567"), false);
   } finally {
     await rm(fx.root, { recursive: true, force: true });
   }

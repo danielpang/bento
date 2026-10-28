@@ -16,7 +16,7 @@ import { SWARM_DESIGN_PATH } from "./design-document.js";
 import { hostBranchSource, publishSwarmBranches, type PublishableRepository, type PublishedPullRequest } from "../publish.js";
 import { swarmBranchName, swarmWorkspaceKey } from "./sandbox.js";
 import { workerBranchName } from "./branches.js";
-import { pushSwarmBranch } from "./remote-branches.js";
+import { branchLagsLanding, pushSwarmBranch } from "./remote-branches.js";
 import { driverForSandbox } from "../sandbox-driver.js";
 import { SandboxGone, wakeSwarmSandbox } from "../hibernate-sandbox.js";
 
@@ -58,10 +58,11 @@ export interface SwarmPublishResult {
   /** Why nothing was attempted, when nothing was. */
   skipped: string | null;
   /**
-   * The machine was lost after a task landed and before that landing
-   * reached GitHub, so the pull request was opened over a branch that
-   * is missing it. Never true when Bento reaped the machine, which it
-   * does only once GitHub has the branch.
+   * The pull request was opened over a branch that is missing landed
+   * work. The task branch never reached GitHub, or the commit that
+   * landed is not in the replay because it existed only on the machine.
+   * A landing whose task branch was pushed, and whose landed commit
+   * the replay contains, is put on GitHub before this is set.
    */
   behind?: boolean;
 }
@@ -273,12 +274,21 @@ export async function publishSwarmCompletion(
   const draft = swarm.status !== "done";
 
   /*
-   * The machine is gone, so there is no checkout to push from. Every
-   * landing already pushed the swarm's branch, so the pull request is
-   * opened on what GitHub holds.
+   * The machine is gone, so there is no checkout to push from. Landings
+   * that never reached GitHub are replayed from the task branches
+   * pushed when those runs ended. What is still missing after that is
+   * a task branch GitHub does not have, and the pull request says so.
    */
   if (!located && ctx.drivers.default.workspace === "clone") {
-    const result = await publishPushedSwarmBranch(ctx, swarm, publisher, repoRows, branch, body, draft);
+    try {
+      await pushSwarmBranch(ctx, swarm.id, undefined, { publisher, ...options });
+    } catch (err) {
+      console.error(
+        `swarm ${swarm.id}: could not rebuild its branch from GitHub: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    const [fresh] = await ctx.db.select().from(swarms).where(eq(swarms.id, swarm.id)).limit(1);
+    const result = await publishPushedSwarmBranch(ctx, fresh ?? swarm, publisher, repoRows, branch, body, draft);
     await refreshSwarmPullRequests(ctx, swarm.id, publisher);
     return result;
   }
@@ -371,7 +381,7 @@ async function publishPushedSwarmBranch(
     .where(and(eq(swarmLandings.swarmId, swarm.id), eq(swarmLandings.status, "landed")))
     .orderBy(desc(swarmLandings.endedAt))
     .limit(1);
-  const behind = Boolean(last?.endedAt && (!swarm.branchPushedAt || swarm.branchPushedAt < last.endedAt));
+  const behind = branchLagsLanding(swarm.branchPushedAt, last?.endedAt ?? null);
   if (behind) {
     ctx.analytics?.captureException(
       new Error(`swarm ${swarm.id}: its machine is gone and GitHub's copy of its branch predates its last landing`),

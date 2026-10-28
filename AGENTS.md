@@ -560,14 +560,36 @@ those once left the machine as the only copy when it was destroyed.
 So `reapSwarmSandbox` first pushes the swarm's branch from the machine
 itself (`saveSwarmBranch`) and destroys it only once GitHub holds it; a
 push it cannot make is a `SandboxReapDeferred`, captured as
-`swarm_branch_unsaved`, and the machine stays until one succeeds. That
-is why a hosted swarm (a clone driver) refuses to start without a
-GitHub connection and a GitHub remote on every repository
+`swarm_branch_unsaved`, and the machine stays until one succeeds. A
+clone machine the provider has already deleted is not "already saved".
+`saveSwarmBranch` used to return on a destroyed row and on
+`SandboxGone`, and the push job used to return success when there was
+nothing left to export, so a landing whose push had only been queued
+never reached GitHub and the reap did not wait. That path now replays
+each landing newer than `branch_pushed_at` from the task branch pushed
+when the run ended (`restoreUnpushedLandings`), in landing order, with
+the same policy the merge queue used. The task branch is used only
+while its tip is still the commit Bento recorded. The base is the
+swarm branch already on GitHub, including when that push was never
+recorded: rebuilding from the default branch would replace it. The
+stamp moves only when every missing landing's own commit is in the
+result. A replay that had to be rewritten is still pushed, so the
+task's commits are kept, and the stamp stays put, so a publish says
+the pull request is missing work (`behind`, captured as
+`swarm_branch_behind`). A task branch that is missing or has moved,
+and any git failure while reading one, fails the push. That failure
+is `SwarmBranchNotSaved` even when the machine is already gone, so
+the reap defers instead of the queue giving up. That is why a hosted
+swarm (a clone driver) refuses to start without a GitHub connection
+and a GitHub remote on every repository
 (`SWARM_GITHUB_REQUIRED`): its work would have nowhere to go, and its
 machine would bill forever. A host driver's checkout outlives its
-machine and needs neither. Every push stamps `branch_pushed_at`, so a
-publish from GitHub's copy after a provider lost the machine says the
-pull request is missing the landings since (`behind`).
+machine and needs neither. Every push stamps `branch_pushed_at`, and
+a later push keeps the later of that stamp and the database clock, so
+a stamp at the landing's own time cannot be moved backward. The stamp
+is the database clock and a landing's `ended_at` is the server clock,
+so a stamp that is merely earlier is asked of git before anyone is
+told the pull request is missing work.
 
 Nothing opens a pull request when a swarm finishes. A person chooses on
 the swarm's header, through `POST /api/swarms/:id/publish`: `combined`

@@ -1,7 +1,7 @@
-import { asc, eq } from "drizzle-orm";
-import { repositories, sandboxes, swarmTasks, swarms } from "@bento/db";
+import { and, asc, eq, sql } from "drizzle-orm";
+import { repositories, sandboxes, swarmLandings, swarmTasks, swarms } from "@bento/db";
 import { parseRepoUrl, type GitHubPublisher } from "@bento/github";
-import type { SandboxDriver, SandboxHandle } from "@bento/sandbox";
+import type { RepositoryBundle, SandboxDriver, SandboxHandle } from "@bento/sandbox";
 import { captureJobErrors } from "../../analytics.js";
 import type { AppContext } from "../../context.js";
 import { githubConnectionFor } from "../../github.js";
@@ -9,8 +9,9 @@ import { SandboxGone, wakeSwarmSandbox } from "../hibernate-sandbox.js";
 import { fetchRemoteBranchBundle, hostBranchSource, pushBranches, recordPushedHead, type PublishableRepository } from "../publish.js";
 import { QUEUE_POLL_SECONDS } from "../queue.js";
 import { driverForSandbox } from "../sandbox-driver.js";
-import { workerBranchName } from "./branches.js";
+import { landingMergeMessage, landingPolicyFor, workerBranchName } from "./branches.js";
 import { refreshSwarmPullRequests } from "./complete.js";
+import { bundleContainsCommit, landWorkerBundles } from "./landing-git.js";
 import { swarmBranchName, swarmTaskWorkspaceKey, swarmWorkspaceKey } from "./sandbox.js";
 
 /**
@@ -110,6 +111,19 @@ type TaskFlags = {
   landedHeads?: Record<string, string>;
 };
 
+/**
+ * Whether GitHub's copy of the swarm branch is older than a landing.
+ *
+ * `branch_pushed_at` is the database clock at the push, and a landing's
+ * `ended_at` is the server clock when the row was written, which is
+ * before that push was even queued. A stamp that is merely earlier is
+ * not proof the commits are missing: the rebuild asks git. It is proof
+ * enough to ask.
+ */
+export function branchLagsLanding(branchPushedAt: Date | null, landingEndedAt: Date | null): boolean {
+  return Boolean(landingEndedAt && (!branchPushedAt || branchPushedAt < landingEndedAt));
+}
+
 /** A task's branch as its worker left it. */
 export async function pushTaskBranch(ctx: AppContext, taskId: string, options: PushOptions = {}): Promise<void> {
   const [task] = await ctx.db.select().from(swarmTasks).where(eq(swarmTasks.id, taskId)).limit(1);
@@ -153,19 +167,38 @@ export async function pushTaskBranch(ctx: AppContext, taskId: string, options: P
  * when the reap destroyed it. Throws SwarmBranchNotSaved instead.
  *
  * A machine on a host driver is not asked: its checkout is the host's
- * worktree, which outlives the machine. One that is already gone has
- * nothing left to save.
+ * worktree, which outlives the machine. A clone machine the provider
+ * has already deleted is not saved either. Its task branches were
+ * pushed when those runs ended, and the landings since the last swarm
+ * push are replayed from those before the reap is allowed to finish.
+ * Treating "gone" as nothing left to save is how a publish later found
+ * GitHub's copy older than the last landing.
  */
 export async function saveSwarmBranch(ctx: AppContext, swarmId: string, options: PushOptions = {}): Promise<void> {
   const [swarm] = await ctx.db.select().from(swarms).where(eq(swarms.id, swarmId)).limit(1);
   if (!swarm?.sandboxId) return;
   const [row] = await ctx.db.select().from(sandboxes).where(eq(sandboxes.id, swarm.sandboxId)).limit(1);
-  if (!row || row.status === "destroyed") return;
-  if (driverForSandbox(ctx.drivers, row, ctx).workspace !== "clone") return;
+  const clone = row
+    ? driverForSandbox(ctx.drivers, row, ctx).workspace === "clone"
+    : ctx.drivers.default.workspace === "clone";
+  if (!clone) return;
+  if (row && row.status !== "destroyed") {
+    try {
+      await pushSwarmBranch(ctx, swarmId, undefined, { ...options, required: true });
+      return;
+    } catch (err) {
+      if (!(err instanceof SandboxGone)) {
+        if (err instanceof SwarmBranchNotSaved) throw err;
+        throw new SwarmBranchNotSaved(swarmId, err instanceof Error ? err.message : String(err));
+      }
+    }
+  }
+  // A gone machine, and any git failure while rebuilding it. Wrapped
+  // like the live path: the reap defers on SwarmBranchNotSaved, and a
+  // plain error is what the queue gives up on after a few tries.
   try {
     await pushSwarmBranch(ctx, swarmId, undefined, { ...options, required: true });
   } catch (err) {
-    if (err instanceof SandboxGone) return;
     if (err instanceof SwarmBranchNotSaved) throw err;
     throw new SwarmBranchNotSaved(swarmId, err instanceof Error ? err.message : String(err));
   }
@@ -194,7 +227,23 @@ export async function pushSwarmBranch(
     wakeSwarmSandbox(ctx, row!, swarm, swarm.plannerProfileId),
   );
   if (!source) {
-    if (options.required) throw new SwarmBranchNotSaved(swarm.id, "its machine cannot export the branch");
+    /*
+     * No row, or it was already destroyed: there is nothing left to
+     * export. The landings that missed their push are still on the
+     * task branches, which left for GitHub when those runs ended.
+     * Returning here used to record the job as done. A live machine
+     * that simply cannot export is a different failure, and is not
+     * papered over with a rebuild that would let the reap delete it.
+     */
+    if (!row) {
+      const gap = await restoreUnpushedLandings(ctx, swarm, publisher, options);
+      if (gap) {
+        if (options.required) throw new SwarmBranchNotSaved(swarm.id, gap);
+        throw new Error(`could not push the branches of swarm ${swarm.id}: ${gap}`);
+      }
+    } else if (options.required) {
+      throw new SwarmBranchNotSaved(swarm.id, "its machine cannot export the branch");
+    }
     await refreshSwarmPullRequests(ctx, swarm.id, publisher);
     return;
   }
@@ -256,6 +305,217 @@ export async function pushSwarmBranch(
   }
   await refreshSwarmPullRequests(ctx, swarm.id, publisher);
   failLoudly(failures, `swarm ${swarm.id}`);
+}
+
+/**
+ * Puts landings GitHub has not been told about onto the swarm branch,
+ * using the task branches that were pushed when those runs ended.
+ *
+ * This is the path a clone machine can no longer serve. Each missing
+ * landing is replayed in the order it landed, with the same policy the
+ * merge queue used. The base is the swarm branch already on GitHub
+ * when that branch exists, even if the push was never recorded:
+ * starting from the default branch would replace it. The task branch
+ * is read only when its tip is still the commit Bento recorded.
+ *
+ * The result is pushed under that base as the lease. Null when there
+ * is nothing left to retry: either every landed commit is on the
+ * branch, and the stamp says so, or the replay had to be rewritten
+ * and the landed commit is not among the result. The second case
+ * still pushes the task's commits, and leaves the stamp where it is,
+ * so a publish says the branch is missing work. The machine is
+ * already gone, and retrying will not make that commit appear. A
+ * string when a branch is missing, moved, or git cannot replay it:
+ * the caller retries, and does not pretend the branch was saved.
+ */
+export async function restoreUnpushedLandings(
+  ctx: AppContext,
+  swarm: typeof swarms.$inferSelect,
+  publisher: GitHubPublisher,
+  options: PushOptions = {},
+): Promise<string | null> {
+  const landings = await ctx.db
+    .select({
+      taskId: swarmLandings.taskId,
+      endedAt: swarmLandings.endedAt,
+      branchName: swarmLandings.branchName,
+    })
+    .from(swarmLandings)
+    .where(and(eq(swarmLandings.swarmId, swarm.id), eq(swarmLandings.status, "landed")))
+    .orderBy(asc(swarmLandings.endedAt), asc(swarmLandings.id));
+  const missing = landings.filter((landing) => branchLagsLanding(swarm.branchPushedAt, landing.endedAt));
+  if (missing.length === 0) return null;
+
+  const tasks = await ctx.db.select().from(swarmTasks).where(eq(swarmTasks.swarmId, swarm.id));
+  const taskById = new Map(tasks.map((task) => [task.id, task]));
+  const repoRows = await projectRepositories(ctx, swarm.projectId);
+  const swarmBranch = swarm.branchName ?? swarmBranchName(swarm.slug);
+  const rebuilt = new Map<string, RepositoryBundle>();
+  // The commit the push must still be based on. The recorded lease
+  // when Bento has one, otherwise the tip just read, so a branch that
+  // exists is never replaced from the default branch.
+  const leases = new Map<string, string | null>();
+  let proved = true;
+
+  for (const repo of repoRows) {
+    if (!repo.repoUrl || !parseRepoUrl(repo.repoUrl)) continue;
+    const touched = missing.flatMap((landing) => {
+      const task = taskById.get(landing.taskId);
+      if (!task) return [];
+      const heads = (task.flags as TaskFlags).landedHeads ?? {};
+      return heads[repo.name] ? [{ landing, task }] : [];
+    });
+    if (touched.length === 0) continue;
+
+    const remote = {
+      repoUrl: repo.repoUrl,
+      githubRepoId: repo.githubRepoId ? Number(repo.githubRepoId) : null,
+      defaultBranch: repo.defaultBranch,
+    };
+    const fetchOptions = { selfContained: true as const, ...(options.remoteUrl ? { remoteUrl: options.remoteUrl } : {}) };
+    const recorded = swarm.pushedHeads?.[repo.repoUrl] ?? null;
+    const onRemote = await fetchRemoteBranchBundle(publisher, remote, swarmBranch, fetchOptions);
+    if (!onRemote && recorded) {
+      return `${repo.name}: GitHub has no ${swarmBranch} branch to rebuild onto`;
+    }
+    let snapshot: RepositoryBundle;
+    if (onRemote) {
+      if (recorded && onRemote.headSha !== recorded) {
+        return `${repo.name}: ${swarmBranch} moved on GitHub since Bento last pushed it`;
+      }
+      snapshot = onRemote;
+      leases.set(repo.repoUrl, recorded ?? onRemote.headSha);
+    } else {
+      const base = await fetchRemoteBranchBundle(publisher, remote, repo.defaultBranch, fetchOptions);
+      if (!base) return `${repo.name}: GitHub has no ${repo.defaultBranch} branch to rebuild onto`;
+      snapshot = base;
+      leases.set(repo.repoUrl, null);
+    }
+
+    let moved = false;
+    for (const { landing, task } of touched) {
+      const flags = task.flags as TaskFlags;
+      const expected = flags.pushedHeads?.[repo.repoUrl];
+      if (!expected) {
+        return `${repo.name}: ${task.title} landed after the last push, and its branch is not on GitHub`;
+      }
+      const branch = landing.branchName ?? task.branchName ?? workerBranchName(swarmBranch, task.id);
+      const bundles = await remoteBranchBundles(
+        ctx,
+        {
+          organizationId: swarm.organizationId,
+          branch,
+          pushedHeads: flags.pushedHeads,
+          repoRows: [repo],
+          selfContained: true,
+        },
+        options,
+      );
+      const worker = bundles.get(repo.name);
+      if (!worker) return `${repo.name}: ${task.title}'s branch is not on GitHub`;
+      if (worker.headSha !== expected) {
+        return `${repo.name}: ${task.title}'s branch moved on GitHub since Bento last pushed it`;
+      }
+      const outcome = await landWorkerBundles({
+        swarm: snapshot,
+        worker: { baseSha: worker.baseSha, headSha: worker.headSha, data: worker.data },
+        policy: landingPolicyFor(task),
+        mergeMessage: landingMergeMessage(task),
+        selfContained: true,
+      });
+      if (!outcome.ok) {
+        // The worker head is already the swarm head: a fast forward
+        // that was pushed, whose stamp is simply older than the row.
+        if (outcome.reason === "empty") continue;
+        return `${repo.name}: ${task.title} could not be replayed onto the swarm branch (${outcome.detail})`;
+      }
+      if (outcome.commits === 0) continue;
+      if (!outcome.bundle) return `${repo.name}: ${task.title} replayed without a snapshot to push`;
+      snapshot = outcome.bundle;
+      moved = true;
+    }
+    for (const { task } of touched) {
+      const sha = (task.flags as TaskFlags).landedHeads?.[repo.name];
+      if (!sha || !(await bundleContainsCommit(snapshot, sha))) {
+        proved = false;
+        console.log(
+          `swarm ${swarm.id}: ${repo.name} ${task.title} landed a commit that is not on the rebuilt branch`,
+        );
+      }
+    }
+    if (moved) rebuilt.set(repo.id, snapshot);
+  }
+
+  if (rebuilt.size > 0) {
+    const outcome = await pushBranches(publisher, {
+      branch: swarmBranch,
+      repositories: repoRows.filter((repo) => rebuilt.has(repo.id)).map((repo) => {
+        const bundle = rebuilt.get(repo.id)!;
+        const githubRepoId = repo.githubRepoId ? Number(repo.githubRepoId) : undefined;
+        const published: PublishableRepository = {
+          id: repo.id,
+          name: repo.name,
+          repoUrl: repo.repoUrl,
+          githubRepoId: Number.isSafeInteger(githubRepoId) ? githubRepoId! : null,
+          defaultBranch: repo.defaultBranch,
+          exportBundle: async () => bundle,
+        };
+        return published;
+      }),
+      lease: async (repo) => (repo.repoUrl ? leases.get(repo.repoUrl) ?? null : null),
+      record: (repo, headSha) => recordPushedHead(ctx.db, { swarmId: swarm.id }, repo.repoUrl, headSha, { stamp: false }),
+      ...(options.remoteUrl ? { remoteUrl: options.remoteUrl } : {}),
+    });
+    const wanted = repoRows.filter((repo) => rebuilt.has(repo.id)).map((repo) => repo.name);
+    const pushed = new Set(outcome.pushed.map((row) => row.name));
+    const missed = [
+      ...outcome.failures.map((failure) => `${failure.name}: ${failure.reason}`),
+      ...wanted.filter((name) => !pushed.has(name) && !outcome.failures.some((failure) => failure.name === name)).map(
+        (name) => `${name}: the rebuilt branch was not pushed`,
+      ),
+    ];
+    if (missed.length > 0) return missed.join("; ");
+  }
+
+  if (!proved) {
+    console.log(
+      `swarm ${swarm.id}: kept the task commits it could replay, and left the branch unmarked because a landed commit is not among them`,
+    );
+    return null;
+  }
+  if (rebuilt.size === 0) {
+    console.log(`swarm ${swarm.id}: GitHub already has the landings that looked newer than the last push`);
+  } else {
+    console.log(`swarm ${swarm.id}: its machine is gone, so its branch was rebuilt from the task branches on GitHub`);
+  }
+  await stampCaughtUp(ctx, swarm.id, missing);
+  return null;
+}
+
+/**
+ * The landings in `missing` are on GitHub now, or were already there.
+ * The stamp has to reach the newest of them: it is the database clock
+ * at a push, and a landing's `ended_at` is the server clock, which can
+ * sit ahead of the database. Stamping `now()` would leave the row
+ * looking behind, and the next publish would report lost work that
+ * had just been written.
+ */
+async function stampCaughtUp(
+  ctx: AppContext,
+  swarmId: string,
+  missing: { endedAt: Date | null }[],
+): Promise<void> {
+  const latest = missing.reduce<Date | null>((max, landing) => {
+    if (!landing.endedAt) return max;
+    return !max || landing.endedAt > max ? landing.endedAt : max;
+  }, null);
+  if (!latest) return;
+  await ctx.db
+    .update(swarms)
+    .set({
+      branchPushedAt: sql`greatest(coalesce(${swarms.branchPushedAt}, '-infinity'::timestamptz), ${latest})`,
+    })
+    .where(eq(swarms.id, swarmId));
 }
 
 /**
