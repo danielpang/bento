@@ -9,10 +9,9 @@ import {
   type ProjectSession,
   type Stage,
 } from "@bento/api-client";
-import { installModelCatalog, spendCoverageNote, type AgentEvent } from "@bento/core";
+import { installModelCatalog, type AgentEvent } from "@bento/core";
 import { useSession, useListOrganizations, signOut } from "./auth-client.js";
 import { teamDisplayName } from "./team-name.js";
-import { useCountUp } from "./count-up.js";
 import { createRequestGate } from "./latest-request.js";
 import { buildWatch } from "./build-watch.js";
 import { Board, matchesQuery, neighbourCardId, type CardPulse } from "./components/Board.js";
@@ -590,9 +589,6 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
   /** Opened from the bottom bar and from the menu; one dialog either way. */
   const [contactOpen, setContactOpen] = useState(false);
   const [usage, setUsage] = useState<ProjectUsage | null>(null);
-  // Called unconditionally: the chip below it is conditional, a hook
-  // cannot be.
-  const spendShown = useCountUp(usage?.totalUsd ?? 0);
   const spendByFeature = useMemo(() => {
     const map: Record<string, FeatureSpend> = {};
     for (const row of usage?.byFeature ?? []) map[row.featureId] = row;
@@ -1214,38 +1210,28 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
     <a
       className="spend-button"
       href="/analytics"
-      aria-label={usage && usage.totalRuns > 0
-        ? `View project analytics. Spend so far: ${usage.runsWithoutCost > 0 ? "at least " : ""}$${usage.totalUsd.toFixed(2)}`
-        : "View project analytics"}
+      aria-label="View project analytics"
       aria-current={screen === "analytics" ? "page" : undefined}
-      // The tool list comes from the catalog, so it cannot drift
-      // from which adapters actually report a figure.
-      title={
-        usage && usage.totalRuns > 0
-          ? usage.runsWithoutCost > 0
-            ? `$${usage.totalUsd.toFixed(2)} across ${usage.totalRuns - usage.runsWithoutCost} of ${usage.totalRuns} runs. ${spendCoverageNote()}`
-            : `Across ${usage.totalRuns} runs. ${spendCoverageNote()}`
-          : spendCoverageNote()
-      }
     >
       <span className="spend-button-label">Analytics</span>
-      {usage && usage.totalRuns > 0 && (
-        <span className="spend-button-amount">
-          $<span className="spend-figure">{spendShown.toFixed(2)}</span>
-          {usage.runsWithoutCost > 0 && <span className="spend-button-estimate">+</span>}
-        </span>
-      )}
       <span className="spend-button-arrow" aria-hidden="true">›</span>
     </a>
   ) : null;
 
   /*
-   * Rendered on the board screen only. Sessions and analytics are not
-   * boards, and a toggle that changes something two screens away is
-   * a control that lies about what it does.
+   * Rendered on the board screen, where it switches the slab in place,
+   * and on Analytics, where it is the way back to either board: each
+   * segment is a link to the board, and neither reads as open. Sessions
+   * is the card board's own tab, so it leaves the toggle out.
    */
   const boardToggle =
-    screen === "board" ? (
+    screen === "analytics" ? (
+      <BoardModeToggle
+        mode={null}
+        locked={swarmAccess.plan === "excluded"}
+        hrefFor={(next) => boardHref("/", window.location.search, { mode: next })}
+      />
+    ) : screen === "board" ? (
       <BoardModeToggle
         mode={boardMode}
         locked={swarmAccess.plan === "excluded"}

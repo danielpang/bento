@@ -19,10 +19,12 @@ export function BoardModeToggle({
   onSelect,
   hrefFor,
 }: {
-  mode: BoardMode;
+  /** Null off the board (on Analytics), where neither board is open. */
+  mode: BoardMode | null;
   /** The team's plan does not include swarms; the Swarms page says so. */
   locked: boolean;
-  onSelect: (mode: BoardMode) => void;
+  /** Without it, a segment is a plain link to its board. */
+  onSelect?: (mode: BoardMode) => void;
   /** The address each segment points at, so the choice is in the URL. */
   hrefFor?: (mode: BoardMode) => string;
 }) {
@@ -44,9 +46,9 @@ function Segment({
 }: {
   id: BoardMode;
   label: string;
-  mode: BoardMode;
+  mode: BoardMode | null;
   locked?: boolean;
-  onSelect: (mode: BoardMode) => void;
+  onSelect?: (mode: BoardMode) => void;
   hrefFor?: (mode: BoardMode) => string;
 }) {
   const current = mode === id;
@@ -67,7 +69,7 @@ function Segment({
         data-on={current ? "" : undefined}
         data-locked={locked ? "" : undefined}
         onClick={(e) => {
-          if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+          if (!onSelect || e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
           e.preventDefault();
           onSelect(id);
         }}
@@ -84,7 +86,7 @@ function Segment({
       aria-current={current ? "page" : undefined}
       data-on={current ? "" : undefined}
       data-locked={locked ? "" : undefined}
-      onClick={() => onSelect(id)}
+      onClick={() => onSelect?.(id)}
     >
       {label}
       {locked && <Lock />}

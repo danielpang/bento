@@ -9,7 +9,6 @@ import {
   budgetHelp,
   parseBudget,
   parseTimeLimit,
-  runSettingsSummary,
   settingsFrom,
   timeLimitHelp,
   type RunSettingsDraft,
@@ -27,6 +26,8 @@ import {
   branchNameRefusal,
   clampWorkers,
   existingPlanHelp,
+  GOAL_SUGGESTION_MS,
+  goalSuggestion,
   isBranchName,
   nameFromGoal,
   readPlanFile,
@@ -106,10 +107,8 @@ export function SwarmComposer({
   const workerProfileId = workerChoice ?? workerDefault;
 
   const [goal, setGoal] = useState("");
-  /** A name the person typed. Null while the composer suggests one from the goal. */
-  const [customName, setCustomName] = useState<string | null>(null);
-  const [editingName, setEditingName] = useState(false);
-  const name = customName ?? nameFromGoal(goal);
+  /** Named from the goal; the swarm's own settings rename it once it exists. */
+  const name = nameFromGoal(goal);
   const [error, setError] = useState("");
   const defaultWorkers = clampWorkers(surfaces.defaultSwarmWorkers, MAX_SWARM_WORKERS);
   const [budget, setBudget] = useState("");
@@ -161,6 +160,16 @@ export function SwarmComposer({
   useEffect(() => {
     if (addingSite) siteInput.current?.focus();
   }, [addingSite]);
+
+  /* The placeholder walks through sample goals while the field is
+     empty, and stops once there is anything in it to read instead. */
+  const [suggestionTick, setSuggestionTick] = useState(0);
+  const suggesting = goal === "" && !existingPlan;
+  useEffect(() => {
+    if (!suggesting) return;
+    const timer = window.setInterval(() => setSuggestionTick((tick) => tick + 1), GOAL_SUGGESTION_MS);
+    return () => window.clearInterval(timer);
+  }, [suggesting]);
 
   // The server names the branch after the swarm, so this is a preview
   // of what it will be rather than a choice.
@@ -221,7 +230,7 @@ export function SwarmComposer({
             rows={4}
             value={goal}
             autoFocus
-            placeholder={existingPlan ? "What should the swarm do with the plan?" : "What should be true when this is finished?"}
+            placeholder={existingPlan ? "What should the swarm do with the plan?" : goalSuggestion(suggestionTick)}
             aria-invalid={goalTooLong}
             aria-describedby={`${ids}-goal-length`}
             onChange={(event) => setGoal(event.target.value)}
@@ -473,6 +482,11 @@ export function SwarmComposer({
           )}
         </section>
 
+        {/* Under the send button, because it is how to press it. */}
+        <div className="swarm-composer-foot">
+          <span className="swarm-composer-hint">{modifier}+Enter creates the swarm. Enter starts a new line.</span>
+        </div>
+
         {/*
           * Why Create is disabled, said beside it. The board's own
           * banner says the same at the top of every board, so this is
@@ -505,39 +519,6 @@ export function SwarmComposer({
               <span id={`${ids}-plan-help`} className="visually-hidden">{existingPlanHelp(existingPlan, planSources.length)}</span>
             </span>
           </label>
-          <span className="swarm-composer-divider" aria-hidden="true">|</span>
-          <span className="swarm-composer-name">
-            {editingName ? (
-              <input
-                className="input swarm-composer-name-input"
-                aria-label="Swarm name"
-                autoFocus
-                maxLength={200}
-                defaultValue={name}
-                placeholder="Checkout rewrite"
-                onBlur={(event) => commitName(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    event.preventDefault();
-                    commitName(event.currentTarget.value);
-                  } else if (event.key === "Escape") {
-                    event.preventDefault();
-                    setEditingName(false);
-                  }
-                }}
-              />
-            ) : (
-              <>
-                <span className="swarm-composer-key">Name</span>
-                <span className="swarm-composer-name-value" title={name || undefined}>
-                  {name || <span className="swarm-composer-key">from the goal</span>}
-                </span>
-                <button type="button" className="swarm-link" onClick={() => setEditingName(true)}>
-                  edit
-                </button>
-              </>
-            )}
-          </span>
           <span className="swarm-composer-spacer" />
           {(continuing || branchName) && (
             <span className="swarm-composer-branch swarm-mono" title={continuing ? "The branch this swarm continues" : "The branch the server will create"}>
@@ -556,16 +537,6 @@ export function SwarmComposer({
           </button>
         </div>
 
-        {/* The second line: how to send, and what Defaults is set to, in
-            the settings dialog's own sentence so a judge or a command set
-            there is read here once the popover closes. */}
-        <div className="swarm-composer-foot">
-          <span className="swarm-composer-hint">{modifier}+Enter creates the swarm. Enter starts a new line.</span>
-          <span className="swarm-composer-summary" title={runSettingsSummary(runSettings, agents, deliverable)}>
-            {summaryWords({ continuing: continuing !== "", budgetUsd, timeLimitMin, settings: runSettingsSummary(runSettings, agents, deliverable) })}
-          </span>
-        </div>
-
         {error && <p className="error error-box" role="alert">{error}</p>}
 
         {swarms.length > 0 && <RecentSwarms swarms={swarms} now={now} onSelect={onSelectSwarm} />}
@@ -573,12 +544,6 @@ export function SwarmComposer({
     </div>
   );
 
-  function commitName(value: string) {
-    const typed = value.trim();
-    // Cleared is "suggest one again", rather than a swarm with no name.
-    setCustomName(typed === "" || typed === nameFromGoal(goal) ? null : typed);
-    setEditingName(false);
-  }
 
   /**
    * Reads each chosen file and adds it, refusing what cannot be a
@@ -665,30 +630,6 @@ export function SwarmComposer({
         sending.current = false;
       });
   }
-}
-
-/**
- * The line under the composer, after the branch: what kind of branch,
- * its ceilings, and then what the run settings say (what it produces,
- * the final check, planning, instructions), in the sentence the
- * settings dialog uses, so a judge or a command set in Defaults is
- * read here once the popover closes.
- */
-export function summaryWords(input: {
-  continuing: boolean;
-  budgetUsd: number | null | undefined;
-  timeLimitMin: number | null | undefined;
-  /** `runSettingsSummary`'s sentence. */
-  settings: string;
-}): string {
-  const parts = [
-    input.continuing ? "existing branch" : "new branch",
-    typeof input.budgetUsd === "number" ? `$${input.budgetUsd.toLocaleString()} cap` : "no cap",
-  ];
-  if (typeof input.timeLimitMin === "number") parts.push(`${input.timeLimitMin.toLocaleString()} min limit`);
-  const settings = input.settings.replace(/\.$/, "");
-  if (settings) parts.push(settings.charAt(0).toLowerCase() + settings.slice(1));
-  return parts.join(" · ");
 }
 
 /** A tool as people call it: "Claude Code" rather than its id. */

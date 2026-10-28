@@ -1229,7 +1229,7 @@ select.input,
   color: var(--text-faint);
 }
 
-/* Analytics is a destination, with the measured spend visible at a glance. */
+/* Analytics is a destination: a labelled link, so the topbar carries no figure of its own. */
 .spend-button {
   display: inline-flex;
   align-items: center;
@@ -1260,15 +1260,6 @@ select.input,
   font-size: 12px;
   color: var(--text-dim);
 }
-.spend-button-amount {
-  display: inline-flex;
-  align-items: baseline;
-  font-family: var(--mono);
-  font-size: 12px;
-  font-weight: 500;
-  white-space: nowrap;
-}
-.spend-button-estimate { color: var(--text-faint); }
 .spend-button-arrow { color: var(--text-faint); font-size: 18px; line-height: 1; }
 @media (max-width: 720px) {
   .spend-button { gap: 6px; padding-inline: 8px; }
@@ -3777,8 +3768,7 @@ a.pr-row:hover .pr-external {
     overflow: hidden;
   }
 
-  .workspace-nav > .spend-button .spend-button-label,
-  .workspace-nav > .spend-button .spend-button-amount {
+  .workspace-nav > .spend-button .spend-button-label {
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -4478,9 +4468,10 @@ a.pr-row:hover .pr-external {
   min-height: 0;
   overflow-y: auto;
   width: 100%;
-  max-width: 960px;
-  margin: 0 auto;
-  padding: 20px 16px 48px;
+  /* The page scrolls, not a column in it: the scroller spans the slab,
+     so its bar sits at the window's edge, and the padding centres a
+     960px column inside it. */
+  padding: 20px max(16px, calc((100% - 960px) / 2 + 16px)) 48px;
   box-sizing: border-box;
 }
 .analytics-intro {
@@ -4516,10 +4507,11 @@ a.pr-row:hover .pr-external {
 .analytics-narrow {
   display: none;
 }
-/* The window picker: one row above everything it scopes, the dates it covers at its end. */
+/* The window picker: one row above everything it scopes, the dates it covers at its start and the picker at its end. */
 .analytics-filters {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 10px 12px;
   flex-wrap: wrap;
 }
@@ -4579,7 +4571,8 @@ a.pr-row:hover .pr-external {
   color: var(--failed);
 }
 .analytics-window-note {
-  margin: 0 0 0 auto;
+  order: -1;
+  margin: 0 auto 0 0;
   font-family: var(--sans);
   font-size: 12.5px;
   color: var(--text-faint);
@@ -4857,6 +4850,7 @@ a.pr-row:hover .pr-external {
     padding: 6px 0;
   }
   .analytics-window-note {
+    order: 0;
     flex-basis: 100%;
     margin: 0;
   }
@@ -11491,7 +11485,7 @@ a.hours-person-name:hover {
   color: var(--text-dim);
 }
 
-/* The line under the composer: the switch, the name, the summary. */
+/* The line under the composer: the switch, the branch, Defaults. */
 .swarm-composer-under {
   display: flex;
   align-items: center;
@@ -11524,39 +11518,6 @@ a.hours-person-name:hover {
   white-space: nowrap;
 }
 
-.swarm-composer-divider {
-  color: var(--line-bright);
-}
-
-.swarm-composer-name {
-  display: inline-flex;
-  align-items: center;
-  flex: 0 1 auto;
-  gap: 6px;
-  min-width: 0;
-}
-
-.swarm-composer-key {
-  color: var(--text-faint);
-  white-space: nowrap;
-}
-
-.swarm-composer-name-value {
-  min-width: 0;
-  max-width: 240px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text);
-}
-
-.swarm-composer-name-input.input {
-  width: 220px;
-  height: 26px;
-  padding: 2px 8px;
-  font-size: 12px;
-}
-
 .swarm-composer-branch {
   flex: 0 1 auto;
   min-width: 0;
@@ -11565,25 +11526,14 @@ a.hours-person-name:hover {
   white-space: nowrap;
 }
 
-/* The second line: the shortcut on the left, what Defaults is set to on the right. */
+/* The shortcut, right under the send button it presses. */
 .swarm-composer-foot {
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 16px;
+  justify-content: flex-end;
   min-width: 0;
   margin-top: -6px;
   font-size: 12px;
   color: var(--text-faint);
-}
-
-.swarm-composer-summary {
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  text-align: right;
 }
 
 /* Recent swarms, under the composer. */
@@ -13031,23 +12981,14 @@ a.swarm-pr-name:hover {
     font-size: 13px;
   }
 
-  .swarm-composer-divider,
   .swarm-composer-branch,
   .swarm-composer-under > .swarm-composer-spacer {
     display: none;
   }
 
-  /* The shortcut means nothing to a thumb; the settings line stays. */
+  /* The shortcut means nothing to a thumb, and it is all the line holds. */
   .swarm-composer-foot {
-    margin-top: -2px;
-  }
-
-  .swarm-composer-name-value {
-    max-width: none;
-  }
-
-  .swarm-composer-name-input.input {
-    width: 100%;
+    display: none;
   }
 
   .swarm-link {
@@ -13068,10 +13009,6 @@ a.swarm-pr-name:hover {
   .swarm-defaults-note,
   .swarm-composer-hint {
     display: none;
-  }
-
-  .swarm-composer-summary {
-    text-align: left;
   }
 
   .swarm-composer-cancel {

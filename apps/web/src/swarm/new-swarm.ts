@@ -224,3 +224,26 @@ export function attachmentName(source: NewPlanSource): string {
   if (source.kind === "file") return source.name;
   return source.url.replace(/^https?:\/\//i, "").replace(/\/$/, "");
 }
+
+/**
+ * Goals the empty composer cycles through as its placeholder, so the
+ * field shows the size of job a swarm is for rather than asking an
+ * abstract question.
+ */
+export const GOAL_SUGGESTIONS = [
+  "Rewrite the whole app in Rust",
+  "Migrate the database to Postgres",
+  "Add Redis caching",
+  "Migrate from JavaScript to TypeScript",
+  "Upgrade Node.js",
+  "Upgrade PHP to fix vulnerabilities",
+] as const;
+
+/** How long each suggestion stays up. */
+export const GOAL_SUGGESTION_MS = 3500;
+
+/** The suggestion for a tick of the rotation, wrapping round the list. */
+export function goalSuggestion(tick: number): string {
+  const at = ((Math.trunc(tick) % GOAL_SUGGESTIONS.length) + GOAL_SUGGESTIONS.length) % GOAL_SUGGESTIONS.length;
+  return GOAL_SUGGESTIONS[at] ?? GOAL_SUGGESTIONS[0];
+}
