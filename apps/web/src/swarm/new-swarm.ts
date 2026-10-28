@@ -31,15 +31,20 @@ const TRAILING_WORDS = new Set(["a", "an", "and", "as", "at", "by", "for", "from
  * A name for the swarm from the first words of its goal.
  *
  * The route needs a name and most people would rather not invent one,
- * so the composer offers this and lets them edit it. The first line
- * that says anything, without a heading or list mark, up to five words
- * and never past a sentence's end, trimmed of a dangling "for" or
- * "the", with its first letter capitalised. Empty when the goal is.
+ * so the composer names the swarm this way, and the swarm's settings
+ * rename it later. The first line that says anything, without a
+ * heading, list mark or leading punctuation, up to five words and
+ * never past a sentence's end, trimmed of a dangling "for" or "the",
+ * with its first letter capitalised. Empty when nothing in the goal is
+ * a word; `swarmNameFor` covers that case.
  */
 export function nameFromGoal(goal: string, maxWords = 5): string {
   const line = goal
     .split("\n")
-    .map((part) => part.trim().replace(/^(?:[#>*+-]+|\d+[.)])\s*/, "").trim())
+    // A list mark, then any punctuation before the first word, so ". Fix
+    // the build" is named from "Fix" rather than from the empty sentence
+    // the leading full stop ends.
+    .map((part) => part.trim().replace(/^(?:[#>*+-]+|\d+[.)])\s*/, "").replace(/^[\s.!?;:,]+/, "").trim())
     .find((part) => part !== "") ?? "";
   const sentence = line.split(/[.!?;:](?:\s|$)/)[0] ?? "";
   const words = sentence.split(/\s+/).map((word) => word.replace(/^[("'`[]+|[)"'`\],]+$/g, "")).filter(Boolean).slice(0, maxWords);
@@ -51,6 +56,19 @@ export function nameFromGoal(goal: string, maxWords = 5): string {
     name = (atWord > SUGGESTED_NAME_MAX / 2 ? cut.slice(0, atWord) : cut).trimEnd();
   }
   return name.charAt(0).toUpperCase() + name.slice(1);
+}
+
+/** The name a goal with no word to name it from is created under. */
+export const UNTITLED_SWARM = "Untitled swarm";
+
+/**
+ * The name the composer creates the swarm under: from the goal, or
+ * UNTITLED_SWARM when the goal has text but no word to name it from,
+ * so a goal is never refused for its name. Empty only while the goal is.
+ */
+export function swarmNameFor(goal: string): string {
+  if (goal.trim() === "") return "";
+  return nameFromGoal(goal) || UNTITLED_SWARM;
 }
 
 /** What the switch says it does, in its current position. */

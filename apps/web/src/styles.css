@@ -4507,7 +4507,8 @@ a.pr-row:hover .pr-external {
 .analytics-narrow {
   display: none;
 }
-/* The window picker: one row above everything it scopes, the dates it covers at its start and the picker at its end. */
+/* The window picker: one row above everything it scopes, the dates it covers at its start and the picker at its end.
+   The dates come first in the markup too, so reading order is the order on screen. */
 .analytics-filters {
   display: flex;
   align-items: center;
@@ -4571,7 +4572,6 @@ a.pr-row:hover .pr-external {
   color: var(--failed);
 }
 .analytics-window-note {
-  order: -1;
   margin: 0 auto 0 0;
   font-family: var(--sans);
   font-size: 12.5px;
@@ -4850,7 +4850,6 @@ a.pr-row:hover .pr-external {
     padding: 6px 0;
   }
   .analytics-window-note {
-    order: 0;
     flex-basis: 100%;
     margin: 0;
   }
@@ -11085,6 +11084,33 @@ a.hours-person-name:hover {
   color: var(--failed);
 }
 
+/* Something behind Defaults differs from a new swarm's: a dot on the gear and on the link. */
+.swarm-tool-quiet[data-changed] {
+  position: relative;
+}
+
+.swarm-tool-quiet[data-changed]::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--brand);
+}
+
+.swarm-composer-defaults-link[data-changed]::after {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 5px;
+  border-radius: 50%;
+  background: var(--brand);
+  vertical-align: middle;
+}
+
 .swarm-tool-key {
   color: var(--text-faint);
 }
@@ -11493,6 +11519,14 @@ a.hours-person-name:hover {
   min-width: 0;
   font-size: 12px;
   color: var(--text-faint);
+}
+
+.swarm-composer-under-end {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+  margin-left: auto;
 }
 
 .swarm-composer-switch {
@@ -12954,7 +12988,7 @@ a.swarm-pr-name:hover {
   }
 
   /* The toggle and Defaults share the line; the shortcut and branch are hidden below. */
-  .swarm-composer-under > .swarm-link {
+  .swarm-composer-under-end {
     justify-self: end;
   }
 
@@ -12972,8 +13006,7 @@ a.swarm-pr-name:hover {
     font-size: 13px;
   }
 
-  .swarm-composer-branch,
-  .swarm-composer-under > .swarm-composer-spacer {
+  .swarm-composer-branch {
     display: none;
   }
 

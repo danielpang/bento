@@ -31,6 +31,7 @@ import {
 } from "./components/Skeleton.js";
 import { useGitHubOutcome } from "./components/GitHubIdentity.js";
 import { SignOutButton } from "./components/IconButtons.js";
+import { GearMark } from "./components/GearMark.js";
 import { CHANGELOG_URL } from "./changelog.js";
 import { FlagsProvider, useBetaTesters, useSwarmFlag } from "./beta.js";
 import { SwarmSubscribe, SwarmUnavailable, SwarmWaitlist, type WaitlistState } from "./components/SwarmGatePage.js";
@@ -1636,29 +1637,6 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
       {dialogs}
       {bottom}
     </div>
-  );
-}
-
-/**
- * The settings gear.
- *
- * Drawn rather than set as U+2699, which is what this was. That glyph
- * occupies a fraction of its em box and the fraction differs per font,
- * so it rendered visibly smaller than the 12px labels beside it and no
- * font size fixed that without throwing the row's alignment out. Eight
- * teeth around a ring, at whatever size the rule below asks for.
- */
-function GearMark() {
-  return (
-    <svg viewBox="0 0 16 16" width="17" height="17" fill="currentColor" aria-hidden="true" focusable="false">
-      {[0, 45, 90, 135, 180, 225, 270, 315].map((deg) => (
-        <rect key={deg} x="7.05" y="0.6" width="1.9" height="3.6" rx="0.6" transform={`rotate(${deg} 8 8)`} />
-      ))}
-      <path
-        fillRule="evenodd"
-        d="M8 3a5 5 0 1 0 0 10A5 5 0 0 0 8 3Zm0 2.65a2.35 2.35 0 1 1 0 4.7 2.35 2.35 0 0 1 0-4.7Z"
-      />
-    </svg>
   );
 }
 

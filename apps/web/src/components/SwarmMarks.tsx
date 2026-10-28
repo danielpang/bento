@@ -82,18 +82,6 @@ export function CheckMark() {
   );
 }
 
-export function GearMark() {
-  return (
-    <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" focusable="false">
-      {/* Teeth on a ring, the topbar's settings gear: thin spokes round a dot read as a sun. */}
-      {[0, 45, 90, 135, 180, 225, 270, 315].map((deg) => (
-        <rect key={deg} x="7.05" y="0.6" width="1.9" height="3.6" rx="0.6" transform={`rotate(${deg} 8 8)`} />
-      ))}
-      <path fillRule="evenodd" d="M8 3a5 5 0 1 0 0 10A5 5 0 0 0 8 3Zm0 2.65a2.35 2.35 0 1 1 0 4.7 2.35 2.35 0 0 1 0-4.7Z" />
-    </svg>
-  );
-}
-
 export function StepGlyph({ plus = false }: { plus?: boolean }): ReactNode {
   return (
     <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true" focusable="false">

@@ -193,6 +193,7 @@ function WindowPicker({
   const problem = custom ? customRangeProblem(custom.from, custom.to) : null;
   return (
     <div className="analytics-filters">
+      {note && <p className="analytics-window-note">{note}</p>}
       <div className="analytics-segmented" role="group" aria-label="Window">
         {ANALYTICS_WINDOWS.map((w) => (
           <button
@@ -242,7 +243,6 @@ function WindowPicker({
           )}
         </div>
       )}
-      {note && <p className="analytics-window-note">{note}</p>}
     </div>
   );
 }

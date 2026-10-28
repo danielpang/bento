@@ -2,7 +2,8 @@ import * as Menu from "@radix-ui/react-dropdown-menu";
 import { MAX_SWARM_GOAL_CHARS, MAX_SWARM_WORKERS, MODEL_GUIDANCE } from "@bento/core";
 import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { growComposer, SendMark } from "./ChatComposer.js";
-import { capitalise, CheckMark, ChevronMark, CloseMark, FileMark, GearMark, GlobeMark, ImageMark, PlusMark, StepGlyph } from "./SwarmMarks.js";
+import { GearMark } from "./GearMark.js";
+import { capitalise, CheckMark, ChevronMark, CloseMark, FileMark, GlobeMark, ImageMark, PlusMark, StepGlyph } from "./SwarmMarks.js";
 import {
   DEFAULT_RUN_SETTINGS,
   SwarmRunSettingsFields,
@@ -29,23 +30,24 @@ import {
   GOAL_SUGGESTION_MS,
   goalSuggestion,
   isBranchName,
-  nameFromGoal,
   readPlanFile,
   suggestBranch,
+  swarmNameFor,
   withPlanSource,
 } from "../swarm/new-swarm.js";
 
 /**
  * Starting a swarm, as one composer in the middle of the board.
  *
- * The goal is the only thing a person has to write. The name is
- * suggested from its first words and can be edited in place; the
- * planner, the worker and how many run at once sit on the composer's
- * own toolbar, already set to what most swarms want; everything else
- * waits behind Defaults, with one line under the card saying what it
- * is set to. Attachments go inside the card, because they are part of
- * what the person is saying, and the switch under it says whether they
- * are the plan itself or material to plan from.
+ * The goal is the only thing a person has to write. The name is taken
+ * from its first words, and Swarm settings renames the swarm once it
+ * exists; the planner, the worker and how many run at once sit on the
+ * composer's own toolbar, already set to what most swarms want;
+ * everything else waits behind Defaults, whose gear and link carry a
+ * dot when any of it was changed. Attachments go inside the card,
+ * because they are part of what the person is saying, and the switch
+ * right under it says whether they are the plan itself or material to
+ * plan from.
  *
  * It asks for what the create route takes and nothing else. A field
  * the server has no home for is a promise the console cannot keep, so
@@ -107,8 +109,8 @@ export function SwarmComposer({
   const workerProfileId = workerChoice ?? workerDefault;
 
   const [goal, setGoal] = useState("");
-  /** Named from the goal; the swarm's own settings rename it once it exists. */
-  const name = nameFromGoal(goal);
+  /** Named from the goal; Swarm settings renames it once it exists. */
+  const name = swarmNameFor(goal);
   const [error, setError] = useState("");
   const defaultWorkers = clampWorkers(surfaces.defaultSwarmWorkers, MAX_SWARM_WORKERS);
   const [budget, setBudget] = useState("");
@@ -161,14 +163,31 @@ export function SwarmComposer({
     if (addingSite) siteInput.current?.focus();
   }, [addingSite]);
 
-  /* The placeholder walks through sample goals while the field is
-     empty, and stops once there is anything in it to read instead. */
-  const [suggestionTick, setSuggestionTick] = useState(0);
+  /*
+   * The placeholder walks through sample goals while the field is
+   * empty, and stops once there is anything in it to read instead.
+   *
+   * Written to the field itself rather than through state: a tick that
+   * re-rendered the composer redrew its toolbar, its menus and the
+   * recent swarms under it every few seconds to change one attribute.
+   * React leaves the attribute alone because the prop below never
+   * changes while this runs. Somebody who asked for reduced motion
+   * gets the first example and keeps it.
+   */
   const suggesting = goal === "" && !existingPlan;
   useEffect(() => {
-    if (!suggesting) return;
-    const timer = window.setInterval(() => setSuggestionTick((tick) => tick + 1), GOAL_SUGGESTION_MS);
-    return () => window.clearInterval(timer);
+    const field = goalInput.current;
+    if (!suggesting || !field) return;
+    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+    let tick = 0;
+    const timer = window.setInterval(() => {
+      tick += 1;
+      field.placeholder = goalSuggestion(tick);
+    }, GOAL_SUGGESTION_MS);
+    return () => {
+      window.clearInterval(timer);
+      field.placeholder = goalSuggestion(0);
+    };
   }, [suggesting]);
 
   // The server names the branch after the swarm, so this is a preview
@@ -181,6 +200,7 @@ export function SwarmComposer({
   const budgetUsd = parseBudget(budget);
   const timeLimitMin = parseTimeLimit(timeLimit);
   const defaultsInvalid = branchRefusal !== null || budgetUsd === undefined || timeLimitMin === undefined;
+  const defaultsChanged = defaultsDiffer({ budget, timeLimit, deliverable, startBranch, runSettings });
   const ready =
     name.trim() !== "" &&
     goalLength > 0 &&
@@ -230,7 +250,7 @@ export function SwarmComposer({
             rows={4}
             value={goal}
             autoFocus
-            placeholder={existingPlan ? "What should the swarm do with the plan?" : goalSuggestion(suggestionTick)}
+            placeholder={existingPlan ? "What should the swarm do with the plan?" : goalSuggestion(0)}
             aria-invalid={goalTooLong}
             aria-describedby={`${ids}-goal-length`}
             onChange={(event) => setGoal(event.target.value)}
@@ -426,15 +446,16 @@ export function SwarmComposer({
               ref={gear}
               type="button"
               className="swarm-tool swarm-tool-icon swarm-tool-quiet"
-              aria-label="Defaults: budget, time limit, branch, final check"
-              title="Defaults"
+              aria-label={`Defaults${defaultsChanged ? ", changed" : ""}: budget, time limit, branch, final check`}
+              title={defaultsChanged ? "Defaults (changed)" : "Defaults"}
               aria-expanded={defaultsOpen}
               aria-controls={`${ids}-defaults`}
               data-defaults-trigger=""
               data-invalid={defaultsInvalid ? "" : undefined}
+              data-changed={defaultsChanged ? "" : undefined}
               onClick={() => setDefaultsOpen((open) => !open)}
             >
-              <GearMark />
+              <GearMark size={15} />
             </button>
             <button
               type="button"
@@ -498,24 +519,28 @@ export function SwarmComposer({
               <span id={`${ids}-plan-help`} className="visually-hidden">{existingPlanHelp(existingPlan, planSources.length)}</span>
             </span>
           </label>
-          <span className="swarm-composer-spacer" />
-          {/* On the right, under the send button it presses. */}
-          <span className="swarm-composer-hint">{modifier}+Enter creates the swarm. Enter starts a new line.</span>
-          {(continuing || branchName) && (
-            <span className="swarm-composer-branch swarm-mono" title={continuing ? "The branch this swarm continues" : "The branch the server will create"}>
-              {continuing || branchName}
-            </span>
-          )}
-          <button
-            type="button"
-            className="swarm-link swarm-composer-defaults-link"
-            data-defaults-trigger=""
-            aria-expanded={defaultsOpen}
-            aria-controls={`${ids}-defaults`}
-            onClick={() => setDefaultsOpen((open) => !open)}
-          >
-            Defaults
-          </button>
+          {/* On the right, under the send button. The branch gives way
+              first when the line is short. */}
+          <span className="swarm-composer-under-end">
+            <span className="swarm-composer-hint">{modifier}+Enter creates the swarm. Enter starts a new line.</span>
+            {(continuing || branchName) && (
+              <span className="swarm-composer-branch swarm-mono" title={continuing ? "The branch this swarm continues" : "The branch the server will create"}>
+                {continuing || branchName}
+              </span>
+            )}
+            <button
+              type="button"
+              className="swarm-link swarm-composer-defaults-link"
+              data-defaults-trigger=""
+              data-changed={defaultsChanged ? "" : undefined}
+              aria-expanded={defaultsOpen}
+              aria-controls={`${ids}-defaults`}
+              onClick={() => setDefaultsOpen((open) => !open)}
+            >
+              Defaults
+              {defaultsChanged && <span className="visually-hidden"> (changed)</span>}
+            </button>
+          </span>
         </div>
 
         {/*
@@ -627,6 +652,33 @@ export function SwarmComposer({
         sending.current = false;
       });
   }
+}
+
+/**
+ * Whether anything behind Defaults is set to other than what a new
+ * swarm starts with, so the gear and the Defaults link can carry a dot
+ * once the popover closes. The workers count is left out: it is on
+ * the toolbar already, in plain sight.
+ */
+export function defaultsDiffer(input: {
+  budget: string;
+  timeLimit: string;
+  deliverable: "code" | "document";
+  startBranch: string;
+  runSettings: RunSettingsDraft;
+}): boolean {
+  const settings = input.runSettings;
+  return (
+    input.budget.trim() !== "" ||
+    input.timeLimit.trim() !== "" ||
+    input.deliverable !== "code" ||
+    input.startBranch.trim() !== "" ||
+    settings.judgeProfileId !== DEFAULT_RUN_SETTINGS.judgeProfileId ||
+    settings.completionCommand.trim() !== DEFAULT_RUN_SETTINGS.completionCommand ||
+    settings.maxPlanDepth !== DEFAULT_RUN_SETTINGS.maxPlanDepth ||
+    settings.plannerInstructions.trim() !== DEFAULT_RUN_SETTINGS.plannerInstructions ||
+    settings.workerInstructions.trim() !== DEFAULT_RUN_SETTINGS.workerInstructions
+  );
 }
 
 /** A tool as people call it: "Claude Code" rather than its id. */

@@ -251,9 +251,11 @@ export const timeLimitHelp = (value: number | null | undefined) =>
 /**
  * A swarm's settings, changed after it exists.
  *
- * Everything the New swarm dialog asked, except the goal and what it
- * produces, which are what the swarm is and are changed by a follow up
- * rather than in place. Saves only what was changed, so opening this
+ * Its name, which the composer took from the goal, and everything the
+ * New swarm dialog asked, except the goal and what it produces, which
+ * are what the swarm is and are changed by a follow up rather than in
+ * place. A rename alone never waits on the hosted waitlist: the route
+ * spares it, because a name puts no agent to work. Saves only what was changed, so opening this
  * and pressing Save changes nothing.
  */
 export function SwarmSettingsDialog({
@@ -278,11 +280,13 @@ export function SwarmSettingsDialog({
    * something this person changed back, and Save would undo it.
    */
   const [opened] = useState(() => ({
+    name: swarm.name,
     settings: swarm.settings,
     budgetUsd: swarm.budgetUsd,
     timeLimitMin: swarm.timeLimitMin,
   }));
   const initial = draftFrom(opened.settings);
+  const [name, setName] = useState(swarm.name);
   const [planner, setPlanner] = useState(swarm.settings.plannerProfileId ?? "");
   const [worker, setWorker] = useState(swarm.settings.workerProfileId ?? "");
   const [budget, setBudget] = useState(swarm.budgetUsd === null ? "" : String(swarm.budgetUsd));
@@ -292,7 +296,8 @@ export function SwarmSettingsDialog({
 
   const budgetUsd = parseBudget(budget);
   const timeLimitMin = parseTimeLimit(timeLimit);
-  const ready = budgetUsd !== undefined && timeLimitMin !== undefined && planner !== "" && worker !== "";
+  const nameMissing = name.trim() === "";
+  const ready = !nameMissing && budgetUsd !== undefined && timeLimitMin !== undefined && planner !== "" && worker !== "";
 
   return (
     <Modal
@@ -311,6 +316,20 @@ export function SwarmSettingsDialog({
       }
     >
       <div className="swarm-new">
+        <label className="field">
+          <span className="field-heading">Name</span>
+          <input
+            className="input"
+            value={name}
+            maxLength={200}
+            aria-invalid={nameMissing}
+            onChange={(event) => setName(event.target.value)}
+          />
+          <span className={nameMissing ? "error" : "muted"}>
+            {nameMissing ? "A swarm needs a name." : "Shown on the board and in the swarm list. The branch keeps the name it was created with."}
+          </span>
+        </label>
+
         <div className="field-row swarm-agent-row">
           <SwarmAgentSelect
             label="Planner agent"
@@ -369,6 +388,7 @@ export function SwarmSettingsDialog({
     const before = settingsFrom(initial);
     const after = settingsFrom(draft);
     const change: SwarmSettingsChange = {};
+    if (name.trim() !== opened.name) change.title = name.trim();
     if (planner !== (opened.settings.plannerProfileId ?? "")) change.plannerProfileId = planner;
     if (worker !== (opened.settings.workerProfileId ?? "")) change.workerProfileId = worker;
     if (after.judgeProfileId !== before.judgeProfileId) change.judgeProfileId = after.judgeProfileId;

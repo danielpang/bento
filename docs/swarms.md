@@ -33,11 +33,11 @@ The Swarms tab opens on the composer when a project has no swarms yet; otherwise
 | Goal | What should be true when the swarm is finished |
 | Attach (the **+** button) | Optional. **Upload files** (text, PDFs, images) or **Add website**. Attachments appear as chips inside the composer |
 | Attachments are the plan | Turn it on to have the planner build the tree from your attachments (or from the goal itself) instead of writing its own plan |
-| Name | Taken from the first words of the goal. Press **edit** to change it. It names the swarm and its branch (`bento/<name>`) |
+| Name | Taken from the first words of the goal ("Untitled swarm" when the goal has no words to take). It names the swarm and its branch (`bento/<name>`). Rename the swarm later under **Settings** on the swarm; the branch keeps its first name |
 | Planner, Worker | Swarm Planner and Swarm Worker by default, created for you if missing |
 | Workers | Up to 10. Four on hosted Bento, two on local. Change it while the swarm runs |
 
-**Defaults** (the gear on the composer, or the link under it) holds the rest. The line under the composer summarises what is set, and you can change all of it later under **Settings** on the swarm:
+**Defaults** (the gear on the composer, or the link under it) holds the rest. When anything there differs from a new swarm's defaults, the gear and the link show a dot. You can change all of it later under **Settings** on the swarm:
 
 - **Budget:** in dollars. Empty means no cap.
 - **Time limit:** in minutes. Empty means no limit.
