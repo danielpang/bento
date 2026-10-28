@@ -279,56 +279,85 @@ export function SessionsListSkeleton({
   return <div className="sessions-screen"><div className="surface-heading" aria-hidden="true"><div className="skeleton-lines"><Skeleton height={24} width="7rem" /><Skeleton height={13} width="14rem" /></div></div>{list}</div>;
 }
 
-/** Table rows for the spend page, without the intro (the intro is data-free). */
-export function SpendPageSkeleton({
+/**
+ * The Analytics page before its figures arrive: the row of tiles, the
+ * chart, and the table under them, at the page's own sizes so nothing
+ * jumps when the data lands. The intro and the window picker are
+ * data-free and render for real; `framed` adds them as bones for the
+ * route-level fallback, which has nothing else to show.
+ */
+export function AnalyticsPageSkeleton({
   rows = 6,
   framed = true,
 }: {
   rows?: number;
   framed?: boolean;
 }) {
-  const table = (
+  const body = (
     <>
-      <LoadingStatus label="Loading spend" />
-      <table className="spend-table" aria-hidden="true">
-        <thead>
-          <tr>
-            <th scope="col">Card</th>
-            <th scope="col" className="spend-col">
-              Spend
-            </th>
-            <th scope="col" className="spend-col">
-              Runs
-            </th>
-          </tr>
-        </thead>
-        <tbody>
-          {Array.from({ length: rows }, (_, i) => (
-            <tr key={i}>
-              <td>
-                <Skeleton height={14} width={`${52 + ((i * 11) % 28)}%`} />
-              </td>
-              <td className="spend-col">
-                <Skeleton height={14} width="3.2rem" />
-              </td>
-              <td className="spend-col">
-                <Skeleton height={14} width="1.4rem" />
-              </td>
-            </tr>
+      <LoadingStatus label="Loading analytics" />
+      <div className="analytics-body" aria-hidden="true">
+        <div className="analytics-tiles">
+          {Array.from({ length: 5 }, (_, i) => (
+            <div key={i} className="analytics-tile">
+              <Skeleton height={11} width="5.5rem" />
+              <Skeleton height={33} width="3rem" />
+              <Skeleton height={12} width="7rem" />
+            </div>
           ))}
-        </tbody>
-      </table>
+        </div>
+        <div className="analytics-section">
+          <Skeleton height={16} width="6rem" />
+          <div className="analytics-chart">
+            <Skeleton className="analytics-chart-plot" />
+          </div>
+        </div>
+        <div className="analytics-section">
+          <div className="analytics-table-scroll">
+            <table className="spend-table">
+              <thead>
+                <tr>
+                  <th scope="col">Card</th>
+                  <th scope="col" className="spend-col">
+                    Spend
+                  </th>
+                  <th scope="col" className="spend-col">
+                    Runs
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {Array.from({ length: rows }, (_, i) => (
+                  <tr key={i}>
+                    <td>
+                      <Skeleton height={14} width={`${52 + ((i * 11) % 28)}%`} />
+                    </td>
+                    <td className="spend-col">
+                      <Skeleton height={14} width="3.2rem" />
+                    </td>
+                    <td className="spend-col">
+                      <Skeleton height={14} width="1.4rem" />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
     </>
   );
-  if (!framed) return table;
+  if (!framed) return body;
   return (
-    <div className="spend-screen" aria-busy="true">
-      <header className="spend-intro" aria-hidden="true">
-        <Skeleton height={22} width="6rem" />
-        <Skeleton height={13} width="72%" />
-        <Skeleton height={13} width="48%" />
+    <div className="analytics-screen" aria-busy="true">
+      <header className="analytics-intro" aria-hidden="true">
+        <Skeleton height={13} width="7rem" />
+        <Skeleton className="analytics-title" height={24} width="6rem" />
       </header>
-      {table}
+      <div className="analytics-filters" aria-hidden="true">
+        <Skeleton height={28} width="14rem" radius={7} />
+      </div>
+      {body}
     </div>
   );
 }

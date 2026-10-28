@@ -315,6 +315,54 @@ export interface ProjectCompletions {
   buckets: { start: string; completed: number }[];
 }
 
+/** The preset windows the Analytics page offers; a custom window names two dates instead. */
+export type AnalyticsRange = "3d" | "1w" | "2w" | "1m";
+
+/** How the Analytics window is cut into bars. */
+export type AnalyticsBucketUnit = "6h" | "day" | "week" | "month";
+
+/** What to ask the Analytics route for: a preset, or two UTC dates (the last one included). */
+export type AnalyticsQuery = { range: AnalyticsRange } | { from: string; to: string };
+
+/** The headline figures for one window. Every count is of what happened inside the window. */
+export interface AnalyticsTotals {
+  cardsCreated: number;
+  /** Done cards, each at its latest completion, and only while still done. */
+  cardsCompleted: number;
+  stageMoves: number;
+  /** Moves a person made from the board. */
+  stageMovesByHand: number;
+  /** Moves a gate, an agent, Linear or the system made. */
+  stageMovesAutomatic: number;
+  /** Finished runs: cards and swarms, judges left out, the usage rule. */
+  runs: number;
+  runsSucceeded: number;
+  runsFailed: number;
+  runsCancelled: number;
+  /** The sum of what those runs reported; `runsWithoutCost` of them reported nothing. */
+  spendUsd: number;
+  runsWithoutCost: number;
+}
+
+/**
+ * The Analytics page for one project and one window. The buckets are
+ * the window cut on UTC boundaries, oldest first and zero-filled, so
+ * the first and last may be partial; their sums are the totals.
+ */
+export interface ProjectAnalytics {
+  window: { range: AnalyticsRange | "custom"; from: string; to: string; bucketUnit: AnalyticsBucketUnit };
+  totals: AnalyticsTotals;
+  /** The window of the same length that ended where this one starts. */
+  previous: AnalyticsTotals;
+  buckets: { start: string; completed: number; created: number; stageMoves: number; runs: number }[];
+  /** The pipeline's stages in order, then Done with a null id. */
+  byStage: { stageId: string | null; name: string; position: number; movesIn: number; cardsNow: number }[];
+  /** Cards with a run or a stage move in the window, spend measured over the window. */
+  byFeature: (FeatureSpend & { stageMoves: number })[];
+  /** Swarms with a run in the window, with the measured cost of those runs. */
+  bySwarm: { swarmId: string; title: string; status: string; runs: number; runsWithoutCost: number; costUsd: number }[];
+}
+
 /**
  * One conversation on the sessions page: a card and its run history,
  * summarized by the newest run. Judge runs are not counted.

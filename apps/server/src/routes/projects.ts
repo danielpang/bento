@@ -35,6 +35,7 @@ import { githubForOrganization } from "../github.js";
 import { branchExists, detectDefaultBranch, githubRemoteOf, linkGitHubRemotes } from "../orchestrator/repo-remote.js";
 import { ACTIVE_RUN_STATUSES } from "../orchestrator/start-run.js";
 import { duplicateRepositoryLocation, sameRepositoryLocation } from "../repository-identity.js";
+import { projectAnalytics, resolveAnalyticsWindow } from "../project-analytics.js";
 
 /**
  * The two shells a repository can carry. Shared by the add and edit
@@ -1024,6 +1025,27 @@ export function projectRoutes(ctx: AppContext) {
             completed: Number(row.completed),
           })),
         });
+      },
+    )
+    /**
+     * The Analytics page: how the board moved over a window, every
+     * figure on the same window. `range` names a preset (the last
+     * month when nothing is asked for); `from` and `to` are UTC dates
+     * naming a custom window, the last day included. The queries live
+     * in project-analytics.ts; this route only checks access and the window.
+     */
+    .get(
+      "/:id/analytics",
+      zValidator(
+        "query",
+        z.object({ range: z.string().optional(), from: z.string().optional(), to: z.string().optional() }),
+      ),
+      async (c) => {
+        const projectId = c.req.param("id");
+        if (!(await canAccessProject(ctx, c, projectId))) return c.json({ error: "not found" }, 404);
+        const resolved = resolveAnalyticsWindow(c.req.valid("query"));
+        if ("error" in resolved) return c.json({ error: resolved.error }, 400);
+        return c.json(await projectAnalytics(db(c, ctx), projectId, resolved.window));
       },
     )
     .get("/:id/pipeline", async (c) => {

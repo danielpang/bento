@@ -20,44 +20,23 @@ export function compareFeatureSpend(a: FeatureSpend, b: FeatureSpend, sort: Spen
   return diff !== 0 ? diff : a.title.localeCompare(b.title);
 }
 
-/** What the spend column says, including how much of it is actually known. */
-export function formatFeatureSpend(row: FeatureSpend): string {
-  if (row.runs === 0) return "No runs";
-  if (row.costUsd === null) return "Not reported";
-  const figure = `$${row.costUsd.toFixed(2)}`;
-  return row.runsWithoutCost > 0 ? `${figure}+` : figure;
+/**
+ * A dollar figure. A cost under a cent is not nothing, and "$0.00"
+ * would say it was, so it prints as a floor. Every spend figure on the
+ * console comes through here, so a tile and a table never disagree
+ * about the same dollars.
+ */
+export function spendFigure(usd: number): string {
+  if (usd > 0 && usd < 0.005) return "<$0.01";
+  return `$${usd.toFixed(2)}`;
 }
 
-/**
- * The sentence at the top of the Spend page.
- *
- * It counts card runs, because that is what the figure beside it is a
- * sum of: a swarm's runs belong to no card and are grouped as swarms
- * further down. So it says so. A project worked entirely by swarms
- * used to open with "No agent runs yet." directly above a table
- * reporting forty dollars, which is the page disagreeing with itself
- * in the two lines a person reads first.
- *
- * The swarm money is deliberately not added in. Its four tiers are
- * kept apart everywhere else precisely so that no single figure stands
- * for a measurement, an estimate, a guess and a list price at once,
- * and the headline is the worst place in the product to start.
- */
-export function spendHeadline(
-  usage: { totalUsd: number; totalRuns: number; runsWithoutCost: number },
-  swarmRuns: number,
-): string {
-  if (usage.totalRuns === 0) {
-    // "on cards" only when there is something else on the page for it
-    // to be distinguished from.
-    return swarmRuns > 0 ? "No runs on cards yet." : "No agent runs yet.";
-  }
-  const figure = `$${usage.totalUsd.toFixed(2)}`;
-  if (usage.runsWithoutCost > 0) {
-    const measured = usage.totalRuns - usage.runsWithoutCost;
-    return `${figure}+ across ${measured} of ${usage.totalRuns} runs on cards.`;
-  }
-  return `${figure} across ${usage.totalRuns} run${usage.totalRuns === 1 ? "" : "s"} on cards.`;
+/** What the spend column says, including how much of it is actually known. */
+export function formatFeatureSpend(row: Pick<FeatureSpend, "runs" | "costUsd" | "runsWithoutCost">): string {
+  if (row.runs === 0) return "No runs";
+  if (row.costUsd === null) return "Not reported";
+  const figure = spendFigure(row.costUsd);
+  return row.runsWithoutCost > 0 ? `${figure}+` : figure;
 }
 
 /**
@@ -69,6 +48,6 @@ export function formatCardSpend(
   row: Pick<FeatureSpend, "costUsd" | "runsWithoutCost"> | undefined,
 ): string | null {
   if (!row || row.costUsd === null) return null;
-  const figure = `$${row.costUsd.toFixed(2)}`;
+  const figure = spendFigure(row.costUsd);
   return row.runsWithoutCost > 0 ? `${figure}+` : figure;
 }
