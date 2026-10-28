@@ -11511,22 +11511,29 @@ a.hours-person-name:hover {
   color: var(--text-dim);
 }
 
-/* The line right under the composer: the switch on the left; the shortcut, the branch and Defaults on the right. */
+/* Right under the composer: the switch and the shortcut on one line, the branch and Defaults on the next, all on the right but the switch. */
 .swarm-composer-under {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 8px 16px;
+  gap: 6px 16px;
   min-width: 0;
   font-size: 12px;
   color: var(--text-faint);
 }
 
+.swarm-composer-under > .swarm-composer-hint {
+  justify-self: end;
+}
+
 .swarm-composer-under-end {
+  grid-column: 1 / -1;
+  justify-self: end;
   display: flex;
   align-items: center;
   gap: 16px;
   min-width: 0;
-  margin-left: auto;
+  max-width: 100%;
 }
 
 .swarm-composer-switch {
@@ -12980,16 +12987,14 @@ a.swarm-pr-name:hover {
   }
 
   .swarm-composer-under {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    align-items: center;
     gap: 10px 12px;
     font-size: 13px;
   }
 
-  /* The toggle and Defaults share the line; the shortcut and branch are hidden below. */
+  /* The shortcut and the branch are hidden below, so Defaults moves up beside the toggle. */
   .swarm-composer-under-end {
-    justify-self: end;
+    grid-column: 2;
+    grid-row: 1;
   }
 
   .swarm-composer-switch .switch {

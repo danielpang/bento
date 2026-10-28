@@ -519,10 +519,10 @@ export function SwarmComposer({
               <span id={`${ids}-plan-help`} className="visually-hidden">{existingPlanHelp(existingPlan, planSources.length)}</span>
             </span>
           </label>
-          {/* On the right, under the send button. The branch gives way
-              first when the line is short. */}
+          {/* On the right, under the send button it presses. */}
+          <span className="swarm-composer-hint">{modifier}+Enter to send</span>
+          {/* A line of its own under that: what the branch will be, and the rest of the settings. */}
           <span className="swarm-composer-under-end">
-            <span className="swarm-composer-hint">{modifier}+Enter creates the swarm. Enter starts a new line.</span>
             {(continuing || branchName) && (
               <span className="swarm-composer-branch swarm-mono" title={continuing ? "The branch this swarm continues" : "The branch the server will create"}>
                 {continuing || branchName}
