@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { attachmentName, attachmentSize, nameFromGoal, suggestBranch } from "./swarm/new-swarm.js";
+import { attachmentName, attachmentSize, GOAL_SUGGESTIONS, goalSuggestion, nameFromGoal, suggestBranch, swarmNameFor, UNTITLED_SWARM } from "./swarm/new-swarm.js";
+import { defaultsDiffer } from "./components/SwarmComposer.js";
+import { DEFAULT_RUN_SETTINGS } from "./components/SwarmSettingsFields.js";
 import { formatAge, formatDuration, shortDate } from "./swarm/time.js";
 import { artifactSourceLabel, artifactTypeLabel, artifactsAfterRefetch, splitArtifactPath } from "./swarm/artifacts.js";
-import { summaryWords } from "./components/SwarmComposer.js";
-import { DEFAULT_RUN_SETTINGS, runSettingsSummary, type RunSettingsDraft } from "./components/SwarmSettingsFields.js";
 import { isApplePlatform, sendModifierName } from "./platform.js";
 import { orderArtifacts, repoLabel } from "./components/SwarmPage.js";
 import { seedSwarms } from "./swarm/fixtures.js";
@@ -16,11 +16,6 @@ import type { SwarmArtifact } from "./swarm/types.js";
  */
 
 const NOW = Date.parse("2026-10-27T12:00:00.000Z");
-
-const AGENTS = [
-  { id: "agent-planner", name: "Swarm Planner", cli: "claude-code", model: "opus" },
-  { id: "agent-worker", name: "Swarm Worker", cli: "claude-code", model: "sonnet" },
-];
 
 test("a swarm is named from the first words of its goal", () => {
   assert.equal(nameFromGoal("Build an MVP for OpenBot according to the attached spec."), "Build an MVP for OpenBot");
@@ -49,24 +44,6 @@ test("an attachment's chip says its name and its size in bytes", () => {
   assert.equal(attachmentSize({ kind: "file", name: "plan.md", content: "x".repeat(4096) }), "4 KB");
   assert.equal(attachmentSize({ kind: "file", name: "a.png", mime: "image/png", data: "AAAA" }), "3 bytes");
   assert.equal(attachmentSize({ kind: "website", url: "https://example.com" }), null);
-});
-
-test("the line under the composer says what the defaults are, final check included", () => {
-  const settings = (draft: Partial<RunSettingsDraft> = {}, deliverable: "code" | "document" = "code") =>
-    runSettingsSummary({ ...DEFAULT_RUN_SETTINGS, ...draft }, AGENTS, deliverable);
-  assert.equal(
-    summaryWords({ continuing: false, budgetUsd: null, timeLimitMin: null, settings: settings() }),
-    "new branch · no cap · changes code, no final check, one planner",
-  );
-  assert.equal(
-    summaryWords({ continuing: true, budgetUsd: 40, timeLimitMin: 90, settings: settings({ completionCommand: "pnpm test", judgeProfileId: "agent-worker" }, "document") }),
-    "existing branch · $40 cap · 90 min limit · writes a document, final check by Swarm Worker after pnpm test, one planner",
-  );
-  // A budget still being typed wrong reads as no cap rather than as a number.
-  assert.equal(
-    summaryWords({ continuing: false, budgetUsd: undefined, timeLimitMin: undefined, settings: "" }),
-    "new branch · no cap",
-  );
 });
 
 test("the shortcut is named for the keyboard in front of the person", () => {
@@ -154,4 +131,35 @@ test("a repository is named without its host", () => {
   assert.equal(repoLabel("github.com/acme/storefront"), "acme/storefront");
   assert.equal(repoLabel("https://github.com/acme/storefront.git"), "acme/storefront");
   assert.equal(repoLabel("https://gitlab.example.com/acme/app/"), "gitlab.example.com/acme/app");
+});
+
+test("the empty composer cycles through sample goals and wraps round", () => {
+  assert.equal(goalSuggestion(0), "Rewrite the whole app in Rust");
+  assert.equal(goalSuggestion(1), "Migrate the database to Postgres");
+  assert.equal(goalSuggestion(GOAL_SUGGESTIONS.length), goalSuggestion(0));
+  assert.equal(goalSuggestion(GOAL_SUGGESTIONS.length * 3 + 5), "Upgrade PHP to fix vulnerabilities");
+});
+
+test("a goal that opens with punctuation is still named from its words", () => {
+  assert.equal(nameFromGoal(". Fix the build"), "Fix the build");
+  assert.equal(nameFromGoal(": migrate the db"), "Migrate the db");
+  assert.equal(nameFromGoal("\n...\nPort the queue to Rust"), "Port the queue to Rust");
+  // A goal with no word in it is created as Untitled, so Create is never refused for the name.
+  assert.equal(nameFromGoal("..."), "");
+  assert.equal(swarmNameFor("..."), UNTITLED_SWARM);
+  assert.equal(swarmNameFor(". Fix the build"), "Fix the build");
+  assert.equal(swarmNameFor("   "), "");
+});
+
+test("the Defaults dot shows only when something behind Defaults was changed", () => {
+  const base = { budget: "", timeLimit: "", deliverable: "code" as const, startBranch: "", runSettings: DEFAULT_RUN_SETTINGS };
+  assert.equal(defaultsDiffer(base), false);
+  assert.equal(defaultsDiffer({ ...base, budget: "40" }), true);
+  assert.equal(defaultsDiffer({ ...base, timeLimit: "90" }), true);
+  assert.equal(defaultsDiffer({ ...base, deliverable: "document" }), true);
+  assert.equal(defaultsDiffer({ ...base, startBranch: "feature/checkout" }), true);
+  assert.equal(defaultsDiffer({ ...base, runSettings: { ...DEFAULT_RUN_SETTINGS, completionCommand: "pnpm test" } }), true);
+  assert.equal(defaultsDiffer({ ...base, runSettings: { ...DEFAULT_RUN_SETTINGS, maxPlanDepth: 2 } }), true);
+  // Whitespace typed and cleared is not a change.
+  assert.equal(defaultsDiffer({ ...base, budget: "  ", runSettings: { ...DEFAULT_RUN_SETTINGS, completionCommand: " " } }), false);
 });

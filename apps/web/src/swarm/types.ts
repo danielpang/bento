@@ -493,6 +493,8 @@ export interface SwarmSettings {
 
 /** The settings a person can change after the swarm exists. */
 export type SwarmSettingsChange = Partial<{
+  /** The swarm's name. The route keeps it as `title`; the branch keeps the name it was created with. */
+  title: string;
   plannerProfileId: string;
   workerProfileId: string;
   judgeProfileId: string | null;

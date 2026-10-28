@@ -407,8 +407,9 @@ export function fixtureSwarmApi(clock: () => number = () => Date.now()): Fixture
     },
     updateSettings(swarmId, change) {
       return mutate(swarmId, (detail) => {
-        const { budgetUsd, timeLimitMin, ...settings } = change;
+        const { budgetUsd, timeLimitMin, title, ...settings } = change;
         detail.swarm.settings = { ...detail.swarm.settings, ...settings };
+        if (title !== undefined) detail.swarm.name = title;
         if (budgetUsd !== undefined) detail.swarm.budgetUsd = budgetUsd;
         if (timeLimitMin !== undefined) detail.swarm.timeLimitMin = timeLimitMin;
       });
