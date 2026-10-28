@@ -75,7 +75,6 @@ test("the page opens on the last month and offers every window", () => {
     createElement(AnalyticsPage, {
       client: {
         getAnalytics: () => new Promise(() => {}),
-        streamBoard: () => () => {},
       } as never,
       projectId: "p1",
     }),

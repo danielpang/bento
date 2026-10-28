@@ -41,17 +41,17 @@ import { AnalyticsPageSkeleton } from "./Skeleton.js";
  * labels where the long ones would wrap (`analytics-wide` and
  * `analytics-narrow`, one of which is always display: none, so a
  * screen reader hears only the one shown).
+ *
+ * The page reads its figures once per window choice and holds no
+ * live connection: it is a report, not a board, and the board stream
+ * the Spend page used to listen to is not reopened here. Choosing a
+ * window again, or reloading, is how the figures are refreshed.
  */
 export function AnalyticsPage({ client, projectId }: { client: BentoClient; projectId: string | null }) {
   const toast = useToast();
   const [choice, setChoice] = useState<WindowChoice>({ kind: "preset", range: DEFAULT_RANGE });
   const [data, setData] = useState<ProjectAnalytics | null>(null);
   const [loading, setLoading] = useState(true);
-  // Which window the figures on screen belong to. A refetch for the
-  // same window (a board event) replaces them in place; only a fetch
-  // for a different window dims them, since those are the figures
-  // that are about to be wrong.
-  const [loadedKey, setLoadedKey] = useState<string | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
   const [series, setSeries] = useState<Series>("completed");
   const [sort, setSort] = useState<SpendSort>("spend-desc");
@@ -71,7 +71,6 @@ export function AnalyticsPage({ client, projectId }: { client: BentoClient; proj
       const next = await client.getAnalytics(projectId, JSON.parse(queryKey));
       if (!gate.current.isCurrent(seq)) return;
       setData(next);
-      setLoadedKey(queryKey);
       setLoadFailed(false);
       setLoading(false);
     } catch (err) {
@@ -81,46 +80,15 @@ export function AnalyticsPage({ client, projectId }: { client: BentoClient; proj
       setLoading(false);
     }
   }, [client, projectId, queryKey]);
-  // The board stream calls the latest refresh through this ref, so
-  // choosing a window never closes and reopens the stream.
-  const refreshRef = useRef(refresh);
-  refreshRef.current = refresh;
 
   useEffect(() => {
     setData(null);
-    setLoadedKey(null);
     setLoadFailed(false);
   }, [projectId]);
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
-
-  // Run endings and card moves change the figures. The board stream is
-  // the same one Sessions listens to; run_output is chatter and moves
-  // nothing here.
-  useEffect(() => {
-    if (!projectId) return;
-    let timer: number | null = null;
-    const schedule = () => {
-      timer ??= window.setTimeout(() => {
-        timer = null;
-        void refreshRef.current();
-      }, 250);
-    };
-    const stop = client.streamBoard(
-      projectId,
-      (event) => {
-        if ((event as { type?: string }).type === "run_output") return;
-        schedule();
-      },
-      schedule,
-    );
-    return () => {
-      stop();
-      if (timer !== null) clearTimeout(timer);
-    };
-  }, [client, projectId]);
 
   const cards = useMemo(() => {
     if (!data) return [];
@@ -147,7 +115,7 @@ export function AnalyticsPage({ client, projectId }: { client: BentoClient; proj
       ) : data === null ? (
         <AnalyticsPageSkeleton framed={false} />
       ) : (
-        <div className="analytics-body" data-loading={loading && loadedKey !== queryKey ? "" : undefined}>
+        <div className="analytics-body" data-loading={loading ? "" : undefined}>
           <Tiles totals={data.totals} previous={data.previous} days={windowDays(data.window)} />
           <section className="analytics-section" aria-labelledby="analytics-over-time">
             <div className="analytics-section-head">
