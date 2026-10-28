@@ -482,27 +482,6 @@ export function SwarmComposer({
           )}
         </section>
 
-        {/* Under the send button, because it is how to press it. */}
-        <div className="swarm-composer-foot">
-          <span className="swarm-composer-hint">{modifier}+Enter creates the swarm. Enter starts a new line.</span>
-        </div>
-
-        {/*
-          * Why Create is disabled, said beside it. The board's own
-          * banner says the same at the top of every board, so this is
-          * one line with the way to fix it rather than a second banner.
-          */}
-        {repositoriesMissing && (
-          <div className="swarm-composer-blocked" role="status">
-            <span>A swarm needs a repository to work in. Add one to this project to create a swarm.</span>
-            {onAddRepository && (
-              <button className="swarm-link" type="button" onClick={onAddRepository}>
-                {REPOSITORY_SETUP_ACTION}
-              </button>
-            )}
-          </div>
-        )}
-
         <div className="swarm-composer-under">
           <label className="switch-row swarm-composer-switch" title={existingPlanHelp(existingPlan, planSources.length)}>
             <input
@@ -520,6 +499,8 @@ export function SwarmComposer({
             </span>
           </label>
           <span className="swarm-composer-spacer" />
+          {/* On the right, under the send button it presses. */}
+          <span className="swarm-composer-hint">{modifier}+Enter creates the swarm. Enter starts a new line.</span>
           {(continuing || branchName) && (
             <span className="swarm-composer-branch swarm-mono" title={continuing ? "The branch this swarm continues" : "The branch the server will create"}>
               {continuing || branchName}
@@ -536,6 +517,22 @@ export function SwarmComposer({
             Defaults
           </button>
         </div>
+
+        {/*
+          * Why Create is disabled, said beside it. The board's own
+          * banner says the same at the top of every board, so this is
+          * one line with the way to fix it rather than a second banner.
+          */}
+        {repositoriesMissing && (
+          <div className="swarm-composer-blocked" role="status">
+            <span>A swarm needs a repository to work in. Add one to this project to create a swarm.</span>
+            {onAddRepository && (
+              <button className="swarm-link" type="button" onClick={onAddRepository}>
+                {REPOSITORY_SETUP_ACTION}
+              </button>
+            )}
+          </div>
+        )}
 
         {error && <p className="error error-box" role="alert">{error}</p>}
 

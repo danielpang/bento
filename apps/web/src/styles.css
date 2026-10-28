@@ -11485,7 +11485,7 @@ a.hours-person-name:hover {
   color: var(--text-dim);
 }
 
-/* The line under the composer: the switch, the branch, Defaults. */
+/* The line right under the composer: the switch on the left; the shortcut, the branch and Defaults on the right. */
 .swarm-composer-under {
   display: flex;
   align-items: center;
@@ -11524,16 +11524,6 @@ a.hours-person-name:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-/* The shortcut, right under the send button it presses. */
-.swarm-composer-foot {
-  display: flex;
-  justify-content: flex-end;
-  min-width: 0;
-  margin-top: -6px;
-  font-size: 12px;
-  color: var(--text-faint);
 }
 
 /* Recent swarms, under the composer. */
@@ -12963,8 +12953,9 @@ a.swarm-pr-name:hover {
     font-size: 13px;
   }
 
-  .swarm-composer-switch {
-    grid-column: 1 / -1;
+  /* The toggle and Defaults share the line; the shortcut and branch are hidden below. */
+  .swarm-composer-under > .swarm-link {
+    justify-self: end;
   }
 
   .swarm-composer-switch .switch {
@@ -12983,11 +12974,6 @@ a.swarm-pr-name:hover {
 
   .swarm-composer-branch,
   .swarm-composer-under > .swarm-composer-spacer {
-    display: none;
-  }
-
-  /* The shortcut means nothing to a thumb, and it is all the line holds. */
-  .swarm-composer-foot {
     display: none;
   }
 
