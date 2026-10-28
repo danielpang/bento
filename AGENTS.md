@@ -568,19 +568,28 @@ nothing left to export, so a landing whose push had only been queued
 never reached GitHub and the reap did not wait. That path now replays
 each landing newer than `branch_pushed_at` from the task branch pushed
 when the run ended (`restoreUnpushedLandings`), in landing order, with
-the same policy the merge queue used, and stamps the swarm current
-only once every repository has been pushed or shown to already contain
-those commits. A task branch that is not on GitHub still fails the
-push, so the reap defers and a publish opens the pull request over
-what GitHub does hold and says it is missing work (`behind`, captured
-as `swarm_branch_behind`). That is why a hosted swarm (a clone driver)
-refuses to start without a GitHub connection and a GitHub remote on
-every repository (`SWARM_GITHUB_REQUIRED`): its work would have
-nowhere to go, and its machine would bill forever. A host driver's
-checkout outlives its machine and needs neither. Every push stamps
-`branch_pushed_at`. The stamp is the database clock and a landing's
-`ended_at` is the server clock, so a stamp that is merely earlier is
-asked of git before anyone is told the pull request is missing work.
+the same policy the merge queue used. The task branch is used only
+while its tip is still the commit Bento recorded. The base is the
+swarm branch already on GitHub, including when that push was never
+recorded: rebuilding from the default branch would replace it. The
+stamp moves only when every missing landing's own commit is in the
+result. A replay that had to be rewritten is still pushed, so the
+task's commits are kept, and the stamp stays put, so a publish says
+the pull request is missing work (`behind`, captured as
+`swarm_branch_behind`). A task branch that is missing or has moved,
+and any git failure while reading one, fails the push. That failure
+is `SwarmBranchNotSaved` even when the machine is already gone, so
+the reap defers instead of the queue giving up. That is why a hosted
+swarm (a clone driver) refuses to start without a GitHub connection
+and a GitHub remote on every repository
+(`SWARM_GITHUB_REQUIRED`): its work would have nowhere to go, and its
+machine would bill forever. A host driver's checkout outlives its
+machine and needs neither. Every push stamps `branch_pushed_at`, and
+a later push keeps the later of that stamp and the database clock, so
+a stamp at the landing's own time cannot be moved backward. The stamp
+is the database clock and a landing's `ended_at` is the server clock,
+so a stamp that is merely earlier is asked of git before anyone is
+told the pull request is missing work.
 
 Nothing opens a pull request when a swarm finishes. A person chooses on
 the swarm's header, through `POST /api/swarms/:id/publish`: `combined`

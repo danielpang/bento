@@ -58,10 +58,11 @@ export interface SwarmPublishResult {
   /** Why nothing was attempted, when nothing was. */
   skipped: string | null;
   /**
-   * The machine was lost after a task landed, and that task's own
-   * branch is not on GitHub either, so the pull request was opened
-   * over a branch that is missing it. A landing whose task branch did
-   * get pushed is replayed onto GitHub's copy before this is set.
+   * The pull request was opened over a branch that is missing landed
+   * work. The task branch never reached GitHub, or the commit that
+   * landed is not in the replay because it existed only on the machine.
+   * A landing whose task branch was pushed, and whose landed commit
+   * the replay contains, is put on GitHub before this is set.
    */
   behind?: boolean;
 }

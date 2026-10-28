@@ -443,7 +443,15 @@ export async function recordPushedHead(
     .update(swarms)
     .set({
       pushedHeads: sql`${swarms.pushedHeads} || ${entry}::jsonb`,
-      ...(options.stamp === false ? {} : { branchPushedAt: sql`now()` }),
+      // Later of the database clock and any stamp already recorded.
+      // A rebuild can stamp the landing's own time, which sits ahead
+      // of the database, and a later push must not move that backward
+      // or the branch looks behind again.
+      ...(options.stamp === false
+        ? {}
+        : {
+            branchPushedAt: sql`greatest(now(), coalesce(${swarms.branchPushedAt}, '-infinity'::timestamptz))`,
+          }),
     })
     .where(eq(swarms.id, owner.swarmId));
 }

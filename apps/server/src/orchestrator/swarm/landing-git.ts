@@ -405,6 +405,32 @@ export async function landWorkerBundles(request: {
 }
 
 /**
+ * Whether `sha` is the bundle's head or an ancestor of it.
+ *
+ * A missing object is not contained. Callers use that to tell a
+ * fast forward, whose landed commit is in the bundle, from a replay
+ * that rewrote history and cannot claim the landed tree.
+ */
+export async function bundleContainsCommit(bundle: RepositoryBundle, sha: string): Promise<boolean> {
+  const root = await mkdtemp(path.join(tmpdir(), "bento-bundle-contains-"));
+  const work = path.join(root, "checkout");
+  const bundlePath = path.join(root, "in.bundle");
+  try {
+    await writeFile(bundlePath, bundle.data);
+    await exec("git", ["init", "--quiet", work]);
+    await git(work, ["fetch", "--no-tags", "--quiet", bundlePath, "+HEAD:refs/heads/base"]);
+    try {
+      await git(work, ["merge-base", "--is-ancestor", sha, "refs/heads/base"]);
+      return true;
+    } catch {
+      return false;
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+  }
+}
+
+/**
  * The commits one task contributed, read back off a branch by trailer.
  *
  * By trailer rather than by a list of shas kept in a column, because a

@@ -6,7 +6,7 @@ import path from "node:path";
 import { after, before, describe, test } from "node:test";
 import { promisify } from "node:util";
 import { taskTrailer } from "./branches.js";
-import { commitsForTask, isRetryableFastForward, landWorkerBranch, landWorkerBundles } from "./landing-git.js";
+import { bundleContainsCommit, commitsForTask, isRetryableFastForward, landWorkerBranch, landWorkerBundles } from "./landing-git.js";
 import type { RepositoryBundle } from "@bento/sandbox";
 
 const exec = promisify(execFile);
@@ -188,6 +188,20 @@ test("a self-contained replay lands one worker and then the next onto that resul
     });
     assert.ok(again.ok, `expected the first worker to already be contained, got ${JSON.stringify(again)}`);
     assert.equal(again.commits, 0);
+  } finally {
+    await rm(fx.root, { recursive: true, force: true });
+  }
+});
+
+test("a bundle contains its head and not a commit it never had", async () => {
+  const fx = await fixture();
+  try {
+    const bundle = await fullBundle(fx.swarmWorktree, path.join(fx.root, "base.bundle"));
+    assert.equal(await bundleContainsCommit(bundle, bundle.headSha), true);
+    await workerCommit(fx, "swarm/demo-chain-a", TASK_A, "a.txt", "from a\n");
+    const other = await git(path.join(fx.root, "swarm_demo-chain-a"), ["rev-parse", "HEAD"]);
+    assert.equal(await bundleContainsCommit(bundle, other), false);
+    assert.equal(await bundleContainsCommit(bundle, "0123456789abcdef0123456789abcdef01234567"), false);
   } finally {
     await rm(fx.root, { recursive: true, force: true });
   }
