@@ -27,6 +27,7 @@ import {
   SettingsPageSkeleton,
   Skeleton,
   AnalyticsPageSkeleton,
+  ArtifactsGridSkeleton,
   SwarmPageSkeleton,
 } from "./components/Skeleton.js";
 import { useGitHubOutcome } from "./components/GitHubIdentity.js";
@@ -61,6 +62,7 @@ import { readProjectSelection, rememberProjectSelection } from "./project-select
 import { loadBoardPipeline } from "./board-shape.js";
 import { ONBOARDING_STEPS, type OnboardingStep } from "./components/OnboardingWalkthrough.js";
 import { REPOSITORY_SETUP_ACTION, REPOSITORY_SETUP_MESSAGE } from "./repository-setup.js";
+import { parseArtifactsRoute, workspaceScreen } from "./artifacts-routes.js";
 
 /*
  * Everything below here is fetched when it is first needed.
@@ -90,6 +92,7 @@ const ResetPassword = lazy(() => import("./components/ResetPassword.js").then((m
 const ArtifactPage = lazy(() => import("./components/ArtifactViewer.js").then((m) => ({ default: m.ArtifactPage })));
 const SessionPage = lazy(() => import("./components/SessionPage.js").then((m) => ({ default: m.SessionPage })));
 const SessionsPage = lazy(() => import("./components/SessionsPage.js").then((m) => ({ default: m.SessionsPage })));
+const ArtifactsPage = lazy(() => import("./components/ArtifactsPage.js").then((m) => ({ default: m.ArtifactsPage })));
 const SettingsPage = lazy(() => import("./components/SettingsPage.js").then((m) => ({ default: m.SettingsPage })));
 const AnalyticsPage = lazy(() => import("./components/AnalyticsPage.js").then((m) => ({ default: m.AnalyticsPage })));
 const StageConfig = lazy(() => import("./components/StageConfig.js").then((m) => ({ default: m.StageConfig })));
@@ -121,6 +124,17 @@ function RouteFallback() {
           <span className="topbar-spacer" />
         </header>
         <SessionsListSkeleton framed />
+      </div>
+    );
+  }
+  if (path === "/artifacts" || path.startsWith("/artifacts/")) {
+    return (
+      <div className="app" aria-busy="true">
+        <header className="topbar">
+          <BrandLockup />
+          <span className="topbar-spacer" />
+        </header>
+        <ArtifactsGridSkeleton framed />
       </div>
     );
   }
@@ -463,9 +477,9 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
   // and answering it with the board under a sessions address helped
   // nobody.
   const path = window.location.pathname.replace(/\/+$/, "") || "/";
-  // "/spend" is the old address of Analytics, kept for bookmarks.
-  const screen: "board" | "sessions" | "analytics" =
-    path === "/sessions" ? "sessions" : path === "/analytics" || path === "/spend" ? "analytics" : "board";
+  const screen = workspaceScreen(path);
+  const artifactsRoute = parseArtifactsRoute(path);
+  const artifactsCardId = artifactsRoute && "cardId" in artifactsRoute ? artifactsRoute.cardId : null;
   const workScreen = screen === "board" || (beta && screen === "sessions");
   const [sessions, setSessions] = useState<ProjectSession[]>([]);
   /**
@@ -760,6 +774,11 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
         setLoadedFor(null);
         return;
       }
+      if (screen === "artifacts") {
+        setLoadedFor(forProject);
+        if (projectsHeld.current !== null) setLoadError("");
+        return;
+      }
       const [pipeline, featureRows, snapshot, conversations] = await Promise.all([
         // Remembers the stage count, so this project's next skeleton is its width.
         loadBoardPipeline(client, forProject),
@@ -878,7 +897,14 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
   useEffect(() => {
     if (!desktop) return;
     const name = projects?.find(project => project.id === projectId)?.name;
-    const section = screen === "sessions" ? "Sessions" : screen === "analytics" ? "Analytics" : null;
+    const section =
+      screen === "sessions"
+        ? "Sessions"
+        : screen === "analytics"
+          ? "Analytics"
+          : screen === "artifacts"
+            ? "Artifacts"
+            : null;
     document.title = [name, section, "Bento"].filter(Boolean).join(" | ");
     return () => { document.title = "Bento"; };
   }, [projectId, projects, screen]);
@@ -1231,7 +1257,7 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
    * is the card board's own tab, so it leaves the toggle out.
    */
   const boardToggle =
-    screen === "analytics" ? (
+    screen === "analytics" || screen === "artifacts" ? (
       <BoardModeToggle
         mode={null}
         locked={swarmAccess.plan === "excluded"}
@@ -1310,6 +1336,7 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
       ]
     : [
         { id: "board", label: "Board", href: "/", current: screen === "board" },
+        { id: "artifacts", label: "Artifacts", href: "/artifacts", current: screen === "artifacts" },
         { id: "sessions", label: "Sessions", href: "/sessions", current: screen === "sessions" },
         { id: "agents", label: "Agents", onSelect: () => { setAgentsIntent(null); setPanel("agents"); } },
         ...(hasProjects
@@ -1359,6 +1386,8 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
           <SessionsListSkeleton framed />
         ) : screen === "analytics" ? (
           <AnalyticsPageSkeleton />
+        ) : screen === "artifacts" ? (
+          <ArtifactsGridSkeleton framed />
         ) : swarming ? (
           <SwarmPageSkeleton />
         ) : (
@@ -1487,6 +1516,10 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
       ) : screen === "analytics" ? (
         <Suspense fallback={<AnalyticsPageSkeleton />}>
           <AnalyticsPage client={client} projectId={projectId} />
+        </Suspense>
+      ) : screen === "artifacts" ? (
+        <Suspense fallback={<ArtifactsGridSkeleton framed={!artifactsCardId} />}>
+          <ArtifactsPage client={client} projectId={projectId} cardId={artifactsCardId} />
         </Suspense>
       ) : swarming && swarmGatePage ? (
         swarmGatePage

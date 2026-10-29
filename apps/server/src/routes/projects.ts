@@ -2,7 +2,7 @@ import { stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { zValidator } from "@hono/zod-validator";
-import { and, asc, count, desc, eq, inArray, isNull, ne, sql, sum } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, isNull, max, ne, sql, sum } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
 import { TERMINAL_RUN_STATUSES, WORKSPACE_ARTIFACT_DIR } from "@bento/core";
@@ -14,6 +14,7 @@ import {
   pipelines,
   projects,
   repositories,
+  runArtifacts,
   runEvents,
   seedDefaultPipeline,
   stages,
@@ -693,6 +694,151 @@ export function projectRoutes(ctx: AppContext) {
         .filter((s) => s.latestRun !== undefined)
         .sort((a, b) => b.latestRun.queuedAt.getTime() - a.latestRun.queuedAt.getTime());
       return c.json({ sessions });
+    })
+    /**
+     * One row per card that has pipeline artifacts, newest activity
+     * first. Metadata only: previews may carry a capped markdown excerpt;
+     * bytes and storage keys never leave the artifact routes.
+     */
+    .get("/:id/artifacts", async (c) => {
+      const projectId = c.req.param("id");
+      if (!(await canAccessProject(ctx, c, projectId))) return c.json({ error: "not found" }, 404);
+
+      const pipelineOnly = and(
+        eq(features.projectId, projectId),
+        eq(runArtifacts.type, "pipeline"),
+      );
+
+      const grouped = await db(c, ctx)
+        .select({
+          featureId: features.id,
+          title: features.title,
+          artifactCount: count(runArtifacts.id),
+          latestCreatedAt: max(runArtifacts.createdAt),
+        })
+        .from(features)
+        .innerJoin(runArtifacts, eq(runArtifacts.featureId, features.id))
+        .where(pipelineOnly)
+        .groupBy(features.id, features.title)
+        .orderBy(desc(max(runArtifacts.createdAt)), asc(features.id));
+
+      if (grouped.length === 0) return c.json([]);
+
+      const featureIds = grouped.map((row) => row.featureId);
+      const [newestRows, kindRows] = await Promise.all([
+        db(c, ctx)
+          .selectDistinctOn([runArtifacts.featureId], {
+            featureId: runArtifacts.featureId,
+            artifactId: runArtifacts.id,
+            kind: runArtifacts.kind,
+            content: runArtifacts.content,
+          })
+          .from(runArtifacts)
+          .innerJoin(features, eq(features.id, runArtifacts.featureId))
+          .where(and(pipelineOnly, inArray(features.id, featureIds)))
+          .orderBy(runArtifacts.featureId, desc(runArtifacts.createdAt)),
+        db(c, ctx)
+          .select({ featureId: runArtifacts.featureId, kind: runArtifacts.kind })
+          .from(runArtifacts)
+          .innerJoin(features, eq(features.id, runArtifacts.featureId))
+          .where(and(pipelineOnly, inArray(features.id, featureIds))),
+      ]);
+
+      const previewByFeature = new Map(
+        newestRows.filter((row) => row.featureId).map((row) => [row.featureId!, row]),
+      );
+      const kindsByFeature = new Map<string, Set<string>>();
+      for (const row of kindRows) {
+        if (!row.featureId) continue;
+        const set = kindsByFeature.get(row.featureId) ?? new Set<string>();
+        set.add(row.kind);
+        kindsByFeature.set(row.featureId, set);
+      }
+
+      const kindOrder = ["markdown", "mermaid", "image", "html", "file"] as const;
+      const cards = grouped.map((row) => {
+        const previewRow = previewByFeature.get(row.featureId)!;
+        const kinds = kindOrder.filter((kind) => kindsByFeature.get(row.featureId)?.has(kind));
+        const preview: {
+          artifactId: string;
+          kind: (typeof kindOrder)[number];
+          markdownExcerpt?: string;
+        } = {
+          artifactId: previewRow.artifactId,
+          kind: previewRow.kind as (typeof kindOrder)[number],
+        };
+        if (previewRow.kind === "markdown" && previewRow.content) {
+          preview.markdownExcerpt = previewRow.content.slice(0, 2000);
+        }
+        return {
+          featureId: row.featureId,
+          title: row.title,
+          artifactCount: Number(row.artifactCount),
+          kinds,
+          latestCreatedAt: row.latestCreatedAt!.toISOString(),
+          preview,
+        };
+      });
+      return c.json(cards);
+    })
+    /**
+     * Line format: session|<featureId>|<runCount>|<cost or ->|<status>|<queuedAt>|<agentName>|<title>
+     * Title is last because it may contain pipes. Names are resolved
+     * here: the Mac app cannot join a profile id to a name.
+     */
+    .get("/:id/sessions/plain", async (c) => {
+      const projectId = c.req.param("id");
+      if (!(await canAccessProject(ctx, c, projectId))) return c.text("error|not found", 404);
+
+      const conversationRuns = and(eq(features.projectId, projectId), ne(agentRuns.role, "judge"));
+      const [totals, latest] = await Promise.all([
+        db(c, ctx)
+          .select({
+            featureId: agentRuns.featureId,
+            title: features.title,
+            runCount: count(agentRuns.id),
+            totalCostUsd: sum(agentRuns.costUsd),
+          })
+          .from(agentRuns)
+          .innerJoin(features, eq(features.id, agentRuns.featureId))
+          .where(conversationRuns)
+          .groupBy(agentRuns.featureId, features.title),
+        db(c, ctx)
+          .selectDistinctOn([agentRuns.featureId], {
+            featureId: agentRuns.featureId,
+            status: agentRuns.status,
+            agentProfileId: agentRuns.agentProfileId,
+            queuedAt: agentRuns.queuedAt,
+          })
+          .from(agentRuns)
+          .innerJoin(features, eq(features.id, agentRuns.featureId))
+          .where(conversationRuns)
+          .orderBy(agentRuns.featureId, desc(agentRuns.queuedAt)),
+      ]);
+
+      const profileIds = [...new Set(latest.map((row) => row.agentProfileId).filter((id): id is string => Boolean(id)))];
+      const profiles = profileIds.length
+        ? await db(c, ctx)
+            .select({ id: agentProfiles.id, name: agentProfiles.name })
+            .from(agentProfiles)
+            .where(inArray(agentProfiles.id, profileIds))
+        : [];
+      const nameById = new Map(profiles.map((row) => [row.id, row.name]));
+      const latestByFeature = new Map(latest.map((row) => [row.featureId, row]));
+      const lines = totals
+        .map((row) => {
+          const run = latestByFeature.get(row.featureId);
+          if (!run) return null;
+          return { row, run };
+        })
+        .filter((entry): entry is { row: (typeof totals)[number]; run: (typeof latest)[number] } => entry !== null)
+        .sort((a, b) => b.run.queuedAt.getTime() - a.run.queuedAt.getTime())
+        .map(({ row, run }) => {
+          const cost = row.totalCostUsd === null ? "-" : Number(row.totalCostUsd).toFixed(2);
+          const agent = (run.agentProfileId && nameById.get(run.agentProfileId)) || "-";
+          return `session|${row.featureId}|${Number(row.runCount)}|${cost}|${run.status}|${run.queuedAt.toISOString()}|${agent}|${row.title}`;
+        });
+      return c.text(lines.join("\n"));
     })
     /**
      * The name, and whether an arriving Linear issue starts the

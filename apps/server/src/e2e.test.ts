@@ -505,6 +505,107 @@ test("a run's artifacts are captured, listed, and served safely", { timeout: 90_
   assert.deepEqual(leftBehind, [], "captured files are removed from the artifacts directory");
 });
 
+test("GET /api/projects/:id/artifacts aggregates pipeline cards without leaking content", async () => {
+  const { project } = await setupProject("Artifact aggregate");
+  const older = await createFeature(project.id, "Older card");
+  const newer = await createFeature(project.id, "Newer card");
+  const profile = await fakeProfile("aggregate-fake");
+  await app.request(`/api/features/${newer.id}/advance`, { method: "POST" });
+  const runNew = (
+    await json<{ id: string }>(
+      await app.request("/api/runs", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ featureId: newer.id, agentProfileId: profile.id, prompt: "go" }),
+      }),
+    )
+  ).id;
+  const runOld = (
+    await json<{ id: string }>(
+      await app.request("/api/runs", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ featureId: older.id, agentProfileId: profile.id, prompt: "go" }),
+      }),
+    )
+  ).id;
+
+  const longBody = "x".repeat(2500);
+  await ctx.db.insert(runArtifacts).values([
+    {
+      runId: runOld.id,
+      type: "pipeline",
+      featureId: older.id,
+      stageSlug: "plan",
+      stageName: "Plan",
+      path: "artifacts/old.md",
+      kind: "markdown",
+      mime: "text/markdown",
+      size: 3,
+      content: "old",
+      createdAt: new Date("2024-01-02T12:00:00.000Z"),
+    },
+    {
+      runId: runNew.id,
+      type: "pipeline",
+      featureId: newer.id,
+      stageSlug: "plan",
+      stageName: "Plan",
+      path: "artifacts/newest.md",
+      kind: "markdown",
+      mime: "text/markdown",
+      size: longBody.length,
+      content: longBody,
+      createdAt: new Date("2025-06-01T12:00:00.000Z"),
+    },
+    {
+      runId: runNew.id,
+      type: "pipeline",
+      featureId: newer.id,
+      stageSlug: "plan",
+      stageName: "Plan",
+      path: "artifacts/diagram.mmd",
+      kind: "mermaid",
+      mime: "text/plain",
+      size: 4,
+      content: "graph TD",
+      createdAt: new Date("2025-05-01T12:00:00.000Z"),
+    },
+  ]);
+
+  const blank = await setupProject("Empty artifacts");
+  assert.deepEqual(await json<unknown[]>(await app.request(`/api/projects/${blank.project.id}/artifacts`)), []);
+
+  const listed = await json<
+    {
+      featureId: string;
+      title: string;
+      artifactCount: number;
+      kinds: string[];
+      latestCreatedAt: string;
+      preview: { artifactId: string; kind: string; markdownExcerpt?: string; content?: string; storageKey?: string };
+    }[]
+  >(await app.request(`/api/projects/${project.id}/artifacts`));
+
+  assert.equal(listed.length, 2);
+  assert.deepEqual(
+    listed.map((row) => row.title),
+    ["Newer card", "Older card"],
+  );
+  assert.equal(listed[0]!.artifactCount, 2);
+  assert.deepEqual(listed[0]!.kinds, ["markdown", "mermaid"]);
+  assert.equal(listed[0]!.preview.kind, "markdown");
+  assert.ok(listed[0]!.preview.markdownExcerpt);
+  assert.equal(listed[0]!.preview.markdownExcerpt!.length, 2000);
+  assert.equal("content" in listed[0]!.preview, false);
+  assert.equal("storageKey" in listed[0]!, false);
+  for (const row of listed) {
+    assert.equal(typeof row.artifactCount, "number");
+    assert.ok(!("content" in row));
+    assert.ok(!("storageKey" in row));
+  }
+});
+
 test("a card's sandbox wait is measured from queueing, new first and reused after", { timeout: 90_000 }, async () => {
   const { project, stages } = await setupProject("Sandbox wait");
   const feature = await createFeature(project.id, "Timed card");

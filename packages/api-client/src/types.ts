@@ -457,6 +457,21 @@ export interface RunArtifact {
   createdAt: string;
 }
 
+/** One card in the project-wide artifacts grid. */
+export interface ProjectArtifactCard {
+  featureId: string;
+  title: string;
+  artifactCount: number;
+  kinds: RunArtifactKind[];
+  latestCreatedAt: string;
+  preview: {
+    artifactId: string;
+    kind: RunArtifactKind;
+    /** Present only for inline markdown, capped server-side. */
+    markdownExcerpt?: string;
+  };
+}
+
 export interface FlagSnapshot {
   /** Whether this user has beta features on, for the team they have open. */
   betaTesters: boolean;

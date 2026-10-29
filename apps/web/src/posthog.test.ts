@@ -17,6 +17,18 @@ test("capture and identify are safe before the client starts", () => {
   resetUser();
 });
 
+test("artifact analytics calls are safe before the client starts", async () => {
+  const { captureArtifactOpened, captureArtifactsTabOpened } = await import("./posthog.js");
+  captureArtifactsTabOpened("project-1");
+  captureArtifactOpened({
+    source: "tab",
+    project_id: "project-1",
+    feature_id: "feature-1",
+    artifact_id: "artifact-1",
+    kind: "markdown",
+  });
+});
+
 test("browser persistence shares the marketing cookie across subdomains", () => {
   assert.equal(BROWSER_PERSISTENCE.persistence, "localStorage+cookie");
   assert.equal(BROWSER_PERSISTENCE.cross_subdomain_cookie, true);

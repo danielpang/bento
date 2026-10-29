@@ -18,6 +18,22 @@ test("relatedFeatures names the card in the path", async () => {
   assert.equal(url, "http://bento.test/api/features/11111111-1111-1111-1111-111111111111/related");
 });
 
+test("listProjectArtifacts encodes the project id in the path", async () => {
+  let url = "";
+  const client = new BentoClient({
+    baseUrl: "http://bento.test",
+    fetch: (async (input) => {
+      url = String(input);
+      return new Response(JSON.stringify([]), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch,
+  });
+  await client.listProjectArtifacts("proj/with/slash");
+  assert.equal(url, "http://bento.test/api/projects/proj%2Fwith%2Fslash/artifacts");
+});
+
 function serverWith(builds: (string | null)[], status = 200) {
   const seen: string[] = [];
   let calls = 0;
