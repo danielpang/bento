@@ -6,6 +6,7 @@ import { ProviderMark } from "./ProviderMark.js";
 import { AgentSession } from "./AgentSession.js";
 import { criterionName, useDismissable } from "./ui.js";
 import { useToast } from "./Toasts.js";
+import { captureArtifactOpened } from "../posthog.js";
 import { ConfirmDialog, PromptDialog } from "./PromptDialog.js";
 import { ApiError } from "@bento/api-client";
 import type {
@@ -1269,7 +1270,20 @@ export function FeatureDrawer({
             <span className="label">Artifacts</span>
             <div className="artifact-list">
               {listedArtifacts.map((artifact) => (
-                <button key={artifact.id} className="artifact-row" onClick={() => setOpenArtifact(artifact)}>
+                <button
+                  key={artifact.id}
+                  className="artifact-row"
+                  onClick={() => {
+                    setOpenArtifact(artifact);
+                    captureArtifactOpened({
+                      source: "card_panel",
+                      project_id: feature.projectId,
+                      feature_id: feature.id,
+                      artifact_id: artifact.id,
+                      kind: artifact.kind,
+                    });
+                  }}
+                >
                   <span className="chip">{artifactKindWords(artifact.kind)}</span>
                   <span className="artifact-name" title={artifact.path}>
                     {artifactBaseName(artifact.path)}

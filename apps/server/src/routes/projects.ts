@@ -2,7 +2,7 @@ import { stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { zValidator } from "@hono/zod-validator";
-import { and, asc, count, desc, eq, inArray, isNull, ne, sql, sum } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, isNull, max, ne, sql, sum } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
 import { TERMINAL_RUN_STATUSES, WORKSPACE_ARTIFACT_DIR } from "@bento/core";
@@ -14,6 +14,7 @@ import {
   pipelines,
   projects,
   repositories,
+  runArtifacts,
   runEvents,
   seedDefaultPipeline,
   stages,
@@ -693,6 +694,92 @@ export function projectRoutes(ctx: AppContext) {
         .filter((s) => s.latestRun !== undefined)
         .sort((a, b) => b.latestRun.queuedAt.getTime() - a.latestRun.queuedAt.getTime());
       return c.json({ sessions });
+    })
+    /**
+     * One row per card that has pipeline artifacts, newest activity
+     * first. Metadata only: previews may carry a capped markdown excerpt;
+     * bytes and storage keys never leave the artifact routes.
+     */
+    .get("/:id/artifacts", async (c) => {
+      const projectId = c.req.param("id");
+      if (!(await canAccessProject(ctx, c, projectId))) return c.json({ error: "not found" }, 404);
+
+      const pipelineOnly = and(
+        eq(features.projectId, projectId),
+        eq(runArtifacts.type, "pipeline"),
+      );
+
+      const grouped = await db(c, ctx)
+        .select({
+          featureId: features.id,
+          title: features.title,
+          artifactCount: count(runArtifacts.id),
+          latestCreatedAt: max(runArtifacts.createdAt),
+        })
+        .from(features)
+        .innerJoin(runArtifacts, eq(runArtifacts.featureId, features.id))
+        .where(pipelineOnly)
+        .groupBy(features.id, features.title)
+        .orderBy(desc(max(runArtifacts.createdAt)), asc(features.id));
+
+      if (grouped.length === 0) return c.json([]);
+
+      const featureIds = grouped.map((row) => row.featureId);
+      const [newestRows, kindRows] = await Promise.all([
+        db(c, ctx)
+          .selectDistinctOn([runArtifacts.featureId], {
+            featureId: runArtifacts.featureId,
+            artifactId: runArtifacts.id,
+            kind: runArtifacts.kind,
+            content: runArtifacts.content,
+          })
+          .from(runArtifacts)
+          .innerJoin(features, eq(features.id, runArtifacts.featureId))
+          .where(and(pipelineOnly, inArray(features.id, featureIds)))
+          .orderBy(runArtifacts.featureId, desc(runArtifacts.createdAt)),
+        db(c, ctx)
+          .select({ featureId: runArtifacts.featureId, kind: runArtifacts.kind })
+          .from(runArtifacts)
+          .innerJoin(features, eq(features.id, runArtifacts.featureId))
+          .where(and(pipelineOnly, inArray(features.id, featureIds))),
+      ]);
+
+      const previewByFeature = new Map(
+        newestRows.filter((row) => row.featureId).map((row) => [row.featureId!, row]),
+      );
+      const kindsByFeature = new Map<string, Set<string>>();
+      for (const row of kindRows) {
+        if (!row.featureId) continue;
+        const set = kindsByFeature.get(row.featureId) ?? new Set<string>();
+        set.add(row.kind);
+        kindsByFeature.set(row.featureId, set);
+      }
+
+      const kindOrder = ["markdown", "mermaid", "image", "html", "file"] as const;
+      const cards = grouped.map((row) => {
+        const previewRow = previewByFeature.get(row.featureId)!;
+        const kinds = kindOrder.filter((kind) => kindsByFeature.get(row.featureId)?.has(kind));
+        const preview: {
+          artifactId: string;
+          kind: (typeof kindOrder)[number];
+          markdownExcerpt?: string;
+        } = {
+          artifactId: previewRow.artifactId,
+          kind: previewRow.kind as (typeof kindOrder)[number],
+        };
+        if (previewRow.kind === "markdown" && previewRow.content) {
+          preview.markdownExcerpt = previewRow.content.slice(0, 2000);
+        }
+        return {
+          featureId: row.featureId,
+          title: row.title,
+          artifactCount: Number(row.artifactCount),
+          kinds,
+          latestCreatedAt: row.latestCreatedAt!.toISOString(),
+          preview,
+        };
+      });
+      return c.json(cards);
     })
     /**
      * The name, and whether an arriving Linear issue starts the
