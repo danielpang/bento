@@ -5,7 +5,7 @@ import { execFile } from "node:child_process";
 import { readdir } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import { and, eq, exists, gt, inArray, isNotNull, isNull, lt, ne, or, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, isNotNull, isNull, lt, ne, or, sql, type SQL, type SQLWrapper } from "drizzle-orm";
 import { agentRuns, features, repositories, sandboxes, swarmLandings, swarmPullRequests, swarmTasks, swarms } from "@bento/db";
 import type { SandboxDriver } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
@@ -303,7 +303,18 @@ export async function reapSandbox(ctx: AppContext, featureId: string, machines?:
 export async function reapSwarmSandbox(
   ctx: AppContext,
   swarmId: string,
-  options: { now?: Date; machines?: SandboxGeneration[]; deferrals?: number; push?: PushOptions } = {},
+  options: {
+    now?: Date;
+    machines?: SandboxGeneration[];
+    deferrals?: number;
+    push?: PushOptions;
+    /**
+     * False for a caller that holds the swarm's lock and needs only the
+     * swarm's own machine gone (the branch release route): each leaf's
+     * reap waits on that lock, and the route queues a reap for them.
+     */
+    leaves?: boolean;
+  } = {},
 ): Promise<void> {
   const now = options.now ?? new Date();
   /*
@@ -320,7 +331,7 @@ export async function reapSwarmSandbox(
     .limit(1);
   if (
     current &&
-    swarmMachineReleasable(current, now, await swarmPublished(ctx.db, swarmId)) &&
+    swarmMachineReleasable(current, now, await swarmPublishedAndSettled(ctx.db, swarmId)) &&
     !(await swarmHasActiveRun(ctx.db, swarmId))
   ) {
     try {
@@ -333,11 +344,11 @@ export async function reapSwarmSandbox(
       throw new SandboxReapDeferred(`${err.message}; keeping its sandbox`, { swarmId });
     }
   }
-  const released = await ctx.db.transaction(async (tx) => {
+  await ctx.db.transaction(async (tx) => {
     const swarm = await lockSwarmForReap(tx, swarmId);
-    if (!swarmMachineReleasable(swarm, now, await swarmPublished(tx, swarmId))) {
+    if (!swarmMachineReleasable(swarm, now, await swarmPublishedAndSettled(tx, swarmId))) {
       console.log(`swarm ${swarmId} is ${swarm?.status} and not archived; keeping its sandbox`);
-      return false;
+      return;
     }
 
     const [working] = await tx
@@ -390,9 +401,14 @@ export async function reapSwarmSandbox(
       await tx.update(sandboxes).set({ status: "destroyed" }).where(and(eq(sandboxes.id, row.id), eq(sandboxes.generation, row.generation)));
       console.log(`reaped sandbox ${row.externalId} for finished swarm ${swarmId}`);
     }
-    return true;
   });
-  if (released) await reapSwarmWorkerSandboxes(ctx, swarmId, { ...options, now });
+  /*
+   * The leaves are asked even when the swarm kept its own machine: a
+   * published swarm whose merge queue still needs that machine has
+   * finished leaves with nothing left to do. Each leaf decides by its
+   * own rule, under the swarm's lock, so a live swarm keeps them all.
+   */
+  if (options.leaves !== false) await reapSwarmWorkerSandboxes(ctx, swarmId, { ...options, now });
 }
 
 /**
@@ -587,21 +603,50 @@ type ReapDb = AppContext["db"] | ReapTx;
 
 /**
  * Whether a person has opened a pull request for this swarm: a combined
- * one (swarm_pull_requests), or any part of a stack (on its tasks).
+ * one (swarm_pull_requests), or any part of a stack (on its tasks). One
+ * condition over the swarm's id column, so the sweep's nomination and
+ * the reap's decision read the same rule.
  */
+function publishedSwarm(swarmId: SQLWrapper | string): SQL {
+  return sql`(
+    exists (select 1 from ${swarmPullRequests} where ${swarmPullRequests.swarmId} = ${swarmId})
+    or exists (
+      select 1 from ${swarmTasks}
+      where ${swarmTasks.swarmId} = ${swarmId} and ${swarmTasks.flags} -> 'pullRequests' is not null
+    )
+  )`;
+}
+
+/** Whether a person has opened a pull request for this swarm. */
 export async function swarmPublished(db: ReapDb, swarmId: string): Promise<boolean> {
-  const [combined] = await db
-    .select({ id: swarmPullRequests.id })
-    .from(swarmPullRequests)
-    .where(eq(swarmPullRequests.swarmId, swarmId))
+  const result = await db.execute<{ published: boolean }>(sql`select ${publishedSwarm(swarmId)} as published`);
+  return result.rows[0]?.published === true;
+}
+
+/**
+ * Landings that still need the swarm's own machine: one waiting in the
+ * queue, one in flight, one a resolver is on, and one that failed and
+ * that "Retry merge queue" lands onto that machine again. A landing
+ * cannot make the swarm's machine again (only a planner run restores
+ * it from GitHub), so a swarm with any of these keeps it.
+ */
+const LANDINGS_NEEDING_SWARM_MACHINE = ["queued", "landing", "conflicted", "failed"] as const;
+
+/**
+ * Whether being published is enough to let the swarm's own machine go:
+ * it is published, and nothing in its merge queue still lands onto that
+ * machine. A swarm out of budget or time keeps landing what its workers
+ * finished, and a failed one is retried at a failed landing; both would
+ * find the machine gone.
+ */
+async function swarmPublishedAndSettled(db: ReapDb, swarmId: string): Promise<boolean> {
+  if (!(await swarmPublished(db, swarmId))) return false;
+  const [pending] = await db
+    .select({ id: swarmLandings.id })
+    .from(swarmLandings)
+    .where(and(eq(swarmLandings.swarmId, swarmId), inArray(swarmLandings.status, [...LANDINGS_NEEDING_SWARM_MACHINE])))
     .limit(1);
-  if (combined) return true;
-  const [stacked] = await db
-    .select({ id: swarmTasks.id })
-    .from(swarmTasks)
-    .where(and(eq(swarmTasks.swarmId, swarmId), sql`${swarmTasks.flags} -> 'pullRequests' is not null`))
-    .limit(1);
-  return Boolean(stacked);
+  return !pending;
 }
 
 /**
@@ -636,13 +681,7 @@ export async function reapFinishedSwarmSandboxes(ctx: AppContext, now: Date = ne
             or(
               lt(swarms.updatedAt, abandonedBefore),
               isNotNull(swarms.archivedAt),
-              exists(ctx.db.select({ id: swarmPullRequests.id }).from(swarmPullRequests).where(eq(swarmPullRequests.swarmId, swarms.id))),
-              exists(
-                ctx.db
-                  .select({ id: swarmTasks.id })
-                  .from(swarmTasks)
-                  .where(and(eq(swarmTasks.swarmId, swarms.id), sql`${swarmTasks.flags} -> 'pullRequests' is not null`)),
-              ),
+              publishedSwarm(swarms.id),
             ),
           ),
         ),
@@ -735,10 +774,12 @@ export async function reapSwarmTaskSandbox(ctx: AppContext, swarmTaskId: string,
     );
   }
 
-  const rows = await ctx.db
-    .select()
-    .from(sandboxes)
-    .where(and(eq(sandboxes.swarmTaskId, swarmTaskId), ne(sandboxes.status, "destroyed")));
+  const liveRows = () =>
+    ctx.db
+      .select()
+      .from(sandboxes)
+      .where(and(eq(sandboxes.swarmTaskId, swarmTaskId), ne(sandboxes.status, "destroyed")));
+  let rows = await liveRows();
 
   if (rows.some((row) => !matchesSandboxGeneration(row, machines))) return;
   const now = options.withSwarm?.now;
@@ -761,6 +802,16 @@ export async function reapSwarmTaskSandbox(ctx: AppContext, swarmTaskId: string,
       }
       throw new SandboxReapDeferred(`${err.message}; keeping its sandbox`, { swarmTaskId });
     }
+    /*
+     * Read again: the push wakes a hibernated machine to export from it,
+     * which bumps its generation and records the image it booted from.
+     * Destroying the rows read before would skip the woken machine and
+     * leave its new image billing. The machines this job was asked
+     * about were checked above; a row that is not one of them is a
+     * machine made since, and stays.
+     */
+    const asked = new Set(rows.map((row) => row.id));
+    rows = (await liveRows()).filter((row) => asked.has(row.id));
   }
 
   const destroy = async (db: ReapDb): Promise<void> => {

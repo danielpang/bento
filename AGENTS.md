@@ -407,7 +407,11 @@ working. A swarm that ended "failed" does not ask as it ends: a failed
 swarm is the one a person retries a leaf or a landing on. Publishing it
 (a pull request, combined or stacked: `swarmPublished`) reaps it, and so
 does reaching an ending once it was published, because its branch is on
-GitHub under a pull request and a retry restores from there. Archiving
+GitHub under a pull request and a planner run restores from there. Not
+while its merge queue has a landing queued, landing, conflicted or
+failed (`swarmPublishedAndSettled`): a landing lands onto the swarm's
+own machine and cannot make it again, and a swarm out of budget or time
+keeps landing what its workers finished. Archiving
 or deleting it reaps it too, and so does the sweep (at boot and nightly)
 once it has sat untouched for `FAILED_SWARM_MACHINE_GRACE_MS`, a week,
 because a sprite bills its storage for as long as it exists.
@@ -419,8 +423,12 @@ and the final check's judge each kept theirs after the pull request was
 open. Each goes through the leaf's reap, which on a clone driver pushes
 the leaf's branch first (`saveSwarmTaskBranch`, skipped for a leaf that
 landed, whose work is on the swarm's branch, and for a machine no worker
-or resolver ran in) and defers, captured as `swarm_branch_unsaved`,
-when it cannot. A swarm released only because it was published keeps
+or resolver started an agent in) and defers, captured as
+`swarm_branch_unsaved`, when it cannot. It destroys the rows as they
+are after that push, because exporting from a hibernated machine wakes
+it, which bumps its generation and records a new image. The branch
+release route reaps only the swarm's own machine under its lock
+(`leaves: false`) and queues the rest. A swarm released only because it was published keeps
 the machine of a leaf that is not landed, done or cancelled, since a
 plain retry continues there (`swarmTaskMachineReleasable`). On a host
 driver (Docker, local) the machine is only a container; the leaf's
@@ -495,7 +503,8 @@ swarm went on from a fresh clone without saying so.
 So `reapSwarmSandbox` locks the swarm row and destroys only when the
 swarm is gone, done or cancelled (`swarmReleasesMachine`), or, in an
 ending a person can still resume (failed, budget_exhausted, timed_out),
-published, archived, or past `FAILED_SWARM_MACHINE_GRACE_MS`. A swarm live again keeps
+published with nothing left in its merge queue, archived, or past
+`FAILED_SWARM_MACHINE_GRACE_MS`. A swarm live again keeps
 its machine, quietly. It also waits for a landing in flight. And a
 swarm machine that is gone is never made again as a fresh clone once
 the swarm has landed work: it is restored from GitHub

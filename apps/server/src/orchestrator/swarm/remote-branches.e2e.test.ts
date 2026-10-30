@@ -407,6 +407,7 @@ test("a leaf's machine goes with its finished swarm only once GitHub holds the l
     agentProfileId: PROFILE,
     prompt: "do the cart",
     status: "succeeded",
+    agentStartedAt: new Date(),
   });
   const [leaf] = await db
     .insert(sandboxes)
@@ -432,10 +433,58 @@ test("a leaf's machine goes with its finished swarm only once GitHub holds the l
   assert.deepEqual(machine.destroyed, [], "the leaf's machine, the only copy of its commit, is still there");
   assert.equal((await db.select().from(sandboxes).where(eq(sandboxes.id, leaf!.id)))[0]?.status, "ready");
 
-  await reapSwarmSandbox(machine.ctx, swarm.id, { push: options });
+  // The push wakes a hibernated machine to export from it, which moves
+  // the row to a new generation: the reap destroys the machine as it is
+  // after the push, not as it was read before.
+  const waking = {
+    publisher: {
+      ...publisher,
+      async pushToken() {
+        await db.update(sandboxes).set({ generation: sql`${sandboxes.generation} + 1` }).where(eq(sandboxes.id, leaf!.id));
+        return "unused: the remote is a directory";
+      },
+    } as unknown as typeof publisher,
+    remoteUrl: () => remotePath,
+  };
+  await reapSwarmSandbox(machine.ctx, swarm.id, { push: waking });
   assert.equal(await remoteHead(worker.branch), head, "GitHub has the leaf's commit");
   assert.deepEqual(machine.destroyed, ["box-leaf-reap"], "and only then is its machine destroyed");
   assert.equal((await db.select().from(sandboxes).where(eq(sandboxes.id, leaf!.id)))[0]?.status, "destroyed");
+});
+
+test("a leaf whose agent never started has nothing to push, so GitHub being down does not keep its machine", async () => {
+  const { swarm } = await swarmOnHost("leaf-never-started");
+  const [task] = await db
+    .insert(swarmTasks)
+    .values({ swarmId: swarm.id, title: "Checkout refused", status: "failed", position: 0, branchName: `${swarm.branchName}-refused` })
+    .returning();
+  await db.insert(agentRuns).values({
+    type: "swarm",
+    swarmId: swarm.id,
+    swarmTaskId: task!.id,
+    role: "worker",
+    agentProfileId: PROFILE,
+    prompt: "never ran",
+    status: "failed",
+  });
+  await db.insert(sandboxes).values({
+    projectId: PROJECT,
+    swarmId: swarm.id,
+    swarmTaskId: task!.id,
+    provider: "modal",
+    externalId: "box-never-started",
+    status: "ready",
+    workdir: "/workspace",
+  });
+  await db.update(swarms).set({ status: "cancelled" }).where(eq(swarms.id, swarm.id));
+  const machine = cloneMachine(() => repoPath);
+  const offline = {
+    publisher: { ...publisher, async pushToken() { throw new Error("GitHub is down"); } } as unknown as typeof publisher,
+    remoteUrl: () => remotePath,
+  };
+
+  await reapSwarmSandbox(machine.ctx, swarm.id, { push: offline });
+  assert.deepEqual(machine.destroyed, ["box-never-started"]);
 });
 
 test("a swarm whose branch was released for checkout still publishes, from the repository's own branch", async () => {

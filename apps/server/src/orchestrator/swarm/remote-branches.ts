@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray, isNotNull } from "drizzle-orm";
 import { agentRuns, repositories, sandboxes, swarmTasks, swarms } from "@bento/db";
 import { parseRepoUrl, type GitHubPublisher } from "@bento/github";
 import type { SandboxDriver, SandboxHandle } from "@bento/sandbox";
@@ -189,7 +189,8 @@ export async function saveSwarmBranch(ctx: AppContext, swarmId: string, options:
  * Nothing to save, and so no push, when the leaf's work is somewhere
  * else already or never existed: a leaf that landed is on the swarm's
  * branch, which the swarm's own reap saves; a machine no worker or
- * resolver ever ran in (a judge's) holds no branch of its own; and a
+ * resolver ever started an agent in (a judge's, or one whose checkout
+ * failed) holds no branch of its own; and a
  * machine on a host driver is the host's worktree, which the reap
  * checks against the repository itself before it removes anything.
  */
@@ -208,10 +209,19 @@ export async function saveSwarmTaskBranch(ctx: AppContext, taskId: string, optio
     if (err instanceof SandboxDriverUnavailable) return;
     throw err;
   }
+  // An agent that never started (its checkout failed, its machine
+  // never came up) committed nothing, and a machine with no checkout
+  // cannot export one: requiring a push there would keep it forever.
   const [worked] = await ctx.db
     .select({ id: agentRuns.id })
     .from(agentRuns)
-    .where(and(eq(agentRuns.swarmTaskId, task.id), inArray(agentRuns.role, ["worker", "resolver"])))
+    .where(
+      and(
+        eq(agentRuns.swarmTaskId, task.id),
+        inArray(agentRuns.role, ["worker", "resolver"]),
+        isNotNull(agentRuns.agentStartedAt),
+      ),
+    )
     .limit(1);
   if (!worked) return;
   try {

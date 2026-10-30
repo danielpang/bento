@@ -1023,6 +1023,38 @@ test("a published swarm that failed gives back its machine and its finished leav
   assert.equal(await sandboxStatus(failed.sandboxId), "ready", "a leaf a person may retry keeps its machine");
 });
 
+/**
+ * A landing lands onto the swarm's own machine and cannot make it
+ * again. A published swarm out of budget still lands what its workers
+ * finished, and a failed one is retried at its failed landing, so the
+ * machine stays until the merge queue has nothing left for it.
+ */
+test("a published swarm keeps its own machine while its merge queue still lands onto it", async () => {
+  for (const [status, landingStatus] of [["budget_exhausted", "queued"], ["failed", "failed"]] as const) {
+    const swarm = await seedSwarm({ title: `Swarm ${status} with a ${landingStatus} landing`, status });
+    const cancelled = await seedLeaf(swarm.swarmId, { title: "Cancelled leaf", status: "cancelled" });
+    const waiting = await seedLeaf(swarm.swarmId, { title: "Leaf waiting to land", status: "working" });
+    const [landing] = await ctx.db
+      .insert(swarmLandings)
+      .values({ swarmId: swarm.swarmId, taskId: waiting.taskId, status: landingStatus })
+      .returning();
+    await ctx.db.insert(swarmPullRequests).values({
+      swarmId: swarm.swarmId,
+      repoUrl: "https://github.com/acme/app",
+      number: 9,
+      url: "https://github.com/acme/app/pull/9",
+    });
+
+    await withQuietBoss(() => runSandboxReapJob(ctx, { swarmId: swarm.swarmId }));
+    assert.equal(await sandboxStatus(swarm.sandboxId), "ready", `a ${landingStatus} landing keeps the swarm's machine`);
+    assert.equal(await sandboxStatus(cancelled.sandboxId), "destroyed", "a finished leaf goes anyway");
+
+    await ctx.db.update(swarmLandings).set({ status: "landed" }).where(eq(swarmLandings.id, landing!.id));
+    await withQuietBoss(() => runSandboxReapJob(ctx, { swarmId: swarm.swarmId }));
+    assert.equal(await sandboxStatus(swarm.sandboxId), "destroyed", "and goes once the queue is done with it");
+  }
+});
+
 test("the sweep finds a swarm by a leaf's machine, and a stack counts as published", async () => {
   const done = await seedSwarm({ title: "Swarm done, leaf left", status: "done" });
   await ctx.db.update(sandboxes).set({ status: "destroyed" }).where(eq(sandboxes.id, done.sandboxId));

@@ -1173,7 +1173,7 @@ test("a finished swarm offers one pull request or one per task, and a failed one
       pullRequests: [{ id: "p", repoUrl: "r", number: 1, url: null, headSha: null }],
     }),
   });
-  assert.match(published, /pull request is open, so its sandbox was released/, "publishing releases a failed swarm's sandbox");
+  assert.match(published, /pull request is open, so Bento releases its sandbox/, "publishing releases a failed swarm's sandbox");
   assert.doesNotMatch(published, /sandbox is kept until about/);
   assertNoDashes(published, "the published failed swarm header");
 });

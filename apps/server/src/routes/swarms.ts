@@ -1014,13 +1014,16 @@ export function swarmRoutes(ctx: AppContext) {
       }
       try {
         // The finished swarm may still have an idle container mounting
-        // this directory. Stop it before Git removes the checkout.
-        await reapSwarmSandbox(ctx, swarm.id);
+        // this directory. Stop it before Git removes the checkout. The
+        // leaves' machines wait on this route's lock, so they go in a
+        // reap of their own once it commits.
+        await reapSwarmSandbox(ctx, swarm.id, { leaves: false });
         await releaseSwarmBranch(ctx.worktrees, swarm.id, swarm.branchName, repos);
       } catch (error) {
         return c.json({ error: error instanceof Error ? error.message : "Could not release the branch." }, 409);
       }
       await db(c, ctx).update(swarms).set({ branchReleasedAt: new Date() }).where(eq(swarms.id, swarm.id));
+      deferAfterCommit(c, () => queueSwarmSandboxReap(ctx, swarm.id));
       saySwarmChanged(ctx, c, swarm, "done");
       return c.json({ released: true });
     })
