@@ -505,8 +505,15 @@ reap wakes the machine if it hibernated, commits whatever the agent left
 uncommitted (`IDLE_WORK_COMMIT_MESSAGE`, hooks skipped), and pushes the
 branch with the stage notes kept (`pushBranches` with
 `includeStageNotes`) under the same lease a publish holds
-(`featureBranchLease`, recorded by `recordFeaturePush`). A card it cannot
-save keeps its machine, captured as `card_idle_branch_unsaved`. The
+(`featureBranchLease`, recorded by `recordFeaturePush`). The commit exec
+is the driver's, so a sprite's handshake ladder applies. A bare
+"The operation was aborted due to timeout" (no `Network error:` prefix)
+is the same transient failure as the wrapped one: the lookup retries it,
+and the handshake recovery does not stop on it. The reap also starts
+the commit again when that exec still ends without having run
+(`IDLE_COMMIT_ATTEMPTS`). A commit git itself refused is not retried.
+A card it cannot save keeps its machine, captured as
+`card_idle_branch_unsaved`, and the next sweep asks again. The
 destroy happens under the card's row lock, the one `startRunIfIdle`
 takes, after reading the card and its rows again, because the save can
 take minutes and wakes the machine into a new generation. On a host

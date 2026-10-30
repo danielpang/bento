@@ -167,9 +167,10 @@ function spriteControlIsRetriable(err: unknown): boolean {
     if (status === 408 || status === 429 || (status !== undefined && status >= 500 && status <= 599)) return true;
     return /temporarily unavailable|please retry|internal server error/i.test(err.message);
   }
+  if (abortedByTimeout(err)) return true;
   if (!(err instanceof Error)) return false;
   if (/^Network error: /.test(err.message)) {
-    return /aborted due to timeout|fetch failed|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up/i.test(err.message);
+    return /fetch failed|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up/i.test(err.message);
   }
   return /Failed to (?:create|get) sprite \(status (?:408|429|5\d\d)\)/.test(err.message);
 }
@@ -228,15 +229,29 @@ function isSpriteConflict(err: unknown): boolean {
 /**
  * The SDK wraps a failed fetch as `Network error: <message>` and drops
  * the cause. An abort and a dropped connection arrive as ordinary
- * Errors with that prefix. An APIError already carries a status, so
- * it is answered once.
+ * Errors with that prefix. The same abort also arrives with no prefix
+ * (`The operation was aborted due to timeout`): a handshake recovery
+ * treated that bare sentence as final and stopped after one retry.
+ * An APIError already carries a status, so it is answered once.
  */
 function spriteLookupIsRetriable(err: unknown): boolean {
+  if (abortedByTimeout(err)) return true;
   return (
     err instanceof Error &&
     /^Network error: /.test(err.message) &&
-    /aborted due to timeout|fetch failed|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up/i.test(err.message)
+    /fetch failed|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up/i.test(err.message)
   );
+}
+
+/**
+ * undici's message when a request is aborted by a timeout.
+ *
+ * The Sprites SDK usually prefixes it with `Network error:`. A lookup
+ * or a WebSocket upgrade can also surface the sentence on its own.
+ * Either shape is the control plane not answering, not an answer.
+ */
+function abortedByTimeout(err: unknown): boolean {
+  return err instanceof Error && /aborted due to timeout/i.test(err.message);
 }
 
 /**
@@ -1747,18 +1762,20 @@ function isTransientSpriteError(err: unknown): boolean {
   if (err instanceof APIError) {
     return err.statusCode !== undefined && TRANSIENT_SPRITE_STATUSES.has(err.statusCode);
   }
+  if (abortedByTimeout(err)) return true;
   return err instanceof Error && /temporarily unavailable|Network error|fetch failed|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up|timed out/i.test(err.message);
 }
 
 const TRANSIENT_SPRITE_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
 
 /**
- * Waits between sprite info lookups. Short on purpose: this sits on
- * the path that writes MCP config before the agent starts, and the
- * lag it covers is a moment, not an outage. Past the last wait the
- * caller addresses the sprite by name instead of failing the run.
+ * Waits between getSprite attempts inside one open. Short on purpose:
+ * this sits on the path that writes MCP config before the agent
+ * starts, and the lag it covers is a moment, not an outage. Past the
+ * last wait the caller addresses the sprite by name instead of failing
+ * the run. Exported so a test can advance the same clock.
  */
-const SPRITE_LOOKUP_DELAYS_MS = [200, 500, 1_000, 2_000];
+export const SPRITE_LOOKUP_DELAYS_MS = [200, 500, 1_000, 2_000];
 
 /**
  * Runs a script through a shell inside the sprite.
