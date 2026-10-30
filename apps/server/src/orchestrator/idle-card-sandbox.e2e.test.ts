@@ -14,8 +14,10 @@ import type { AppContext } from "../context.js";
 import { EventBus } from "../events.js";
 import { loadEnv } from "../env.js";
 import { singleDriver } from "./sandbox-driver.js";
+import { recordingAnalytics } from "../test-analytics.js";
 import {
   CARD_SANDBOX_IDLE_MS,
+  IDLE_COMMIT_ATTEMPTS,
   IDLE_WORK_COMMIT_MESSAGE,
   reapIdleCardSandbox,
   reapIdleCardSandboxes,
@@ -115,12 +117,27 @@ after(async () => {
 });
 
 /**
+ * What the idle commit's exec returned when the sprite upgrade failed
+ * and the recovery lookup then aborted, with no newline between the
+ * driver's own retry note and the timeout.
+ */
+const REFUSED_EXEC_STDERR =
+  "Error: WebSocket error: Received network error or non-101 status code. (url: [sandbox exec url]) the sandbox did not accept the exec connection, retrying the sandbox did not accept the exec connection: The operation was aborted due to timeout";
+
+/**
  * A clone machine: its checkouts live under `workdir`, its exec runs
  * there, and it exports the way the real drivers do (HEAD over the
  * base). `exists` answers until it has been destroyed.
+ *
+ * `refuseExecs` fails that many execs the way a sprite handshake does,
+ * then runs the command. `refuseForever` never gets that far.
+ * `throwExecs` rejects the exec before a stream, the other shape of
+ * the same timeout. `gitFailure` is git itself refusing, which is not
+ * retried.
  */
-function cloneMachine() {
+function cloneMachine(options: { refuseExecs?: number; refuseForever?: boolean; throwExecs?: number; gitFailure?: boolean } = {}) {
   const destroyed: string[] = [];
+  let execs = 0;
   const driver = {
     provider: "modal",
     workspace: "clone",
@@ -131,6 +148,20 @@ function cloneMachine() {
       destroyed.push(handle.externalId);
     },
     async *exec(handle: { workdir: string }, argv: string[]): AsyncIterable<ExecChunk> {
+      execs += 1;
+      if (options.gitFailure) {
+        yield { kind: "stderr", data: "fatal: unable to write new index file\n" };
+        yield { kind: "exit", exitCode: 1 };
+        return;
+      }
+      if (options.throwExecs && execs <= options.throwExecs) {
+        throw new Error("The operation was aborted due to timeout");
+      }
+      if (options.refuseForever || (options.refuseExecs !== undefined && execs <= options.refuseExecs)) {
+        yield { kind: "stderr", data: REFUSED_EXEC_STDERR };
+        yield { kind: "exit", exitCode: -1, neverStarted: "refused" };
+        return;
+      }
       try {
         const { stdout, stderr } = await exec(argv[0]!, argv.slice(1), { cwd: handle.workdir, env: { ...process.env, ...IDENTITY } });
         if (stdout) yield { kind: "stdout", data: stdout };
@@ -152,7 +183,7 @@ function cloneMachine() {
       return { baseSha, headSha: head, data: await readFile(file) };
     },
   } as unknown as SandboxDriver;
-  return { ctx: { ...ctx, drivers: singleDriver(driver) } as AppContext, destroyed };
+  return { ctx: { ...ctx, drivers: singleDriver(driver) } as AppContext, destroyed, execCount: () => execs };
 }
 
 /**
@@ -302,4 +333,57 @@ test("a finished card is left to the finished card reaper", async () => {
   assert.equal(await remoteHas(card.branch), false);
   // The sweep did pick up the card GitHub was down for earlier, now that it is back.
   assert.ok(machine.destroyed.includes("box-idle-offline"));
+});
+
+test("a refused exec is tried again, and the sandbox goes once the commit lands", async () => {
+  const card = await idleCard("idle-retry", CARD_SANDBOX_IDLE_MS + DAY);
+  const machine = cloneMachine({ refuseExecs: 1 });
+
+  assert.equal(await reapIdleCardSandbox(machine.ctx, card.featureId, { push }), true);
+
+  assert.ok(machine.execCount() > 1, "the failed exec was not the last try");
+  assert.deepEqual(machine.destroyed, ["box-idle-retry"]);
+  assert.equal((await readSandbox(card.sandboxId)).status, "destroyed");
+  const pushed = await git(remotePath, ["rev-parse", `refs/heads/${card.branch}`]);
+  assert.equal(await git(remotePath, ["log", "-1", "--format=%s", pushed]), IDLE_WORK_COMMIT_MESSAGE);
+});
+
+test("an exec that throws a bare timeout is tried again", async () => {
+  const card = await idleCard("idle-throw", CARD_SANDBOX_IDLE_MS + DAY);
+  const machine = cloneMachine({ throwExecs: 1 });
+
+  assert.equal(await reapIdleCardSandbox(machine.ctx, card.featureId, { push }), true);
+
+  assert.equal(machine.execCount(), 2);
+  assert.deepEqual(machine.destroyed, ["box-idle-throw"]);
+});
+
+test("an exec that keeps refusing does not idle the sandbox", async () => {
+  const card = await idleCard("idle-refused", CARD_SANDBOX_IDLE_MS + DAY);
+  const recorded = recordingAnalytics();
+  const machine = cloneMachine({ refuseForever: true });
+  machine.ctx.analytics = recorded.analytics;
+
+  assert.equal(await reapIdleCardSandbox(machine.ctx, card.featureId, { push }), false);
+
+  assert.equal(machine.execCount(), IDLE_COMMIT_ATTEMPTS);
+  assert.deepEqual(machine.destroyed, []);
+  assert.equal((await readSandbox(card.sandboxId)).status, "ready");
+  assert.equal(await remoteHas(card.branch), false, "the branch was not pushed");
+  await stat(path.join(card.checkout, "half-done.ts"));
+  assert.equal(recorded.exceptions.length, 1);
+  assert.match(recorded.exceptions[0]!.error.message, /could not be committed/);
+  assert.match(recorded.exceptions[0]!.error.message, /aborted due to timeout/);
+  assert.equal(recorded.exceptions[0]!.properties?.source, "card_idle_branch_unsaved");
+});
+
+test("a commit git refused is not retried, and the sandbox stays", async () => {
+  const card = await idleCard("idle-git", CARD_SANDBOX_IDLE_MS + DAY);
+  const machine = cloneMachine({ gitFailure: true });
+
+  assert.equal(await reapIdleCardSandbox(machine.ctx, card.featureId, { push }), false);
+
+  assert.equal(machine.execCount(), 1);
+  assert.deepEqual(machine.destroyed, []);
+  assert.equal((await readSandbox(card.sandboxId)).status, "ready");
 });

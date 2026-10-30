@@ -15,6 +15,7 @@ import {
   selectSpriteSession,
   EXEC_HANDSHAKE_RETRY_DELAYS_MS,
   EXEC_URL_MAX_BYTES,
+  SPRITE_LOOKUP_DELAYS_MS,
   execUrlBytes,
   launcherScript,
   planExecLaunch,
@@ -1330,6 +1331,135 @@ test("Sprite exec joins a command the refused upgrade had already started", asyn
   assert.equal(spawns.length, 2);
   assert.equal(spawns[1]?.sessionId, "sess-started");
   assert.deepEqual(spawns[1]?.args, []);
+});
+
+/**
+ * The upgrade failed, and the lookup that decides whether to start the
+ * command again aborted without the SDK's "Network error:" prefix.
+ * That bare timeout is the same blip as the wrapped one. Stopping
+ * there is how an idle card's commit gave up after a single retry.
+ */
+test("Sprite exec keeps retrying a handshake whose recovery lookup aborts", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  let spawned = 0;
+  let listings = 0;
+  const sprite = {
+    spawn() {
+      spawned += 1;
+      const child = fakeChild();
+      if (spawned === 1) {
+        queueMicrotask(() => {
+          child.emit(
+            "error",
+            new Error(
+              "WebSocket error: Received network error or non-101 status code. (url: wss://api.sprites.dev/v1/sprites/x/exec?cmd=sh)",
+            ),
+          );
+        });
+        return child;
+      }
+      queueMicrotask(() => {
+        child.stdout.write("ok\n");
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    async listSessions() {
+      listings += 1;
+      if (listings === 1) throw new Error("The operation was aborted due to timeout");
+      return [];
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const pending = collectExec(driver.exec({ externalId: "sprite", provider: "sprite", workdir: "/workspace" }, ["sh", "-c", "true"]));
+  await settle();
+  t.mock.timers.tick(EXEC_HANDSHAKE_RETRY_DELAYS_MS[0]!);
+  await settle();
+  t.mock.timers.tick(EXEC_HANDSHAKE_RETRY_DELAYS_MS[1]!);
+  await settle();
+  const result = await pending;
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.stdout, "ok\n");
+  assert.equal(spawned, 2);
+  assert.equal(listings, 2);
+  assert.equal((result.stderr.match(/did not accept the exec connection, retrying/g) ?? []).length, 2);
+  assert.equal(result.neverStarted, undefined);
+  assert.doesNotMatch(result.stderr, /wss:/);
+});
+
+/**
+ * getSprite during that recovery throws the same bare timeout. openSprite
+ * tries the lookup again itself, so the handshake does not have to
+ * start over for one aborted request.
+ */
+test("Sprite exec retries a bare timeout from getSprite during handshake recovery", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  let spawned = 0;
+  let lookups = 0;
+  const sprite = {
+    spawn() {
+      spawned += 1;
+      const child = fakeChild();
+      if (spawned === 1) {
+        queueMicrotask(() => {
+          child.emit(
+            "error",
+            new Error(
+              "WebSocket error: Received network error or non-101 status code. (url: wss://api.sprites.dev/v1/sprites/x/exec?cmd=sh)",
+            ),
+          );
+        });
+        return child;
+      }
+      queueMicrotask(() => {
+        child.stdout.write("ok\n");
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    async listSessions() {
+      return [];
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+  const client = (driver as unknown as { client: { getSprite(): Promise<unknown> } }).client;
+  client.getSprite = async () => {
+    lookups += 1;
+    // The first lookup is the exec's own open. The next is the recovery, and it aborts once.
+    if (lookups === 2) throw new Error("The operation was aborted due to timeout");
+    return sprite;
+  };
+
+  let settled = false;
+  const pending = collectExec(driver.exec({ externalId: "sprite", provider: "sprite", workdir: "/workspace" }, ["sh", "-c", "true"])).then(
+    (result) => {
+      settled = true;
+      return result;
+    },
+  );
+  await settle();
+  t.mock.timers.tick(EXEC_HANDSHAKE_RETRY_DELAYS_MS[0]!);
+  await settle();
+  t.mock.timers.tick(SPRITE_LOOKUP_DELAYS_MS[0]!);
+  await settle();
+  const recoveredInsideLookup = settled;
+  if (!recoveredInsideLookup) {
+    for (const delay of EXEC_HANDSHAKE_RETRY_DELAYS_MS.slice(1)) {
+      t.mock.timers.tick(delay);
+      await settle();
+    }
+  }
+  const result = await pending;
+
+  assert.equal(recoveredInsideLookup, true, "getSprite's bare timeout was retried inside the recovery");
+  assert.equal(result.exitCode, 0);
+  assert.equal(lookups, 3);
+  assert.equal(spawned, 2);
+  assert.equal((result.stderr.match(/did not accept the exec connection, retrying/g) ?? []).length, 1);
 });
 
 /**
@@ -3417,6 +3547,24 @@ test("destroying a sprite retries a transient control-plane failure", async (t) 
   assert.equal(calls, 3);
 });
 
+test("destroying a sprite retries a bare abort timeout", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let calls = 0;
+  const driver = new SpriteDriver({ token: "sprite-control-token" });
+  (driver as unknown as { client: { deleteSprite(): Promise<void> } }).client = {
+    async deleteSprite() {
+      calls += 1;
+      if (calls === 1) throw new Error("The operation was aborted due to timeout");
+    },
+  };
+  const pending = driver.destroy({ externalId: "bento-feature", provider: "sprite", workdir: "/workspace" });
+  await settle();
+  assert.equal(calls, 1);
+  t.mock.timers.tick(SPRITE_DESTROY_RETRY_DELAYS_MS[0]!);
+  await pending;
+  assert.equal(calls, 2);
+});
+
 /**
  * The sandbox e2e asks "does this sprite already exist" before it
  * creates one. Fly aborted that getSprite at the client's one minute
@@ -3509,6 +3657,30 @@ test("a sprite lookup retries a control-plane timeout and still reports a real f
   );
   assert.equal(calls, 1);
   assert.deepEqual(notices, []);
+});
+
+/**
+ * The same abort without the SDK's "Network error:" prefix. A handshake
+ * recovery stopped on that sentence, so the lookup helper has to
+ * recognise it too.
+ */
+test("a sprite lookup retries a bare abort timeout", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let calls = 0;
+  const client = {
+    async getSprite() {
+      calls += 1;
+      if (calls === 1) throw new Error("The operation was aborted due to timeout");
+      return { name: "bento-e2e" };
+    },
+  };
+  const pending = spriteExistsWithRetry(client as never, "bento-e2e");
+  await settle();
+  assert.equal(calls, 1);
+  t.mock.timers.tick(SPRITE_LOOKUP_RETRY_DELAYS_MS[0]!);
+  await settle();
+  assert.equal(await pending, true);
+  assert.equal(calls, 2);
 });
 
 /**
@@ -4191,6 +4363,7 @@ test("sandboxErrorKind tells the concurrent sprite limit apart from the creation
   assert.equal(sandboxErrorKind(new Error("Failed to create sprite (status 429): busy")), "rate_limited");
   assert.equal(sandboxErrorKind(new APIError("upstream is unwell", { statusCode: 503 })), "control_plane");
   assert.equal(sandboxErrorKind(new Error("Network error: fetch failed")), "control_plane");
+  assert.equal(sandboxErrorKind(new Error("The operation was aborted due to timeout")), "control_plane");
   assert.equal(sandboxErrorKind(new APIError("forbidden", { statusCode: 403 })), "other");
   assert.equal(sandboxErrorKind(new Error("Command failed with exit code 1")), "other");
 });
