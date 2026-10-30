@@ -14,6 +14,10 @@ The **Create PR** button in the card drawer publishes current commits without wa
 
 The card lists open pull requests by repository. Multi-repo cards require a PR in each repo for completion gates (`checks_pass`, `pr_comments_resolved`). Untouched repositories are skipped. Turn the flag off on a stage (an investigation stage, say) to keep its work in the worktree only.
 
+## Idle cards
+
+A card on the board that nobody has run, moved, or changed for five days gives its sandbox back, so it stops counting against storage and the sprite allowance. Nothing on it is lost. On a hosted sandbox, Bento first commits any files the agent left uncommitted (as "Save uncommitted work before Bento released this card's idle sandbox"), then pushes the card's branch to GitHub, stage notes included, without opening a pull request. The next run on the card starts a new sandbox from that branch. A later publish replaces the branch with the stage notes taken out, as usual. If the branch cannot be pushed (no GitHub connection, a repository without a GitHub remote, or someone else pushed to the branch), the sandbox is kept. With Docker or a local checkout, only the container goes: the card's worktree stays on your computer as it is. Finished and cancelled cards release their sandbox when they finish, as before.
+
 ## Swarm pull requests
 
 A swarm opens no pull request by itself. Its branches are pushed to GitHub as work lands, and you publish from the swarm's header when you choose, even before the swarm finishes: **Open pull request** opens one of the swarm's branch (a draft until the swarm is done), and **Open one per task** opens one per committed task, each against the task committed before it. Clicking again finishes a publish that was cut off and updates the same pull requests. See [Swarms](./swarms.md).

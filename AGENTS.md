@@ -491,6 +491,37 @@ row, found the failed one, and queued nothing, so a leaf whose landing
 failed and whose retry the planner then accepted sat "working" with
 nothing to land it and a merge queue retry that refused it.
 
+## An idle card gives its machine back after five days, and its branch goes to GitHub first
+
+A done or cancelled card's machine is reaped as it finishes, but a card
+left on the board kept its sprite or Modal snapshot for as long as it
+stayed there. `reapIdleCardSandboxes` (`orchestrator/idle-card-sandbox.ts`,
+at boot and in the nightly sweep) releases the machine of a card with
+nothing on it for `CARD_SANDBOX_IDLE_MS` (five days): no active run, no
+run queued or ended since, the card unchanged since, and no machine used
+since. On a clone driver the machine is often the only copy of the
+card's branch, because a card pushes only when it publishes, so the
+reap wakes the machine if it hibernated, commits whatever the agent left
+uncommitted (`IDLE_WORK_COMMIT_MESSAGE`, hooks skipped), and pushes the
+branch with the stage notes kept (`pushBranches` with
+`includeStageNotes`) under the same lease a publish holds
+(`featureBranchLease`, recorded by `recordFeaturePush`). A card it cannot
+save keeps its machine, captured as `card_idle_branch_unsaved`. The
+destroy happens under the card's row lock, the one `startRunIfIdle`
+takes, after reading the card and its rows again, because the save can
+take minutes and wakes the machine into a new generation. On a host
+driver only the container goes; the worktree stays on disk untouched.
+
+The next run on such a card has no machine, so `cardRestoreBundles` in
+the executor reads the branch Bento pushed (`features.pushed_heads`)
+back from GitHub and hands it to provisioning as the start bundle. A
+hosted machine is seeded with the base branch only and holds no GitHub
+credential, so without that bundle it would cut the branch again from
+the base and the card's work would be on GitHub but not in front of its
+agent. The same restore covers a published card whose machine was lost.
+A later publish replaces the pushed branch with the notes taken out,
+since its lease is the commit this push recorded.
+
 ## A swarm's machine is reaped only once the swarm is over, and never rebuilt without its work
 
 Swarm 7a33f51d lost three landed tasks this way: a worker failure

@@ -166,6 +166,7 @@ import { describeRunSubject, type RunSubject } from "./run-subject.js";
 import { enqueueSwarmTick, SWARM_TICK_QUEUE, tickAllLiveSwarms, tickSwarm } from "./swarm/coordinator.js";
 import { SWARM_LAND_QUEUE, resumeClaimedLandings } from "./swarm/landing.js";
 import { SWARM_PUSH_QUEUE, ensureSwarmPushWorker, remoteBranchBundles } from "./swarm/remote-branches.js";
+import { reapIdleCardSandboxes } from "./idle-card-sandbox.js";
 import { SWARM_START_OVER_QUEUE } from "./swarm/start-over.js";
 import {
   claimQueuedMessages,
@@ -544,6 +545,14 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
        */
       ...(subject.kind === "swarm" && !subject.task && driver.workspace === "clone"
         ? await swarmRestoreBundles(ctx, subject.swarm, repoRows)
+        : {}),
+      /**
+       * And a card whose machine is gone (released after it sat idle, or
+       * lost) is made again on the branch Bento pushed for it, rather
+       * than cut from the base branch without its work.
+       */
+      ...(subject.kind === "pipeline" && driver.workspace === "clone"
+        ? await cardRestoreBundles(ctx, subject.feature, branch, repoRows, saySystem)
         : {}),
       say: saySystem,
     };
@@ -2516,6 +2525,34 @@ async function swarmRestoreBundles(
   return {};
 }
 
+/**
+ * The card's branch read back from GitHub, for a card with no machine
+ * that Bento pushed the branch of: the idle reaper pushes it before it
+ * releases the machine (idle-card-sandbox.ts), and a publish pushes it
+ * too. A card that still has a machine has its branch there, and a card
+ * that never pushed this branch has nothing to restore.
+ */
+async function cardRestoreBundles(
+  ctx: AppContext,
+  feature: typeof features.$inferSelect,
+  branch: string,
+  repoRows: (typeof repositories.$inferSelect)[],
+  say: (text: string) => Promise<void>,
+): Promise<{ startFromBundles?: Map<string, { branch: string; data: Buffer }> }> {
+  const pushedHeads = feature.pushedHeads?.[branch];
+  if (!pushedHeads || Object.keys(pushedHeads).length === 0) return {};
+  const [live] = await ctx.db
+    .select({ id: sandboxes.id })
+    .from(sandboxes)
+    .where(and(eq(sandboxes.featureId, feature.id), ne(sandboxes.status, "destroyed")))
+    .limit(1);
+  if (live) return {};
+  const bundles = await remoteBranchBundles(ctx, { organizationId: feature.organizationId, branch, pushedHeads, repoRows });
+  if (bundles.size === 0) return {};
+  await say(`This card's sandbox was released, so a new one is starting from ${branch} as it was saved to GitHub.`);
+  return { startFromBundles: bundles };
+}
+
 /** Whether the planner has written the design note a worker is told to read. */
 /**
  * The swarm's plan sources, with a copy of each written into this
@@ -4157,6 +4194,7 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
        */
       const steps: [string, () => Promise<void>][] = [
         ["swarm_reap", () => reapFinishedSwarmSandboxes(ctx)],
+        ["card_idle_reap", () => reapIdleCardSandboxes(ctx)],
         ["modal_sweep", () => sweepOrphanModalSandboxes(ctx)],
       ];
       for (const [source, step] of steps) {
@@ -4175,10 +4213,17 @@ export async function registerJobs(ctx: AppContext): Promise<void> {
    * awaited: reclaiming machines is not worth delaying the server's
    * boot, and it retries on the next start either way.
    */
-  void reapFinishedSandboxes(ctx).catch((err: unknown) => {
-    console.warn("the sandbox sweep did not finish:", err);
-    ctx.analytics?.captureException(err, null, null, { queue: "sandbox.sweep" });
-  });
+  void reapFinishedSandboxes(ctx)
+    .catch((err: unknown) => {
+      console.warn("the sandbox sweep did not finish:", err);
+      ctx.analytics?.captureException(err, null, null, { queue: "sandbox.sweep" });
+    })
+    // And cards nobody has touched in days, after the finished ones.
+    .then(() => reapIdleCardSandboxes(ctx))
+    .catch((err: unknown) => {
+      console.warn("the idle card sandbox sweep did not finish:", err);
+      ctx.analytics?.captureException(err, null, null, { queue: "sandbox.sweep", source: "card_idle_reap" });
+    });
 
   /**
    * One worker per concurrent slot, each taking a single job.
