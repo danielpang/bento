@@ -1333,6 +1333,103 @@ test("Sprite exec joins a command the refused upgrade had already started", asyn
 });
 
 /**
+ * listSessions aborts itself after 30 seconds and does not wake a
+ * sleeping sprite. The idle-card reaper hit that on the retry after a
+ * non-101, and the driver treated the bare timeout as a permanent
+ * refusal, so the upgrade that wakes the sprite never ran.
+ *
+ * The timeout is not a refusal. The next upgrade is what wakes the
+ * machine, and the command runs on it.
+ */
+test("Sprite exec starts the command when the session list aborts on a waking sprite", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  let spawned = 0;
+  const sprite = {
+    spawn() {
+      spawned += 1;
+      const child = fakeChild();
+      queueMicrotask(() => {
+        if (spawned === 1) {
+          child.emit(
+            "error",
+            new Error(
+              "WebSocket error: Received network error or non-101 status code. (url: wss://api.sprites.dev/v1/sprites/x/exec?cmd=sh)",
+            ),
+          );
+          return;
+        }
+        child.emit("spawn");
+        child.stdout.write("ok\n");
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    async listSessions() {
+      throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const pending = collectExec(
+    driver.exec({ externalId: "sprite", provider: "sprite", workdir: "/workspace" }, ["sh", "-c", "true"]),
+  );
+  await settle();
+  t.mock.timers.tick(EXEC_HANDSHAKE_RETRY_DELAYS_MS[0]!);
+  await settle();
+  const result = await pending;
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(spawned, 2, "the upgrade after the timed-out listing is what wakes the sprite");
+  assert.match(result.stdout, /ok/);
+  assert.match(result.stderr, /did not accept the exec connection, retrying/);
+  assert.doesNotMatch(result.stderr, /did not accept the exec connection: The operation was aborted due to timeout/);
+  assert.equal(result.neverStarted, undefined);
+});
+
+/**
+ * A listing that keeps timing out must not spin. Each refused upgrade
+ * spends one handshake wait, and past those the exec ends as refused.
+ */
+test("Sprite exec stops when the session list keeps aborting", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  let spawned = 0;
+  const sprite = {
+    spawn() {
+      spawned += 1;
+      const child = fakeChild();
+      queueMicrotask(() => {
+        child.emit(
+          "error",
+          new Error("WebSocket error: Received network error or non-101 status code. (url: wss://api.sprites.dev/x)"),
+        );
+      });
+      return child;
+    },
+    async listSessions() {
+      throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const pending = collectExec(
+    driver.exec({ externalId: "sprite", provider: "sprite", workdir: "/workspace" }, ["sh", "-c", "true"]),
+  );
+  for (const delay of EXEC_HANDSHAKE_RETRY_DELAYS_MS) {
+    await settle();
+    t.mock.timers.tick(delay);
+  }
+  await settle();
+  const result = await pending;
+
+  assert.equal(result.exitCode, -1);
+  assert.equal(result.neverStarted, "refused");
+  assert.equal(spawned, 1 + EXEC_HANDSHAKE_RETRY_DELAYS_MS.length);
+  assert.match(result.stderr, /stayed that way through the retries/);
+});
+
+/**
  * A real process exit arrives as an unsigned byte, so a negative code
  * always means the socket closed without one. When the sandbox answers
  * and the session is not there, the process is genuinely gone, and the

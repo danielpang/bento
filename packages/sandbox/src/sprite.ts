@@ -168,6 +168,7 @@ function spriteControlIsRetriable(err: unknown): boolean {
     return /temporarily unavailable|please retry|internal server error/i.test(err.message);
   }
   if (!(err instanceof Error)) return false;
+  if (spriteCallTimedOut(err)) return true;
   if (/^Network error: /.test(err.message)) {
     return /aborted due to timeout|fetch failed|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up/i.test(err.message);
   }
@@ -232,11 +233,41 @@ function isSpriteConflict(err: unknown): boolean {
  * it is answered once.
  */
 function spriteLookupIsRetriable(err: unknown): boolean {
+  if (spriteCallTimedOut(err)) return true;
   return (
     err instanceof Error &&
     /^Network error: /.test(err.message) &&
     /aborted due to timeout|fetch failed|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up/i.test(err.message)
   );
+}
+
+/**
+ * A request the Sprites client aborted because it did not answer.
+ *
+ * `fetch` on the client wraps that as "Network error: The operation
+ * was aborted due to timeout". `listSessions` does not: it calls fetch
+ * itself, with its own 30 second abort, and the DOMException arrives
+ * with only that sentence. Both are the control plane not answering.
+ */
+function spriteCallTimedOut(err: unknown): boolean {
+  return err instanceof Error && /aborted due to timeout/i.test(err.message);
+}
+
+/**
+ * Whether a session listing failed because the machine did not answer,
+ * rather than because it refused the request.
+ *
+ * The listing is a raw fetch with a 30 second abort, and it does not
+ * wake a sleeping sprite. A timeout there used to end the exec
+ * handshake on the first retry, so the upgrade that does wake the
+ * sprite never ran, and a commit of uncommitted work was reported as
+ * the sandbox refusing the connection.
+ */
+function spriteSessionListIsTransient(err: unknown): boolean {
+  if (spriteCallTimedOut(err)) return true;
+  if (!(err instanceof Error)) return false;
+  if (/fetch failed|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up/i.test(err.message)) return true;
+  return /Failed to list sessions \(status (?:408|429|5\d\d)\)/.test(err.message);
 }
 
 /**
@@ -269,6 +300,7 @@ export function execHandshakeIsRetriable(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   const message = err.message;
   if (/sprite not found/i.test(message)) return false;
+  if (/aborted due to timeout/i.test(message)) return true;
   if (/Received network error or non-101 status code/i.test(message)) return true;
   if (/WebSocket closed before open/i.test(message)) return true;
   return (
@@ -1123,7 +1155,27 @@ export class SpriteDriver implements SandboxDriver {
         if (done || killed || connectionOpened) return;
         try {
           const fresh = await this.openSprite(handle.externalId);
-          const sessions = await fresh.listSessions();
+          let sessions: Awaited<ReturnType<Sprite["listSessions"]>>;
+          try {
+            sessions = await fresh.listSessions();
+          } catch (err) {
+            if (done || killed || connectionOpened) return;
+            /**
+             * A sleeping sprite's session list times out at 30 seconds
+             * and does not wake the machine. That abort is not a
+             * refusal and not proof the command is already running:
+             * the upgrade below is what wakes it. A command the first
+             * upgrade did start is joined on a later list, once the
+             * machine answers. Stopping here left an idle card's
+             * uncommitted files uncommitted, with the branch still
+             * only on the sprite.
+             */
+            if (spriteSessionListIsTransient(err)) {
+              adoptInitial(fresh);
+              return;
+            }
+            throw err;
+          }
           if (done || killed || connectionOpened) return;
           const mine = newestSessionFor(
             sessions.filter((session) => session.created.getTime() >= startedAt - 15_000),
@@ -1747,6 +1799,7 @@ function isTransientSpriteError(err: unknown): boolean {
   if (err instanceof APIError) {
     return err.statusCode !== undefined && TRANSIENT_SPRITE_STATUSES.has(err.statusCode);
   }
+  if (spriteCallTimedOut(err)) return true;
   return err instanceof Error && /temporarily unavailable|Network error|fetch failed|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up|timed out/i.test(err.message);
 }
 

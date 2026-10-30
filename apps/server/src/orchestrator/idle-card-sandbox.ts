@@ -38,11 +38,18 @@ export interface IdleCardPushOptions {
 /**
  * The card's branch could not be put on GitHub, so its machine is still
  * the only copy of its work, and stays.
+ *
+ * `incident` is false when a person has to reconcile the branch (they
+ * pushed commits Bento does not have). The machine stays either way.
+ * That case is the lease working, so it is logged and not reported.
  */
 export class CardBranchNotSaved extends Error {
-  constructor(featureId: string, reason: string) {
+  readonly incident: boolean;
+
+  constructor(featureId: string, reason: string, incident = true) {
     super(`card ${featureId}'s branch is not on GitHub: ${reason}`);
     this.name = "CardBranchNotSaved";
+    this.incident = incident;
   }
 }
 
@@ -118,8 +125,13 @@ export async function reapIdleCardSandbox(
     await saveCardBranch(ctx, featureId, rows, options.push ?? {});
   } catch (err) {
     if (!(err instanceof CardBranchNotSaved)) throw err;
+    // Ahead of any destroy. A save that did not land leaves the machine
+    // as the only copy, including when the failure was a sandbox exec
+    // that never connected.
     console.warn(`${err.message}; keeping its sandbox`);
-    ctx.analytics?.captureException(err, null, null, { feature_id: featureId, source: "card_idle_branch_unsaved" });
+    if (err.incident) {
+      ctx.analytics?.captureException(err, null, null, { feature_id: featureId, source: "card_idle_branch_unsaved" });
+    }
     return false;
   }
 
@@ -285,16 +297,37 @@ async function saveCardBranch(
       ...(push.remoteUrl ? { remoteUrl: push.remoteUrl } : {}),
     });
     if (outcome.failures.length > 0) {
-      throw new CardBranchNotSaved(featureId, outcome.failures.map((f) => `${f.name}: ${f.reason}`).join("; "));
+      const reason = outcome.failures.map((f) => `${f.name}: ${f.reason}`).join("; ");
+      // Someone pushed to the branch. The sentence tells them what to
+      // do, the machine stays, and it is not an outage.
+      const incident = outcome.failures.some((failure) => !failure.reason.includes("the branch moved on GitHub"));
+      throw new CardBranchNotSaved(featureId, reason, incident);
     }
   }
 }
+
+/**
+ * How long one commit of leftovers may take.
+ *
+ * A sleeping sprite does not answer its session list (that call aborts
+ * at 30 seconds and does not wake the machine). The exec upgrade that
+ * follows is what wakes it, and that connect is allowed two minutes.
+ * Two minutes here used to expire during that wake, so the commit never
+ * ran. Four leaves room for the list, the wake, and git.
+ */
+const COMMIT_EXEC_TIMEOUT_MS = 4 * 60_000;
 
 /**
  * Commits whatever the agent left uncommitted in one repository, so the
  * push carries it. A repository the machine has no checkout of has
  * nothing to commit. Hooks are skipped: the commit is Bento's, and a
  * hook that fails would keep the machine for good.
+ *
+ * A refused exec is tried once more. The first attempt is often the one
+ * that starts a sleeping sprite, and the machine is up by the time that
+ * attempt has failed. A machine that is gone is not retried: another
+ * exec cannot bring it back. Either failure throws, and the caller
+ * keeps the sandbox.
  */
 async function commitLeftovers(
   featureId: string,
@@ -311,10 +344,15 @@ async function commitLeftovers(
     `  git -c user.name=Bento -c user.email=no-reply@usebento.ai commit --no-verify -q -m ${shellQuote(IDLE_WORK_COMMIT_MESSAGE)}`,
     `fi`,
   ].join("\n");
-  const result = await collectExec(driver.exec(handle, ["sh", "-c", script], { timeoutMs: 120_000 }));
+  const run = () => collectExec(driver.exec(handle, ["sh", "-c", script], { timeoutMs: COMMIT_EXEC_TIMEOUT_MS }));
+  let result = await run();
+  if (result.neverStarted === "refused") result = await run();
   if (result.exitCode !== 0) {
     const reason = result.stderr.trim().split("\n").at(-1) || `exit code ${result.exitCode}`;
-    throw new CardBranchNotSaved(featureId, `uncommitted files in ${repoName} could not be committed: ${reason}`);
+    const detail = result.neverStarted
+      ? `the sandbox did not run the commit (${result.neverStarted}): ${reason}`
+      : `uncommitted files in ${repoName} could not be committed: ${reason}`;
+    throw new CardBranchNotSaved(featureId, detail);
   }
 }
 

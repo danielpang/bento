@@ -16,6 +16,7 @@ import { loadEnv } from "../env.js";
 import { singleDriver } from "./sandbox-driver.js";
 import {
   CARD_SANDBOX_IDLE_MS,
+  CardBranchNotSaved,
   IDLE_WORK_COMMIT_MESSAGE,
   reapIdleCardSandbox,
   reapIdleCardSandboxes,
@@ -152,7 +153,39 @@ function cloneMachine() {
       return { baseSha, headSha: head, data: await readFile(file) };
     },
   } as unknown as SandboxDriver;
-  return { ctx: { ...ctx, drivers: singleDriver(driver) } as AppContext, destroyed };
+  return { ctx: { ...ctx, drivers: singleDriver(driver) } as AppContext, destroyed, driver };
+}
+
+/** Records what the reap reports, so a test can tell an incident from a kept machine. */
+function watchExceptions(app: AppContext): unknown[] {
+  const captured: unknown[] = [];
+  app.analytics = {
+    capture() {},
+    captureException(error) {
+      captured.push(error);
+    },
+    async shutdown() {},
+  };
+  return captured;
+}
+
+const REFUSED_EXEC =
+  "Error: WebSocket error: Received network error or non-101 status code. (url: [sandbox exec url])the sandbox did not accept the exec connection, retryingthe sandbox did not accept the exec connection: The operation was aborted due to timeout";
+
+/** The first `times` execs fail the way a sprite's refused upgrade does. Later ones run. */
+function refuseExec(driver: SandboxDriver, times: number): { calls: () => number } {
+  const real = driver.exec.bind(driver);
+  let calls = 0;
+  driver.exec = (async function* (...args: Parameters<SandboxDriver["exec"]>) {
+    calls += 1;
+    if (calls <= times) {
+      yield { kind: "stderr", data: REFUSED_EXEC };
+      yield { kind: "exit", exitCode: -1, neverStarted: "refused" };
+      return;
+    }
+    yield* real(...args);
+  }) as SandboxDriver["exec"];
+  return { calls: () => calls };
 }
 
 /**
@@ -244,11 +277,64 @@ test("a card used within the last five days keeps its sandbox", async () => {
 test("an idle card whose branch cannot reach GitHub keeps its sandbox", async () => {
   const card = await idleCard("idle-offline", CARD_SANDBOX_IDLE_MS + DAY);
   const machine = cloneMachine();
+  const captured = watchExceptions(machine.ctx);
 
   assert.equal(await reapIdleCardSandbox(machine.ctx, card.featureId, { push: offline }), false);
 
   assert.deepEqual(machine.destroyed, [], "the machine, the only copy of the work, is still there");
   assert.equal((await readSandbox(card.sandboxId)).status, "ready");
+  assert.equal(captured.length, 1, "GitHub being down is an incident");
+  assert.equal((captured[0] as CardBranchNotSaved).incident, true);
+});
+
+test("a refused exec while committing leftovers is retried, and the sandbox stays until the branch is saved", async () => {
+  const card = await idleCard("idle-exec-woke", CARD_SANDBOX_IDLE_MS + DAY);
+  const machine = cloneMachine();
+  const execs = refuseExec(machine.driver, 1);
+  const captured = watchExceptions(machine.ctx);
+
+  assert.equal(await reapIdleCardSandbox(machine.ctx, card.featureId, { push }), true);
+
+  assert.equal(execs.calls(), 2, "the attempt that woke the sandbox is followed by one more");
+  assert.equal(captured.length, 0, "the retry saved the branch, so nothing is reported");
+  const pushed = await git(remotePath, ["rev-parse", `refs/heads/${card.branch}`]);
+  assert.equal(await git(remotePath, ["log", "-1", "--format=%s", pushed]), IDLE_WORK_COMMIT_MESSAGE);
+  assert.deepEqual(machine.destroyed, ["box-idle-exec-woke"]);
+  assert.equal((await readSandbox(card.sandboxId)).status, "destroyed");
+});
+
+test("a refused exec that keeps failing does not destroy the sandbox", async () => {
+  const card = await idleCard("idle-exec-refused", CARD_SANDBOX_IDLE_MS + DAY);
+  const machine = cloneMachine();
+  const execs = refuseExec(machine.driver, 5);
+  const captured = watchExceptions(machine.ctx);
+
+  assert.equal(await reapIdleCardSandbox(machine.ctx, card.featureId, { push }), false);
+
+  assert.equal(execs.calls(), 2, "one retry, then the machine is left alone");
+  assert.deepEqual(machine.destroyed, []);
+  assert.equal((await readSandbox(card.sandboxId)).status, "ready");
+  assert.equal(await remoteHas(card.branch), false, "the uncommitted file is still only on the machine");
+  assert.equal(captured.length, 1);
+  assert.match((captured[0] as Error).message, /did not run the commit \(refused\)/);
+  assert.match((captured[0] as Error).message, /aborted due to timeout/);
+});
+
+test("a branch somebody else pushed is kept and is not reported as an incident", async () => {
+  const card = await idleCard("idle-moved", CARD_SANDBOX_IDLE_MS + DAY);
+  const parent = await git(card.checkout, ["rev-parse", "HEAD^"]);
+  await git(card.checkout, ["push", "--quiet", remotePath, `HEAD:refs/heads/${card.branch}`]);
+  await db.update(features).set({ pushedHeads: { [card.branch]: { [REPO_URL]: parent } } }).where(eq(features.id, card.featureId));
+  const machine = cloneMachine();
+  const captured = watchExceptions(machine.ctx);
+
+  assert.equal(await reapIdleCardSandbox(machine.ctx, card.featureId, { push }), false);
+
+  assert.deepEqual(machine.destroyed, [], "the machine stays until the person's commits are pulled in");
+  assert.equal((await readSandbox(card.sandboxId)).status, "ready");
+  assert.equal(captured.length, 0);
+  const pushed = await git(remotePath, ["rev-parse", `refs/heads/${card.branch}`]);
+  assert.notEqual(await git(remotePath, ["log", "-1", "--format=%s", pushed]), IDLE_WORK_COMMIT_MESSAGE);
 });
 
 test("a card a run started on while it was being saved keeps its sandbox", async () => {
