@@ -2,6 +2,29 @@ import type pg from "pg";
 import { isQueryReadTimeout } from "./pg-boss-archive.js";
 
 /**
+ * A checkout that never got a client, so the statement never started.
+ *
+ * pg-pool says "timeout exceeded when trying to connect" when the pool
+ * is already full and no client comes free within
+ * connectionTimeoutMillis. That wait is for a slot. A new connection
+ * that does not finish in time is "Connection terminated due to
+ * connection timeout" from the pool, or "timeout expired" from
+ * node-pg's own connect timer.
+ */
+export function isConnectTimeout(err: unknown): err is Error {
+  return (
+    err instanceof Error &&
+    (err.message === "timeout exceeded when trying to connect" ||
+      err.message === "Connection terminated due to connection timeout" ||
+      err.message === "timeout expired")
+  );
+}
+
+function isRetryablePollError(err: unknown): boolean {
+  return isQueryReadTimeout(err) || isConnectTimeout(err);
+}
+
+/**
  * Client-side timeout for the statements pg-boss runs on a timer.
  *
  * A Fly machine resumes from a suspend with its wall clock still at
@@ -38,13 +61,20 @@ export function isPgBossPoll(sql: string): boolean {
 }
 
 /**
- * Run a pg-boss poll with a short timeout, and once more when it timed
- * out.
+ * Run a pg-boss poll with a short timeout, and once more when that
+ * attempt could not finish.
  *
- * pg-pool destroys the client whose query timed out, and the pool
- * retires its other idle clients when that happens (they were idle
- * across the same suspend), so the second attempt connects fresh. A
- * second timeout is a real outage and goes to pg-boss as before.
+ * A "Query read timeout" is a socket the freeze check missed. pg-pool
+ * destroys that client, and the pool retires its other idle clients
+ * (they were idle across the same suspend), so the second attempt
+ * connects fresh.
+ *
+ * A connect timeout is every slot already checked out for the whole
+ * wait: connects that have not returned, or queries still in flight.
+ * The statement never started. The first wait is the backoff. The
+ * second attempt checks out again and takes a client once a slot
+ * frees. A second failure of either kind is a real outage and goes to
+ * pg-boss as before.
  */
 export async function runPgBossPoll(
   pool: Pick<pg.Pool, "query">,
@@ -58,7 +88,7 @@ export async function runPgBossPoll(
   try {
     return await pool.query(config);
   } catch (err) {
-    if (!isQueryReadTimeout(err)) throw err;
+    if (!isRetryablePollError(err)) throw err;
     return pool.query(config);
   }
 }

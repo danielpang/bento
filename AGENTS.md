@@ -1097,8 +1097,14 @@ too, silently, because pg-boss swallows fetch errors. So a query that
 times out retires the pool's other idle clients, and
 `pgBossDatabase` gives the statements pg-boss runs on a timer (fetch,
 the version row leases, the clock read) a ten second timeout and one
-retry (`pg-boss-poll.ts`). Retry only a statement that is harmless to
-run twice.
+retry (`pg-boss-poll.ts`). The same retry covers a connect timeout on
+those statements: pg-pool's "timeout exceeded when trying to connect"
+means every client in the boss pool was already checked out for the
+whole `connectionTimeoutMillis` (10s), so the cron lease, the clock
+read, or a worker fetch never started. That is a stall while connects
+or queries have not returned, and the next attempt usually gets a
+slot. A second failure is still reported. Retry only a statement that
+is harmless to run twice.
 
 A dedicated `pg.Client` (the LISTEN connection in `pg-bus.ts`) is
 outside this and has to handle its own reconnect.

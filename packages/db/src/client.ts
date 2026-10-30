@@ -206,9 +206,11 @@ export function createPool(databaseUrl: string, options?: { max?: number }): pg.
  * rather than run as the unbounded statement.
  *
  * The statements pg-boss runs on a timer (fetch, the version row
- * leases, the clock read) get a short timeout and one retry on a fresh
- * connection (`runPgBossPoll`), because a poll after a suspend can draw
- * a socket the freeze check missed.
+ * leases, the clock read) get a short timeout and one retry
+ * (`runPgBossPoll`). A poll after a suspend can draw a socket the
+ * freeze check missed, and a cron or fetch can also fail to check out
+ * a client while every slot is stuck connecting. Either way the
+ * statement is safe to run twice, and a second failure is reported.
  */
 export function pgBossDatabase(
   pool: pg.Pool,
