@@ -21,6 +21,7 @@ import {
   sandboxes,
   stages,
   swarmLandings,
+  swarmPullRequests,
   swarmTasks,
   swarms,
 } from "@bento/db";
@@ -47,10 +48,11 @@ import {
   reapSwarmTaskSandbox,
   runSandboxReapJob,
   swarmMachineReleasable,
+  swarmTaskMachineReleasable,
 } from "./reap-sandbox.js";
 import { evaluateFeatureGate } from "./gate-evaluator.js";
 import { swarmReleasesMachine } from "./swarm/coordinator.js";
-import { swarmWorkspaceKey } from "./swarm/sandbox.js";
+import { swarmTaskWorkspaceKey, swarmWorkspaceKey } from "./swarm/sandbox.js";
 
 const run = promisify(execFile);
 
@@ -904,4 +906,150 @@ test("completion cleanup leaves a card reopened before settlement or reap alone"
   } finally {
     ctx.boss = previous;
   }
+});
+
+/* ------------------------------------------------------------------ */
+/* A swarm's leaves give their machines back with the swarm's.         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A leaf of the swarm with a machine of its own, and, when asked, a
+ * checkout of the project's repository on this host the way a Docker
+ * machine has one: "clean" holds a commit on the leaf's branch and
+ * nothing else, "dirty" holds a file nobody committed.
+ */
+async function seedLeaf(
+  swarmId: string,
+  opts: { title: string; status: (typeof swarmTasks.$inferSelect)["status"]; checkout?: "clean" | "dirty" },
+): Promise<{ taskId: string; sandboxId: string; externalId: string; worktree: string; branch: string }> {
+  const [swarm] = await ctx.db.select({ projectId: swarms.projectId }).from(swarms).where(eq(swarms.id, swarmId));
+  const projectId = swarm!.projectId;
+  const [repo] = await ctx.db.select().from(repositories).where(eq(repositories.projectId, projectId));
+  if (!repo) await ctx.db.insert(repositories).values({ projectId, name: "app", localPath: repoDir });
+  const [task] = await ctx.db.insert(swarmTasks).values({ swarmId, title: opts.title, status: opts.status }).returning();
+  const externalId = `leaf-box-${task!.id}`;
+  const [sandbox] = await ctx.db
+    .insert(sandboxes)
+    .values({ projectId, swarmId, swarmTaskId: task!.id, provider: "docker", externalId, status: "ready", workdir: "/workspace" })
+    .returning();
+  const branch = `leaf/${task!.id}`;
+  const worktree = ctx.worktrees.worktreePath(swarmTaskWorkspaceKey(swarmId, task!.id), "app");
+  if (opts.checkout) {
+    await mkdir(path.dirname(worktree), { recursive: true });
+    await run("git", ["-C", repoDir, "worktree", "add", "-q", "-b", branch, worktree, "main"]);
+    await writeFile(path.join(worktree, `${task!.id}.txt`), "work\n");
+    if (opts.checkout === "clean") {
+      await run("git", ["-C", worktree, "add", "-A"]);
+      await run("git", ["-C", worktree, "-c", "user.email=t@t.test", "-c", "user.name=t", "commit", "-qm", opts.title]);
+    }
+  }
+  return { taskId: task!.id, sandboxId: sandbox!.id, externalId, worktree, branch };
+}
+
+async function sandboxStatus(id: string): Promise<string | undefined> {
+  const [row] = await ctx.db.select({ status: sandboxes.status }).from(sandboxes).where(eq(sandboxes.id, id));
+  return row?.status;
+}
+
+/**
+ * Only a leaf that landed gave its machine back. One the planner
+ * cancelled, one that failed, and the final check's judge each kept
+ * theirs for as long as the swarm existed, billing after its pull
+ * request was open.
+ */
+test("a swarm that is over takes every leaf's machine with its own", async () => {
+  const swarm = await seedSwarm({ title: "Swarm with leaves left", status: "done" });
+  const cancelled = await seedLeaf(swarm.swarmId, { title: "Cancelled leaf", status: "cancelled" });
+  const failed = await seedLeaf(swarm.swarmId, { title: "Failed leaf", status: "failed" });
+  const judge = await seedLeaf(swarm.swarmId, { title: "Final check", status: "done" });
+
+  await withQuietBoss(() => runSandboxReapJob(ctx, { swarmId: swarm.swarmId }));
+
+  for (const machine of [swarm, cancelled, failed, judge]) {
+    assert.ok(destroyed.includes(machine.externalId), `${machine.externalId} was destroyed`);
+    assert.equal(await sandboxStatus(machine.sandboxId), "destroyed");
+  }
+});
+
+/**
+ * A Docker machine's checkout is a worktree on the person's computer.
+ * Its branch outlives the worktree, so a clean one goes once the
+ * repository has the commit; a file nobody committed would be deleted
+ * for good, so that checkout stays.
+ */
+test("a leaf's local checkout goes only once the repository holds everything in it", async () => {
+  const swarm = await seedSwarm({ title: "Swarm with local leaves", status: "cancelled" });
+  const clean = await seedLeaf(swarm.swarmId, { title: "Clean leaf", status: "cancelled", checkout: "clean" });
+  const dirty = await seedLeaf(swarm.swarmId, { title: "Dirty leaf", status: "failed", checkout: "dirty" });
+  const { stdout: committed } = await run("git", ["-C", clean.worktree, "rev-parse", "HEAD"]);
+
+  await withQuietBoss(() => runSandboxReapJob(ctx, { swarmId: swarm.swarmId }));
+
+  assert.equal(await sandboxStatus(clean.sandboxId), "destroyed");
+  assert.equal(await sandboxStatus(dirty.sandboxId), "destroyed", "the container holds nothing; the checkout is on the host");
+  await assert.rejects(() => stat(clean.worktree), { code: "ENOENT" });
+  const { stdout: kept } = await run("git", ["-C", repoDir, "rev-parse", `refs/heads/${clean.branch}`]);
+  assert.equal(kept.trim(), committed.trim(), "the leaf's commit is still on its branch in the repository");
+  await stat(path.join(dirty.worktree, `${dirty.taskId}.txt`));
+});
+
+/**
+ * A failed swarm keeps its machines for the person who retries it,
+ * until that person publishes it: then its branch is on GitHub with a
+ * pull request over it, and a retry restores from there. A leaf that
+ * failed is the one thing still kept, because a plain retry continues
+ * in its machine.
+ */
+test("a published swarm that failed gives back its machine and its finished leaves'", async () => {
+  const swarm = await seedSwarm({ title: "Swarm failed then published", status: "failed" });
+  const cancelled = await seedLeaf(swarm.swarmId, { title: "Cancelled leaf", status: "cancelled" });
+  const failed = await seedLeaf(swarm.swarmId, { title: "Failed leaf", status: "failed" });
+
+  await withQuietBoss(() => runSandboxReapJob(ctx, { swarmId: swarm.swarmId }));
+  for (const machine of [swarm, cancelled, failed]) {
+    assert.equal(destroyed.includes(machine.externalId), false, "unpublished, everything stays");
+  }
+
+  await ctx.db.insert(swarmPullRequests).values({
+    swarmId: swarm.swarmId,
+    repoUrl: "https://github.com/acme/app",
+    number: 7,
+    url: "https://github.com/acme/app/pull/7",
+  });
+  await withQuietBoss(() => runSandboxReapJob(ctx, { swarmId: swarm.swarmId }));
+
+  assert.equal(await sandboxStatus(swarm.sandboxId), "destroyed");
+  assert.equal(await sandboxStatus(cancelled.sandboxId), "destroyed");
+  assert.equal(await sandboxStatus(failed.sandboxId), "ready", "a leaf a person may retry keeps its machine");
+});
+
+test("the sweep finds a swarm by a leaf's machine, and a stack counts as published", async () => {
+  const done = await seedSwarm({ title: "Swarm done, leaf left", status: "done" });
+  await ctx.db.update(sandboxes).set({ status: "destroyed" }).where(eq(sandboxes.id, done.sandboxId));
+  const leftover = await seedLeaf(done.swarmId, { title: "Leftover leaf", status: "cancelled" });
+
+  const stacked = await seedSwarm({ title: "Swarm out of time, stacked", status: "timed_out" });
+  const part = await seedLeaf(stacked.swarmId, { title: "Stacked part", status: "landed" });
+  await ctx.db
+    .update(swarmTasks)
+    .set({ flags: { pullRequests: { "https://github.com/acme/app": { number: 8, url: "https://github.com/acme/app/pull/8" } } } })
+    .where(eq(swarmTasks.id, part.taskId));
+
+  await reapFinishedSwarmSandboxes(ctx);
+
+  assert.equal(await sandboxStatus(leftover.sandboxId), "destroyed", "a done swarm's leftover leaf is found");
+  assert.equal(await sandboxStatus(stacked.sandboxId), "destroyed");
+  assert.equal(await sandboxStatus(part.sandboxId), "destroyed");
+});
+
+test("a leaf's machine goes with its swarm's only when the leaf is finished or the swarm is over for good", () => {
+  const now = new Date();
+  const failed = { status: "failed" as const, archivedAt: null, updatedAt: now };
+  assert.equal(swarmTaskMachineReleasable(failed, "cancelled", now), false, "unpublished, nothing goes");
+  assert.equal(swarmTaskMachineReleasable(failed, "cancelled", now, true), true);
+  assert.equal(swarmTaskMachineReleasable(failed, "failed", now, true), false);
+  assert.equal(swarmTaskMachineReleasable({ ...failed, status: "done" }, "failed", now), true);
+  assert.equal(swarmTaskMachineReleasable({ ...failed, archivedAt: now }, "failed", now), true);
+  assert.equal(swarmTaskMachineReleasable({ ...failed, status: "running" }, "cancelled", now, true), false);
+  assert.equal(swarmMachineReleasable({ ...failed, status: "running" }, now, true), false, "a live swarm keeps everything");
 });

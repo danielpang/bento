@@ -420,10 +420,17 @@ export function SwarmPage({
         )}
 
         {swarm.status === "failed" && swarm.updatedAt && (
-          <p className="muted swarm-grace-note">
-            This swarm&apos;s sandbox is kept until about {graceDate(swarm.updatedAt)} so its tasks and merge queue can be
-            retried. Its branches are also on GitHub when the project has a GitHub connection.
-          </p>
+          detail.pullRequests.length > 0 || stackedPullRequests(detail.tasks).length > 0 ? (
+            <p className="muted swarm-grace-note">
+              This swarm&apos;s pull request is open, so its sandbox was released. A retry rebuilds it from the branch on
+              GitHub, and a failed task keeps its own sandbox until about {graceDate(swarm.updatedAt)}.
+            </p>
+          ) : (
+            <p className="muted swarm-grace-note">
+              This swarm&apos;s sandbox is kept until about {graceDate(swarm.updatedAt)} so its tasks and merge queue can be
+              retried. Its branches are also on GitHub when the project has a GitHub connection.
+            </p>
+          )
         )}
 
         <SwarmStats detail={detail} model={model} agents={agents} busy={busy} now={now} onWorkers={actions.onWorkers} />

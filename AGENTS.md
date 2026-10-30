@@ -403,13 +403,31 @@ that ends a swarm asks for its machine only once no run is active: a failed leaf
 the planner in the tick that marks the swarm failed, and that run
 works in the swarm's own machine, so asking on every tick made every
 poll of the reap queue an exception for as long as the planner kept
-working. A swarm that ended "failed" never asks at all: its branch has
-never been pushed, the machine is the only copy of every leaf that
-landed, and a failed swarm is the one a person retries a leaf or a
-landing on. Archiving or deleting it reaps it, and so does the sweep
-(at boot and nightly) once it has sat untouched for
-`FAILED_SWARM_MACHINE_GRACE_MS`, a week, because a sprite bills its
-storage for as long as it exists.
+working. A swarm that ended "failed" does not ask as it ends: a failed
+swarm is the one a person retries a leaf or a landing on. Publishing it
+(a pull request, combined or stacked: `swarmPublished`) reaps it, and so
+does reaching an ending once it was published, because its branch is on
+GitHub under a pull request and a retry restores from there. Archiving
+or deleting it reaps it too, and so does the sweep (at boot and nightly)
+once it has sat untouched for `FAILED_SWARM_MACHINE_GRACE_MS`, a week,
+because a sprite bills its storage for as long as it exists.
+
+A swarm's reap takes its leaves' machines after its own
+(`reapSwarmWorkerSandboxes`), because only a landed leaf gave its
+machine back: a cancelled leaf, a failed one, one a person marked done,
+and the final check's judge each kept theirs after the pull request was
+open. Each goes through the leaf's reap, which on a clone driver pushes
+the leaf's branch first (`saveSwarmTaskBranch`, skipped for a leaf that
+landed, whose work is on the swarm's branch, and for a machine no worker
+or resolver ran in) and defers, captured as `swarm_branch_unsaved`,
+when it cannot. A swarm released only because it was published keeps
+the machine of a leaf that is not landed, done or cancelled, since a
+plain retry continues there (`swarmTaskMachineReleasable`). On a host
+driver (Docker, local) the machine is only a container; the leaf's
+checkout is a worktree of the project's repository, and it is removed
+only when `hostCheckoutUnsaved` finds no uncommitted file and a local
+branch reaching its HEAD. Otherwise the checkout stays for a person;
+only "Retry task" (start over) removes it regardless.
 
 A hibernated machine is still the branch. The merge queue and a new
 worker both read branches out of other machines, and either can find
@@ -475,9 +493,9 @@ destroyed, Fly refused the new sprite, `auto` fell back to Modal, and the
 swarm went on from a fresh clone without saying so.
 
 So `reapSwarmSandbox` locks the swarm row and destroys only when the
-swarm is gone, done or cancelled (`swarmReleasesMachine`), archived, or
-past `FAILED_SWARM_MACHINE_GRACE_MS` in an ending a person can still
-resume (failed, budget_exhausted, timed_out). A swarm live again keeps
+swarm is gone, done or cancelled (`swarmReleasesMachine`), or, in an
+ending a person can still resume (failed, budget_exhausted, timed_out),
+published, archived, or past `FAILED_SWARM_MACHINE_GRACE_MS`. A swarm live again keeps
 its machine, quietly. It also waits for a landing in flight. And a
 swarm machine that is gone is never made again as a fresh clone once
 the swarm has landed work: it is restored from GitHub

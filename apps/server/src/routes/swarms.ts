@@ -1327,6 +1327,19 @@ export function swarmRoutes(ctx: AppContext) {
           const reasons = result.failures.map((failure) => `${failure.name}: ${withoutUrlCredentials(failure.reason)}`).join(" ");
           return c.json({ error: `Could not open the pull request. ${reasons}`.trim() }, 502);
         }
+        /*
+         * The work is on GitHub with a pull request over it now, so a
+         * swarm that has ended gives its machines back. The reap saves
+         * every branch again before anything goes, and keeps a machine
+         * whose branch it cannot save. A swarm still running keeps its
+         * machines; it asks for this itself when it ends.
+         */
+        const [ended] = await ctx.db.select({ status: swarms.status }).from(swarms).where(eq(swarms.id, swarm.id)).limit(1);
+        if (ended && archiveReapsSandboxes(ended)) {
+          await queueSwarmSandboxReap(ctx, swarm.id).catch((err) => {
+            console.error(`swarm ${swarm.id}: could not queue the reap of its sandboxes:`, err);
+          });
+        }
         const failures = result.failures.map((failure) => ({ name: failure.name, reason: withoutUrlCredentials(failure.reason) }));
         return c.json({ mode: parsed.data.mode, pullRequests: result.published, failures, behind: result.behind === true });
       });

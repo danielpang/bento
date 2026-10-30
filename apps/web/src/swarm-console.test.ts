@@ -1161,9 +1161,21 @@ test("a finished swarm offers one pull request or one per task, and a failed one
   assert.match(done, /Every branch is on GitHub/);
   assertNoDashes(done, "the publish choice");
 
-  const failed = pageHtml("multi", "failed");
+  const updated = (detail: SwarmDetail) => ({ ...detail.swarm, updatedAt: new Date(NOW).toISOString() });
+  const failed = pageHtml("multi", "failed", { extra: (detail) => ({ swarm: updated(detail) }) });
   assert.match(failed, />Open pull request<\/button>/, "a failed swarm's landed work can still be published");
+  assert.match(failed, /sandbox is kept until about/);
   assertNoDashes(failed, "the failed swarm header");
+
+  const published = pageHtml("multi", "failed", {
+    extra: (detail) => ({
+      swarm: updated(detail),
+      pullRequests: [{ id: "p", repoUrl: "r", number: 1, url: null, headSha: null }],
+    }),
+  });
+  assert.match(published, /pull request is open, so its sandbox was released/, "publishing releases a failed swarm's sandbox");
+  assert.doesNotMatch(published, /sandbox is kept until about/);
+  assertNoDashes(published, "the published failed swarm header");
 });
 
 test("pull requests are offered once anything landed, and a stack is offered the tasks landed since", () => {
