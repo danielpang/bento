@@ -128,3 +128,47 @@ test("a step that did not exit is the machine's, whatever came before it", () =>
   const killed = Object.assign(new Error("exit 137"), { exitCode: 137, stderr: "" });
   assert.equal(checkoutStepFailure("modal", remote, killed).blame, "provider", "git did not say why");
 });
+
+/**
+ * A card whose machine was released after it sat idle is made again on
+ * the branch Bento pushed for it. The seed is the base branch, as for
+ * every hosted card; the start bundle is the card's own branch read
+ * back from GitHub (`branch ^base`), and the run's branch is that same
+ * branch, so the new checkout must land on its saved head, not on a
+ * fresh branch cut from the base.
+ */
+test("a card's saved branch comes back as the run's own branch on a new seeded machine", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "bento-checkout-restore-"));
+  try {
+    const origin = await originRepo(root);
+    const seed = path.join(root, "seed.bundle");
+    await git(origin, ["bundle", "create", seed, "refs/heads/main"]);
+
+    const card = path.join(root, "card");
+    await git(root, ["clone", "-q", origin, card]);
+    await git(card, ["checkout", "-q", "-b", "bento/idle-card"]);
+    await writeFile(path.join(card, "feature.ts"), "export const saved = true;\n");
+    await git(card, ["add", "."]);
+    await git(card, ["commit", "-q", "-m", "the card's work"]);
+    const saved = (await git(card, ["rev-parse", "HEAD"])).trim();
+    const base = (await git(card, ["merge-base", "HEAD", "origin/main"])).trim();
+    const start = path.join(root, "start.bundle");
+    await git(card, ["bundle", "create", start, "refs/heads/bento/idle-card", `^${base}`]);
+
+    const dir = path.join(root, "machine", "app");
+    const { failed } = await runSteps(
+      checkoutSteps({
+        dir,
+        branch: "bento/idle-card",
+        baseBranch: "main",
+        seed: { bundlePath: seed, start: { bundlePath: start, branch: "bento/idle-card" } },
+      }),
+      root,
+    );
+    assert.equal(failed, undefined, failed?.ran.stderr);
+    assert.equal((await git(dir, ["rev-parse", "--abbrev-ref", "HEAD"])).trim(), "bento/idle-card");
+    assert.equal((await git(dir, ["rev-parse", "HEAD"])).trim(), saved, "the checkout is the saved head");
+  } finally {
+    await removeRoot(root);
+  }
+});

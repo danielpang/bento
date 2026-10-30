@@ -402,7 +402,7 @@ export async function reapSwarmSandbox(
  * only through it, so without it a reap called a machine gone while
  * its image was still stored.
  */
-async function destroyAndConfirm(
+export async function destroyAndConfirm(
   ctx: AppContext,
   row: typeof sandboxes.$inferSelect,
   owner: string,

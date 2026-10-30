@@ -217,6 +217,53 @@ export interface PublishOutcome {
   notesOnly: string[];
 }
 
+/**
+ * The commit Bento last pushed to a card's branch in one repository: the
+ * lease every push of that branch holds. From `features.pushed_heads`,
+ * or, for cards published before that column, the pull request row.
+ */
+export async function featureBranchLease(db: Db, featureId: string, branch: string, repoUrl: string): Promise<string | null> {
+  const [feature] = await db
+    .select({ pushedHeads: features.pushedHeads })
+    .from(features)
+    .where(eq(features.id, featureId))
+    .limit(1);
+  const pushed = feature?.pushedHeads?.[branch]?.[repoUrl];
+  if (pushed) return pushed;
+  const [known] = await db
+    .select({ headSha: featurePullRequests.headSha })
+    .from(featurePullRequests)
+    .where(
+      and(
+        eq(featurePullRequests.featureId, featureId),
+        eq(featurePullRequests.repoUrl, repoUrl),
+        // This branch's lease, not the card's. A card that merged
+        // one branch and started another has a row for each, and
+        // holding the old branch's head against a push to the new
+        // one would fail every publish after the first rotation.
+        eq(featurePullRequests.branch, branch),
+      ),
+    )
+    .limit(1);
+  return known?.headSha ?? null;
+}
+
+/** Saves what a push put on a card's branch, as the next push's lease. */
+export async function recordFeaturePush(
+  db: Db,
+  featureId: string,
+  branch: string,
+  repoUrl: string,
+  headSha: string,
+): Promise<void> {
+  await db
+    .update(features)
+    .set({
+      pushedHeads: sql`${features.pushedHeads} || jsonb_build_object(${branch}::text, coalesce(${features.pushedHeads}->${branch}::text, '{}'::jsonb) || jsonb_build_object(${repoUrl}::text, ${headSha}::text))`,
+    })
+    .where(eq(features.id, featureId));
+}
+
 export async function publishFeatureBranches(
   db: Db,
   publisher: GitHubPublisher,
@@ -266,39 +313,8 @@ export async function publishFeatureBranches(
      * rewritten away. Null (rows from before this column, or a first
      * push) falls back to the read-at-push behavior.
      */
-    lease: async (repo) => {
-      const [feature] = await db
-        .select({ pushedHeads: features.pushedHeads })
-        .from(features)
-        .where(eq(features.id, args.featureId))
-        .limit(1);
-      const pushed = feature?.pushedHeads?.[args.branch]?.[repo.repoUrl];
-      if (pushed) return pushed;
-      const [known] = await db
-        .select({ headSha: featurePullRequests.headSha })
-        .from(featurePullRequests)
-        .where(
-          and(
-            eq(featurePullRequests.featureId, args.featureId),
-            eq(featurePullRequests.repoUrl, repo.repoUrl),
-            // This branch's lease, not the card's. A card that merged
-            // one branch and started another has a row for each, and
-            // holding the old branch's head against a push to the new
-            // one would fail every publish after the first rotation.
-            eq(featurePullRequests.branch, args.branch),
-          ),
-        )
-        .limit(1);
-      return known?.headSha ?? null;
-    },
-    pushed: async (repo, headSha) => {
-      await db
-        .update(features)
-        .set({
-          pushedHeads: sql`${features.pushedHeads} || jsonb_build_object(${args.branch}::text, coalesce(${features.pushedHeads}->${args.branch}::text, '{}'::jsonb) || jsonb_build_object(${repo.repoUrl}::text, ${headSha}::text))`,
-        })
-        .where(eq(features.id, args.featureId));
-    },
+    lease: (repo) => featureBranchLease(db, args.featureId, args.branch, repo.repoUrl),
+    pushed: (repo, headSha) => recordFeaturePush(db, args.featureId, args.branch, repo.repoUrl, headSha),
     record: async (repo, pr) => {
       await db
         .insert(featurePullRequests)
@@ -467,6 +483,12 @@ export async function pushBranches(
     /** A commit inside the bundle to push instead of its head, per repository. */
     target?: (repo: PublishableRemote) => string | undefined;
     remoteUrl?: (owner: string, repo: string) => string;
+    /**
+     * Keep Bento's stage write-ups on the pushed branch. Off for anything
+     * a reviewer reads; on for a copy Bento restores a machine from,
+     * where the next stage's agent reads them.
+     */
+    includeStageNotes?: boolean;
   },
 ): Promise<PushOutcome> {
   const pushed: PushOutcome["pushed"] = [];
@@ -495,7 +517,7 @@ export async function pushBranches(
       const remote = plan.remoteUrl?.(parsed.owner, parsed.repo) ?? `https://github.com/${parsed.owner}/${parsed.repo}.git`;
       const target = plan.target?.(remoteRepo);
       const head = await pushBundle(bundle, remote, repo.defaultBranch, plan.branch, token, {
-        includeStageNotes: false,
+        includeStageNotes: plan.includeStageNotes === true,
         label: `${parsed.owner}/${parsed.repo}`,
         expectedRemoteHead: await plan.lease(remoteRepo),
         ...(target ? { target } : {}),
