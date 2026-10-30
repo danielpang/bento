@@ -7,7 +7,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import pg from "pg";
 import { eq, sql } from "drizzle-orm";
-import { createDb, createPool, repositories, runMigrations, sandboxes, swarmLandings, swarmTasks, swarms, type Db } from "@bento/db";
+import { agentRuns, createDb, createPool, repositories, runMigrations, sandboxes, swarmLandings, swarmTasks, swarms, type Db } from "@bento/db";
 import { WorktreeManager, type SandboxDriver } from "@bento/sandbox";
 import { singleDriver } from "../sandbox-driver.js";
 import { reapSwarmSandbox, SandboxReapDeferred } from "../reap-sandbox.js";
@@ -386,6 +386,105 @@ test("a finished swarm's machine is kept while its branch cannot reach GitHub", 
   await reapSwarmSandbox(machine.ctx, swarm.id, { push: options });
   assert.equal(await remoteHead(swarm.branchName!), await git(tree, ["rev-parse", "HEAD"]));
   assert.deepEqual(machine.destroyed, ["box-reap-keeps"]);
+});
+
+/**
+ * A leaf that never landed (cancelled, failed, or marked done by a
+ * person) kept its machine after its swarm was over. On a clone driver
+ * that machine is the only copy of whatever the worker committed since
+ * its last push, so the swarm's reap pushes the leaf's branch first and
+ * keeps the machine when it cannot.
+ */
+test("a leaf's machine goes with its finished swarm only once GitHub holds the leaf's branch", async () => {
+  const { swarm } = await swarmOnHost("leaf-reap");
+  const worker = await workerCommits(swarm, "Cart", "cart.ts", 0);
+  await db.update(swarmTasks).set({ status: "cancelled" }).where(eq(swarmTasks.id, worker.task.id));
+  await db.insert(agentRuns).values({
+    type: "swarm",
+    swarmId: swarm.id,
+    swarmTaskId: worker.task.id,
+    role: "worker",
+    agentProfileId: PROFILE,
+    prompt: "do the cart",
+    status: "succeeded",
+    agentStartedAt: new Date(),
+  });
+  const [leaf] = await db
+    .insert(sandboxes)
+    .values({
+      projectId: PROJECT,
+      swarmId: swarm.id,
+      swarmTaskId: worker.task.id,
+      provider: "modal",
+      externalId: "box-leaf-reap",
+      status: "ready",
+      workdir: "/workspace",
+    })
+    .returning();
+  await db.update(swarms).set({ status: "done" }).where(eq(swarms.id, swarm.id));
+  const head = await git(worker.tree, ["rev-parse", "HEAD"]);
+  const machine = cloneMachine(() => worker.tree);
+  const offline = {
+    publisher: { ...publisher, async pushToken() { throw new Error("GitHub is down"); } } as unknown as typeof publisher,
+    remoteUrl: () => remotePath,
+  };
+
+  await assert.rejects(reapSwarmSandbox(machine.ctx, swarm.id, { push: offline }), SandboxReapDeferred, "the reap waits");
+  assert.deepEqual(machine.destroyed, [], "the leaf's machine, the only copy of its commit, is still there");
+  assert.equal((await db.select().from(sandboxes).where(eq(sandboxes.id, leaf!.id)))[0]?.status, "ready");
+
+  // The push wakes a hibernated machine to export from it, which moves
+  // the row to a new generation: the reap destroys the machine as it is
+  // after the push, not as it was read before.
+  const waking = {
+    publisher: {
+      ...publisher,
+      async pushToken() {
+        await db.update(sandboxes).set({ generation: sql`${sandboxes.generation} + 1` }).where(eq(sandboxes.id, leaf!.id));
+        return "unused: the remote is a directory";
+      },
+    } as unknown as typeof publisher,
+    remoteUrl: () => remotePath,
+  };
+  await reapSwarmSandbox(machine.ctx, swarm.id, { push: waking });
+  assert.equal(await remoteHead(worker.branch), head, "GitHub has the leaf's commit");
+  assert.deepEqual(machine.destroyed, ["box-leaf-reap"], "and only then is its machine destroyed");
+  assert.equal((await db.select().from(sandboxes).where(eq(sandboxes.id, leaf!.id)))[0]?.status, "destroyed");
+});
+
+test("a leaf whose agent never started has nothing to push, so GitHub being down does not keep its machine", async () => {
+  const { swarm } = await swarmOnHost("leaf-never-started");
+  const [task] = await db
+    .insert(swarmTasks)
+    .values({ swarmId: swarm.id, title: "Checkout refused", status: "failed", position: 0, branchName: `${swarm.branchName}-refused` })
+    .returning();
+  await db.insert(agentRuns).values({
+    type: "swarm",
+    swarmId: swarm.id,
+    swarmTaskId: task!.id,
+    role: "worker",
+    agentProfileId: PROFILE,
+    prompt: "never ran",
+    status: "failed",
+  });
+  await db.insert(sandboxes).values({
+    projectId: PROJECT,
+    swarmId: swarm.id,
+    swarmTaskId: task!.id,
+    provider: "modal",
+    externalId: "box-never-started",
+    status: "ready",
+    workdir: "/workspace",
+  });
+  await db.update(swarms).set({ status: "cancelled" }).where(eq(swarms.id, swarm.id));
+  const machine = cloneMachine(() => repoPath);
+  const offline = {
+    publisher: { ...publisher, async pushToken() { throw new Error("GitHub is down"); } } as unknown as typeof publisher,
+    remoteUrl: () => remotePath,
+  };
+
+  await reapSwarmSandbox(machine.ctx, swarm.id, { push: offline });
+  assert.deepEqual(machine.destroyed, ["box-never-started"]);
 });
 
 test("a swarm whose branch was released for checkout still publishes, from the repository's own branch", async () => {

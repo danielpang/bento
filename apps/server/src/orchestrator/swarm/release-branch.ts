@@ -71,3 +71,30 @@ export async function releaseSwarmBranch(
     }
   }
 }
+
+/**
+ * Why removing a host checkout would lose work, or null when it would
+ * not.
+ *
+ * A Docker or local machine works in a worktree of the project's own
+ * repository, so its commits are the repository's: removing the
+ * worktree keeps every branch. What it does not keep is a file nobody
+ * committed, or a commit no local branch reaches (a detached HEAD), and
+ * `git worktree remove --force` deletes both without a word. A checkout
+ * that cannot be read is answered as unsaved, because the safe mistake
+ * is keeping a directory.
+ */
+export async function hostCheckoutUnsaved(worktree: string, repoPath: string, repoName: string): Promise<string | null> {
+  if (!(await stat(worktree).then((entry) => entry.isDirectory(), () => false))) return null;
+  try {
+    if (await git(worktree, "status", "--porcelain=v1", "--untracked-files=all")) {
+      return `${repoName} has uncommitted files`;
+    }
+    const head = await git(worktree, "rev-parse", "--verify", "HEAD^{commit}");
+    const branches = await git(repoPath, "for-each-ref", "--contains", head, "--format=%(refname)", "refs/heads/");
+    if (!branches) return `${repoName}'s last commit is on no branch of ${repoPath}`;
+    return null;
+  } catch (error) {
+    return `${repoName}'s checkout could not be read (${error instanceof Error ? error.message : String(error)})`;
+  }
+}

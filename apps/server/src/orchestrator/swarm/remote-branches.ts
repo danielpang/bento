@@ -1,5 +1,5 @@
-import { asc, eq } from "drizzle-orm";
-import { repositories, sandboxes, swarmTasks, swarms } from "@bento/db";
+import { and, asc, eq, inArray, isNotNull } from "drizzle-orm";
+import { agentRuns, repositories, sandboxes, swarmTasks, swarms } from "@bento/db";
 import { parseRepoUrl, type GitHubPublisher } from "@bento/github";
 import type { SandboxDriver, SandboxHandle } from "@bento/sandbox";
 import { captureJobErrors } from "../../analytics.js";
@@ -8,7 +8,7 @@ import { githubConnectionFor } from "../../github.js";
 import { SandboxGone, wakeSwarmSandbox } from "../hibernate-sandbox.js";
 import { fetchRemoteBranchBundle, hostBranchSource, pushBranches, recordPushedHead, type PublishableRepository } from "../publish.js";
 import { QUEUE_POLL_SECONDS } from "../queue.js";
-import { driverForSandbox } from "../sandbox-driver.js";
+import { driverForSandbox, SandboxDriverUnavailable } from "../sandbox-driver.js";
 import { workerBranchName } from "./branches.js";
 import { refreshSwarmPullRequests } from "./complete.js";
 import { swarmBranchName, swarmTaskWorkspaceKey, swarmWorkspaceKey } from "./sandbox.js";
@@ -54,12 +54,12 @@ export interface PushOptions {
 }
 
 /**
- * The swarm's branch could not be put on GitHub, so its machine is
- * still the only copy of it.
+ * The swarm's branch (or one task's) could not be put on GitHub, so its
+ * machine is still the only copy of it.
  */
 export class SwarmBranchNotSaved extends Error {
-  constructor(swarmId: string, reason: string) {
-    super(`swarm ${swarmId}'s branch is not on GitHub: ${reason}`);
+  constructor(id: string, reason: string, owner: "swarm" | "swarm task" = "swarm") {
+    super(`${owner} ${id}'s branch is not on GitHub: ${reason}`);
     this.name = "SwarmBranchNotSaved";
   }
 }
@@ -111,7 +111,11 @@ type TaskFlags = {
 };
 
 /** A task's branch as its worker left it. */
-export async function pushTaskBranch(ctx: AppContext, taskId: string, options: PushOptions = {}): Promise<void> {
+export async function pushTaskBranch(
+  ctx: AppContext,
+  taskId: string,
+  options: PushOptions & { required?: boolean } = {},
+): Promise<void> {
   const [task] = await ctx.db.select().from(swarmTasks).where(eq(swarmTasks.id, taskId)).limit(1);
   if (!task) return;
   const flags = task.flags as TaskFlags;
@@ -121,7 +125,10 @@ export async function pushTaskBranch(ctx: AppContext, taskId: string, options: P
   const [swarm] = await ctx.db.select().from(swarms).where(eq(swarms.id, task.swarmId)).limit(1);
   if (!swarm) return;
   const publisher = options.publisher ?? (await githubConnectionFor(ctx, swarm.organizationId));
-  if (!publisher) return;
+  if (!publisher) {
+    if (options.required) throw new SwarmBranchNotSaved(task.id, "the organization has no GitHub connection", "swarm task");
+    return;
+  }
 
   const [row] = (await ctx.db.select().from(sandboxes).where(eq(sandboxes.swarmTaskId, task.id)))
     .filter((candidate) => candidate.status !== "destroyed");
@@ -130,9 +137,13 @@ export async function pushTaskBranch(ctx: AppContext, taskId: string, options: P
   );
   // The machine is gone: whatever it held was pushed before it went,
   // or the task is starting over and there is nothing of it to keep.
-  if (!source) return;
+  if (!source) {
+    if (options.required) throw new SwarmBranchNotSaved(task.id, "its machine cannot export the branch", "swarm task");
+    return;
+  }
 
   const repoRows = await projectRepositories(ctx, swarm.projectId);
+  if (options.required) requireRemotes(repoRows, task.id, "swarm task");
   const branch = task.branchName ?? workerBranchName(swarm.branchName ?? swarmBranchName(swarm.slug), task.id);
   const outcome = await pushBranches(publisher, {
     branch,
@@ -171,6 +182,57 @@ export async function saveSwarmBranch(ctx: AppContext, swarmId: string, options:
   }
 }
 
+/**
+ * The same promise for one leaf's machine: returns only once GitHub
+ * holds what the worker's machine holds, so the machine can go.
+ *
+ * Nothing to save, and so no push, when the leaf's work is somewhere
+ * else already or never existed: a leaf that landed is on the swarm's
+ * branch, which the swarm's own reap saves; a machine no worker or
+ * resolver ever started an agent in (a judge's, or one whose checkout
+ * failed) holds no branch of its own; and a
+ * machine on a host driver is the host's worktree, which the reap
+ * checks against the repository itself before it removes anything.
+ */
+export async function saveSwarmTaskBranch(ctx: AppContext, taskId: string, options: PushOptions = {}): Promise<void> {
+  const [task] = await ctx.db.select().from(swarmTasks).where(eq(swarmTasks.id, taskId)).limit(1);
+  if (!task) return;
+  const flags = task.flags as TaskFlags;
+  if (flags.landedHeads && Object.keys(flags.landedHeads).length > 0) return;
+  const [row] = (await ctx.db.select().from(sandboxes).where(eq(sandboxes.swarmTaskId, task.id)))
+    .filter((candidate) => candidate.status !== "destroyed");
+  if (!row) return;
+  try {
+    if (driverForSandbox(ctx.drivers, row, ctx).workspace !== "clone") return;
+  } catch (err) {
+    // The reap cannot destroy it either, and says so there.
+    if (err instanceof SandboxDriverUnavailable) return;
+    throw err;
+  }
+  // An agent that never started (its checkout failed, its machine
+  // never came up) committed nothing, and a machine with no checkout
+  // cannot export one: requiring a push there would keep it forever.
+  const [worked] = await ctx.db
+    .select({ id: agentRuns.id })
+    .from(agentRuns)
+    .where(
+      and(
+        eq(agentRuns.swarmTaskId, task.id),
+        inArray(agentRuns.role, ["worker", "resolver"]),
+        isNotNull(agentRuns.agentStartedAt),
+      ),
+    )
+    .limit(1);
+  if (!worked) return;
+  try {
+    await pushTaskBranch(ctx, task.id, { ...options, required: true });
+  } catch (err) {
+    if (err instanceof SandboxGone) return;
+    if (err instanceof SwarmBranchNotSaved) throw err;
+    throw new SwarmBranchNotSaved(task.id, err instanceof Error ? err.message : String(err), "swarm task");
+  }
+}
+
 /** The swarm's branch, and the branch of the task that just landed on it. */
 export async function pushSwarmBranch(
   ctx: AppContext,
@@ -200,12 +262,7 @@ export async function pushSwarmBranch(
   }
 
   const repoRows = await projectRepositories(ctx, swarm.projectId);
-  if (options.required) {
-    const remoteless = repoRows.filter((repo) => !repo.repoUrl || !parseRepoUrl(repo.repoUrl));
-    if (remoteless.length > 0) {
-      throw new SwarmBranchNotSaved(swarm.id, `${remoteless.map((repo) => repo.name).join(", ")} has no GitHub remote`);
-    }
-  }
+  if (options.required) requireRemotes(repoRows, swarm.id, "swarm");
   // One export per repository, shared by both pushes below.
   const exports = new Map<string, ReturnType<NonNullable<PublishableRepository["exportBundle"]>>>();
   const swarmBranch = swarm.branchName ?? swarmBranchName(swarm.slug);
@@ -345,6 +402,18 @@ function publishable(
 
 async function projectRepositories(ctx: AppContext, projectId: string) {
   return ctx.db.select().from(repositories).where(eq(repositories.projectId, projectId)).orderBy(asc(repositories.position));
+}
+
+/** A branch that must reach GitHub cannot from a repository with no GitHub remote. */
+function requireRemotes(
+  repoRows: (typeof repositories.$inferSelect)[],
+  id: string,
+  owner: "swarm" | "swarm task",
+): void {
+  const remoteless = repoRows.filter((repo) => !repo.repoUrl || !parseRepoUrl(repo.repoUrl));
+  if (remoteless.length > 0) {
+    throw new SwarmBranchNotSaved(id, `${remoteless.map((repo) => repo.name).join(", ")} has no GitHub remote`, owner);
+  }
 }
 
 /** A push that failed is thrown, so the queue tries it again and error tracking hears of it. */

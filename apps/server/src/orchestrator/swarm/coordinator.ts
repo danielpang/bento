@@ -18,7 +18,7 @@ import type { BoardEvent } from "../../events.js";
 import { captureJobErrors } from "../../analytics.js";
 import { infraFailureReason } from "../../infra-failures.js";
 import { enqueueRun, INTERACTIVE_POLL_SECONDS } from "../queue.js";
-import { queueSwarmSandboxReap } from "../reap-sandbox.js";
+import { queueSwarmSandboxReap, swarmPublished } from "../reap-sandbox.js";
 import { swarmHasActiveRun } from "./reopen.js";
 import { ACTIVE_RUN_STATUSES, projectHasRepositories, SWARM_FULL, startRunIfIdle, swarmComputeRefusal, type NewRun, type OutOfCompute } from "../start-run.js";
 import { plannerWakeMessage, quoteUntrusted, type PlannerWakeItem } from "./planner-prompt.js";
@@ -585,6 +585,16 @@ export async function tickSwarm(
      * again later rather than failing.
      */
     if (swarmReleasesMachine(result.status) && !(await swarmHasActiveRun(ctx.db, swarmId))) {
+      await queueSwarmSandboxReap(ctx, swarmId);
+    } else if (result.becameFinal && (await swarmPublished(ctx.db, swarmId))) {
+      /*
+       * A swarm a person already published, ending in a way they could
+       * still pick up. Its branch is on GitHub under a pull request, so
+       * its machines are not the only copy of anything, and a retry
+       * makes the swarm's machine again from that branch. On the
+       * transition, so it is asked once; a run still in flight makes
+       * the job wait for it rather than fail.
+       */
       await queueSwarmSandboxReap(ctx, swarmId);
     }
   }

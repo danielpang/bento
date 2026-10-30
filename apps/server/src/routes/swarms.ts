@@ -1014,13 +1014,16 @@ export function swarmRoutes(ctx: AppContext) {
       }
       try {
         // The finished swarm may still have an idle container mounting
-        // this directory. Stop it before Git removes the checkout.
-        await reapSwarmSandbox(ctx, swarm.id);
+        // this directory. Stop it before Git removes the checkout. The
+        // leaves' machines wait on this route's lock, so they go in a
+        // reap of their own once it commits.
+        await reapSwarmSandbox(ctx, swarm.id, { leaves: false });
         await releaseSwarmBranch(ctx.worktrees, swarm.id, swarm.branchName, repos);
       } catch (error) {
         return c.json({ error: error instanceof Error ? error.message : "Could not release the branch." }, 409);
       }
       await db(c, ctx).update(swarms).set({ branchReleasedAt: new Date() }).where(eq(swarms.id, swarm.id));
+      deferAfterCommit(c, () => queueSwarmSandboxReap(ctx, swarm.id));
       saySwarmChanged(ctx, c, swarm, "done");
       return c.json({ released: true });
     })
@@ -1326,6 +1329,19 @@ export function swarmRoutes(ctx: AppContext) {
         if (result.published.length === 0) {
           const reasons = result.failures.map((failure) => `${failure.name}: ${withoutUrlCredentials(failure.reason)}`).join(" ");
           return c.json({ error: `Could not open the pull request. ${reasons}`.trim() }, 502);
+        }
+        /*
+         * The work is on GitHub with a pull request over it now, so a
+         * swarm that has ended gives its machines back. The reap saves
+         * every branch again before anything goes, and keeps a machine
+         * whose branch it cannot save. A swarm still running keeps its
+         * machines; it asks for this itself when it ends.
+         */
+        const [ended] = await ctx.db.select({ status: swarms.status }).from(swarms).where(eq(swarms.id, swarm.id)).limit(1);
+        if (ended && archiveReapsSandboxes(ended)) {
+          await queueSwarmSandboxReap(ctx, swarm.id).catch((err) => {
+            console.error(`swarm ${swarm.id}: could not queue the reap of its sandboxes:`, err);
+          });
         }
         const failures = result.failures.map((failure) => ({ name: failure.name, reason: withoutUrlCredentials(failure.reason) }));
         return c.json({ mode: parsed.data.mode, pullRequests: result.published, failures, behind: result.behind === true });

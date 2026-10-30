@@ -420,10 +420,17 @@ export function SwarmPage({
         )}
 
         {swarm.status === "failed" && swarm.updatedAt && (
-          <p className="muted swarm-grace-note">
-            This swarm&apos;s sandbox is kept until about {graceDate(swarm.updatedAt)} so its tasks and merge queue can be
-            retried. Its branches are also on GitHub when the project has a GitHub connection.
-          </p>
+          detail.pullRequests.length > 0 || stackedPullRequests(detail.tasks).length > 0 ? (
+            <p className="muted swarm-grace-note">
+              This swarm&apos;s pull request is open, so Bento releases its sandbox once the merge queue has nothing left
+              to retry. A failed task keeps its own sandbox until about {graceDate(swarm.updatedAt)} so it can be retried.
+            </p>
+          ) : (
+            <p className="muted swarm-grace-note">
+              This swarm&apos;s sandbox is kept until about {graceDate(swarm.updatedAt)} so its tasks and merge queue can be
+              retried. Its branches are also on GitHub when the project has a GitHub connection.
+            </p>
+          )
         )}
 
         <SwarmStats detail={detail} model={model} agents={agents} busy={busy} now={now} onWorkers={actions.onWorkers} />

@@ -5,8 +5,8 @@ import { execFile } from "node:child_process";
 import { readdir } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import { and, eq, gt, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
-import { agentRuns, features, repositories, sandboxes, swarmLandings, swarmTasks, swarms } from "@bento/db";
+import { and, eq, gt, inArray, isNotNull, isNull, lt, ne, or, sql, type SQL, type SQLWrapper } from "drizzle-orm";
+import { agentRuns, features, repositories, sandboxes, swarmLandings, swarmPullRequests, swarmTasks, swarms } from "@bento/db";
 import type { SandboxDriver } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
 import { LANDING_ACTIVITY_MAX_MS, sweepOrphanModalSandboxes } from "./hibernate-sandbox.js";
@@ -16,7 +16,8 @@ import { swarmTaskWorkspaceKey } from "./swarm/sandbox.js";
 import { archiveReapsSandboxes } from "./swarm/archive.js";
 import { swarmReleasesMachine } from "./swarm/coordinator.js";
 import { swarmHasActiveRun } from "./swarm/reopen.js";
-import { saveSwarmBranch, SwarmBranchNotSaved, type PushOptions } from "./swarm/remote-branches.js";
+import { saveSwarmBranch, saveSwarmTaskBranch, SwarmBranchNotSaved, type PushOptions } from "./swarm/remote-branches.js";
+import { hostCheckoutUnsaved } from "./swarm/release-branch.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -302,7 +303,18 @@ export async function reapSandbox(ctx: AppContext, featureId: string, machines?:
 export async function reapSwarmSandbox(
   ctx: AppContext,
   swarmId: string,
-  options: { now?: Date; machines?: SandboxGeneration[]; deferrals?: number; push?: PushOptions } = {},
+  options: {
+    now?: Date;
+    machines?: SandboxGeneration[];
+    deferrals?: number;
+    push?: PushOptions;
+    /**
+     * False for a caller that holds the swarm's lock and needs only the
+     * swarm's own machine gone (the branch release route): each leaf's
+     * reap waits on that lock, and the route queues a reap for them.
+     */
+    leaves?: boolean;
+  } = {},
 ): Promise<void> {
   const now = options.now ?? new Date();
   /*
@@ -317,7 +329,11 @@ export async function reapSwarmSandbox(
     .from(swarms)
     .where(eq(swarms.id, swarmId))
     .limit(1);
-  if (current && swarmMachineReleasable(current, now) && !(await swarmHasActiveRun(ctx.db, swarmId))) {
+  if (
+    current &&
+    swarmMachineReleasable(current, now, await swarmPublishedAndSettled(ctx.db, swarmId)) &&
+    !(await swarmHasActiveRun(ctx.db, swarmId))
+  ) {
     try {
       await saveSwarmBranch(ctx, swarmId, options.push);
     } catch (err) {
@@ -330,7 +346,7 @@ export async function reapSwarmSandbox(
   }
   await ctx.db.transaction(async (tx) => {
     const swarm = await lockSwarmForReap(tx, swarmId);
-    if (!swarmMachineReleasable(swarm, now)) {
+    if (!swarmMachineReleasable(swarm, now, await swarmPublishedAndSettled(tx, swarmId))) {
       console.log(`swarm ${swarmId} is ${swarm?.status} and not archived; keeping its sandbox`);
       return;
     }
@@ -386,6 +402,59 @@ export async function reapSwarmSandbox(
       console.log(`reaped sandbox ${row.externalId} for finished swarm ${swarmId}`);
     }
   });
+  /*
+   * The leaves are asked even when the swarm kept its own machine: a
+   * published swarm whose merge queue still needs that machine has
+   * finished leaves with nothing left to do. Each leaf decides by its
+   * own rule, under the swarm's lock, so a live swarm keeps them all.
+   */
+  if (options.leaves !== false) await reapSwarmWorkerSandboxes(ctx, swarmId, { ...options, now });
+}
+
+/**
+ * The leaves' machines, once their swarm has let its own go.
+ *
+ * A leaf that landed gives its machine back as it lands, but nothing
+ * else ever did: a leaf the planner cancelled, one a person marked
+ * done, one that failed, and the final check's judge each kept a
+ * machine for as long as the swarm existed, billing after the pull
+ * request was open. Each goes through the leaf's own reap, which saves
+ * the leaf's branch first and keeps the machine when it cannot.
+ *
+ * One leaf that has to wait does not hold up the rest. The job comes
+ * back for the ones still standing, and the swarm's own machine is
+ * already gone by then, so the retry asks only about the leaves.
+ */
+async function reapSwarmWorkerSandboxes(
+  ctx: AppContext,
+  swarmId: string,
+  options: { now: Date; machines?: SandboxGeneration[]; deferrals?: number; push?: PushOptions },
+): Promise<void> {
+  const leaves = await ctx.db
+    .selectDistinct({ swarmTaskId: sandboxes.swarmTaskId })
+    .from(sandboxes)
+    .where(and(eq(sandboxes.swarmId, swarmId), isNotNull(sandboxes.swarmTaskId), ne(sandboxes.status, "destroyed")));
+  let deferred: SandboxReapDeferred | null = null;
+  let failure: unknown = null;
+  for (const { swarmTaskId } of leaves) {
+    if (!swarmTaskId) continue;
+    try {
+      await reapSwarmTaskSandbox(ctx, swarmTaskId, {
+        withSwarm: { now: options.now },
+        ...(options.machines ? { machines: options.machines } : {}),
+        ...(options.deferrals ? { deferrals: options.deferrals } : {}),
+        ...(options.push ? { push: options.push } : {}),
+      });
+    } catch (err) {
+      if (err instanceof SandboxReapDeferred || err instanceof SandboxInUse) {
+        deferred ??= new SandboxReapDeferred(err.message, { swarmId });
+      } else {
+        failure ??= err;
+      }
+    }
+  }
+  if (failure) throw failure;
+  if (deferred) throw deferred;
 }
 
 /**
@@ -483,19 +552,101 @@ function isLockNotAvailable(err: unknown): boolean {
  * A deleted swarm has nobody to keep it for. A done or cancelled one
  * is finished with it (swarmReleasesMachine). An ending a person can
  * still pick up (failed, out of budget, out of time) keeps it, unless
- * the swarm was archived or has sat untouched past
- * FAILED_SWARM_MACHINE_GRACE_MS. Anything else is a swarm that is live,
- * or live again, and its machine holds its branch.
+ * a person published it, archived it, or left it untouched past
+ * FAILED_SWARM_MACHINE_GRACE_MS. A published swarm's branch is on
+ * GitHub with a pull request over it, so a retry has somewhere to
+ * restore the machine from (and the reap pushes once more before it
+ * destroys anything). Anything else is a swarm that is live, or live
+ * again, and its machine holds its branch.
  */
 export function swarmMachineReleasable(
   swarm: Pick<typeof swarms.$inferSelect, "status" | "archivedAt" | "updatedAt"> | undefined,
   now: Date = new Date(),
+  published = false,
 ): boolean {
   if (!swarm) return true;
   if (swarmReleasesMachine(swarm.status)) return true;
   if (!(RESUMABLE_SWARM_ENDINGS as readonly string[]).includes(swarm.status)) return false;
+  if (published) return true;
   if (swarm.archivedAt && archiveReapsSandboxes(swarm)) return true;
   return swarm.updatedAt.getTime() < now.getTime() - FAILED_SWARM_MACHINE_GRACE_MS;
+}
+
+/**
+ * Leaves that are finished with their machines whatever their swarm
+ * does next. A failed or unfinished leaf is not among them: a person's
+ * plain retry continues in the same machine on the same branch.
+ */
+const FINISHED_TASK_STATUSES = ["landed", "done", "cancelled"] as const;
+
+/**
+ * Whether a leaf's machine may go with its swarm's.
+ *
+ * Every leaf's, when the swarm is over for good, archived, or past its
+ * grace. When the swarm only let its own machine go because a person
+ * published it, a leaf that is finished goes too, and one a person may
+ * still retry keeps its machine until the grace ends.
+ */
+export function swarmTaskMachineReleasable(
+  swarm: Pick<typeof swarms.$inferSelect, "status" | "archivedAt" | "updatedAt"> | undefined,
+  taskStatus: (typeof swarmTasks.$inferSelect)["status"] | undefined,
+  now: Date = new Date(),
+  published = false,
+): boolean {
+  if (swarmMachineReleasable(swarm, now)) return true;
+  if (!swarmMachineReleasable(swarm, now, published)) return false;
+  return taskStatus === undefined || (FINISHED_TASK_STATUSES as readonly string[]).includes(taskStatus);
+}
+
+/** Anything a reap reads through: the pool, or its own transaction. */
+type ReapDb = AppContext["db"] | ReapTx;
+
+/**
+ * Whether a person has opened a pull request for this swarm: a combined
+ * one (swarm_pull_requests), or any part of a stack (on its tasks). One
+ * condition over the swarm's id column, so the sweep's nomination and
+ * the reap's decision read the same rule.
+ */
+function publishedSwarm(swarmId: SQLWrapper | string): SQL {
+  return sql`(
+    exists (select 1 from ${swarmPullRequests} where ${swarmPullRequests.swarmId} = ${swarmId})
+    or exists (
+      select 1 from ${swarmTasks}
+      where ${swarmTasks.swarmId} = ${swarmId} and ${swarmTasks.flags} -> 'pullRequests' is not null
+    )
+  )`;
+}
+
+/** Whether a person has opened a pull request for this swarm. */
+export async function swarmPublished(db: ReapDb, swarmId: string): Promise<boolean> {
+  const result = await db.execute<{ published: boolean }>(sql`select ${publishedSwarm(swarmId)} as published`);
+  return result.rows[0]?.published === true;
+}
+
+/**
+ * Landings that still need the swarm's own machine: one waiting in the
+ * queue, one in flight, one a resolver is on, and one that failed and
+ * that "Retry merge queue" lands onto that machine again. A landing
+ * cannot make the swarm's machine again (only a planner run restores
+ * it from GitHub), so a swarm with any of these keeps it.
+ */
+const LANDINGS_NEEDING_SWARM_MACHINE = ["queued", "landing", "conflicted", "failed"] as const;
+
+/**
+ * Whether being published is enough to let the swarm's own machine go:
+ * it is published, and nothing in its merge queue still lands onto that
+ * machine. A swarm out of budget or time keeps landing what its workers
+ * finished, and a failed one is retried at a failed landing; both would
+ * find the machine gone.
+ */
+async function swarmPublishedAndSettled(db: ReapDb, swarmId: string): Promise<boolean> {
+  if (!(await swarmPublished(db, swarmId))) return false;
+  const [pending] = await db
+    .select({ id: swarmLandings.id })
+    .from(swarmLandings)
+    .where(and(eq(swarmLandings.swarmId, swarmId), inArray(swarmLandings.status, [...LANDINGS_NEEDING_SWARM_MACHINE])))
+    .limit(1);
+  return !pending;
 }
 
 /**
@@ -506,9 +657,12 @@ export function swarmMachineReleasable(
  * boards say "over" with different words in different tables.
  *
  * Done and cancelled swarms at once; one that failed or ran out of
- * budget or time only once it has sat untouched past
- * FAILED_SWARM_MACHINE_GRACE_MS. Run at boot and by the nightly sweep,
- * so the grace ends even on a server nobody redeploys. The query only
+ * budget or time once a person published or archived it, or once it
+ * has sat untouched past FAILED_SWARM_MACHINE_GRACE_MS. Any machine
+ * of the swarm nominates it, a leaf's included, because a swarm whose
+ * own machine went before its leaves' were reaped has nothing else
+ * left to be found by. Run at boot and by the nightly sweep, so the
+ * grace ends even on a server nobody redeploys. The query only
  * nominates: reapSwarmSandbox reads each swarm again under its lock.
  */
 export async function reapFinishedSwarmSandboxes(ctx: AppContext, now: Date = new Date()): Promise<void> {
@@ -520,10 +674,16 @@ export async function reapFinishedSwarmSandboxes(ctx: AppContext, now: Date = ne
     .where(
       and(
         ne(sandboxes.status, "destroyed"),
-        isNull(sandboxes.swarmTaskId),
         or(
           inArray(swarms.status, [...FINISHED_SWARM_STATUSES]),
-          and(inArray(swarms.status, [...RESUMABLE_SWARM_ENDINGS]), lt(swarms.updatedAt, abandonedBefore)),
+          and(
+            inArray(swarms.status, [...RESUMABLE_SWARM_ENDINGS]),
+            or(
+              lt(swarms.updatedAt, abandonedBefore),
+              isNotNull(swarms.archivedAt),
+              publishedSwarm(swarms.id),
+            ),
+          ),
         ),
       ),
     );
@@ -572,7 +732,27 @@ async function removeFeatureWorkspace(ctx: AppContext, featureId: string): Promi
  * machine belongs to, and a single function taking either would have
  * had to guess which column a null meant.
  */
-export async function reapSwarmTaskSandbox(ctx: AppContext, swarmTaskId: string, machines?: SandboxGeneration[]): Promise<void> {
+export interface SwarmTaskReapOptions {
+  machines?: SandboxGeneration[];
+  /** How many times this job has already waited, so a branch that cannot be saved is recorded once. */
+  deferrals?: number;
+  push?: PushOptions;
+  /**
+   * The leaf is starting over: its earlier attempts are thrown away on
+   * purpose, so nothing is saved first and its checkout goes whatever
+   * is in it.
+   */
+  discard?: boolean;
+  /**
+   * Reaped as part of its swarm's reap. The swarm is read again under
+   * its lock before the machine goes, for the reason the swarm's own
+   * machine is: a swarm that is live again keeps everything.
+   */
+  withSwarm?: { now: Date };
+}
+
+export async function reapSwarmTaskSandbox(ctx: AppContext, swarmTaskId: string, options: SwarmTaskReapOptions = {}): Promise<void> {
+  const { machines } = options;
   /**
    * Never under a live agent. A leaf that landed should have no run on
    * it, but a resolver started for its conflict and a worker the
@@ -594,19 +774,96 @@ export async function reapSwarmTaskSandbox(ctx: AppContext, swarmTaskId: string,
     );
   }
 
-  const rows = await ctx.db
-    .select()
-    .from(sandboxes)
-    .where(and(eq(sandboxes.swarmTaskId, swarmTaskId), ne(sandboxes.status, "destroyed")));
+  const liveRows = () =>
+    ctx.db
+      .select()
+      .from(sandboxes)
+      .where(and(eq(sandboxes.swarmTaskId, swarmTaskId), ne(sandboxes.status, "destroyed")));
+  let rows = await liveRows();
 
   if (rows.some((row) => !matchesSandboxGeneration(row, machines))) return;
-  for (const row of rows) {
-    if (!(await destroyAndConfirm(ctx, row, `swarm task ${swarmTaskId}`))) continue;
-    await ctx.db.update(sandboxes).set({ status: "destroyed" }).where(and(eq(sandboxes.id, row.id), eq(sandboxes.generation, row.generation)));
-    console.log(`reaped sandbox ${row.externalId} for finished swarm task ${swarmTaskId}`);
+  const now = options.withSwarm?.now;
+  // Asked before anything is pushed, so a leaf that is staying does not
+  // push on every sweep. Asked again under the lock below.
+  if (now && !(await swarmTaskReleasable(ctx.db, swarmTaskId, now, false))) return;
+
+  /*
+   * On a clone driver the machine is the only copy of whatever the
+   * worker committed since its last push, so GitHub has to hold it
+   * before the machine goes, the swarm's own machine's rule.
+   */
+  if (rows.length > 0 && !options.discard) {
+    try {
+      await saveSwarmTaskBranch(ctx, swarmTaskId, options.push);
+    } catch (err) {
+      if (!(err instanceof SwarmBranchNotSaved)) throw err;
+      if (!options.deferrals) {
+        ctx.analytics?.captureException(err, null, null, { swarm_task_id: swarmTaskId, source: "swarm_branch_unsaved" });
+      }
+      throw new SandboxReapDeferred(`${err.message}; keeping its sandbox`, { swarmTaskId });
+    }
+    /*
+     * Read again: the push wakes a hibernated machine to export from it,
+     * which bumps its generation and records the image it booted from.
+     * Destroying the rows read before would skip the woken machine and
+     * leave its new image billing. The machines this job was asked
+     * about were checked above; a row that is not one of them is a
+     * machine made since, and stays.
+     */
+    const asked = new Set(rows.map((row) => row.id));
+    rows = (await liveRows()).filter((row) => asked.has(row.id));
   }
 
-  await removeSwarmTaskWorkspace(ctx, swarmTaskId);
+  const destroy = async (db: ReapDb): Promise<void> => {
+    for (const row of rows) {
+      if (!(await destroyAndConfirm(ctx, row, `swarm task ${swarmTaskId}`))) continue;
+      await db.update(sandboxes).set({ status: "destroyed" }).where(and(eq(sandboxes.id, row.id), eq(sandboxes.generation, row.generation)));
+      console.log(`reaped sandbox ${row.externalId} for finished swarm task ${swarmTaskId}`);
+    }
+  };
+  if (now) {
+    const released = await ctx.db.transaction(async (tx) => {
+      if (!(await swarmTaskReleasable(tx, swarmTaskId, now, true))) return false;
+      const [working] = await tx
+        .select({ id: agentRuns.id })
+        .from(agentRuns)
+        .where(and(eq(agentRuns.swarmTaskId, swarmTaskId), inArray(agentRuns.status, ACTIVE_RUN_STATUSES)))
+        .limit(1);
+      if (working) {
+        throw new SandboxReapDeferred(`a run is still working swarm task ${swarmTaskId}; not reaping its sandbox yet`, {
+          swarmTaskId,
+        });
+      }
+      await destroy(tx);
+      return true;
+    });
+    if (!released) return;
+  } else {
+    await destroy(ctx.db);
+  }
+
+  await removeSwarmTaskWorkspace(ctx, swarmTaskId, { discard: options.discard === true });
+}
+
+/**
+ * Whether a leaf's machine may go with its swarm's, read from the rows
+ * as they are now: under the swarm's lock when `locked`, which is the
+ * read that decides.
+ */
+async function swarmTaskReleasable(db: ReapDb, swarmTaskId: string, now: Date, locked: boolean): Promise<boolean> {
+  const [task] = await db
+    .select({ swarmId: swarmTasks.swarmId, status: swarmTasks.status })
+    .from(swarmTasks)
+    .where(eq(swarmTasks.id, swarmTaskId))
+    .limit(1);
+  if (!task) return true;
+  const columns = { status: swarms.status, archivedAt: swarms.archivedAt, updatedAt: swarms.updatedAt };
+  const swarm = locked
+    ? await lockSwarmForReap(db as ReapTx, task.swarmId)
+    : (await db.select(columns).from(swarms).where(eq(swarms.id, task.swarmId)).limit(1))[0];
+  const releasable = swarmTaskMachineReleasable(swarm, task.status, now, await swarmPublished(db, task.swarmId));
+  if (!releasable && locked) console.log(`swarm task ${swarmTaskId} may still be retried; keeping its sandbox`);
+  return releasable;
 }
 
 /**
@@ -626,7 +883,7 @@ export async function discardSwarmTaskWork(
   ctx: AppContext,
   input: { swarmTaskId: string; branch: string | null },
 ): Promise<void> {
-  await reapSwarmTaskSandbox(ctx, input.swarmTaskId);
+  await reapSwarmTaskSandbox(ctx, input.swarmTaskId, { discard: true });
   if (!input.branch) return;
   const [task] = await ctx.db
     .select({ projectId: swarms.projectId })
@@ -656,8 +913,19 @@ export async function discardSwarmTaskWork(
  * read off a row, for the reason the swarm's own key is: it is derived
  * from ids that never change, and a name rebuilt from a slug a team
  * may have renamed would point at a directory that is not this one.
+ *
+ * Only once the project's repository holds everything in it, unless
+ * the leaf is starting over. A Docker machine's checkout is a worktree
+ * on the person's own computer, and removing it with a file nobody
+ * committed, or a commit no branch reaches, would delete that work for
+ * good. Such a workspace is kept, whole, for a person to look at; the
+ * machine beside it is already gone, so it costs nothing but disk.
  */
-async function removeSwarmTaskWorkspace(ctx: AppContext, swarmTaskId: string): Promise<void> {
+async function removeSwarmTaskWorkspace(
+  ctx: AppContext,
+  swarmTaskId: string,
+  options: { discard: boolean } = { discard: false },
+): Promise<void> {
   const [task] = await ctx.db
     .select({ swarmId: swarmTasks.swarmId })
     .from(swarmTasks)
@@ -678,6 +946,15 @@ async function removeSwarmTaskWorkspace(ctx: AppContext, swarmTaskId: string): P
     .select({ name: repositories.name, localPath: repositories.localPath })
     .from(repositories)
     .where(eq(repositories.projectId, swarm.projectId));
+  if (!options.discard) {
+    for (const repo of repos) {
+      const unsaved = await hostCheckoutUnsaved(ctx.worktrees.worktreePath(key, repo.name), repo.localPath, repo.name);
+      if (unsaved) {
+        console.warn(`keeping the workspace of swarm task ${swarmTaskId}: ${unsaved}`);
+        return;
+      }
+    }
+  }
   await ctx.worktrees.removeWorkspace(repos, key);
 }
 
@@ -709,7 +986,12 @@ async function reapTarget(ctx: AppContext, data: SandboxReapTarget, now?: Date):
   // The leaf is asked first because it is the narrowest. A target
   // naming none of them is one nothing can act on, so it is dropped
   // rather than retried forever.
-  if (data.swarmTaskId) await reapSwarmTaskSandbox(ctx, data.swarmTaskId, data.machines);
+  if (data.swarmTaskId) {
+    await reapSwarmTaskSandbox(ctx, data.swarmTaskId, {
+      ...(data.machines ? { machines: data.machines } : {}),
+      ...(data.deferrals ? { deferrals: data.deferrals } : {}),
+    });
+  }
   else if (data.swarmId) {
     await reapSwarmSandbox(ctx, data.swarmId, {
       ...(now ? { now } : {}),
