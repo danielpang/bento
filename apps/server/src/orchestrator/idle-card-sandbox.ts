@@ -39,11 +39,18 @@ export interface IdleCardPushOptions {
 /**
  * The card's branch could not be put on GitHub, so its machine is still
  * the only copy of its work, and stays.
+ *
+ * `incident` is false when a person pushed commits Bento does not have.
+ * The lease held, which is what it is for. The machine stays either
+ * way. That case is logged, not reported.
  */
 export class CardBranchNotSaved extends Error {
-  constructor(featureId: string, reason: string) {
+  readonly incident: boolean;
+
+  constructor(featureId: string, reason: string, incident = true) {
     super(`card ${featureId}'s branch is not on GitHub: ${reason}`);
     this.name = "CardBranchNotSaved";
+    this.incident = incident;
   }
 }
 
@@ -123,10 +130,14 @@ export async function reapIdleCardSandbox(
     await saveCardBranch(ctx, featureId, rows, options.push ?? {});
   } catch (err) {
     // The destroy below is not reached. The machine stays the copy of
-    // the branch until a later sweep manages to save it.
+    // the branch until a later sweep manages to save it. A branch a
+    // person pushed is the lease working: the warning is the report,
+    // and it already says to pull those commits in or push manually.
     if (!(err instanceof CardBranchNotSaved)) throw err;
     console.warn(`${err.message}; keeping its sandbox`);
-    ctx.analytics?.captureException(err, null, null, { feature_id: featureId, source: "card_idle_branch_unsaved" });
+    if (err.incident) {
+      ctx.analytics?.captureException(err, null, null, { feature_id: featureId, source: "card_idle_branch_unsaved" });
+    }
     return false;
   }
 
@@ -292,7 +303,12 @@ async function saveCardBranch(
       ...(push.remoteUrl ? { remoteUrl: push.remoteUrl } : {}),
     });
     if (outcome.failures.length > 0) {
-      throw new CardBranchNotSaved(featureId, outcome.failures.map((f) => `${f.name}: ${f.reason}`).join("; "));
+      const reason = outcome.failures.map((f) => `${f.name}: ${f.reason}`).join("; ");
+      // Every failure is someone else's commits on the branch. The
+      // sentence tells them what to do. Anything else is an incident,
+      // including one repository that moved and another that did not.
+      const incident = outcome.failures.some((failure) => !failure.reason.includes("the branch moved on GitHub"));
+      throw new CardBranchNotSaved(featureId, reason, incident);
     }
   }
 }

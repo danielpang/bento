@@ -2,7 +2,7 @@ import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -17,6 +17,7 @@ import { singleDriver } from "./sandbox-driver.js";
 import { recordingAnalytics } from "../test-analytics.js";
 import {
   CARD_SANDBOX_IDLE_MS,
+  CardBranchNotSaved,
   IDLE_COMMIT_ATTEMPTS,
   IDLE_WORK_COMMIT_MESSAGE,
   reapIdleCardSandbox,
@@ -386,4 +387,110 @@ test("a commit git refused is not retried, and the sandbox stays", async () => {
   assert.equal(machine.execCount(), 1);
   assert.deepEqual(machine.destroyed, []);
   assert.equal((await readSandbox(card.sandboxId)).status, "ready");
+});
+
+test("a branch somebody else pushed is kept and is not reported", async () => {
+  const card = await idleCard("idle-moved", CARD_SANDBOX_IDLE_MS + DAY);
+  const parent = await git(card.checkout, ["rev-parse", "HEAD^"]);
+  await git(card.checkout, ["push", "--quiet", remotePath, `HEAD:refs/heads/${card.branch}`]);
+  await db.update(features).set({ pushedHeads: { [card.branch]: { [REPO_URL]: parent } } }).where(eq(features.id, card.featureId));
+  const recorded = recordingAnalytics();
+  const machine = cloneMachine();
+  machine.ctx.analytics = recorded.analytics;
+  const warnings: string[] = [];
+  const warn = console.warn;
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map(String).join(" "));
+  };
+
+  try {
+    assert.equal(await reapIdleCardSandbox(machine.ctx, card.featureId, { push }), false);
+  } finally {
+    console.warn = warn;
+  }
+
+  assert.deepEqual(machine.destroyed, [], "the machine stays until those commits are pulled in");
+  assert.equal((await readSandbox(card.sandboxId)).status, "ready");
+  assert.equal(recorded.exceptions.length, 0);
+  assert.match(warnings.join("\n"), /Pull those commits into this branch, or push manually, then try again/);
+  assert.match(warnings.join("\n"), /keeping its sandbox/);
+  const pushed = await git(remotePath, ["rev-parse", `refs/heads/${card.branch}`]);
+  assert.notEqual(await git(remotePath, ["log", "-1", "--format=%s", pushed]), IDLE_WORK_COMMIT_MESSAGE);
+});
+
+test("a push that races a ref which already exists is retried, then the sandbox goes", async () => {
+  const card = await idleCard("idle-race", CARD_SANDBOX_IDLE_MS + DAY);
+  const recorded = recordingAnalytics();
+  const machine = cloneMachine();
+  machine.ctx.analytics = recorded.analytics;
+  const bin = path.join(dataDir, "git-race-bin");
+  const marker = path.join(dataDir, "git-race-fired");
+  await mkdir(bin, { recursive: true });
+  const realGit = (await exec("which", ["git"])).stdout.trim();
+  await writeFile(
+    path.join(bin, "git"),
+    `#!/bin/sh
+is_push=0
+for arg in "$@"; do
+  [ "$arg" = "push" ] && is_push=1
+done
+if [ "$is_push" = 1 ]; then
+  for arg in "$@"; do
+    case "$arg" in
+      --force-with-lease=*)
+        if [ ! -f ${JSON.stringify(marker).replaceAll('"', "")} ]; then
+          : > ${JSON.stringify(marker)}
+          if ! ${JSON.stringify(realGit)} "$@" >/dev/null 2>/dev/null; then
+            echo "git push failed before the simulated race" >&2
+            exit 1
+          fi
+          echo " ! [remote rejected] abc -> branch (cannot lock ref 'refs/heads/branch': reference already exists)" >&2
+          echo "error: failed to push some refs" >&2
+          exit 1
+        fi
+        ;;
+    esac
+  done
+fi
+exec ${JSON.stringify(realGit)} "$@"
+`,
+  );
+  await chmod(path.join(bin, "git"), 0o755);
+  const pathBefore = process.env.PATH;
+  process.env.PATH = `${bin}:${pathBefore}`;
+
+  try {
+    assert.equal(await reapIdleCardSandbox(machine.ctx, card.featureId, { push }), true);
+  } finally {
+    process.env.PATH = pathBefore;
+  }
+
+  await stat(marker);
+  assert.equal(recorded.exceptions.length, 0, "the retry saved the branch");
+  assert.deepEqual(machine.destroyed, ["box-idle-race"]);
+  assert.equal((await readSandbox(card.sandboxId)).status, "destroyed");
+  const pushed = await git(remotePath, ["rev-parse", `refs/heads/${card.branch}`]);
+  assert.equal(await git(remotePath, ["log", "-1", "--format=%s", pushed]), IDLE_WORK_COMMIT_MESSAGE);
+});
+
+test("a branch name that collides with another ref keeps the sandbox and says which ref", async () => {
+  const card = await idleCard("idle-conflict", CARD_SANDBOX_IDLE_MS + DAY);
+  const nested = "feature/add-ability-to-download-a-site-be4f48df";
+  await git(card.checkout, ["push", "--quiet", remotePath, "HEAD:refs/heads/feature"]);
+  await db.update(features).set({ branchName: nested }).where(eq(features.id, card.featureId));
+  const recorded = recordingAnalytics();
+  const machine = cloneMachine();
+  machine.ctx.analytics = recorded.analytics;
+
+  assert.equal(await reapIdleCardSandbox(machine.ctx, card.featureId, { push }), false);
+
+  assert.deepEqual(machine.destroyed, []);
+  assert.equal((await readSandbox(card.sandboxId)).status, "ready");
+  assert.equal(await remoteHas(nested), false, "the nested branch was not created");
+  assert.equal(recorded.exceptions.length, 1);
+  const error = recorded.exceptions[0]!.error as CardBranchNotSaved;
+  assert.equal(error.incident, true);
+  assert.match(error.message, /refs\/heads\/feature is already a branch/);
+  assert.match(error.message, /Rename one of them, then try again/);
+  assert.equal(recorded.exceptions[0]!.properties?.source, "card_idle_branch_unsaved");
 });
