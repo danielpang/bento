@@ -782,15 +782,16 @@ async function pushBundle(
 
     /**
      * List the remote again on every try. An empty answer is "create
-     * this ref", and the lease below is what makes that safe. Between
-     * the list and the push another push can create the ref (two
-     * servers saving the same card, or GitHub accepting a create the
-     * list had not seen). GitHub then rejects the create with
-     * "cannot lock ref: reference already exists". Local git calls the
-     * same compare-and-swap miss "stale info". Either one is retried
-     * from a fresh list. A name collision ("refs/heads/feature exists;
-     * cannot create refs/heads/feature/...") is not: the path is a file
-     * and a directory at once, and another try creates the same thing.
+     * this ref". Between the list and the push another push can create
+     * it, and GitHub rejects that create with "cannot lock ref:
+     * reference already exists" (local git says "stale info"). The
+     * create is tried again only while the list is still empty. A retry
+     * that finds a tip Bento did not record stops, the same way a lease
+     * mismatch does: adopting that tip and force-updating would delete
+     * the commits that won the race, and the idle reap would then
+     * destroy the machine. A name collision ("refs/heads/feature
+     * exists; cannot create refs/heads/feature/...") is not retried.
+     * The path is a file and a directory at once.
      */
     let raced: string | null = null;
     for (let attempt = 0; attempt <= REF_LOCK_RETRY_DELAYS_MS.length; attempt++) {
@@ -802,17 +803,15 @@ async function pushBundle(
       );
       const actual = remoteRef.trim().split(/\s+/)[0] ?? "";
       /**
-       * The real lease check happens here, against the commit Bento
-       * itself last pushed, because a lease read from the remote a
-       * moment before pushing can never disagree with the remote. A
-       * mismatch means a person or a bot pushed to the branch since:
-       * force pushing over that, rebased history especially, would
-       * silently delete their commits.
+       * The lease is the commit Bento itself last pushed. A mismatch
+       * means a person or a bot pushed since: force pushing over that,
+       * rebased history especially, would delete their commits. The
+       * first attempt may still update a branch Bento has never
+       * recorded. A later attempt may not. The ref it finds was created
+       * by the push this one just lost to.
        */
-      if (options.expectedRemoteHead && actual && actual !== options.expectedRemoteHead) {
-        throw new Error(
-          `the branch moved on GitHub since Bento last pushed it (someone pushed commits to ${branch}). Pull those commits into this branch, or push manually, then try again.`,
-        );
+      if (actual && actual !== options.expectedRemoteHead && (options.expectedRemoteHead || attempt > 0)) {
+        throw new Error(branchMovedMessage(branch));
       }
       try {
         await run(
@@ -836,7 +835,7 @@ async function pushBundle(
         if (!refCreateRaced(text) || attempt === REF_LOCK_RETRY_DELAYS_MS.length) {
           if (refCreateRaced(text)) {
             throw new Error(
-              `the push of ${branch} lost a race with another push that created the branch, and retrying did not clear it. ${text.trim().split("\n").at(-1) ?? text.trim()}`,
+              `the push of ${branch} lost a race with another push that created the branch, and retrying did not clear it. ${refLockDetail(text)}`,
             );
           }
           throw err;
@@ -1133,9 +1132,22 @@ const REF_LOCK_RETRY_DELAYS_MS = [1_000, 2_000];
  * Not the directory collision, which names the ref that is in the way
  * and says "cannot create".
  */
+function branchMovedMessage(branch: string): string {
+  return `the branch moved on GitHub since Bento last pushed it (someone pushed commits to ${branch}). Pull those commits into this branch, or push manually, then try again.`;
+}
+
 function refCreateRaced(text: string): boolean {
   if (/exists; cannot create/.test(text)) return false;
   return /reference already exists|\(stale info\)/i.test(text);
+}
+
+/** The rejection itself, not git's trailing "failed to push some refs". */
+function refLockDetail(text: string): string {
+  const line = text
+    .split("\n")
+    .map((entry) => entry.trim())
+    .find((entry) => /cannot lock ref|reference already exists|\(stale info\)/i.test(entry));
+  return line || text.trim();
 }
 
 /**

@@ -389,19 +389,16 @@ async function commitLeftovers(
  * Whether another exec might commit what this one did not.
  *
  * A refused connection never started the script. A negative exit is
- * the socket, not git. The reap's own timeout counts only when the
- * output still says the connection was being retried, because that is
- * the ladder being cut off, and a git commit that simply ran long is
- * not. A machine that is gone is not tried again.
+ * the socket, not git. A machine that is gone is not tried again.
+ * The reap's own timeout is not tried again in this sweep either:
+ * one attempt already waited out the handshake ladder, and two more
+ * would hold every later card in the nightly sweep behind it. The
+ * next sweep starts a fresh exec.
  */
 function commitExecIsTransient(result: { exitCode: number; stderr: string; neverStarted?: "refused" | "gone" }): boolean {
-  if (result.neverStarted === "gone") return false;
+  if (result.neverStarted === "gone" || isExecTimeout(result.stderr)) return false;
   if (result.neverStarted === "refused") return true;
-  if (result.exitCode < 0 && !isExecTimeout(result.stderr)) return true;
-  return (
-    isExecTimeout(result.stderr) &&
-    /did not accept the exec connection|non-101 status code|aborted due to timeout/i.test(result.stderr)
-  );
+  return result.exitCode < 0;
 }
 
 /** A throw from exec, before a stream, that is the same transport failure. */
