@@ -505,9 +505,29 @@ reap wakes the machine if it hibernated, commits whatever the agent left
 uncommitted (`IDLE_WORK_COMMIT_MESSAGE`, hooks skipped), and pushes the
 branch with the stage notes kept (`pushBranches` with
 `includeStageNotes`) under the same lease a publish holds
-(`featureBranchLease`, recorded by `recordFeaturePush`). A card it cannot
-save keeps its machine, captured as `card_idle_branch_unsaved`. The
-destroy happens under the card's row lock, the one `startRunIfIdle`
+(`featureBranchLease`, recorded by `recordFeaturePush`). The commit exec
+is the driver's, so a sprite's handshake ladder applies. A bare
+"The operation was aborted due to timeout" (no `Network error:` prefix)
+is the same transient failure as the wrapped one: the lookup retries it,
+and the handshake recovery does not stop on it. The reap also starts
+the commit again when that exec still ends without having run
+(`IDLE_COMMIT_ATTEMPTS`). A commit git itself refused is not retried,
+and neither is one the reap's own time limit stopped: that attempt
+already waited out the handshake ladder, and repeating it would hold
+the rest of the sweep. The next sweep starts it again. A push rejected
+because the branch moved since Bento last pushed it is the lease
+working: the machine stays, the log line says to pull those commits
+into the branch or push manually, and it is not sent to error
+tracking. A push GitHub rejects with "reference already exists" had
+been told the ref was absent. The create is tried again only while
+the list is still empty. A retry that finds a tip Bento did not record
+stops the way a moved branch does, so the commits that won the race
+are not overwritten. A rejection of "exists; cannot create" is a
+branch name that is also a folder of branches, which another try
+cannot fix: the machine stays and the failure names the ref in the
+way. Anything else it cannot save keeps the machine too, captured as
+`card_idle_branch_unsaved`, and the next sweep asks again. The destroy
+happens under the card's row lock, the one `startRunIfIdle`
 takes, after reading the card and its rows again, because the save can
 take minutes and wakes the machine into a new generation. On a host
 driver only the container goes; the worktree stays on disk untouched.

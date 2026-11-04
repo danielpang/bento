@@ -1,7 +1,8 @@
+import { setTimeout as sleep } from "node:timers/promises";
 import { and, asc, eq, gte, inArray, isNotNull, lt, ne, notInArray, or, sql } from "drizzle-orm";
 import { agentRuns, features, repositories, sandboxes } from "@bento/db";
 import { parseRepoUrl, type GitHubPublisher } from "@bento/github";
-import { collectExec, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
+import { collectExec, isExecTimeout, type SandboxDriver, type SandboxHandle } from "@bento/sandbox";
 import type { AppContext } from "../context.js";
 import { githubConnectionFor } from "../github.js";
 import { SandboxGone, wakeSwarmSandbox } from "./hibernate-sandbox.js";
@@ -38,11 +39,18 @@ export interface IdleCardPushOptions {
 /**
  * The card's branch could not be put on GitHub, so its machine is still
  * the only copy of its work, and stays.
+ *
+ * `incident` is false when a person pushed commits Bento does not have.
+ * The lease held, which is what it is for. The machine stays either
+ * way. That case is logged, not reported.
  */
 export class CardBranchNotSaved extends Error {
-  constructor(featureId: string, reason: string) {
+  readonly incident: boolean;
+
+  constructor(featureId: string, reason: string, incident = true) {
     super(`card ${featureId}'s branch is not on GitHub: ${reason}`);
     this.name = "CardBranchNotSaved";
+    this.incident = incident;
   }
 }
 
@@ -93,9 +101,13 @@ export async function reapIdleCardSandboxes(
  * the machine is often the only copy of the card's branch: a card
  * pushes only when it publishes. So first anything the agent left
  * uncommitted is committed, and the branch, Bento's stage write-ups
- * included, is pushed to GitHub under the lease a publish holds. A
- * card that cannot be saved (no GitHub connection, a repository with no
- * remote, a push GitHub refused) keeps its machine. The next run on the
+ * included, is pushed to GitHub under the lease a publish holds. The
+ * commit is tried again when the exec fails before it ran (a refused
+ * sandbox connection, including one the driver's own ladder gave up
+ * on). A card that still cannot be saved (no GitHub connection, a
+ * repository with no remote, a push GitHub refused, a commit that
+ * exhausted those tries) keeps its machine: the reap does not idle it,
+ * and the next boot or nightly sweep asks again. The next run on the
  * card makes a new machine from that branch (`cardRestoreBundles`), and
  * a later publish replaces it with the write-ups taken out.
  *
@@ -117,9 +129,15 @@ export async function reapIdleCardSandbox(
   try {
     await saveCardBranch(ctx, featureId, rows, options.push ?? {});
   } catch (err) {
+    // The destroy below is not reached. The machine stays the copy of
+    // the branch until a later sweep manages to save it. A branch a
+    // person pushed is the lease working: the warning is the report,
+    // and it already says to pull those commits in or push manually.
     if (!(err instanceof CardBranchNotSaved)) throw err;
     console.warn(`${err.message}; keeping its sandbox`);
-    ctx.analytics?.captureException(err, null, null, { feature_id: featureId, source: "card_idle_branch_unsaved" });
+    if (err.incident) {
+      ctx.analytics?.captureException(err, null, null, { feature_id: featureId, source: "card_idle_branch_unsaved" });
+    }
     return false;
   }
 
@@ -285,16 +303,50 @@ async function saveCardBranch(
       ...(push.remoteUrl ? { remoteUrl: push.remoteUrl } : {}),
     });
     if (outcome.failures.length > 0) {
-      throw new CardBranchNotSaved(featureId, outcome.failures.map((f) => `${f.name}: ${f.reason}`).join("; "));
+      const reason = outcome.failures.map((f) => `${f.name}: ${f.reason}`).join("; ");
+      // Every failure is someone else's commits on the branch. The
+      // sentence tells them what to do. Anything else is an incident,
+      // including one repository that moved and another that did not.
+      const incident = outcome.failures.some((failure) => !failure.reason.includes("the branch moved on GitHub"));
+      throw new CardBranchNotSaved(featureId, reason, incident);
     }
   }
 }
+
+/**
+ * How many times the commit exec is started.
+ *
+ * The sprite driver's handshake ladder already runs inside one exec.
+ * These are further tries, for an exec that still ended without the
+ * commit having run. A commit git itself refused is not one of them.
+ */
+export const IDLE_COMMIT_ATTEMPTS = 3;
+
+/** Pauses between those tries. The driver's own ladder already waited. */
+const IDLE_COMMIT_RETRY_DELAYS_MS = [2_000, 8_000];
+
+/**
+ * Bound on one commit exec.
+ *
+ * The sprite handshake ladder waits out several upgrades, and a lookup
+ * that aborts is tried again inside that same exec. Two minutes is
+ * shorter than one connect that never opens (two minutes on its own)
+ * plus those waits, so the reap's timer could end a ladder that was
+ * still retrying. Six minutes covers that and a git commit of a dirty
+ * tree. A lookup that sits out the client's fifteen minute timeout is
+ * still cut here, and the next attempt starts a fresh exec.
+ */
+const IDLE_COMMIT_TIMEOUT_MS = 6 * 60_000;
 
 /**
  * Commits whatever the agent left uncommitted in one repository, so the
  * push carries it. A repository the machine has no checkout of has
  * nothing to commit. Hooks are skipped: the commit is Bento's, and a
  * hook that fails would keep the machine for good.
+ *
+ * The script is safe to run again. It commits only when the tree is
+ * dirty, so a retry after a commit that landed but whose exit was lost
+ * finds nothing to do.
  */
 async function commitLeftovers(
   featureId: string,
@@ -311,11 +363,50 @@ async function commitLeftovers(
     `  git -c user.name=Bento -c user.email=no-reply@usebento.ai commit --no-verify -q -m ${shellQuote(IDLE_WORK_COMMIT_MESSAGE)}`,
     `fi`,
   ].join("\n");
-  const result = await collectExec(driver.exec(handle, ["sh", "-c", script], { timeoutMs: 120_000 }));
-  if (result.exitCode !== 0) {
-    const reason = result.stderr.trim().split("\n").at(-1) || `exit code ${result.exitCode}`;
-    throw new CardBranchNotSaved(featureId, `uncommitted files in ${repoName} could not be committed: ${reason}`);
+  let lastReason = "the commit did not finish";
+  for (let attempt = 0; attempt < IDLE_COMMIT_ATTEMPTS; attempt++) {
+    if (attempt > 0) await sleep(IDLE_COMMIT_RETRY_DELAYS_MS[attempt - 1]!);
+    try {
+      const result = await collectExec(driver.exec(handle, ["sh", "-c", script], { timeoutMs: IDLE_COMMIT_TIMEOUT_MS }));
+      if (result.exitCode === 0) return;
+      lastReason = result.stderr.trim().split("\n").at(-1) || `exit code ${result.exitCode}`;
+      if (!commitExecIsTransient(result)) break;
+    } catch (err) {
+      // A programming error, or a driver that refused for a reason
+      // another try will not change, still fails the save. The reap
+      // keeps the machine either way.
+      if (!thrownExecIsTransient(err)) throw err;
+      lastReason = err instanceof Error ? err.message : String(err);
+    }
+    if (attempt < IDLE_COMMIT_ATTEMPTS - 1) {
+      console.warn(`card ${featureId}: committing uncommitted files in ${repoName} failed (${lastReason}); retrying`);
+    }
   }
+  throw new CardBranchNotSaved(featureId, `uncommitted files in ${repoName} could not be committed: ${lastReason}`);
+}
+
+/**
+ * Whether another exec might commit what this one did not.
+ *
+ * A refused connection never started the script. A negative exit is
+ * the socket, not git. A machine that is gone is not tried again.
+ * The reap's own timeout is not tried again in this sweep either:
+ * one attempt already waited out the handshake ladder, and two more
+ * would hold every later card in the nightly sweep behind it. The
+ * next sweep starts a fresh exec.
+ */
+function commitExecIsTransient(result: { exitCode: number; stderr: string; neverStarted?: "refused" | "gone" }): boolean {
+  if (result.neverStarted === "gone" || isExecTimeout(result.stderr)) return false;
+  if (result.neverStarted === "refused") return true;
+  return result.exitCode < 0;
+}
+
+/** A throw from exec, before a stream, that is the same transport failure. */
+function thrownExecIsTransient(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  return /aborted due to timeout|non-101 status code|WebSocket error|ECONNRESET|ETIMEDOUT|ECONNREFUSED|EAI_AGAIN|socket hang up|fetch failed|did not accept the exec connection/i.test(
+    err.message,
+  );
 }
 
 function shellQuote(value: string): string {
