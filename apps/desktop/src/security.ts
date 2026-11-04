@@ -1,5 +1,5 @@
 import path from "node:path";
-import type { DesktopSettings } from "./contracts.js";
+import type { DesktopSettings, LoginHint } from "./contracts.js";
 
 export const LAUNCHER_ORIGIN = "bento-desktop://launcher";
 
@@ -46,7 +46,13 @@ export function validateSettings(input: unknown): DesktopSettings {
   // anything but an explicit false: on, so keys stay out of sandboxes
   // unless the user chose otherwise.
   const modelProxy = value.modelProxy !== false;
-  return { mode, sandbox, dataDir, serverUrl, databaseUrl, sandboxImage, betaFeatures, modelProxy };
+  const hint = value.loginHint && typeof value.loginHint === "object" ? value.loginHint as Record<string, unknown> : {};
+  const email = typeof hint.email === "string" ? hint.email.trim() : "";
+  const loginHint: LoginHint = {
+    ...(email.length <= 254 && /^[^\s@\0]+@[^\s@\0]+$/.test(email) ? { email } : {}),
+    ...(hint.provider === "github" ? { provider: hint.provider } : {}),
+  };
+  return { mode, sandbox, dataDir, serverUrl, databaseUrl, sandboxImage, betaFeatures, modelProxy, ...(Object.keys(loginHint).length ? { loginHint } : {}) };
 }
 
 export function isApiPath(pathname: string): boolean {

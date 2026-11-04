@@ -1,8 +1,9 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { authClient, signIn, signUp } from "../auth-client.js";
 import { BrandLockup } from "./BrandLockup.js";
 import { desktop } from "../desktop.js";
 import { GitHubIcon, GoogleIcon } from "./ProviderIcons.js";
+import { withoutAutoProvider } from "../device-approval.js";
 
 /**
  * Which social logins to offer.
@@ -12,17 +13,20 @@ import { GitHubIcon, GoogleIcon } from "./ProviderIcons.js";
  * invitation link, and the device approval page. Two of those rendered
  * it with no answer, and a gate that reads "unknown" as "none" left an
  * invited teammate who signed up with GitHub no way in at all.
+ *
+ * Undefined while the server has not answered, null once it answered
+ * nothing usable, so a caller can wait for the answer before deciding.
  */
 function useSocialProviders(supplied?: { github: boolean; google: boolean }) {
-  const [discovered, setDiscovered] = useState<{ github: boolean; google: boolean } | undefined>(undefined);
+  const [discovered, setDiscovered] = useState<{ github: boolean; google: boolean } | null | undefined>(undefined);
   useEffect(() => {
     if (supplied) return;
     void fetch("/api/health")
       .then((res) => (res.ok ? res.json() : null))
       .then((body: { social?: { github: boolean; google: boolean } } | null) => {
-        if (body?.social) setDiscovered(body.social);
+        setDiscovered(body?.social ?? null);
       })
-      .catch(() => setDiscovered(undefined));
+      .catch(() => setDiscovered(null));
   }, [supplied]);
   return supplied ?? discovered;
 }
@@ -34,6 +38,7 @@ export function SignIn({
   lockEmail = false,
   callbackURL = "/",
   note,
+  autoProvider,
 }: {
   social?: { github: boolean; google: boolean };
   /** Open on sign up instead: the invitation page knows the invitee has no account yet. */
@@ -55,8 +60,16 @@ export function SignIn({
   callbackURL?: string;
   /** Replaces the tagline, so the invitation page can say whose team this is. */
   note?: string;
+  /**
+   * Go straight to this provider, once, when the server offers it: the
+   * desktop app's GitHub button. Otherwise the form shows as usual.
+   */
+  autoProvider?: "github";
 }) {
   const social = useSocialProviders(supplied);
+  // Decided once per page, so StrictMode's second effect run and a
+  // later render never start a second OAuth redirect.
+  const autoStarted = useRef(false);
   const [mode, setMode] = useState<"in" | "up">(initialMode);
   const [email, setEmail] = useState(initialEmail);
   const [password, setPassword] = useState("");
@@ -67,6 +80,25 @@ export function SignIn({
   const [pendingEmail, setPendingEmail] = useState("");
   const [notice, setNotice] = useState("");
   const [forgot, setForgot] = useState(false);
+
+  useEffect(() => {
+    if (!autoProvider || autoStarted.current || social === undefined) return;
+    autoStarted.current = true;
+    // Back or a reload comes back to the form, not to GitHub again.
+    window.history.replaceState(window.history.state, "", withoutAutoProvider(window.location.href));
+    if (!social?.[autoProvider]) return;
+    void startSocial(autoProvider);
+  }, [autoProvider, social]);
+
+  async function startSocial(provider: "github") {
+    setError("");
+    try {
+      const result = await signIn.social({ provider, callbackURL });
+      if (result?.error) setError(result.error.message || "Could not start sign in with GitHub. Try again.");
+    } catch {
+      setError("Could not start sign in with GitHub. Try again.");
+    }
+  }
 
   async function submit(event: FormEvent) {
     event.preventDefault();
