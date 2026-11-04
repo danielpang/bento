@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
 import { authClient } from "../auth-client.js";
-import { useSession } from "../auth-client.js";
+import { signOut, useSession } from "../auth-client.js";
 import { BrandLockup } from "./BrandLockup.js";
 import { CenteredPanelSkeleton } from "./Skeleton.js";
 import { SignIn } from "./SignIn.js";
-import { deviceApprovalCallbackUrl } from "../device-approval.js";
+import { deviceApprovalCallbackUrl, deviceSignInAgainUrl, signedInAsOther } from "../device-approval.js";
 
 type Phase = "entering" | "claiming" | "ready" | "done" | "denied" | "error";
 
@@ -18,10 +18,13 @@ type Phase = "entering" | "claiming" | "ready" | "done" | "denied" | "error";
  */
 export function DeviceApproval() {
   const initial = new URLSearchParams(window.location.search).get("user_code") ?? "";
+  // The address the desktop app's sign in card was given, if any.
+  const requestedEmail = new URLSearchParams(window.location.search).get("email") ?? "";
   const [code, setCode] = useState(initial);
   const [phase, setPhase] = useState<Phase>("entering");
   const [message, setMessage] = useState("");
   const [deciding, setDeciding] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
   const { data: session, isPending } = useSession();
 
   useEffect(() => {
@@ -62,6 +65,16 @@ export function DeviceApproval() {
     }
   }
 
+  /** "Not you?": sign out and come back to this code, where the sign in form shows. */
+  async function signInAsSomeoneElse() {
+    setSigningOut(true);
+    try {
+      await signOut();
+    } finally {
+      window.location.assign(deviceSignInAgainUrl(code, requestedEmail));
+    }
+  }
+
   if (isPending) return <CenteredPanelSkeleton />;
   if (!session) {
     // The desktop app's sign in card passes what the person already told it.
@@ -70,7 +83,7 @@ export function DeviceApproval() {
     return (
       <SignIn
         callbackURL={deviceApprovalCallbackUrl(code)}
-        initialEmail={params.get("email") ?? ""}
+        initialEmail={requestedEmail}
         {...(provider === "github" ? { autoProvider: provider } : {})}
       />
     );
@@ -104,6 +117,18 @@ export function DeviceApproval() {
         {phase === "ready" && (
           <>
             <p className="muted">A Bento application is asking to sign in as you.</p>
+            <p className="muted">
+              Signing in as <strong>{session.user.email}</strong>.{" "}
+              <button className="btn-link" disabled={signingOut} onClick={() => void signInAsSomeoneElse()}>
+                Not you?
+              </button>
+            </p>
+            {signedInAsOther(requestedEmail, session.user.email) && (
+              <p className="warn">
+                The app asked to sign in as <strong>{requestedEmail}</strong>, but this browser is signed in as{" "}
+                <strong>{session.user.email}</strong>.
+              </p>
+            )}
             <div className="user-code">{code}</div>
             <div className="actions actions-centered">
               <button className="btn btn-primary" disabled={deciding} onClick={() => decide(true)}>

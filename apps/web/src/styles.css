@@ -3761,12 +3761,6 @@ a.pr-row:hover .pr-external {
     overflow: hidden;
   }
 
-  .workspace-nav > .spend-button .spend-button-label {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
   .workspace-nav > .topbar-spacer,
   .workspace-toolbar > .topbar-spacer {
     display: none;

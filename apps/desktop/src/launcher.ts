@@ -10,6 +10,10 @@ const actions: Record<DesktopMode, { id: string; label: string }> = {
   remote: { id: "connect", label: "Continue with email" },
 };
 let pressed: DesktopMode = "local";
+// The button that started the current start or sign in, which alone says "Connecting...".
+let pressedButton = actions.local.id;
+// Every submit button and its resting label. GitHub's label is a span beside its icon.
+const buttonLabels: Record<string, string> = { start: actions.local.label, connect: actions.remote.label, "connect-github": "GitHub" };
 let runningLocal: DesktopStatus["local"];
 let busy = false;
 
@@ -56,21 +60,26 @@ function formSettings(mode: DesktopMode, hint?: LoginHint): DesktopSettings {
   };
 }
 
+/** Sets a button's text, keeping any icon beside a `.button-label` span. */
+function setButtonLabel(id: string, text: string) {
+  const button = element(id);
+  (button.querySelector(".button-label") ?? button).textContent = text;
+}
+
 function renderStartLabel() {
-  if (busy && pressed === "local") return;
+  if (busy && pressedButton === actions.local.id) return;
   const restart = runningLocal && localSettingsChanged(runningLocal, formSettings("local"));
-  element(actions.local.id).textContent = restart ? "Restart to save these settings" : actions.local.label;
+  setButtonLabel(actions.local.id, restart ? "Restart to save these settings" : actions.local.label);
 }
 
 function renderStatus(status: DesktopStatus) {
   element("status-message").textContent = status.message;
   element("status-message").parentElement!.classList.toggle("error", status.phase === "error");
   busy = status.phase === "starting" || status.phase === "login";
-  element<HTMLButtonElement>("connect-github").disabled = busy;
   field("login-email").disabled = busy;
-  for (const [mode, action] of Object.entries(actions) as [DesktopMode, { id: string; label: string }][]) {
-    element<HTMLButtonElement>(action.id).disabled = busy;
-    element(action.id).textContent = busy && mode === pressed ? "Connecting..." : action.label;
+  for (const [id, label] of Object.entries(buttonLabels)) {
+    element<HTMLButtonElement>(id).disabled = busy;
+    setButtonLabel(id, busy && id === pressedButton ? "Connecting..." : label);
   }
   element("cancel").hidden = !busy;
   element("show-console").hidden = status.phase !== "ready";
@@ -98,6 +107,7 @@ async function start() {
   const settings = await bridge.settings();
   fillForm(settings);
   pressed = settings.mode;
+  pressedButton = actions[pressed].id;
   element("sandbox").addEventListener("change", renderIsolation);
   element("connection-form").addEventListener("input", renderStartLabel);
   element("connection-form").addEventListener("change", renderStartLabel);
@@ -108,11 +118,14 @@ async function start() {
     event.preventDefault();
     const submitter = (event as SubmitEvent).submitter?.id;
     pressed = submitter === "start" ? "local" : "remote";
+    pressedButton = submitter && submitter in buttonLabels ? submitter : actions[pressed].id;
     void bridge.connect(formSettings(pressed, pressed === "remote" ? loginHint(submitter) : undefined)).catch(showError);
   });
   // Enter in the email field means this card's button, not the first submit button in the form (Start).
   element("login-email").addEventListener("keydown", (event) => {
-    if ((event as KeyboardEvent).key === "Enter") { event.preventDefault(); element<HTMLButtonElement>("connect").click(); }
+    const key = event as KeyboardEvent;
+    // Enter that confirms an IME composition is not a submit.
+    if (key.key === "Enter" && !key.isComposing) { event.preventDefault(); element<HTMLButtonElement>("connect").click(); }
   });
   element("choose-directory").addEventListener("click", () => void bridge.chooseDirectory().then((directory) => { if (directory) { field("data-dir").value = directory; renderStartLabel(); } }).catch(showError));
   element("cancel").addEventListener("click", () => void bridge.cancel().catch(showError));
