@@ -7,6 +7,8 @@ import {
   importLinearIssue,
   linearConnectionFor,
   linearConnectionRow,
+  linearImportSources,
+  pickImportProject,
   resolveIssueTarget,
   resolveTeamState,
   stateTypeForStatus,
@@ -18,6 +20,9 @@ import { advanceFeature } from "./gate-evaluator.js";
 import { INTERACTIVE_POLL_SECONDS } from "./queue.js";
 
 const BENTO_LABEL = "bento";
+
+/** Linear state types that are still waiting for work: what a followed Linear project imports. */
+const OPEN_STATE_TYPES = ["triage", "backlog", "unstarted"];
 
 function linkOrgFilter(organizationId: string | null) {
   return organizationId
@@ -32,39 +37,53 @@ function mappingOrgFilter(organizationId: string | null) {
 }
 
 /**
- * Pulls each mapped team's backlog into its project. Runs from Sync now
- * and from the cron sweep, which is what keeps deployments without a
- * reachable webhook (local mode above all) in step.
+ * Pulls the open issues of each project's chosen Linear project into
+ * it. Runs from Sync now and from the cron sweep, which is what keeps
+ * deployments without a reachable webhook (local mode above all) in
+ * step. A team mapping imports nothing: a whole team's backlog is not
+ * work anyone chose for Bento.
  */
 export async function syncLinearBacklog(ctx: AppContext, organizationId: string | null): Promise<number> {
   const connection = await linearConnectionFor(ctx, organizationId);
   if (!connection) return 0;
-  const mappings = await ctx.db
-    .select()
-    .from(linearTeamMappings)
-    .where(mappingOrgFilter(organizationId));
 
   let imported = 0;
-  for (const mapping of mappings) {
-    let after: string | undefined;
-    // Bounded paging so one enormous backlog cannot pin the worker.
-    for (let page = 0; page < 20; page += 1) {
-      const result = await connection.client.issues({
-        teamId: mapping.linearTeamId,
-        stateTypes: ["backlog", "unstarted"],
-        after,
-      });
-      for (const issue of result.issues) {
-        const featureId = await importLinearIssue(ctx, {
-          organizationId,
-          projectId: mapping.projectId,
-          issue,
-        });
-        if (featureId) imported += 1;
-      }
-      if (!result.hasNextPage || !result.endCursor) break;
-      after = result.endCursor;
+  let failure: unknown = null;
+  for (const source of await linearImportSources(ctx, organizationId)) {
+    // One source Linear refuses (a deleted project, lost access) must
+    // not keep the others from syncing.
+    try {
+      imported += await syncImportSource(ctx, connection.client, organizationId, source);
+    } catch (err) {
+      failure ??= err;
     }
+  }
+  if (failure) throw failure;
+  return imported;
+}
+
+async function syncImportSource(
+  ctx: AppContext,
+  client: LinearClient,
+  organizationId: string | null,
+  source: { id: string; linearImportTeamId: string; linearImportProjectId: string },
+): Promise<number> {
+  let imported = 0;
+  let after: string | undefined;
+  // Bounded paging so one enormous backlog cannot pin the worker.
+  for (let page = 0; page < 20; page += 1) {
+    const result = await client.issues({
+      teamId: source.linearImportTeamId,
+      projectId: source.linearImportProjectId,
+      stateTypes: OPEN_STATE_TYPES,
+      after,
+    });
+    for (const issue of result.issues) {
+      const featureId = await importLinearIssue(ctx, { organizationId, projectId: source.id, issue });
+      if (featureId) imported += 1;
+    }
+    if (!result.hasNextPage || !result.endCursor) break;
+    after = result.endCursor;
   }
   return imported;
 }
@@ -78,10 +97,10 @@ export async function linearConnectedOrgs(ctx: AppContext): Promise<(string | nu
 }
 
 /**
- * Applies one verified webhook event. Import rules match the sweep: a
- * mapped team's new backlog issue comes in on its own, and the bento
- * label pulls in anything else the mapping or default project can
- * place. Updates only touch the title, plus the echo check that keeps
+ * Applies one verified webhook event. Import rules match the sweep: an
+ * open issue in the Linear project a Bento project follows comes in,
+ * created or updated, and the bento label pulls in anything else the
+ * mapping or default project can place. Updates only touch the title, plus the echo check that keeps
  * our own state pushes from bouncing back as inbound changes.
  */
 export async function handleLinearInbound(
@@ -130,13 +149,22 @@ export async function handleLinearInbound(
     .limit(1);
 
   const hasBentoLabel = (issue.labels ?? []).some((label) => label.name.toLowerCase() === BENTO_LABEL);
-  const isBacklogState = !issue.state || issue.state.type === "backlog" || issue.state.type === "unstarted";
+  const isOpenState = !issue.state || OPEN_STATE_TYPES.includes(issue.state.type);
+  const sourceProjectId = pickImportProject(await linearImportSources(ctx, organizationId), {
+    teamId: issue.teamId,
+    projectId: issue.projectId,
+  });
 
   let projectId: string | null = null;
   if (hasBentoLabel) {
-    projectId = mapping?.projectId ?? (await defaultProjectFor(ctx, organizationId));
-  } else if (mapping && action === "create" && isBacklogState) {
-    projectId = mapping.projectId;
+    // An issue in a followed Linear project belongs to that project
+    // whatever its labels; the mapping and default place the rest.
+    projectId = sourceProjectId ?? mapping?.projectId ?? (await defaultProjectFor(ctx, organizationId));
+  } else if (sourceProjectId && isOpenState) {
+    // An update counts too: moving an issue into the Linear project a
+    // Bento project follows is how most issues arrive there, and the
+    // sweep would import it within minutes anyway.
+    projectId = sourceProjectId;
   }
   if (!projectId) return;
 

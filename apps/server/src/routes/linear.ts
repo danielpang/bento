@@ -7,7 +7,7 @@ import { linearConnections, linearIssueLinks, linearTeamMappings, member, projec
 import { LinearClient } from "@bento/linear";
 import type { AppContext } from "../context.js";
 import { actor, activeOrg } from "../middleware/actor.js";
-import { tenantDb as db } from "../middleware/tenant.js";
+import { deferAfterCommit, tenantDb as db } from "../middleware/tenant.js";
 import { canAccessProject } from "../access.js";
 import { maskSecret } from "../secrets.js";
 import { importLinearIssue, linearConnectionFor, linearConnectionRow } from "../linear.js";
@@ -111,6 +111,18 @@ export function linearRoutes(ctx: AppContext) {
     await db(c, ctx)
       .delete(linearConnections)
       .where(orgFilter(linearConnections.organizationId, access.organizationId));
+    // A source names a team and project in this workspace; another
+    // workspace connected later must not inherit it.
+    await db(c, ctx)
+      .update(projects)
+      .set({
+        linearImportTeamId: null,
+        linearImportTeamKey: null,
+        linearImportTeamName: null,
+        linearImportProjectId: null,
+        linearImportProjectName: null,
+      })
+      .where(orgFilter(projects.organizationId, access.organizationId));
     return c.json({ ok: true });
   });
 
@@ -271,6 +283,8 @@ export function linearRoutes(ctx: AppContext) {
         createIssues: z.boolean().optional(),
         teamId: z.string().min(1).nullable().optional(),
         linearProjectId: z.string().min(1).nullable().optional(),
+        importTeamId: z.string().min(1).nullable().optional(),
+        importLinearProjectId: z.string().min(1).nullable().optional(),
       }),
     ),
     async (c) => {
@@ -291,61 +305,38 @@ export function linearRoutes(ctx: AppContext) {
 
       if (body.createIssues !== undefined) values.linearCreateIssues = body.createIssues;
 
-      // The team a Linear project is checked against: the one this
-      // request sets, or the stored one when it leaves the team alone.
-      let teamId = project.linearTeamId;
-
-      if (body.teamId !== undefined) {
-        if (body.teamId === null) {
-          values.linearTeamId = null;
-          values.linearTeamKey = null;
-          values.linearTeamName = null;
-          // A Linear project belongs to a team, so it cannot outlive one.
-          values.linearProjectId = null;
-          values.linearProjectName = null;
-          teamId = null;
-        } else {
-          const client = await linearConnectionFor(ctx, access.organizationId);
-          if (!client) return c.json({ error: "connect Linear first" }, 409);
-          let team;
-          try {
-            team = (await client.client.teams()).find((t) => t.id === body.teamId);
-          } catch {
-            return c.json({ error: "Linear did not answer. Check the API key and try again." }, 502);
-          }
-          if (!team) return c.json({ error: "not found" }, 404);
-          values.linearTeamId = team.id;
-          values.linearTeamKey = team.key;
-          values.linearTeamName = team.name;
-          if (team.id !== project.linearTeamId) {
-            // The stored project belonged to the team being replaced.
-            values.linearProjectId = null;
-            values.linearProjectName = null;
-          }
-          teamId = team.id;
-        }
+      // The outbound team and project, then the inbound ones: the same
+      // rules on two sets of columns.
+      const outbound = await applyTeamAndProject(ctx, access.organizationId, {
+        teamId: body.teamId,
+        linearProjectId: body.linearProjectId,
+        storedTeamId: project.linearTeamId,
+      });
+      if ("error" in outbound) return c.json({ error: outbound.error }, outbound.status);
+      if (outbound.team !== undefined) {
+        values.linearTeamId = outbound.team?.id ?? null;
+        values.linearTeamKey = outbound.team?.key ?? null;
+        values.linearTeamName = outbound.team?.name ?? null;
+      }
+      if (outbound.project !== undefined) {
+        values.linearProjectId = outbound.project?.id ?? null;
+        values.linearProjectName = outbound.project?.name ?? null;
       }
 
-      if (body.linearProjectId !== undefined) {
-        if (body.linearProjectId === null) {
-          values.linearProjectId = null;
-          values.linearProjectName = null;
-        } else {
-          if (!teamId) return c.json({ error: "pick a team first" }, 400);
-          const client = await linearConnectionFor(ctx, access.organizationId);
-          if (!client) return c.json({ error: "connect Linear first" }, 409);
-          let linearProject;
-          try {
-            linearProject = (await client.client.teamProjects(teamId)).find(
-              (p) => p.id === body.linearProjectId,
-            );
-          } catch {
-            return c.json({ error: "Linear did not answer. Check the API key and try again." }, 502);
-          }
-          if (!linearProject) return c.json({ error: "not found" }, 404);
-          values.linearProjectId = linearProject.id;
-          values.linearProjectName = linearProject.name;
-        }
+      const inbound = await applyTeamAndProject(ctx, access.organizationId, {
+        teamId: body.importTeamId,
+        linearProjectId: body.importLinearProjectId,
+        storedTeamId: project.linearImportTeamId,
+      });
+      if ("error" in inbound) return c.json({ error: inbound.error }, inbound.status);
+      if (inbound.team !== undefined) {
+        values.linearImportTeamId = inbound.team?.id ?? null;
+        values.linearImportTeamKey = inbound.team?.key ?? null;
+        values.linearImportTeamName = inbound.team?.name ?? null;
+      }
+      if (inbound.project !== undefined) {
+        values.linearImportProjectId = inbound.project?.id ?? null;
+        values.linearImportProjectName = inbound.project?.name ?? null;
       }
 
       const [updated] = await db(c, ctx)
@@ -354,6 +345,20 @@ export function linearRoutes(ctx: AppContext) {
         .where(eq(projects.id, projectId))
         .returning();
       if (!updated) return c.json({ error: "not found" }, 404);
+
+      // A source just named: bring in what is already open there now
+      // rather than at the next sweep. After the commit, so the job
+      // reads the source this request wrote.
+      const sourceChanged =
+        updated.linearImportTeamId !== project.linearImportTeamId ||
+        updated.linearImportProjectId !== project.linearImportProjectId;
+      if (sourceChanged && updated.linearImportProjectId) {
+        const organizationId = access.organizationId;
+        deferAfterCommit(c, async () => {
+          await ctx.boss.send("linear.backlog-sync", { organizationId });
+        });
+      }
+
       return c.json({
         linearCreateIssues: updated.linearCreateIssues,
         linearTeamId: updated.linearTeamId,
@@ -361,6 +366,11 @@ export function linearRoutes(ctx: AppContext) {
         linearTeamName: updated.linearTeamName,
         linearProjectId: updated.linearProjectId,
         linearProjectName: updated.linearProjectName,
+        linearImportTeamId: updated.linearImportTeamId,
+        linearImportTeamKey: updated.linearImportTeamKey,
+        linearImportTeamName: updated.linearImportTeamName,
+        linearImportProjectId: updated.linearImportProjectId,
+        linearImportProjectName: updated.linearImportProjectName,
       });
     },
   );
@@ -447,6 +457,77 @@ export function linearRoutes(ctx: AppContext) {
   });
 
   return routes;
+}
+
+interface TeamAndProjectChange {
+  /** Undefined leaves the stored value alone; null clears it. */
+  team?: { id: string; key: string; name: string } | null;
+  project?: { id: string; name: string } | null;
+}
+
+/**
+ * Checks a team and Linear project pair against Linear and says what to
+ * store. Shared by the outbound and inbound settings, which follow the
+ * same rules: a Linear project belongs to a team, so clearing or
+ * replacing the team clears the project, and a project is only taken
+ * from the team it will be stored with.
+ */
+async function applyTeamAndProject(
+  ctx: AppContext,
+  organizationId: string | null,
+  input: {
+    teamId: string | null | undefined;
+    linearProjectId: string | null | undefined;
+    storedTeamId: string | null;
+  },
+): Promise<TeamAndProjectChange | { error: string; status: 400 | 404 | 409 | 502 }> {
+  const result: TeamAndProjectChange = {};
+  // The team a Linear project is checked against: the one this request
+  // sets, or the stored one when it leaves the team alone.
+  let teamId = input.storedTeamId;
+
+  if (input.teamId !== undefined) {
+    if (input.teamId === null) {
+      result.team = null;
+      result.project = null;
+      teamId = null;
+    } else {
+      const connection = await linearConnectionFor(ctx, organizationId);
+      if (!connection) return { error: "connect Linear first", status: 409 };
+      let team;
+      try {
+        team = (await connection.client.teams()).find((t) => t.id === input.teamId);
+      } catch {
+        return { error: "Linear did not answer. Check the API key and try again.", status: 502 };
+      }
+      if (!team) return { error: "not found", status: 404 };
+      result.team = { id: team.id, key: team.key, name: team.name };
+      // The stored project belonged to the team being replaced.
+      if (team.id !== input.storedTeamId) result.project = null;
+      teamId = team.id;
+    }
+  }
+
+  if (input.linearProjectId !== undefined) {
+    if (input.linearProjectId === null) {
+      result.project = null;
+    } else {
+      if (!teamId) return { error: "pick a team first", status: 400 };
+      const connection = await linearConnectionFor(ctx, organizationId);
+      if (!connection) return { error: "connect Linear first", status: 409 };
+      let linearProject;
+      try {
+        linearProject = (await connection.client.teamProjects(teamId)).find(
+          (p) => p.id === input.linearProjectId,
+        );
+      } catch {
+        return { error: "Linear did not answer. Check the API key and try again.", status: 502 };
+      }
+      if (!linearProject) return { error: "not found", status: 404 };
+      result.project = { id: linearProject.id, name: linearProject.name };
+    }
+  }
+  return result;
 }
 
 function orgFilter(column: any, organizationId: string | null) {

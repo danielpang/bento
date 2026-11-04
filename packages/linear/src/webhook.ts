@@ -40,6 +40,7 @@ export interface LinearWebhookIssue {
   url?: string;
   updatedAt?: string;
   teamId?: string;
+  projectId?: string | null;
   state?: { id: string; name: string; type: string };
   labels?: { id: string; name: string }[];
 }

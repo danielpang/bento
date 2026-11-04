@@ -308,11 +308,13 @@ export interface LinearSettings {
   defaultProjectId?: string | null;
 }
 
-/** One project's outbound settings: only what was sent is written. */
+/** One project's Linear settings, both directions: only what was sent is written. */
 export interface ProjectLinearSettings {
   createIssues?: boolean;
   teamId?: string | null;
   linearProjectId?: string | null;
+  importTeamId?: string | null;
+  importLinearProjectId?: string | null;
 }
 
 /** What the project settings PATCH answers with: the stored values. */
@@ -323,6 +325,11 @@ export interface ProjectLinearState {
   linearTeamName: string | null;
   linearProjectId: string | null;
   linearProjectName: string | null;
+  linearImportTeamId: string | null;
+  linearImportTeamKey: string | null;
+  linearImportTeamName: string | null;
+  linearImportProjectId: string | null;
+  linearImportProjectName: string | null;
 }
 
 export interface LinearIssueOption {
