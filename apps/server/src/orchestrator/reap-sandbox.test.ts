@@ -35,6 +35,7 @@ import { loadEnv } from "../env.js";
 import { SecretBox } from "../secrets.js";
 import { EventBus } from "../events.js";
 import {
+  COMPLETED_SWARM_IDLE_MS,
   FAILED_SWARM_MACHINE_GRACE_MS,
   MAX_SANDBOX_REAP_DEFERRALS,
   SANDBOX_REAP_DEFER_MS,
@@ -1072,6 +1073,40 @@ test("the sweep finds a swarm by a leaf's machine, and a stack counts as publish
   assert.equal(await sandboxStatus(leftover.sandboxId), "destroyed", "a done swarm's leftover leaf is found");
   assert.equal(await sandboxStatus(stacked.sandboxId), "destroyed");
   assert.equal(await sandboxStatus(part.sandboxId), "destroyed");
+});
+
+test("a completed worker used today keeps its machine, and one idle for three days does not", async () => {
+  const recent = await seedSwarm({ title: "Swarm done today", status: "done" });
+  await ctx.db.update(sandboxes).set({ lastUsedAt: new Date() }).where(eq(sandboxes.id, recent.sandboxId));
+  const recentLeaf = await seedLeaf(recent.swarmId, { title: "Landed today", status: "landed" });
+  await ctx.db.update(sandboxes).set({ lastUsedAt: new Date() }).where(eq(sandboxes.id, recentLeaf.sandboxId));
+
+  const idleAt = new Date(Date.now() - COMPLETED_SWARM_IDLE_MS - 60_000);
+  const idle = await seedSwarm({ title: "Swarm done and idle", status: "done" });
+  await ctx.db.update(sandboxes).set({ lastUsedAt: idleAt }).where(eq(sandboxes.id, idle.sandboxId));
+  const idleLeaf = await seedLeaf(idle.swarmId, { title: "Landed earlier", status: "landed" });
+  await ctx.db.update(sandboxes).set({ lastUsedAt: idleAt }).where(eq(sandboxes.id, idleLeaf.sandboxId));
+
+  await withQuietBoss(() => runSandboxReapJob(ctx, { swarmId: recent.swarmId }));
+  await withQuietBoss(() => runSandboxReapJob(ctx, { swarmTaskId: recentLeaf.taskId }));
+  assert.equal(await sandboxStatus(recent.sandboxId), "ready", "a swarm used today keeps its machine");
+  assert.equal(await sandboxStatus(recentLeaf.sandboxId), "ready", "a worker used today keeps its machine");
+
+  await withQuietBoss(() => runSandboxReapJob(ctx, { swarmId: idle.swarmId }));
+  assert.equal(await sandboxStatus(idle.sandboxId), "destroyed");
+  assert.equal(await sandboxStatus(idleLeaf.sandboxId), "destroyed", "three days idle, the worker goes with the swarm");
+});
+
+test("stopping a swarm takes a machine that was used today", async () => {
+  const swarm = await seedSwarm({ title: "Swarm stopped today", status: "cancelled" });
+  await ctx.db.update(sandboxes).set({ lastUsedAt: new Date() }).where(eq(sandboxes.id, swarm.sandboxId));
+  const leaf = await seedLeaf(swarm.swarmId, { title: "Cancelled today", status: "cancelled" });
+  await ctx.db.update(sandboxes).set({ lastUsedAt: new Date() }).where(eq(sandboxes.id, leaf.sandboxId));
+
+  await withQuietBoss(() => runSandboxReapJob(ctx, { swarmId: swarm.swarmId, immediate: true }));
+
+  assert.equal(await sandboxStatus(swarm.sandboxId), "destroyed");
+  assert.equal(await sandboxStatus(leaf.sandboxId), "destroyed");
 });
 
 test("a leaf's machine goes with its swarm's only when the leaf is finished or the swarm is over for good", () => {

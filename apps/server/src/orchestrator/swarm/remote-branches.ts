@@ -150,6 +150,7 @@ export async function pushTaskBranch(
     repositories: repoRows.map((repo) => publishable(ctx, repo, source, branch)),
     lease: async (repo) => flags.pushedHeads?.[repo.repoUrl] ?? null,
     record: (repo, headSha) => recordPushedHead(ctx.db, { taskId: task.id }, repo.repoUrl, headSha),
+    skipIfHeadContained: options.required === true,
     ...(options.remoteUrl ? { remoteUrl: options.remoteUrl } : {}),
   });
   failLoudly(outcome.failures, `swarm task ${task.id}`);
@@ -166,6 +167,10 @@ export async function pushTaskBranch(
  * A machine on a host driver is not asked: its checkout is the host's
  * worktree, which outlives the machine. One that is already gone has
  * nothing left to save.
+ *
+ * The push is skipped when GitHub already contains the machine's
+ * commit. A notes commit on top of that commit is a different sha, and
+ * pushing another one is what the lease rejects as stale info.
  */
 export async function saveSwarmBranch(ctx: AppContext, swarmId: string, options: PushOptions = {}): Promise<void> {
   const [swarm] = await ctx.db.select().from(swarms).where(eq(swarms.id, swarmId)).limit(1);
@@ -290,6 +295,9 @@ export async function pushSwarmBranch(
       repositories: repoRows.map(shared),
       lease: async (repo) => swarm.pushedHeads?.[repo.repoUrl] ?? null,
       record: (repo, headSha) => recordPushedHead(ctx.db, { swarmId: swarm.id }, repo.repoUrl, headSha),
+      // The reap only needs the commit to be on GitHub. A normal push
+      // still updates the branch, notes commit included.
+      skipIfHeadContained: options.required === true,
       ...(options.remoteUrl ? { remoteUrl: options.remoteUrl } : {}),
     })
   ).failures;

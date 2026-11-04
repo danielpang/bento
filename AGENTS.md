@@ -420,7 +420,13 @@ A swarm's reap takes its leaves' machines after its own
 (`reapSwarmWorkerSandboxes`), because only a landed leaf gave its
 machine back: a cancelled leaf, a failed one, one a person marked done,
 and the final check's judge each kept theirs after the pull request was
-open. Each goes through the leaf's reap, which on a clone driver pushes
+open. A completed worker (landed, done, or cancelled) keeps its machine
+until `COMPLETED_SWARM_IDLE_MS` (three days) after it was last used, or
+after its last run, whichever is later. A swarm that just finished
+keeps its own machine for the same window, measured on that machine's
+last use and its planner runs. Stopping, archiving, and releasing the
+branch still take the machines then. Each finished leaf goes through
+the leaf's reap, which on a clone driver pushes
 the leaf's branch first (`saveSwarmTaskBranch`, skipped for a leaf that
 landed, whose work is on the swarm's branch, and for a machine no worker
 or resolver started an agent in) and defers, captured as
@@ -623,7 +629,19 @@ is why a hosted swarm (a clone driver) refuses to start without a
 GitHub connection and a GitHub remote on every repository
 (`SWARM_GITHUB_REQUIRED`): its work would have nowhere to go, and its
 machine would bill forever. A host driver's checkout outlives its
-machine and needs neither. Every push stamps `branch_pushed_at`, so a
+machine and needs neither. The reap checks the remote before it pushes. When the tip already
+contains the machine's commit, including as the parent of the notes
+commit a previous push added, GitHub holds the work and nothing is
+pushed. Pushing another notes commit is a different sha for the same
+work, which is what the lease rejects as `stale info`. A commit the
+remote does not have yet is still pushed, with `--force-with-lease`
+on the tip just listed. That tip can move before the update is sent,
+because `swarm.push` is often in flight as the reap runs (GitHub's
+create says `reference already exists` for the same race). The push
+lists again. The machine's commit now on the branch means the save is
+done. A tip already contained in that commit, and descended from the
+recorded lease when one is recorded, is pushed over. Any other tip is
+left untouched, the way a lease mismatch is, and the machine stays. Every push stamps `branch_pushed_at`, so a
 publish from GitHub's copy after a provider lost the machine says the
 pull request is missing the landings since (`behind`).
 

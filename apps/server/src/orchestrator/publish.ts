@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
+import { setTimeout as sleep } from "node:timers/promises";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -489,6 +490,13 @@ export async function pushBranches(
      * where the next stage's agent reads them.
      */
     includeStageNotes?: boolean;
+    /**
+     * The reap's question, not a request to update the branch. When the
+     * remote tip already contains this commit, GitHub holds it and
+     * nothing is pushed. A notes commit on top of it is a different sha,
+     * and pushing another one races the push that wrote the first.
+     */
+    skipIfHeadContained?: boolean;
   },
 ): Promise<PushOutcome> {
   const pushed: PushOutcome["pushed"] = [];
@@ -520,6 +528,7 @@ export async function pushBranches(
         includeStageNotes: plan.includeStageNotes === true,
         label: `${parsed.owner}/${parsed.repo}`,
         expectedRemoteHead: await plan.lease(remoteRepo),
+        skipIfHeadContained: plan.skipIfHeadContained === true,
         ...(target ? { target } : {}),
       });
       if (head === null) continue;
@@ -737,6 +746,12 @@ async function pushBundle(
      * landed, which a later landing has since built on.
      */
     target?: string;
+    /**
+     * Return the remote tip without pushing when it already contains
+     * the commit being saved. The returned sha is that tip, so the
+     * lease records the commit the branch actually has.
+     */
+    skipIfHeadContained?: boolean;
   },
 ): Promise<string | null> {
   const root = await mkdtemp(path.join(tmpdir(), "bento-publish-"));
@@ -766,15 +781,47 @@ async function pushBundle(
       await run("git", ["-C", checkout, "merge-base", "--is-ancestor", bundle.baseSha, bundle.headSha], { env });
     }
 
-    const { stdout: remoteRef } = await run(
-      "git",
-      [...credentialArgs, "ls-remote", remote, `refs/heads/${branch}`],
-      { env },
-    );
     const tip = options.target ?? bundle.headSha;
     if (options.target) {
       await run("git", ["-C", checkout, "merge-base", "--is-ancestor", options.target, bundle.headSha], { env });
     }
+
+    let leaseTipFetched = false;
+    const fetchLeaseTip = async () => {
+      if (leaseTipFetched) return;
+      await run(
+        "git",
+        [
+          "-C",
+          checkout,
+          ...credentialArgs,
+          "fetch",
+          "--no-tags",
+          remote,
+          `+refs/heads/${branch}:refs/bento-lease/${branch}`,
+        ],
+        { env },
+      );
+      leaseTipFetched = true;
+    };
+    const contains = (ancestor: string, descendant: string) =>
+      commitIsAncestor(checkout, ancestor, descendant, env, fetchLeaseTip);
+    /**
+     * Checked before any push. The machine's commit already on the
+     * remote, including as the parent of a notes commit, means this
+     * save is done. A new notes commit would be a different sha for
+     * the same work, and the lease rejects it once the other push lands.
+     */
+    const alreadyPushed = async (actual: string): Promise<string | null> => {
+      if (!options.skipIfHeadContained || !actual) return null;
+      if (await contains(tip, actual)) return actual;
+      return null;
+    };
+    if (options.skipIfHeadContained) {
+      const held = await alreadyPushed(await listedRemoteHead(remote, branch, credentialArgs, env));
+      if (held) return held;
+    }
+
     const head = options.includeStageNotes
       ? tip
       : await withoutStageNotes(checkout, tip, path.join(root, "strip.index"), env);
@@ -784,37 +831,205 @@ async function pushBundle(
     // back until a stage commits something a reviewer can read.
     if (head !== tip && (await sameTreeAsForkPoint(checkout, head, env))) return null;
 
-    const actual = remoteRef.trim().split(/\s+/)[0] ?? "";
     /**
-     * The real lease check happens here, against the commit Bento
-     * itself last pushed, because a lease read from the remote a
-     * moment before pushing can never disagree with the remote. A
-     * mismatch means a person or a bot pushed to the branch since:
-     * force pushing over that, rebased history especially, would
-     * silently delete their commits.
+     * The lease is the commit Bento itself last pushed. A different
+     * tip means a person or a bot pushed since, and force pushing
+     * over that, rebased history especially, would delete their
+     * commits. The list and the update are not one fact, though: the
+     * tip read here can move before git sends the update. A swarm's
+     * own push is often in flight while its machine is reaped, and
+     * git then rejects the lease with "stale info" (GitHub's word for
+     * the same race on a create is "reference already exists"). Read
+     * the tip again. The commit being saved means the branch already
+     * holds it. A tip already contained in that commit, and descended
+     * from the recorded lease when there is one, is pushed over, so
+     * the newer work still lands. Anything else is left where it is.
      */
-    if (options.expectedRemoteHead && actual && actual !== options.expectedRemoteHead) {
-      throw new Error(
-        `the branch moved on GitHub since Bento last pushed it (someone pushed commits to ${branch}). Pull those commits into this branch, or push manually, then try again.`,
-      );
+    const decide = (actual: string, attempt: number) =>
+      leaseDecision({ actual, head, recorded: options.expectedRemoteHead, attempt, contains });
+
+    let raced: string | null = null;
+    for (let attempt = 0; attempt <= LEASE_RACE_RETRIES; attempt++) {
+      if (attempt > 0) await sleep(LEASE_RACE_PAUSE_MS);
+      const actual = await listedRemoteHead(remote, branch, credentialArgs, env);
+      const held = await alreadyPushed(actual);
+      if (held) return held;
+      const decision = await decide(actual, attempt);
+      if (decision === "saved") return head;
+      if (decision === "moved") throw new Error(branchMovedMessage(branch));
+      try {
+        await run(
+          "git",
+          [
+            "-C",
+            checkout,
+            ...credentialArgs,
+            "push",
+            `--force-with-lease=refs/heads/${branch}:${actual}`,
+            remote,
+            `${head}:refs/heads/${branch}`,
+          ],
+          { env },
+        );
+        return head;
+      } catch (err) {
+        const text = gitFailureText(err);
+        const conflict = refNameConflict(text, branch);
+        if (conflict) throw new Error(conflict);
+        if (!leaseRejected(text) || attempt === LEASE_RACE_RETRIES) {
+          if (leaseRejected(text)) {
+            const now = await listedRemoteHead(remote, branch, credentialArgs, env);
+            const heldNow = await alreadyPushed(now);
+            if (heldNow) return heldNow;
+            const settled = await decide(now, attempt + 1);
+            if (settled === "saved") return head;
+            if (settled === "moved") throw new Error(branchMovedMessage(branch));
+            throw new Error(
+              `the push of ${branch} was rejected because the branch changed while it was being pushed, and retrying did not clear it. ${leaseRejectionDetail(text)}`,
+            );
+          }
+          throw err;
+        }
+        raced = text;
+      }
     }
-    await run(
-      "git",
-      [
-        "-C",
-        checkout,
-        ...credentialArgs,
-        "push",
-        `--force-with-lease=refs/heads/${branch}:${actual}`,
-        remote,
-        `${head}:refs/heads/${branch}`,
-      ],
-      { env },
-    );
-    return head;
+    throw new Error(raced ?? `the push of ${branch} did not finish`);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+}
+
+/**
+ * How many times a lease rejection is pushed again. The other update
+ * has already landed by the time this one is refused, so the next list
+ * sees it. Two more tries cover a second push still crossing this one.
+ */
+const LEASE_RACE_RETRIES = 2;
+
+/** A short gap so two retries do not read the ref in the same instant. */
+const LEASE_RACE_PAUSE_MS = 50;
+
+function branchMovedMessage(branch: string): string {
+  return `the branch moved on GitHub since Bento last pushed it (someone pushed commits to ${branch}). Pull those commits into this branch, or push manually, then try again.`;
+}
+
+/** The sha `ls-remote` reported for this branch, or empty when it is absent. */
+async function listedRemoteHead(
+  remote: string,
+  branch: string,
+  credentialArgs: string[],
+  env: NodeJS.ProcessEnv,
+): Promise<string> {
+  const { stdout } = await run("git", [...credentialArgs, "ls-remote", remote, `refs/heads/${branch}`], { env });
+  const want = `refs/heads/${branch}`;
+  for (const line of stdout.split("\n")) {
+    const match = /^([0-9a-f]{40,64})\s+(\S+)/i.exec(line.trim());
+    if (match?.[2] === want) return match[1]!;
+  }
+  return "";
+}
+
+/**
+ * Whether `ancestor` is contained in `descendant`. A tip the checkout
+ * has not seen yet is fetched once from the branch. Unknown is not
+ * contained: a push must not assume it can delete commits it cannot read.
+ */
+async function commitIsAncestor(
+  checkout: string,
+  ancestor: string,
+  descendant: string,
+  env: NodeJS.ProcessEnv,
+  fetchTip: () => Promise<void>,
+): Promise<boolean> {
+  if (!ancestor || ancestor === descendant) return true;
+  if (!/^[0-9a-f]{40,64}$/i.test(ancestor)) return false;
+  const present = async () => {
+    try {
+      await run("git", ["-C", checkout, "cat-file", "-e", `${ancestor}^{commit}`], { env });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (!(await present())) {
+    try {
+      await fetchTip();
+    } catch {
+      return false;
+    }
+    if (!(await present())) return false;
+  }
+  try {
+    await run("git", ["-C", checkout, "merge-base", "--is-ancestor", ancestor, descendant], { env });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * What to do with the tip the remote lists.
+ *
+ * The first attempt is the lease as it has always been: a recorded
+ * tip that disagrees is refused, and a branch Bento has never recorded
+ * is updated. A later attempt is the push that just lost the race.
+ * The new tip is taken only when it is already inside the commit being
+ * saved, so the update adds that commit and deletes nothing. With a
+ * recorded lease, the new tip also has to descend from it. A reset
+ * back to an older commit stays, because force pushing would undo it.
+ * The commit being saved, already on the branch, is the save finished.
+ */
+async function leaseDecision(input: {
+  actual: string;
+  head: string;
+  recorded: string | null | undefined;
+  attempt: number;
+  contains: (ancestor: string, descendant: string) => Promise<boolean>;
+}): Promise<"push" | "saved" | "moved"> {
+  const { actual, head, recorded, attempt, contains } = input;
+  if (actual && actual === head) return "saved";
+  if (attempt === 0) {
+    if (recorded && actual && actual !== recorded) return "moved";
+    return "push";
+  }
+  if (!actual) return "push";
+  if (recorded && actual === recorded) return "push";
+  if ((await contains(actual, head)) && (!recorded || (await contains(recorded, actual)))) return "push";
+  return "moved";
+}
+
+/**
+ * A create that found the ref already there.
+ *
+ * GitHub says "cannot lock ref: reference already exists". The local
+ * compare, given an empty or outdated lease, says "stale info". A
+ * branch and a folder of branches ("exists; cannot create") is a
+ * different refusal, and another try reports the same line.
+ */
+function leaseRejected(text: string): boolean {
+  if (/exists; cannot create/.test(text)) return false;
+  return /reference already exists|\(stale info\)/i.test(text);
+}
+
+/** The rejection itself, not git's trailing "failed to push some refs". */
+function leaseRejectionDetail(text: string): string {
+  const line = text
+    .split("\n")
+    .map((entry) => entry.trim())
+    .find((entry) => /cannot lock ref|reference already exists|\(stale info\)/i.test(entry));
+  return line || text.trim();
+}
+
+/**
+ * A branch and a folder of branches cannot share a path. `swarm` as a
+ * branch means `swarm/anything` can never be created, and the other
+ * way around. Retrying the push reports the same line.
+ */
+function refNameConflict(text: string, branch: string): string | null {
+  if (!/exists; cannot create/.test(text)) return null;
+  const blocking = text.match(/'([^']+)' exists; cannot create/)?.[1];
+  const where = blocking ? `${blocking} is already a branch` : "another branch already uses that path";
+  return `GitHub cannot create ${branch} because ${where}. A branch and a folder of branches cannot share that name. Rename one of them, then try again.`;
 }
 
 /**
