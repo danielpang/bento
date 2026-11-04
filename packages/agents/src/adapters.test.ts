@@ -1038,6 +1038,7 @@ test("muse builds its headless command and resumes by session", () => {
     "exec",
     "--json",
     "--yolo",
+    "--disable-request-user-input",
     "--user-input-auto-resolve",
     "--workspace",
     "/workspace",
