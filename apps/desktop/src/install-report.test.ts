@@ -58,6 +58,8 @@ test("a report that could not go is sent on the next launch, still as the instal
   try {
     const remote = server(503);
     assert.equal(await reportInstall({ directory, version: "0.4.2", arch: "arm64", configured: false, fetch: remote.fetch }), null);
+    const notDeployed = server(404);
+    assert.equal(await reportInstall({ directory, version: "0.4.2", arch: "arm64", configured: false, fetch: notDeployed.fetch }), null);
     const offline: typeof fetch = async () => { throw new TypeError("fetch failed"); };
     assert.equal(await reportInstall({ directory, version: "0.4.2", arch: "arm64", configured: false, fetch: offline }), null);
 

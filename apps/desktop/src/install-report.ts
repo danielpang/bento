@@ -103,9 +103,10 @@ export async function reportInstall(deps: InstallReportDeps): Promise<InstallRep
       redirect: "error",
       signal: AbortSignal.timeout(15_000),
     });
-    // A refusal is not retried forever: only a server that could not
-    // answer (5xx, or a 429 meter) leaves the version for next launch.
-    if (response.status >= 500 || response.status === 429) return null;
+    // Only a refusal of the report itself (400) is final, so it is not
+    // sent again every launch. Anything else (a server down, metered,
+    // or one not yet deployed with the route) leaves it for next launch.
+    if (!response.ok && response.status !== 400) return null;
     await writeState(deps.directory, { ...state, reportedVersion: deps.version });
     return response.ok ? report : null;
   } catch {
