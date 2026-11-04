@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { resolveIssueTarget, stateTypeForStatus } from "./linear.js";
+import { pickImportProject, resolveIssueTarget, stateTypeForStatus } from "./linear.js";
 
 const project = {
   linearCreateIssues: true,
@@ -59,4 +59,20 @@ test("stateTypeForStatus maps the lifecycle Linear cares about", () => {
   assert.equal(stateTypeForStatus("done"), "completed");
   assert.equal(stateTypeForStatus("cancelled"), "canceled");
   assert.equal(stateTypeForStatus("something-else"), null);
+});
+
+const sources = [
+  { id: "older", linearImportTeamId: "team-a", linearImportProjectId: "linear-q3" },
+  { id: "newer", linearImportTeamId: "team-a", linearImportProjectId: "linear-q3" },
+  { id: "team-only", linearImportTeamId: "team-a", linearImportProjectId: null },
+];
+
+test("pickImportProject imports into the project following the issue's Linear project", () => {
+  assert.equal(pickImportProject(sources, { teamId: "team-a", projectId: "linear-q3" }), "older");
+});
+
+test("pickImportProject never imports on a team alone", () => {
+  assert.equal(pickImportProject(sources, { teamId: "team-a", projectId: "linear-q4" }), null);
+  assert.equal(pickImportProject(sources, { teamId: "team-a", projectId: null }), null);
+  assert.equal(pickImportProject(sources, { teamId: "team-b", projectId: "linear-q3" }), null);
 });

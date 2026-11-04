@@ -1,4 +1,4 @@
-import { and, eq, isNull } from "drizzle-orm";
+import { and, asc, eq, isNotNull, isNull } from "drizzle-orm";
 import { features, linearConnections, linearIssueLinks, pipelines, projects } from "@bento/db";
 import { LinearClient, type LinearIssue, type LinearWorkflowState } from "@bento/linear";
 import type { AppContext } from "./context.js";
@@ -74,6 +74,55 @@ export function resolveIssueTarget(
   if (!teamId) return null;
   const sameTeam = teamId === project.linearTeamId;
   return { teamId, projectId: sameTeam ? (project.linearProjectId ?? null) : null };
+}
+
+export type LinearImportSource = Pick<
+  typeof projects.$inferSelect,
+  "id" | "linearImportTeamId" | "linearImportProjectId"
+>;
+
+/**
+ * The project that follows the issue's Linear project, or null. A team
+ * alone is never a source, and among projects following the same Linear
+ * project the oldest wins, so callers pass sources oldest first.
+ */
+export function pickImportProject(
+  sources: LinearImportSource[],
+  issue: { teamId: string; projectId?: string | null | undefined },
+): string | null {
+  if (!issue.projectId) return null;
+  return (
+    sources.find(
+      (s) => s.linearImportTeamId === issue.teamId && s.linearImportProjectId === issue.projectId,
+    )?.id ?? null
+  );
+}
+
+/** Every project of one tenant that follows a Linear project, oldest first. */
+export async function linearImportSources(
+  ctx: AppContext,
+  organizationId: string | null,
+): Promise<{ id: string; linearImportTeamId: string; linearImportProjectId: string }[]> {
+  const rows = await ctx.db
+    .select({
+      id: projects.id,
+      linearImportTeamId: projects.linearImportTeamId,
+      linearImportProjectId: projects.linearImportProjectId,
+    })
+    .from(projects)
+    .where(
+      and(
+        organizationId ? eq(projects.organizationId, organizationId) : isNull(projects.organizationId),
+        isNotNull(projects.linearImportTeamId),
+        isNotNull(projects.linearImportProjectId),
+      ),
+    )
+    .orderBy(asc(projects.createdAt), asc(projects.id));
+  return rows.flatMap((row) =>
+    row.linearImportTeamId && row.linearImportProjectId
+      ? [{ id: row.id, linearImportTeamId: row.linearImportTeamId, linearImportProjectId: row.linearImportProjectId }]
+      : [],
+  );
 }
 
 /** Bento lifecycle to Linear workflow state type. */

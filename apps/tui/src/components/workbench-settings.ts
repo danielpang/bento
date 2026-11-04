@@ -213,7 +213,7 @@ export function advancedSettings(
                     }),
                     ...status.mappings.map((mapping) =>
                       choice(mapping.id, `Remove ${mapping.linearTeamKey} mapping`, () =>
-                        confirm("Remove team mapping", "Incoming issues will use the default project.", () =>
+                        confirm("Remove team mapping", "Labeled issues from this team will use the default project.", () =>
                           client.deleteLinearMapping(mapping.id),
                         ),
                       ),

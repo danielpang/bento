@@ -87,6 +87,17 @@ export const projects = pgTable("projects", {
   linearTeamName: text("linear_team_name"),
   linearProjectId: text("linear_project_id"),
   linearProjectName: text("linear_project_name"),
+  /**
+   * Where this project's cards come from in Linear: every open issue in
+   * that Linear project becomes a card here. The team is the project's
+   * owner and is stored first, so the picker can list its projects; a
+   * team without a project imports nothing.
+   */
+  linearImportTeamId: text("linear_import_team_id"),
+  linearImportTeamKey: text("linear_import_team_key"),
+  linearImportTeamName: text("linear_import_team_name"),
+  linearImportProjectId: text("linear_import_project_id"),
+  linearImportProjectName: text("linear_import_project_name"),
   ...timestamps,
 });
 

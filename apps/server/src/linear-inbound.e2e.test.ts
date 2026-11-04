@@ -59,7 +59,14 @@ let firstStageId: string;
 const originalFetch = globalThis.fetch;
 
 /** The issues the stub's team backlog holds, for the sweep. */
-const backlogIssues: { id: string; identifier: string; title: string; url: string }[] = [];
+const backlogIssues: {
+  id: string;
+  identifier: string;
+  title: string;
+  url: string;
+  teamId?: string;
+  projectId?: string;
+}[] = [];
 
 before(async () => {
   const admin = new pg.Client({ connectionString: baseUrl });
@@ -130,7 +137,7 @@ after(async () => {
   await ctx.pool.end();
 });
 
-/** A project with a two stage pipeline and the Linear team mapped to it. */
+/** A project with a two stage pipeline that follows one Linear project. */
 async function setupProject(
   userId: string,
   name: string,
@@ -148,12 +155,7 @@ async function setupProject(
     { pipelineId: pipeline!.id, position: 0, name: "Investigation", slug: `${name}-investigation` },
     { pipelineId: pipeline!.id, position: 1, name: "Implementation", slug: `${name}-implementation` },
   ]);
-  await ctx.db.insert(linearTeamMappings).values({
-    linearTeamId: `team-${name.toLowerCase()}`,
-    linearTeamKey: name.slice(0, 3).toUpperCase(),
-    linearTeamName: name,
-    projectId: project!.id,
-  });
+  await followLinear(project!.id, `team-${name.toLowerCase()}`, `linear-${name.toLowerCase()}`);
   return project!.id;
 }
 
@@ -162,16 +164,25 @@ function stubLinear(): typeof fetch {
   return (async (_url: string | URL | Request, init?: RequestInit) => {
     const body = JSON.parse(String(init?.body ?? "{}")) as { query: string };
     if (body.query.includes("query Issues(")) {
+      // Filtered the way Linear filters, so a sweep that forgets the
+      // project filter imports the wrong issues and fails the test.
+      const filter = (body as { variables?: { filter?: IssueFilter } }).variables?.filter;
+      const matching = backlogIssues.filter(
+        (issue) =>
+          (issue.teamId ?? "team-inbound") === filter?.team?.id?.eq &&
+          (!filter.project || (issue.projectId ?? "linear-inbound") === filter.project.id.eq),
+      );
       return new Response(
         JSON.stringify({
           data: {
             issues: {
-              nodes: backlogIssues.map((issue) => ({
+              nodes: matching.map(({ teamId, projectId, ...issue }) => ({
                 ...issue,
                 description: null,
                 updatedAt: new Date(0).toISOString(),
                 state: { id: "s", name: "Backlog", type: "backlog" },
-                team: { id: "team-inbound" },
+                team: { id: teamId ?? "team-inbound" },
+                project: { id: projectId ?? "linear-inbound" },
                 labels: { nodes: [] },
               })),
               pageInfo: { endCursor: null, hasNextPage: false },
@@ -185,7 +196,15 @@ function stubLinear(): typeof fetch {
   }) as typeof fetch;
 }
 
-/** The webhook payload Linear sends for a brand new backlog issue. */
+interface IssueFilter {
+  team?: { id?: { eq?: string } };
+  project?: { id: { eq: string } };
+}
+
+/**
+ * The webhook payload Linear sends for a brand new backlog issue, in the
+ * Linear project that `setupProject` has the team's Bento project follow.
+ */
 function issueCreated(id: string, title: string, teamId = "team-inbound"): LinearWebhookIssue {
   return {
     id,
@@ -193,6 +212,7 @@ function issueCreated(id: string, title: string, teamId = "team-inbound"): Linea
     title,
     url: `https://linear.app/bento/issue/INB-${id}`,
     teamId,
+    projectId: teamId.replace(/^team-/, "linear-"),
     state: { id: "s", name: "Backlog", type: "backlog" },
   };
 }
@@ -241,6 +261,7 @@ test("an issue created in Linear enters the first stage when its project asked f
       title: "Straight to work",
       url: "https://linear.app/bento/issue/INB-1",
       teamId: "team-inbound",
+      projectId: "linear-inbound",
       state: { id: "s", name: "Backlog", type: "backlog" },
     },
     webhookTimestamp: Date.now(),
@@ -288,7 +309,7 @@ test("with the setting off the same issue waits in the backlog", async () => {
 test("each project decides for itself, so one starts while the other waits", async () => {
   // The reason the setting is per project: one team's intake is triaged
   // by a person, another's is meant to be picked up like a CI job. Two
-  // mapped teams, one setting each, one webhook shape.
+  // followed Linear projects, one setting each, one webhook shape.
   const eager = await setupProject(ctx.userId, "Eager", null);
   const patient = await setupProject(ctx.userId, "Patient", null);
   await setAutoStart(eager, true);
@@ -375,6 +396,7 @@ test("an issue created with the bento label starts too, in the default project",
       action: "create",
       issue: {
         ...issueCreated("tagged", "Filed with the label", "team-nowhere"),
+        projectId: null,
         labels: [{ id: "l1", name: "bento" }],
       },
     });
@@ -420,4 +442,148 @@ test("a plan with no room for another live card leaves the import in the backlog
   } finally {
     delete ctx.entitlements;
   }
+});
+
+/** The source under test: the Linear team and project a Bento project follows. */
+async function followLinear(project: string, teamId: string | null, linearProjectId: string | null) {
+  await ctx.db
+    .update(projects)
+    .set({ linearImportTeamId: teamId, linearImportProjectId: linearProjectId })
+    .where(eq(projects.id, project));
+}
+
+async function linkFor(linearIssueId: string) {
+  const [link] = await ctx.db
+    .select()
+    .from(linearIssueLinks)
+    .where(eq(linearIssueLinks.linearIssueId, linearIssueId));
+  return link;
+}
+
+test("only issues in the followed Linear project become cards, including ones moved in later", async () => {
+  const follower = await setupProject(ctx.userId, "Follower", null);
+  await setAutoStart(follower, true);
+  try {
+    await handleLinearInbound(ctx, {
+      organizationId: null,
+      action: "create",
+      issue: issueCreated("in-project", "Filed in the project", "team-follower"),
+    });
+    const card = await cardFor("in-project");
+    assert.equal(card.projectId, follower);
+    assert.ok((await waitForStage(card.id)).currentStageId, "a new issue starts like any other arrival");
+
+    await handleLinearInbound(ctx, {
+      organizationId: null,
+      action: "create",
+      issue: { ...issueCreated("elsewhere", "Another Linear project", "team-follower"), projectId: "linear-q4" },
+    });
+    await handleLinearInbound(ctx, {
+      organizationId: null,
+      action: "create",
+      issue: { ...issueCreated("no-project", "In no Linear project", "team-follower"), projectId: null },
+    });
+    assert.equal(await linkFor("elsewhere"), undefined, "the rest of the team stays in Linear");
+    assert.equal(await linkFor("no-project"), undefined);
+
+    // Moved into the followed project later: an update, imported, not started.
+    await handleLinearInbound(ctx, {
+      organizationId: null,
+      action: "update",
+      issue: issueCreated("moved-in", "Moved into the project", "team-follower"),
+    });
+    const moved = await cardFor("moved-in");
+    assert.equal(moved.projectId, follower);
+    assert.equal(moved.currentStageId, null);
+  } finally {
+    await setAutoStart(follower, false);
+  }
+});
+
+test("a mapped team imports nothing on its own", async () => {
+  // Mappings still say which team a project files issues in, and where a
+  // labeled issue lands. A whole team's intake is never imported.
+  const mapped = await setupProject(ctx.userId, "Mapped", null);
+  await ctx.db.insert(linearTeamMappings).values({
+    linearTeamId: "team-mapped-only",
+    linearTeamKey: "MAP",
+    linearTeamName: "Mapped only",
+    projectId: mapped,
+  });
+  await handleLinearInbound(ctx, {
+    organizationId: null,
+    action: "create",
+    issue: { ...issueCreated("mapped-new", "New in a mapped team", "team-mapped-only"), projectId: null },
+  });
+  assert.equal(await linkFor("mapped-new"), undefined);
+});
+
+test("a team picked without a Linear project imports nothing", async () => {
+  const halfway = await setupProject(ctx.userId, "Halfway", null);
+  await followLinear(halfway, "team-halfway", null);
+  backlogIssues.push({
+    id: "halfway-open",
+    identifier: "HLF-1",
+    title: "Open in the team",
+    url: "https://linear.app/x/HLF-1",
+    teamId: "team-halfway",
+    projectId: "linear-anything",
+  });
+  try {
+    await handleLinearInbound(ctx, {
+      organizationId: null,
+      action: "create",
+      issue: { ...issueCreated("halfway-new", "New in the team", "team-halfway"), projectId: "linear-anything" },
+    });
+    await syncLinearBacklog(ctx, null);
+    assert.equal(await linkFor("halfway-new"), undefined);
+    assert.equal(await linkFor("halfway-open"), undefined);
+  } finally {
+    backlogIssues.length = 0;
+  }
+});
+
+test("the sweep brings in only the followed Linear project's open issues", async () => {
+  const swept = await setupProject(ctx.userId, "Swept", null);
+  backlogIssues.push(
+    { id: "swept-in", identifier: "SWP-1", title: "In the project", url: "https://linear.app/x/SWP-1", teamId: "team-swept", projectId: "linear-swept" },
+    { id: "swept-out", identifier: "SWP-2", title: "Elsewhere", url: "https://linear.app/x/SWP-2", teamId: "team-swept", projectId: "linear-other" },
+  );
+  try {
+    await syncLinearBacklog(ctx, null);
+    assert.equal((await cardFor("swept-in")).projectId, swept);
+    assert.equal(await linkFor("swept-out"), undefined);
+  } finally {
+    backlogIssues.length = 0;
+  }
+});
+
+test("two organizations following the same Linear project each import only their own events", async () => {
+  await ctx.db.insert(organization).values([
+    { id: "org-a", name: "A", slug: "a" },
+    { id: "org-b", name: "B", slug: "b" },
+  ]);
+  const projectA = await setupProject(ctx.userId, "Shared", "org-a");
+  const projectB = await setupProject(ctx.userId, "Shared", "org-b");
+  for (const organizationId of ["org-a", "org-b"]) {
+    await ctx.db.insert(linearConnections).values({
+      ownerId: ctx.userId,
+      organizationId,
+      encryptedApiKey: ctx.secretBox.encrypt("lin_api_test"),
+    });
+  }
+  await handleLinearInbound(ctx, {
+    organizationId: "org-a",
+    action: "create",
+    issue: issueCreated("shared-a", "Filed in A's workspace", "team-shared"),
+  });
+  const card = await cardFor("shared-a");
+  assert.equal(card.projectId, projectA);
+  assert.notEqual(card.projectId, projectB);
+  const links = await ctx.db
+    .select()
+    .from(linearIssueLinks)
+    .where(eq(linearIssueLinks.linearIssueId, "shared-a"));
+  assert.equal(links.length, 1, "the other organization's project gets nothing");
+  assert.equal(links[0]!.organizationId, "org-a");
 });

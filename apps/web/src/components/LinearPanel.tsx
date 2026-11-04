@@ -88,7 +88,7 @@ export function LinearPanel({ client }: { client: BentoClient }) {
         ) : (
           <p className="muted">
             Linear cannot reach this server, so changes arrive on a sweep every 15 minutes. Use
-            Sync now to pull the mapped backlogs immediately.
+            Sync now to pull each project's Linear project immediately.
           </p>
         )}
         <p className="muted">
@@ -101,7 +101,7 @@ export function LinearPanel({ client }: { client: BentoClient }) {
             onClick={() =>
               void act(async () => {
                 await client.syncLinearNow();
-                toast.note("Sync queued. Mapped backlogs land on the board shortly.");
+                toast.note("Sync queued. New cards land on the board shortly.");
               })
             }
           >
@@ -205,8 +205,9 @@ function MappingsCard({
     <section className="section settings-card">
       <h3 className="settings-title">Team mappings</h3>
       <p className="muted">
-        Each mapped team's backlog issues become cards in its project, arriving as they are
-        created.
+        A mapped team is where its project's cards file their Linear issues, and where an issue
+        labeled "bento" from that team lands. Issues arrive as cards only from the Linear project
+        each project picks in its settings.
       </p>
       {status.mappings.length === 0 && <p className="muted">No teams mapped yet.</p>}
       {status.mappings.map((mapping) => (
@@ -361,7 +362,7 @@ function ImportCard({ client, projects }: { client: BentoClient; projects: Proje
     <section className="section settings-card">
       <h3 className="settings-title">Import issues</h3>
       <p className="muted">
-        Pull specific issues in without mapping the whole team. Imported issues become backlog
+        Pull specific issues in without following a Linear project. Imported issues become backlog
         cards and stay linked to Linear.
       </p>
       <div className="actions">

@@ -26,6 +26,15 @@ export interface Project {
   linearTeamName: string | null;
   linearProjectId: string | null;
   linearProjectName: string | null;
+  /**
+   * Where this project's cards come from in Linear: open issues in the
+   * team, and only in the Linear project when one is set.
+   */
+  linearImportTeamId: string | null;
+  linearImportTeamKey: string | null;
+  linearImportTeamName: string | null;
+  linearImportProjectId: string | null;
+  linearImportProjectName: string | null;
 }
 
 export interface Repository {

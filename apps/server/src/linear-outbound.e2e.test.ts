@@ -481,6 +481,11 @@ test("the project settings route stores a team and Linear project", async () => 
       linearTeamName: "Other",
       linearProjectId: "linear-project-2",
       linearProjectName: "Q4",
+      linearImportTeamId: null,
+      linearImportTeamKey: null,
+      linearImportTeamName: null,
+      linearImportProjectId: null,
+      linearImportProjectName: null,
     });
 
     // A team Linear does not know must not be storable, and a project
@@ -506,6 +511,27 @@ test("the project settings route stores a team and Linear project", async () => 
     assert.equal(row!.linearTeamId, null);
     assert.equal(row!.linearProjectId, null, "a Linear project cannot outlive its team");
     assert.equal(row!.linearProjectName, null);
+
+    // Where cards come from is stored on its own columns by the same rules.
+    const source = await app.request(`/api/linear/projects/${projectId}/settings`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ importTeamId: "team-other", importLinearProjectId: "linear-project-2" }),
+    });
+    const sourced = (await source.json()) as Record<string, unknown>;
+    assert.equal(source.status, 200, JSON.stringify(sourced));
+    assert.equal(sourced.linearImportTeamName, "Other");
+    assert.equal(sourced.linearImportProjectName, "Q4");
+    assert.equal(sourced.linearTeamId, null, "the outbound team is untouched");
+
+    const unsourced = await app.request(`/api/linear/projects/${projectId}/settings`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ importTeamId: null }),
+    });
+    const after = (await unsourced.json()) as Record<string, unknown>;
+    assert.equal(after.linearImportTeamId, null);
+    assert.equal(after.linearImportProjectId, null, "the source's project goes with its team");
   } finally {
     globalThis.fetch = stubLinear();
   }

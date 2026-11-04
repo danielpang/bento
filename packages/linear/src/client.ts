@@ -39,6 +39,7 @@ export interface LinearIssue {
   updatedAt: string;
   state: LinearIssueState;
   team: { id: string };
+  project: { id: string } | null;
   labels: { nodes: { id: string; name: string }[] };
 }
 
@@ -67,6 +68,7 @@ const ISSUE_FIELDS = `
   updatedAt
   state { id name type }
   team { id }
+  project { id }
   labels { nodes { id name } }
 `;
 
@@ -133,13 +135,17 @@ export class LinearClient {
     return data.team.states.nodes;
   }
 
-  /** Pages issues for a team, optionally restricted to the given state types. */
+  /** Pages issues for a team, optionally restricted to one Linear project and the given state types. */
   async issues(options: {
     teamId: string;
+    projectId?: string | undefined;
     stateTypes?: string[] | undefined;
     after?: string | undefined;
   }): Promise<LinearIssuePage> {
     const filter: Record<string, unknown> = { team: { id: { eq: options.teamId } } };
+    if (options.projectId) {
+      filter.project = { id: { eq: options.projectId } };
+    }
     if (options.stateTypes?.length) {
       filter.state = { type: { in: options.stateTypes } };
     }

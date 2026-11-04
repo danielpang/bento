@@ -20,6 +20,11 @@ function project(id: string, name: string, localPath: string | null = null): Pro
     linearTeamName: null,
     linearProjectId: null,
     linearProjectName: null,
+    linearImportTeamId: null,
+    linearImportTeamKey: null,
+    linearImportTeamName: null,
+    linearImportProjectId: null,
+    linearImportProjectName: null,
   };
 }
 
