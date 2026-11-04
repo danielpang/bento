@@ -23,6 +23,13 @@ export interface AuthEvent {
   properties: {
     /** "email", "device", or a configured social provider id. */
     method: string;
+    /** Device flow only: which app asked for the code ("mac app", "cli", or "other"). */
+    client?: DeviceClient;
+    /**
+     * Device flow successes only: the account was made while the code
+     * was out, so this sign in was the person's sign up.
+     */
+    new_account?: boolean;
     /** better-auth's route template, such as "/callback/:id". */
     route: string;
     /** Failures only. */
@@ -44,7 +51,7 @@ export interface AuthHookContext {
   headers?: Headers | undefined;
   context: {
     returned?: unknown;
-    newSession?: { user: { id: string } } | null | undefined;
+    newSession?: { user: { id: string; createdAt?: Date | string } } | null | undefined;
     socialProviders?: { id: string }[] | undefined;
     authCookies?: { sessionToken: { name: string } } | undefined;
   };
@@ -82,8 +89,30 @@ const EXPECTED_REFUSALS = new Set([
   "access_denied",
 ]);
 
+/**
+ * How long a device code is good for (auth.ts gives the plugin the same
+ * figure). A device sign in hands over its token within this window of
+ * the code being issued, so an account younger than this was made by
+ * the person while they were signing in: the Mac app's sign up is a
+ * sign in through the browser to an account they just created there.
+ */
+export const DEVICE_CODE_LIFETIME_MS = 30 * 60 * 1000;
+
+export type DeviceClient = "mac app" | "cli" | "other";
+
+/**
+ * The app behind a device code, from the client id it sent. Ids are
+ * caller-supplied, so anything unknown is "other" rather than a new
+ * property value.
+ */
+export function deviceClient(clientId: unknown): DeviceClient {
+  if (clientId === "bento-desktop") return "mac app";
+  if (clientId === "bento-tui" || clientId === "bento-cli") return "cli";
+  return "other";
+}
+
 /** What the endpoint that just ran means for sign in or sign up, or null. */
-export function describeAuthEvent(ctx: AuthHookContext): AuthEvent | null {
+export function describeAuthEvent(ctx: AuthHookContext, now = Date.now()): AuthEvent | null {
   const route = ctx.path ?? "";
   const flow: AuthFlow | null = route.startsWith("/sign-up/") ? "sign up" : isSignInRoute(route) ? "sign in" : null;
   if (!flow) return null;
@@ -93,6 +122,12 @@ export function describeAuthEvent(ctx: AuthHookContext): AuthEvent | null {
   if (session) {
     // A sign up that also signed the person in is counted once, by its user row.
     if (flow === "sign up") return null;
+    if (route === "/device/token") {
+      const created = session.user.createdAt === undefined ? NaN : new Date(session.user.createdAt).getTime();
+      const newAccount = Number.isFinite(created) && now - created < DEVICE_CODE_LIFETIME_MS;
+      const client = deviceClient(field(ctx.body, "client_id"));
+      return { flow, outcome: "succeeded", userId: session.user.id, properties: { method, route, client, new_account: newAccount } };
+    }
     return { flow, outcome: "succeeded", userId: session.user.id, properties: { method, route } };
   }
 
@@ -182,6 +217,14 @@ export class AuthFailureError extends Error {
 
 export function reportAuthEvent(analytics: Analytics, event: AuthEvent): void {
   analytics.capture({ event: authEventName(event), userId: event.userId ?? null, properties: event.properties });
+  // The Mac app signs in, and signs up, through the device flow, so
+  // these are the device token's successes under its client id. Every
+  // sign in counts, a new account's included; a sign up counts again.
+  if (event.outcome === "succeeded" && event.properties.client === "mac app") {
+    const newAccount = event.properties.new_account === true;
+    analytics.capture({ event: "mac app signed in", userId: event.userId ?? null, properties: { new_account: newAccount } });
+    if (newAccount) analytics.capture({ event: "mac app signed up", userId: event.userId ?? null });
+  }
   if (event.outcome !== "failed" || EXPECTED_REFUSALS.has(event.properties.code ?? "")) return;
   analytics.captureException(new AuthFailureError(event), null, null, {
     ...event.properties,

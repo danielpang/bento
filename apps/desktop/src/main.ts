@@ -1,5 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, protocol, session, shell, type IpcMainInvokeEvent, type Session } from "electron";
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { DeviceFlow } from "@bento/api-client";
 import { DesktopStore } from "./store.js";
@@ -10,6 +11,7 @@ import type { DesktopUpdates } from "./updates.js";
 import { isTrustedConsoleUrl, LAUNCHER_ORIGIN, normalizeServerUrl, safeExternalUrl, validateSettings } from "./security.js";
 import type { DesktopSettings, DesktopStatus, LoginHint } from "./contracts.js";
 import { localSettings, localSettingsChanged } from "./local-settings.js";
+import { reportInstall } from "./install-report.js";
 
 const directory = import.meta.dirname;
 app.setName("Bento");
@@ -59,6 +61,7 @@ function publish(next: DesktopStatus) {
 async function boot() {
   store = new DesktopStore(app.getPath("userData"));
   await store.load();
+  void reportLaunch(store.configured);
   runtime = new RuntimeController(directory,
     (message) => publish({ phase: "starting", message }),
     // Local Bento stopped on its own: its windows go, since nothing answers
@@ -101,6 +104,26 @@ async function boot() {
   if (server >= 0 && process.argv[server + 1]) {
     await connect({ ...store.settings, mode: "remote", serverUrl: process.argv[server + 1]! });
   } else if (store.configured) await connect(store.settings);
+}
+
+/**
+ * Counts this install, or its update, on hosted Bento (install-report.ts).
+ * Only a published release reports: development packages, unsigned
+ * local builds and the smoke tests' separate profiles never count.
+ */
+async function reportLaunch(configured: boolean) {
+  if (!app.isPackaged || process.platform !== "darwin" || process.env.BENTO_DESKTOP_PROFILE || process.env.DO_NOT_TRACK === "1") return;
+  try {
+    const manifest = JSON.parse(await readFile(path.join(app.getAppPath(), "package.json"), "utf8")) as { bentoUpdateMode?: string };
+    if (manifest.bentoUpdateMode !== "automatic") return;
+  } catch { return; }
+  await reportInstall({
+    directory: app.getPath("userData"),
+    version: app.getVersion(),
+    arch: process.arch === "arm64" || app.runningUnderARM64Translation ? "arm64" : "x64",
+    osVersion: process.getSystemVersion(),
+    configured,
+  });
 }
 
 function refreshUpdates() {

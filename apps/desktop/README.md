@@ -32,6 +32,7 @@ Everything else (keys, agents, pipelines, repos, team, integrations) is the same
 - **Updates:** unsigned builds → **Check for Updates** opens a newer stable DMG in the browser; replace `Bento.app` manually after quitting. Signed releases → background check every 6h; **Restart to Update** when ready (local server stops on restart; **Later** keeps it up).
 - A bottom-left toast offers **Download update** or **Restart and update**, with a dismiss button. Both packaged modes check after launch and every six hours; unsigned builds only download after consent. Dismissing hides that version across windows for the app session.
 - Device tokens: encrypted in the macOS Keychain. No plaintext fallback.
+- **Install and update counts:** a published release (signed, tagged) reports its install once, and each version change after it, to hosted Bento (`POST /api/desktop/events`), which records `mac app installed` or `mac app updated` in PostHog. The report carries a random install id kept in `install.json` in the app's profile, the version before and after, the architecture, and the macOS version, nothing else. A report that cannot go is sent on the next launch. Development builds, unsigned packages, the smoke tests' profiles, and `DO_NOT_TRACK=1` send nothing, and local Bento's server never sends anything. Signing in from the app is counted by the server as `mac app signed in`, plus `mac app signed up` when the account is new, from the device flow's `bento-desktop` client id.
 
 ## Build
 

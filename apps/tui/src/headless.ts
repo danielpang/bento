@@ -671,7 +671,7 @@ export async function runLogin(options: CliOptions): Promise<void> {
     const { DeviceFlow } = await import("@bento/api-client");
     const flow = new DeviceFlow({
       baseUrl: options.server,
-      clientId: "bento-desktop",
+      clientId: "bento-cli",
       onPrompt: (code) => {
         emit("verify_url", code.verification_uri_complete ?? code.verification_uri);
         emit("verify_code", code.user_code);

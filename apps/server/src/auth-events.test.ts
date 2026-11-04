@@ -17,7 +17,7 @@ function hook(input: {
   body?: unknown;
   cookie?: string;
   returned?: unknown;
-  newSession?: { user: { id: string } } | null;
+  newSession?: { user: { id: string; createdAt?: Date | string } } | null;
 }): AuthHookContext {
   return {
     path: input.path,
@@ -212,11 +212,59 @@ test("confirming an address and the device flow are sign ins; their protocol noi
   reportAuthEvent(expiredReport.analytics, expired!);
   assert.equal(expiredReport.exceptions.length, 0, "an old link is not a fault");
 
-  const cli = describeAuthEvent(hook({ path: "/device/token", newSession: session, returned: { access_token: "t" } }));
-  assert.deepEqual(cli, { flow: "sign in", outcome: "succeeded", userId: "user-1", properties: { method: "device", route: "/device/token" } });
+  const cli = describeAuthEvent(hook({ path: "/device/token", body: { client_id: "bento-tui" }, newSession: session, returned: { access_token: "t" } }));
+  assert.deepEqual(cli, {
+    flow: "sign in",
+    outcome: "succeeded",
+    userId: "user-1",
+    properties: { method: "device", route: "/device/token", client: "cli", new_account: false },
+  });
   // The CLI polls until the person approves; "pending" is the protocol, not a failure.
   const pending = describeAuthEvent(hook({ path: "/device/token", returned: { status: "BAD_REQUEST", statusCode: 400, body: { error: "authorization_pending" } } }));
   assert.equal(pending, null);
+});
+
+test("the Mac app's device sign in is a Mac app sign in, and a sign up when the account is new", () => {
+  const now = Date.parse("2026-11-04T12:00:00Z");
+  const signIn = (createdAt: string, clientId = "bento-desktop") =>
+    describeAuthEvent(
+      hook({
+        path: "/device/token",
+        body: { client_id: clientId, device_code: "d", grant_type: "urn:ietf:params:oauth:grant-type:device_code" },
+        newSession: { user: { id: "user-1", createdAt } },
+        returned: { access_token: "t" },
+      }),
+      now,
+    )!;
+
+  // An account made a few minutes ago, while the code was out.
+  const fresh = signIn("2026-11-04T11:50:00Z");
+  assert.deepEqual(fresh.properties, { method: "device", route: "/device/token", client: "mac app", new_account: true });
+  const freshReport = recordingAnalytics();
+  reportAuthEvent(freshReport.analytics, fresh);
+  assert.deepEqual(
+    freshReport.events.map((e) => [e.event, e.userId, e.properties]),
+    [
+      ["sign in succeeded", "user-1", fresh.properties],
+      ["mac app signed in", "user-1", { new_account: true }],
+      ["mac app signed up", "user-1", undefined],
+    ],
+  );
+
+  // An account older than any code could be is a returning person.
+  const returning = signIn("2026-10-01T00:00:00Z");
+  assert.equal(returning.properties.new_account, false);
+  const returningReport = recordingAnalytics();
+  reportAuthEvent(returningReport.analytics, returning);
+  assert.deepEqual(returningReport.events.map((e) => e.event), ["sign in succeeded", "mac app signed in"]);
+
+  // The CLI, and a client id nobody ships, are not the Mac app.
+  for (const clientId of ["bento-tui", "bento-cli", "made-up"]) {
+    const report = recordingAnalytics();
+    reportAuthEvent(report.analytics, signIn("2026-11-04T11:50:00Z", clientId));
+    assert.deepEqual(report.events.map((e) => e.event), ["sign in succeeded"], clientId);
+  }
+  assert.equal(signIn("2026-11-04T11:50:00Z", "made-up").properties.client, "other");
 });
 
 test("sessions minted elsewhere, and every other route, are left alone", () => {

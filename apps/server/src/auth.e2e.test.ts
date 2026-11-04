@@ -3998,6 +3998,32 @@ test("sign in and sign up outcomes reach PostHog through better-auth's own hooks
   assert.equal(session.status, 200);
   assert.equal(events.length, 7);
 
+  // The Mac app signs in through the device flow. This account is
+  // minutes old, so the sign in is also the person's sign up from it.
+  const code = (await (await post("/api/auth/device/code", { client_id: "bento-desktop", scope: "board" })).json()) as {
+    device_code: string;
+    user_code: string;
+    interval: number;
+  };
+  await socialApp.request(`/api/auth/device?user_code=${code.user_code}`, { headers: { authorization: `Bearer ${token}` } });
+  const approved = await post("/api/auth/device/approve", { userCode: code.user_code }, { authorization: `Bearer ${token}` });
+  assert.equal(((await approved.json()) as { success: boolean }).success, true);
+  await new Promise((r) => setTimeout(r, (code.interval + 1) * 1000));
+  const granted = await post("/api/auth/device/token", {
+    grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+    device_code: code.device_code,
+    client_id: "bento-desktop",
+  });
+  assert.ok(((await granted.json()) as { access_token?: string }).access_token);
+  assert.deepEqual(
+    events.slice(7).map((e) => [e.event, e.userId, e.properties]),
+    [
+      ["sign in succeeded", created, { method: "device", route: "/device/token", client: "mac app", new_account: true }],
+      ["mac app signed in", created, { new_account: true }],
+      ["mac app signed up", created, undefined],
+    ],
+  );
+
   // Nothing that identifies the person rides along on a failure.
   for (const event of events) {
     if (event.event.endsWith("failed")) assert.equal(JSON.stringify(event).includes("outcome-metrics"), false);

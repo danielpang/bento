@@ -18,7 +18,7 @@ import {
   verification,
   type Db,
 } from "@bento/db";
-import { authEventHook, methodFor, type AuthEvent } from "./auth-events.js";
+import { authEventHook, DEVICE_CODE_LIFETIME_MS, methodFor, type AuthEvent } from "./auth-events.js";
 import type { Env } from "./env.js";
 import {
   deleteAccountMessage,
@@ -343,7 +343,7 @@ function buildAuth(env: Env, db: Db, mailer: Mailer, hooks: AuthHooks) {
       bearer(),
       deviceAuthorization({
         verificationUri: "/device",
-        expiresIn: "30m",
+        expiresIn: `${DEVICE_CODE_LIFETIME_MS / 60_000}m`,
         interval: "5s",
       }),
       // Teams share a board. The creator becomes owner; owners and

@@ -22,6 +22,7 @@ import { catalogRoutes } from "./routes/catalog.js";
 import { and, eq } from "drizzle-orm";
 import { invitation, member } from "@bento/db";
 import { invitationPreviewRoutes } from "./routes/invitations.js";
+import { desktopEventRoutes } from "./routes/desktop-events.js";
 import { githubRoutes } from "./routes/github.js";
 import { linearRoutes } from "./routes/linear.js";
 import { slackRoutes } from "./routes/slack.js";
@@ -339,6 +340,10 @@ export function createApp(ctx: AppContext, extras: AppExtras = {}) {
   // mode so the page's contract holds everywhere: local mode has no
   // invitation rows, so every id answers 404 there.
   app.route("/api/invitation-preview", invitationPreviewRoutes(ctx));
+
+  // The Mac app's installs and updates, reported before anyone signs
+  // in. No tenant and no session; see routes/desktop-events.ts.
+  app.route("/api/desktop/events", desktopEventRoutes(ctx));
 
   /**
    * Permanent feature flags. Evaluation waits on PostHog, so this sits

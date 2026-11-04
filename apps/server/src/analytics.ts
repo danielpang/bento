@@ -17,6 +17,12 @@ export interface ServerEvent {
   userId?: string | null;
   /** The tenant the event happened in; becomes a PostHog group. */
   organizationId?: string | null;
+  /**
+   * Who the event is about when it is not a user: a Mac app install,
+   * say. Counted under this id with no person profile, like any event
+   * without a user. Ignored when userId is set.
+   */
+  distinctId?: string;
   properties?: Record<string, unknown>;
 }
 
@@ -124,13 +130,13 @@ export function createAnalytics(env: Env): Analytics | null {
   void client.register({ environment, bento_mode: mode });
 
   return {
-    capture({ event, userId, organizationId, properties }: ServerEvent): void {
+    capture({ event, userId, organizationId, distinctId: anonymousId, properties }: ServerEvent): void {
       /**
        * A synthetic distinct id (the organization, or the server
        * itself) still counts the event, but must not mint a person
        * profile pretending to be someone.
        */
-      const distinctId = userId ?? (organizationId ? `organization:${organizationId}` : "bento-server");
+      const distinctId = userId ?? anonymousId ?? (organizationId ? `organization:${organizationId}` : "bento-server");
       client.capture({
         distinctId,
         event,
