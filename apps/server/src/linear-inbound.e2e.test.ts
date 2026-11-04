@@ -587,3 +587,27 @@ test("two organizations following the same Linear project each import only their
   assert.equal(links.length, 1, "the other organization's project gets nothing");
   assert.equal(links[0]!.organizationId, "org-a");
 });
+
+test("a new issue in Triage is imported and starts like any other", async () => {
+  const triaged = await setupProject(ctx.userId, "Triaged", null);
+  await setAutoStart(triaged, true);
+  try {
+    await handleLinearInbound(ctx, {
+      organizationId: null,
+      action: "create",
+      issue: { ...issueCreated("in-triage", "Waiting in Triage", "team-triaged"), state: { id: "t", name: "Triage", type: "triage" } },
+    });
+    const card = await cardFor("in-triage");
+    assert.equal(card.projectId, triaged);
+    assert.ok((await waitForStage(card.id)).currentStageId);
+
+    await handleLinearInbound(ctx, {
+      organizationId: null,
+      action: "create",
+      issue: { ...issueCreated("started", "Already in progress", "team-triaged"), state: { id: "p", name: "In Progress", type: "started" } },
+    });
+    assert.equal(await linkFor("started"), undefined, "work already under way in Linear stays there");
+  } finally {
+    await setAutoStart(triaged, false);
+  }
+});

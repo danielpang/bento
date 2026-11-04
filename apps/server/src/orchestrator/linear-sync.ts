@@ -21,6 +21,9 @@ import { INTERACTIVE_POLL_SECONDS } from "./queue.js";
 
 const BENTO_LABEL = "bento";
 
+/** Linear state types that are still waiting for work: what a followed Linear project imports. */
+const OPEN_STATE_TYPES = ["triage", "backlog", "unstarted"];
+
 function linkOrgFilter(organizationId: string | null) {
   return organizationId
     ? eq(linearIssueLinks.organizationId, organizationId)
@@ -72,7 +75,7 @@ async function syncImportSource(
     const result = await client.issues({
       teamId: source.linearImportTeamId,
       projectId: source.linearImportProjectId,
-      stateTypes: ["backlog", "unstarted"],
+      stateTypes: OPEN_STATE_TYPES,
       after,
     });
     for (const issue of result.issues) {
@@ -146,7 +149,7 @@ export async function handleLinearInbound(
     .limit(1);
 
   const hasBentoLabel = (issue.labels ?? []).some((label) => label.name.toLowerCase() === BENTO_LABEL);
-  const isBacklogState = !issue.state || issue.state.type === "backlog" || issue.state.type === "unstarted";
+  const isOpenState = !issue.state || OPEN_STATE_TYPES.includes(issue.state.type);
   const sourceProjectId = pickImportProject(await linearImportSources(ctx, organizationId), {
     teamId: issue.teamId,
     projectId: issue.projectId,
@@ -157,7 +160,7 @@ export async function handleLinearInbound(
     // An issue in a followed Linear project belongs to that project
     // whatever its labels; the mapping and default place the rest.
     projectId = sourceProjectId ?? mapping?.projectId ?? (await defaultProjectFor(ctx, organizationId));
-  } else if (sourceProjectId && isBacklogState) {
+  } else if (sourceProjectId && isOpenState) {
     // An update counts too: moving an issue into the Linear project a
     // Bento project follows is how most issues arrive there, and the
     // sweep would import it within minutes anyway.
