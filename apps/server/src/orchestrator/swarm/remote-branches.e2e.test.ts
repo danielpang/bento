@@ -1,7 +1,8 @@
 import { after, before, beforeEach, test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -14,6 +15,7 @@ import { reapSwarmSandbox, SandboxReapDeferred } from "../reap-sandbox.js";
 import type { AppContext } from "../../context.js";
 import { EventBus } from "../../events.js";
 import { loadEnv } from "../../env.js";
+import { recordingAnalytics } from "../../test-analytics.js";
 import { publishStackedPullRequests, publishSwarmCompletion } from "./complete.js";
 import { pushSwarmBranch, pushTaskBranch, remoteBranchBundles } from "./remote-branches.js";
 import { releaseSwarmBranch } from "./release-branch.js";
@@ -527,4 +529,223 @@ test("a pull request over a branch GitHub has only part of says so, rather than 
   await pushSwarmBranch(ctx, swarm.id, second.task.id, options);
   const current = await publishSwarmCompletion(lost, await readSwarm(swarm.id), publisher, { remoteUrl: () => remotePath });
   assert.equal(current.behind, false, "a copy pushed after the last landing is whole");
+});
+
+/**
+ * The first `git push --force-with-lease` for `branch` is answered the
+ * way production answered the reap, then later pushes run real git.
+ *
+ * `reject-once` leaves the remote untouched. `land-then-reject` performs
+ * the push and then reports the rejection, which is a concurrent push of
+ * this same commit winning the race. `move-then-reject` points the
+ * branch at `moveTo` and reports the rejection, which is some other
+ * update landing between the list and the push.
+ */
+async function withLeaseShim(
+  branch: string,
+  shim: { mode: "reject-once" | "land-then-reject" | "move-then-reject"; moveTo?: string; wording?: "stale" | "exists" },
+  fn: () => Promise<void>,
+): Promise<void> {
+  const bin = path.join(dataDir, `git-shim-${randomUUID()}`);
+  await mkdir(bin);
+  const realGit = (await exec("which", ["git"])).stdout.trim();
+  const marker = path.join(bin, "fired");
+  const script = `#!/usr/bin/env node
+const { spawnSync } = require("node:child_process");
+const { writeFileSync, existsSync } = require("node:fs");
+const real = ${JSON.stringify(realGit)};
+const args = process.argv.slice(2);
+const branch = ${JSON.stringify(branch)};
+const mode = ${JSON.stringify(shim.mode)};
+const marker = ${JSON.stringify(marker)};
+const moveTo = ${JSON.stringify(shim.moveTo ?? "")};
+const remote = ${JSON.stringify(remotePath)};
+const wording = ${JSON.stringify(shim.wording ?? "stale")};
+const isPush = args.includes("push");
+const lease = args.some((arg) => arg.startsWith("--force-with-lease="));
+const refspec = args.find((arg) => arg.endsWith(":refs/heads/" + branch));
+function run(gitArgs) {
+  const path = (process.env.PATH || "").split(":").filter((entry) => entry && entry !== ${JSON.stringify(bin)}).join(":");
+  const result = spawnSync(real, gitArgs, { encoding: "utf8", env: { ...process.env, PATH: path } });
+  if (result.error) {
+    process.stderr.write(String(result.error));
+    process.exit(1);
+  }
+  if (result.stdout) process.stdout.write(result.stdout);
+  if (result.stderr) process.stderr.write(result.stderr);
+  return result.status === null ? 1 : result.status;
+}
+if (isPush && lease && refspec && !existsSync(marker)) {
+  writeFileSync(marker, "1");
+  if (mode === "land-then-reject") {
+    const status = run(args.filter((arg) => !arg.startsWith("--force-with-lease=")));
+    if (status !== 0) process.exit(status);
+  } else if (mode === "move-then-reject") {
+    const status = run(["--git-dir", remote, "update-ref", "refs/heads/" + branch, moveTo]);
+    if (status !== 0) process.exit(status);
+  }
+  const sha = refspec.slice(0, refspec.indexOf(":"));
+  const line = wording === "exists"
+    ? " ! [remote rejected] " + sha + " -> " + branch + " (cannot lock ref 'refs/heads/" + branch + "': reference already exists)"
+    : " ! [rejected]        " + sha + " -> " + branch + " (stale info)";
+  process.stderr.write("To " + remote + "\\n" + line + "\\nerror: failed to push some refs to '" + remote + "'\\n");
+  process.exit(1);
+}
+process.exit(run(args));
+`;
+  await writeFile(path.join(bin, "git"), script);
+  await chmod(path.join(bin, "git"), 0o755);
+  const before = process.env.PATH ?? "";
+  process.env.PATH = `${bin}:${before}`;
+  try {
+    await fn();
+  } finally {
+    process.env.PATH = before;
+  }
+}
+
+/** A commit that is not on the swarm's branch, stored on the remote under a hidden ref. */
+async function unrelatedTip(name: string): Promise<string> {
+  const side = path.join(dataDir, `side-${name}`);
+  await exec("git", ["clone", "--quiet", "--branch", "main", remotePath, side]);
+  await git(side, ["checkout", "--quiet", "-b", name]);
+  await writeFile(path.join(side, `${name}.txt`), `${name}\n`);
+  await git(side, ["add", "."]);
+  await git(side, ["commit", "--quiet", "-m", name]);
+  const sha = await git(side, ["rev-parse", "HEAD"]);
+  await git(side, ["push", "--quiet", "origin", `HEAD:refs/hidden/${name}`]);
+  return sha;
+}
+
+test("a reap push rejected with stale info lists again and then saves the branch", async () => {
+  const { swarm, tree } = await finishedOnMachine("reap-stale");
+  const machine = cloneMachine(() => tree);
+  // The sandbox row names modal, so the push that records the lease has
+  // to use the same stand-in driver the reap will.
+  await pushSwarmBranch(machine.ctx, swarm.id, undefined, options);
+  await writeFile(path.join(tree, "later.ts"), "later\n");
+  await git(tree, ["add", "."]);
+  await git(tree, ["commit", "--quiet", "-m", "later"]);
+  const head = await git(tree, ["rev-parse", "HEAD"]);
+  const recorded = recordingAnalytics();
+  machine.ctx.analytics = recorded.analytics;
+
+  await withLeaseShim(swarm.branchName!, { mode: "reject-once" }, async () => {
+    await reapSwarmSandbox(machine.ctx, swarm.id, { push: options });
+  });
+
+  assert.equal(await remoteHead(swarm.branchName!), head, "the retry put the machine's head on the branch");
+  assert.equal((await readSwarm(swarm.id)).pushedHeads?.[REPO_URL], head);
+  assert.deepEqual(machine.destroyed, ["box-reap-stale"]);
+  assert.equal(recorded.exceptions.length, 0, "a rejection the retry cleared is not a lost branch");
+});
+
+test("a create GitHub rejects as reference already exists is retried while the ref is still absent", async () => {
+  const { swarm, tree } = await finishedOnMachine("reap-exists");
+  const head = await git(tree, ["rev-parse", "HEAD"]);
+  const machine = cloneMachine(() => tree);
+  const recorded = recordingAnalytics();
+  machine.ctx.analytics = recorded.analytics;
+
+  await withLeaseShim(swarm.branchName!, { mode: "reject-once", wording: "exists" }, async () => {
+    await reapSwarmSandbox(machine.ctx, swarm.id, { push: options });
+  });
+
+  assert.equal(await remoteHead(swarm.branchName!), head);
+  assert.deepEqual(machine.destroyed, ["box-reap-exists"]);
+  assert.equal(recorded.exceptions.length, 0);
+});
+
+test("a reap that loses the race to the same commit treats the branch as saved", async () => {
+  const { swarm, tree } = await finishedOnMachine("reap-same");
+  const head = await git(tree, ["rev-parse", "HEAD"]);
+  const machine = cloneMachine(() => tree);
+  const recorded = recordingAnalytics();
+  machine.ctx.analytics = recorded.analytics;
+
+  await withLeaseShim(swarm.branchName!, { mode: "land-then-reject" }, async () => {
+    await reapSwarmSandbox(machine.ctx, swarm.id, { push: options });
+  });
+
+  assert.equal(await remoteHead(swarm.branchName!), head, "the push that won the race is the machine's head");
+  assert.equal((await readSwarm(swarm.id)).pushedHeads?.[REPO_URL], head);
+  assert.deepEqual(machine.destroyed, ["box-reap-same"], "GitHub holds the work, so the machine can go");
+  assert.equal(recorded.exceptions.length, 0);
+});
+
+test("a race that lands someone else's commit is not force-updated, and the machine stays", async () => {
+  const { swarm, tree, sandboxId } = await finishedOnMachine("reap-theirs");
+  const theirs = await unrelatedTip("reap-theirs");
+  const machine = cloneMachine(() => tree);
+  const recorded = recordingAnalytics();
+  machine.ctx.analytics = recorded.analytics;
+
+  await assert.rejects(
+    () =>
+      withLeaseShim(swarm.branchName!, { mode: "move-then-reject", moveTo: theirs }, async () => {
+        await reapSwarmSandbox(machine.ctx, swarm.id, { push: options });
+      }),
+    (err: unknown) => err instanceof SandboxReapDeferred && /branch moved on GitHub/.test(err.message),
+  );
+
+  assert.equal(await remoteHead(swarm.branchName!), theirs, "their commit is still the branch");
+  assert.deepEqual(machine.destroyed, [], "the machine, the only copy of this swarm's commits, stays");
+  assert.equal((await db.select().from(sandboxes).where(eq(sandboxes.id, sandboxId)))[0]?.status, "ready");
+  assert.equal(recorded.exceptions.length, 1);
+  assert.equal(recorded.exceptions[0]?.properties?.source, "swarm_branch_unsaved");
+});
+
+test("a race that moves the branch forward inside this commit is pushed over", async () => {
+  const { swarm, tree } = await finishedOnMachine("reap-forward");
+  const machine = cloneMachine(() => tree);
+  await pushSwarmBranch(machine.ctx, swarm.id, undefined, options);
+  await writeFile(path.join(tree, "middle.ts"), "middle\n");
+  await git(tree, ["add", "."]);
+  await git(tree, ["commit", "--quiet", "-m", "middle"]);
+  const middle = await git(tree, ["rev-parse", "HEAD"]);
+  await git(tree, ["push", "--quiet", remotePath, `${middle}:refs/hidden/reap-forward`]);
+  await writeFile(path.join(tree, "later.ts"), "later\n");
+  await git(tree, ["add", "."]);
+  await git(tree, ["commit", "--quiet", "-m", "later"]);
+  const head = await git(tree, ["rev-parse", "HEAD"]);
+  const recorded = recordingAnalytics();
+  machine.ctx.analytics = recorded.analytics;
+
+  await withLeaseShim(swarm.branchName!, { mode: "move-then-reject", moveTo: middle }, async () => {
+    await reapSwarmSandbox(machine.ctx, swarm.id, { push: options });
+  });
+
+  assert.equal(await remoteHead(swarm.branchName!), head, "the machine's newer commit replaced the tip the race landed");
+  assert.equal((await readSwarm(swarm.id)).pushedHeads?.[REPO_URL], head);
+  assert.deepEqual(machine.destroyed, ["box-reap-forward"]);
+  assert.equal(recorded.exceptions.length, 0);
+});
+
+test("a race that resets the branch behind the recorded lease is not force-updated", async () => {
+  const { swarm, tree, sandboxId } = await finishedOnMachine("reap-reset");
+  const machine = cloneMachine(() => tree);
+  await pushSwarmBranch(machine.ctx, swarm.id, undefined, options);
+  const earlier = await git(tree, ["rev-parse", "HEAD"]);
+  await writeFile(path.join(tree, "kept.ts"), "kept\n");
+  await git(tree, ["add", "."]);
+  await git(tree, ["commit", "--quiet", "-m", "kept"]);
+  await pushSwarmBranch(machine.ctx, swarm.id, undefined, options);
+  await writeFile(path.join(tree, "newer.ts"), "newer\n");
+  await git(tree, ["add", "."]);
+  await git(tree, ["commit", "--quiet", "-m", "newer"]);
+  const recorded = recordingAnalytics();
+  machine.ctx.analytics = recorded.analytics;
+
+  await assert.rejects(
+    () =>
+      withLeaseShim(swarm.branchName!, { mode: "move-then-reject", moveTo: earlier }, async () => {
+        await reapSwarmSandbox(machine.ctx, swarm.id, { push: options });
+      }),
+    (err: unknown) => err instanceof SandboxReapDeferred && /branch moved on GitHub/.test(err.message),
+  );
+
+  assert.equal(await remoteHead(swarm.branchName!), earlier, "the reset is still the branch");
+  assert.deepEqual(machine.destroyed, [], "force pushing would undo the reset, so the machine stays");
+  assert.equal((await db.select().from(sandboxes).where(eq(sandboxes.id, sandboxId)))[0]?.status, "ready");
+  assert.equal(recorded.exceptions.length, 1);
 });
