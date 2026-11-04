@@ -85,7 +85,7 @@ test("the page opens on the last month and offers every window", () => {
   }
   assert.match(html, /aria-pressed="true"[^>]*aria-label="Last 30 days"/, "the month is the default window");
   assert.match(html, />Custom</);
-  assert.match(html, /href="\/"[^>]*>.*Back to board/);
+  assert.match(html, /href="\/"[^>]*>.*Back</);
   assert.match(html, /Loading analytics/);
 });
 
