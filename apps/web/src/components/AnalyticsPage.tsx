@@ -99,7 +99,7 @@ export function AnalyticsPage({ client, projectId }: { client: BentoClient; proj
     <div className="analytics-screen" aria-busy={data === null && !loadFailed ? true : undefined}>
       <header className="analytics-intro">
         <a className="analytics-back" href="/" aria-label="Back to board">
-          <span aria-hidden="true">←</span> Back to board
+          <span aria-hidden="true">←</span> Back
         </a>
         <h1 className="analytics-title">Analytics</h1>
       </header>

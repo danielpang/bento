@@ -111,7 +111,7 @@ export function SettingsPage({ client }: { client: BentoClient }) {
         <BrandLockup />
         <span className="topbar-spacer" />
         <a className="btn btn-ghost" href="/">
-          Back to board
+          Back
         </a>
       </header>
 
