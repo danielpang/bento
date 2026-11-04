@@ -59,3 +59,10 @@ test("settings reject unrequested runner mode and relative local directories", (
   assert.throws(() => validateSettings({ ...settings, dataDir: "relative" }));
   assert.throws(() => validateSettings({ ...settings, sandboxImage: "name; touch /tmp/bad" }));
 });
+
+test("a sign in hint keeps a plausible email and a known provider, and drops everything else", () => {
+  const base = { mode: "remote", serverUrl: "https://bento.example", dataDir: "/tmp/bento", databaseUrl: "", sandbox: "docker", sandboxImage: "bento-sandbox:dev" };
+  assert.deepEqual(validateSettings({ ...base, loginHint: { email: " a@b.co ", provider: "github" } }).loginHint, { email: "a@b.co", provider: "github" });
+  assert.equal(validateSettings({ ...base, loginHint: { email: "not an email", provider: "gitlab" } }).loginHint, undefined);
+  assert.equal(validateSettings(base).loginHint, undefined);
+});

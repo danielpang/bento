@@ -1211,11 +1211,16 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
     <a
       className="spend-button"
       href="/analytics"
-      aria-label="View project analytics"
+      aria-label="Analytics"
+      title="Analytics"
       aria-current={screen === "analytics" ? "page" : undefined}
     >
-      <span className="spend-button-label">Analytics</span>
-      <span className="spend-button-arrow" aria-hidden="true">›</span>
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d="M2.5 13.5h11" />
+        <path d="M4.5 13.5V8.5" />
+        <path d="M8 13.5V3.5" />
+        <path d="M11.5 13.5V6.5" />
+      </svg>
     </a>
   ) : null;
 

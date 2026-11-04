@@ -63,7 +63,18 @@ export function DeviceApproval() {
   }
 
   if (isPending) return <CenteredPanelSkeleton />;
-  if (!session) return <SignIn callbackURL={deviceApprovalCallbackUrl(code)} />;
+  if (!session) {
+    // The desktop app's sign in card passes what the person already told it.
+    const params = new URLSearchParams(window.location.search);
+    const provider = params.get("provider");
+    return (
+      <SignIn
+        callbackURL={deviceApprovalCallbackUrl(code)}
+        initialEmail={params.get("email") ?? ""}
+        {...(provider === "github" || provider === "google" ? { autoProvider: provider } : {})}
+      />
+    );
+  }
 
   return (
     <div className="center">

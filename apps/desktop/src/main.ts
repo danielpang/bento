@@ -8,7 +8,7 @@ import { RuntimeController } from "./runtime-controller.js";
 import { createUpdates } from "./update-service.js";
 import type { DesktopUpdates } from "./updates.js";
 import { isTrustedConsoleUrl, LAUNCHER_ORIGIN, normalizeServerUrl, safeExternalUrl, validateSettings } from "./security.js";
-import type { DesktopSettings, DesktopStatus } from "./contracts.js";
+import type { DesktopSettings, DesktopStatus, LoginHint } from "./contracts.js";
 import { localSettings, localSettingsChanged } from "./local-settings.js";
 
 const directory = import.meta.dirname;
@@ -262,7 +262,8 @@ async function connect(settings: DesktopSettings): Promise<void> {
       const restart = settings.mode === "local" && existing !== undefined && localSettingsChanged(existing.settings, settings);
       if (restart && !await confirmRestart()) return;
       // Signing in elsewhere keeps the settings local Bento runs with.
-      await store.saveSettings(settings.mode === "remote" && runningLocal ? { ...settings, ...localSettings(runningLocal) } : settings);
+      const { loginHint: _hint, ...persisted } = settings;
+      await store.saveSettings(persisted.mode === "remote" && runningLocal ? { ...persisted, ...localSettings(runningLocal) } : persisted);
       if (restart) {
         publish({ phase: "starting", message: "Restarting Bento with your new settings..." });
         try { await runtime.stop(); }
@@ -291,7 +292,7 @@ async function connect(settings: DesktopSettings): Promise<void> {
         if (!response.ok) throw new Error(`The server returned HTTP ${response.status}. Check its address and try again.`);
         const health = await response.json() as { mode?: string };
         if (health.mode !== "local" && health.mode !== "multi") throw new Error("This address did not return a Bento server.");
-        if (health.mode === "multi") await authenticate(origin, controller.signal);
+        if (health.mode === "multi") await authenticate(origin, controller.signal, settings.loginHint);
       }
       controller.signal.throwIfAborted();
       const partition = `persist:bento-${createHash("sha256").update(settings.mode === "local" ? `local:${settings.dataDir}` : origin).digest("hex").slice(0, 20)}`;
@@ -333,7 +334,7 @@ function connectionKey(settings: DesktopSettings): string {
   return settings.mode === "local" ? "local" : `remote:${normalizeServerUrl(settings.serverUrl)}`;
 }
 
-async function authenticate(origin: string, signal: AbortSignal) {
+async function authenticate(origin: string, signal: AbortSignal, hint?: LoginHint) {
   const token = store.token(origin);
   if (token) {
     const response = await fetch(`${origin}/api/auth/get-session`, { headers: { authorization: `Bearer ${token}` }, redirect: "error", signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]) });
@@ -348,8 +349,12 @@ async function authenticate(origin: string, signal: AbortSignal) {
     },
   });
   const code = await flow.requestCode();
-  const verificationUrl = new URL(code.verification_uri_complete ?? code.verification_uri, origin).href;
-  if (new URL(verificationUrl).origin !== origin) throw new Error("The server returned a login address on a different server.");
+  const verification = new URL(code.verification_uri_complete ?? code.verification_uri, origin);
+  if (verification.origin !== origin) throw new Error("The server returned a login address on a different server.");
+  // The page prefills the email, or goes straight to the provider.
+  if (hint?.email) verification.searchParams.set("email", hint.email);
+  if (hint?.provider) verification.searchParams.set("provider", hint.provider);
+  const verificationUrl = verification.href;
   publish({ phase: "login", message: "Finish signing in through your browser, then return to Bento.", userCode: code.user_code, verificationUrl });
   await shell.openExternal(verificationUrl);
   const nextToken = await flow.pollForToken(code);

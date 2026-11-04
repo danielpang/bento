@@ -43,3 +43,14 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 :root[data-theme="navy"] { --bg: #0a0e16; --panel: #111927; --line: #263348; --muted: #9ba9bd; }
 :root[data-theme="dark"] button:not(.secondary), :root[data-theme="navy"] button:not(.secondary) { color: #0e0d0b; }
 :root[data-theme="dark"] :is(.status.error, .warning), :root[data-theme="navy"] :is(.status.error, .warning) { color: #ffaaa1; }
+
+/* Sign in card: email first, then the providers, then why. */
+button.full { width: 100%; }
+.divider { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 12px; }
+.divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.providers { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.providers button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
+.perks { list-style: none; margin: 0; padding: 12px 0 0; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; color: var(--muted); font-size: 13px; }
+.perks li { padding-left: 22px; position: relative; }
+.perks li::before { content: ""; position: absolute; left: 3px; top: 5px; width: 9px; height: 5px; border-left: 2px solid var(--accent); border-bottom: 2px solid var(--accent); transform: rotate(-45deg); }
+.card .fine { font-size: 12px; color: var(--muted); text-align: center; }

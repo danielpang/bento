@@ -34,6 +34,7 @@ export function SignIn({
   lockEmail = false,
   callbackURL = "/",
   note,
+  autoProvider,
 }: {
   social?: { github: boolean; google: boolean };
   /** Open on sign up instead: the invitation page knows the invitee has no account yet. */
@@ -55,8 +56,13 @@ export function SignIn({
   callbackURL?: string;
   /** Replaces the tagline, so the invitation page can say whose team this is. */
   note?: string;
+  /** Go straight to this provider, once: the desktop app's GitHub and Google buttons. */
+  autoProvider?: "github" | "google";
 }) {
   const social = useSocialProviders(supplied);
+  useEffect(() => {
+    if (autoProvider) void signIn.social({ provider: autoProvider, callbackURL });
+  }, []);
   const [mode, setMode] = useState<"in" | "up">(initialMode);
   const [email, setEmail] = useState(initialEmail);
   const [password, setPassword] = useState("");

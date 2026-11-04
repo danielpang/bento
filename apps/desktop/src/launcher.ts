@@ -1,4 +1,4 @@
-import type { DesktopMode, DesktopSettings, DesktopStatus, LauncherBridge, LocalSettings } from "./contracts.js";
+import type { DesktopMode, DesktopSettings, DesktopStatus, LauncherBridge, LocalSettings, LoginHint } from "./contracts.js";
 import { localSettingsChanged } from "./local-settings.js";
 
 const bridge = (window as unknown as { bentoLauncher: LauncherBridge }).bentoLauncher;
@@ -7,7 +7,7 @@ const field = (id: string) => element<HTMLInputElement>(id);
 // One action per card: the button pressed is the mode.
 const actions: Record<DesktopMode, { id: string; label: string }> = {
   local: { id: "start", label: "Start" },
-  remote: { id: "connect", label: "Sign in or sign up" },
+  remote: { id: "connect", label: "Continue with email" },
 };
 let pressed: DesktopMode = "local";
 let runningLocal: DesktopStatus["local"];
@@ -37,8 +37,16 @@ function fillForm(settings: LocalSettings) {
   field("model-proxy").checked = settings.modelProxy;
 }
 
-function formSettings(mode: DesktopMode): DesktopSettings {
+/** The sign in card's email or provider, for the browser page to start from. */
+function loginHint(submitterId: string | undefined): LoginHint {
+  const provider = submitterId === "connect-github" ? "github" : submitterId === "connect-google" ? "google" : undefined;
+  const email = field("login-email").value.trim();
+  return { ...(email ? { email } : {}), ...(provider ? { provider } : {}) };
+}
+
+function formSettings(mode: DesktopMode, hint?: LoginHint): DesktopSettings {
   return {
+    ...(hint && Object.keys(hint).length ? { loginHint: hint } : {}),
     mode,
     serverUrl: "https://app.usebento.ai", dataDir: field("data-dir").value,
     databaseUrl: field("database-url").value, sandboxImage: field("sandbox-image").value,
@@ -58,6 +66,8 @@ function renderStatus(status: DesktopStatus) {
   element("status-message").textContent = status.message;
   element("status-message").parentElement!.classList.toggle("error", status.phase === "error");
   busy = status.phase === "starting" || status.phase === "login";
+  for (const id of ["connect-github", "connect-google"]) element<HTMLButtonElement>(id).disabled = busy;
+  field("login-email").disabled = busy;
   for (const [mode, action] of Object.entries(actions) as [DesktopMode, { id: string; label: string }][]) {
     element<HTMLButtonElement>(action.id).disabled = busy;
     element(action.id).textContent = busy && mode === pressed ? "Connecting..." : action.label;
@@ -96,8 +106,13 @@ async function start() {
   renderStatus(await bridge.status());
   element("connection-form").addEventListener("submit", (event) => {
     event.preventDefault();
-    pressed = (event as SubmitEvent).submitter?.id === actions.remote.id ? "remote" : "local";
-    void bridge.connect(formSettings(pressed)).catch(showError);
+    const submitter = (event as SubmitEvent).submitter?.id;
+    pressed = submitter === "start" ? "local" : "remote";
+    void bridge.connect(formSettings(pressed, pressed === "remote" ? loginHint(submitter) : undefined)).catch(showError);
+  });
+  // Enter in the email field means this card's button, not the first submit button in the form (Start).
+  element("login-email").addEventListener("keydown", (event) => {
+    if ((event as KeyboardEvent).key === "Enter") { event.preventDefault(); element<HTMLButtonElement>("connect").click(); }
   });
   element("choose-directory").addEventListener("click", () => void bridge.chooseDirectory().then((directory) => { if (directory) { field("data-dir").value = directory; renderStartLabel(); } }).catch(showError));
   element("cancel").addEventListener("click", () => void bridge.cancel().catch(showError));

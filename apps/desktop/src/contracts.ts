@@ -10,6 +10,12 @@ export interface DesktopUpdateNotice {
   busy: boolean;
 }
 
+/** What the launcher's sign in card passes to the browser page, so it opens ready for this person. */
+export interface LoginHint {
+  email?: string;
+  provider?: "github" | "google";
+}
+
 export interface DesktopSettings {
   mode: DesktopMode;
   serverUrl: string;
@@ -25,6 +31,8 @@ export interface DesktopSettings {
    * local server on each start; on unless the user turned it off.
    */
   modelProxy: boolean;
+  /** Used for one sign in only, never saved. */
+  loginHint?: LoginHint;
 }
 
 export interface DesktopStatus {
