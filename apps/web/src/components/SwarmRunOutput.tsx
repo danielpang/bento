@@ -478,7 +478,7 @@ export function SwarmRunOutputDrawer({ client, api, swarmId, swarmStatus, runId,
             onStop={plannerActive && onStop && !busy ? onStop : undefined}
             busy={sending}
             maxLength={20_000}
-            placeholder="Give feedback or ask for a change to the plan"
+            placeholder="Give feedback on the plan"
             ariaLabel="Message the planner"
           />
           <p className="muted composer-hint">{helper}</p>

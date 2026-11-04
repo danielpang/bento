@@ -5190,15 +5190,40 @@ a.pr-row:hover .pr-external {
   min-width: 0;
 }
 
-/* The composer: input first, stop beside it while the agent works. */
+/*
+ * The composer is one surface: the form draws the border and the
+ * field inside it has none, so the text, Stop and Send read as a
+ * single control rather than an input with buttons stood beside it.
+ * Buttons sit on the last line so a wrapped message does not stretch
+ * them into a tall column.
+ */
 .composer {
   display: flex;
-  gap: 8px;
+  gap: 6px;
   margin-top: 8px;
-  /* Buttons sit on the last line so a wrapped message does not
-     stretch Stop and Send into a tall column beside it. */
   align-items: flex-end;
   flex-shrink: 0;
+  padding: 5px 5px 5px 6px;
+  background: var(--bg);
+  border: 1px solid var(--field-line);
+  border-radius: 12px;
+  transition: border-color 150ms ease;
+}
+.composer:focus-within {
+  border-color: var(--text-faint);
+}
+.composer .composer-input,
+.composer .composer-input:focus {
+  background: transparent;
+  border: 0;
+  outline: 0;
+  box-shadow: none;
+  border-radius: 8px;
+  padding: 6px 6px 6px 8px;
+  font-size: 13.5px;
+}
+.composer .composer-input::placeholder {
+  color: var(--text-faint);
 }
 .composer-input {
   flex: 1;
@@ -5226,9 +5251,20 @@ a.pr-row:hover .pr-external {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 6px 10px;
+  padding: 0;
+  width: 34px;
   height: 34px;
+  border-radius: 8px;
   box-sizing: border-box;
+}
+/* Stop is part of the surface too: no outline of its own. */
+.composer .composer-stop {
+  border-color: transparent;
+  background: transparent;
+  border-radius: 8px;
+}
+.composer .composer-stop:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--failed) 14%, transparent);
 }
 .stop-square {
   width: 9px;
@@ -5263,8 +5299,14 @@ a.pr-row:hover .pr-external {
   .composer-input {
     min-height: 44px;
   }
+  /* 16px keeps iOS from zooming the page when the field is focused. */
+  .composer .composer-input {
+    font-size: 16px;
+  }
   .composer-send,
   .composer .icon-button {
+    width: 44px;
+    min-width: 44px;
     height: 44px;
   }
 }

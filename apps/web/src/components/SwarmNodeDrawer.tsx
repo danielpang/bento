@@ -721,7 +721,7 @@ export function SwarmNodeDrawer({
                   onStop={node.agentActive && onStopWorker && !busy ? () => onStopWorker(task.id) : undefined}
                   busy={sending}
                   maxLength={20_000}
-                  placeholder="Ask for clarification or build something else"
+                  placeholder="Message the worker"
                   ariaLabel="Message the worker"
                 />
               </div>
