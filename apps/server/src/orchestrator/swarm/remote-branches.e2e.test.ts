@@ -535,15 +535,21 @@ test("a pull request over a branch GitHub has only part of says so, rather than 
  * The first `git push --force-with-lease` for `branch` is answered the
  * way production answered the reap, then later pushes run real git.
  *
- * `reject-once` leaves the remote untouched. `land-then-reject` performs
- * the push and then reports the rejection, which is a concurrent push of
- * this same commit winning the race. `move-then-reject` points the
- * branch at `moveTo` and reports the rejection, which is some other
- * update landing between the list and the push.
+ * `reject-once` leaves the remote untouched. `reject-always` refuses
+ * every lease push, which is how a reap that should not push is told
+ * apart from one that does. `land-then-reject` performs the push and
+ * then reports the rejection, which is a concurrent push of this same
+ * commit winning the race. `move-then-reject` points the branch at
+ * `moveTo` and reports the rejection, which is some other update
+ * landing between the list and the push.
  */
 async function withLeaseShim(
   branch: string,
-  shim: { mode: "reject-once" | "land-then-reject" | "move-then-reject"; moveTo?: string; wording?: "stale" | "exists" },
+  shim: {
+    mode: "reject-once" | "reject-always" | "land-then-reject" | "move-then-reject";
+    moveTo?: string;
+    wording?: "stale" | "exists";
+  },
   fn: () => Promise<void>,
 ): Promise<void> {
   const bin = path.join(dataDir, `git-shim-${randomUUID()}`);
@@ -575,8 +581,8 @@ function run(gitArgs) {
   if (result.stderr) process.stderr.write(result.stderr);
   return result.status === null ? 1 : result.status;
 }
-if (isPush && lease && refspec && !existsSync(marker)) {
-  writeFileSync(marker, "1");
+if (isPush && lease && refspec && (mode === "reject-always" || !existsSync(marker))) {
+  if (mode !== "reject-always") writeFileSync(marker, "1");
   if (mode === "land-then-reject") {
     const status = run(args.filter((arg) => !arg.startsWith("--force-with-lease=")));
     if (status !== 0) process.exit(status);
@@ -616,6 +622,31 @@ async function unrelatedTip(name: string): Promise<string> {
   await git(side, ["push", "--quiet", "origin", `HEAD:refs/hidden/${name}`]);
   return sha;
 }
+
+test("a reap whose commit is already on GitHub does not push again", async () => {
+  const { swarm, tree } = await finishedOnMachine("reap-already");
+  await mkdir(path.join(tree, "docs", "bento"), { recursive: true });
+  await writeFile(path.join(tree, "docs", "bento", "note.md"), "notes\n");
+  await git(tree, ["add", "."]);
+  await git(tree, ["commit", "--quiet", "-m", "notes"]);
+  const machineHead = await git(tree, ["rev-parse", "HEAD"]);
+  const machine = cloneMachine(() => tree);
+  await pushSwarmBranch(machine.ctx, swarm.id, undefined, options);
+  const pushed = await remoteHead(swarm.branchName!);
+  assert.notEqual(pushed, machineHead, "the branch on GitHub is the notes commit, not the machine's");
+  await git(remotePath, ["merge-base", "--is-ancestor", machineHead, pushed]);
+  const recorded = recordingAnalytics();
+  machine.ctx.analytics = recorded.analytics;
+
+  await withLeaseShim(swarm.branchName!, { mode: "reject-always" }, async () => {
+    await reapSwarmSandbox(machine.ctx, swarm.id, { push: options });
+  });
+
+  assert.equal(await remoteHead(swarm.branchName!), pushed, "the reap left the branch that was already pushed");
+  assert.equal((await readSwarm(swarm.id)).pushedHeads?.[REPO_URL], pushed);
+  assert.deepEqual(machine.destroyed, ["box-reap-already"]);
+  assert.equal(recorded.exceptions.length, 0);
+});
 
 test("a reap push rejected with stale info lists again and then saves the branch", async () => {
   const { swarm, tree } = await finishedOnMachine("reap-stale");

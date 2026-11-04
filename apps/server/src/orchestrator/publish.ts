@@ -490,6 +490,13 @@ export async function pushBranches(
      * where the next stage's agent reads them.
      */
     includeStageNotes?: boolean;
+    /**
+     * The reap's question, not a request to update the branch. When the
+     * remote tip already contains this commit, GitHub holds it and
+     * nothing is pushed. A notes commit on top of it is a different sha,
+     * and pushing another one races the push that wrote the first.
+     */
+    skipIfHeadContained?: boolean;
   },
 ): Promise<PushOutcome> {
   const pushed: PushOutcome["pushed"] = [];
@@ -521,6 +528,7 @@ export async function pushBranches(
         includeStageNotes: plan.includeStageNotes === true,
         label: `${parsed.owner}/${parsed.repo}`,
         expectedRemoteHead: await plan.lease(remoteRepo),
+        skipIfHeadContained: plan.skipIfHeadContained === true,
         ...(target ? { target } : {}),
       });
       if (head === null) continue;
@@ -738,6 +746,12 @@ async function pushBundle(
      * landed, which a later landing has since built on.
      */
     target?: string;
+    /**
+     * Return the remote tip without pushing when it already contains
+     * the commit being saved. The returned sha is that tip, so the
+     * lease records the commit the branch actually has.
+     */
+    skipIfHeadContained?: boolean;
   },
 ): Promise<string | null> {
   const root = await mkdtemp(path.join(tmpdir(), "bento-publish-"));
@@ -771,6 +785,43 @@ async function pushBundle(
     if (options.target) {
       await run("git", ["-C", checkout, "merge-base", "--is-ancestor", options.target, bundle.headSha], { env });
     }
+
+    let leaseTipFetched = false;
+    const fetchLeaseTip = async () => {
+      if (leaseTipFetched) return;
+      await run(
+        "git",
+        [
+          "-C",
+          checkout,
+          ...credentialArgs,
+          "fetch",
+          "--no-tags",
+          remote,
+          `+refs/heads/${branch}:refs/bento-lease/${branch}`,
+        ],
+        { env },
+      );
+      leaseTipFetched = true;
+    };
+    const contains = (ancestor: string, descendant: string) =>
+      commitIsAncestor(checkout, ancestor, descendant, env, fetchLeaseTip);
+    /**
+     * Checked before any push. The machine's commit already on the
+     * remote, including as the parent of a notes commit, means this
+     * save is done. A new notes commit would be a different sha for
+     * the same work, and the lease rejects it once the other push lands.
+     */
+    const alreadyPushed = async (actual: string): Promise<string | null> => {
+      if (!options.skipIfHeadContained || !actual) return null;
+      if (await contains(tip, actual)) return actual;
+      return null;
+    };
+    if (options.skipIfHeadContained) {
+      const held = await alreadyPushed(await listedRemoteHead(remote, branch, credentialArgs, env));
+      if (held) return held;
+    }
+
     const head = options.includeStageNotes
       ? tip
       : await withoutStageNotes(checkout, tip, path.join(root, "strip.index"), env);
@@ -794,26 +845,6 @@ async function pushBundle(
      * from the recorded lease when there is one, is pushed over, so
      * the newer work still lands. Anything else is left where it is.
      */
-    let leaseTipFetched = false;
-    const fetchLeaseTip = async () => {
-      if (leaseTipFetched) return;
-      await run(
-        "git",
-        [
-          "-C",
-          checkout,
-          ...credentialArgs,
-          "fetch",
-          "--no-tags",
-          remote,
-          `+refs/heads/${branch}:refs/bento-lease/${branch}`,
-        ],
-        { env },
-      );
-      leaseTipFetched = true;
-    };
-    const contains = (ancestor: string, descendant: string) =>
-      commitIsAncestor(checkout, ancestor, descendant, env, fetchLeaseTip);
     const decide = (actual: string, attempt: number) =>
       leaseDecision({ actual, head, recorded: options.expectedRemoteHead, attempt, contains });
 
@@ -821,6 +852,8 @@ async function pushBundle(
     for (let attempt = 0; attempt <= LEASE_RACE_RETRIES; attempt++) {
       if (attempt > 0) await sleep(LEASE_RACE_PAUSE_MS);
       const actual = await listedRemoteHead(remote, branch, credentialArgs, env);
+      const held = await alreadyPushed(actual);
+      if (held) return held;
       const decision = await decide(actual, attempt);
       if (decision === "saved") return head;
       if (decision === "moved") throw new Error(branchMovedMessage(branch));
@@ -845,7 +878,10 @@ async function pushBundle(
         if (conflict) throw new Error(conflict);
         if (!leaseRejected(text) || attempt === LEASE_RACE_RETRIES) {
           if (leaseRejected(text)) {
-            const settled = await decide(await listedRemoteHead(remote, branch, credentialArgs, env), attempt + 1);
+            const now = await listedRemoteHead(remote, branch, credentialArgs, env);
+            const heldNow = await alreadyPushed(now);
+            if (heldNow) return heldNow;
+            const settled = await decide(now, attempt + 1);
             if (settled === "saved") return head;
             if (settled === "moved") throw new Error(branchMovedMessage(branch));
             throw new Error(

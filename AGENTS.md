@@ -623,15 +623,19 @@ is why a hosted swarm (a clone driver) refuses to start without a
 GitHub connection and a GitHub remote on every repository
 (`SWARM_GITHUB_REQUIRED`): its work would have nowhere to go, and its
 machine would bill forever. A host driver's checkout outlives its
-machine and needs neither. The push lists the remote and updates with
-`--force-with-lease` on that tip. The tip can move before the update
-is sent, because `swarm.push` is often in flight as the reap runs, and
-git rejects the lease with `stale info` (GitHub's create says
-`reference already exists`). The push lists again. The commit it was
-saving means the branch already holds it. A tip already contained in
-that commit, and descended from the recorded lease when one is
-recorded, is pushed over. Any other tip is left untouched, the way a
-lease mismatch is, and the machine stays. Every push stamps `branch_pushed_at`, so a
+machine and needs neither. The reap checks the remote before it pushes. When the tip already
+contains the machine's commit, including as the parent of the notes
+commit a previous push added, GitHub holds the work and nothing is
+pushed. Pushing another notes commit is a different sha for the same
+work, which is what the lease rejects as `stale info`. A commit the
+remote does not have yet is still pushed, with `--force-with-lease`
+on the tip just listed. That tip can move before the update is sent,
+because `swarm.push` is often in flight as the reap runs (GitHub's
+create says `reference already exists` for the same race). The push
+lists again. The machine's commit now on the branch means the save is
+done. A tip already contained in that commit, and descended from the
+recorded lease when one is recorded, is pushed over. Any other tip is
+left untouched, the way a lease mismatch is, and the machine stays. Every push stamps `branch_pushed_at`, so a
 publish from GitHub's copy after a provider lost the machine says the
 pull request is missing the landings since (`behind`).
 
