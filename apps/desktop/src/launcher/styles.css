@@ -48,7 +48,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 button.full { width: 100%; }
 .divider { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 12px; }
 .divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: var(--line); }
-.providers { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.providers { display: grid; gap: 10px; }
 .providers button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
 .perks { list-style: none; margin: 0; padding: 12px 0 0; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; color: var(--muted); font-size: 13px; }
 .perks li { padding-left: 22px; position: relative; }

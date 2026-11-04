@@ -39,7 +39,7 @@ function fillForm(settings: LocalSettings) {
 
 /** The sign in card's email or provider, for the browser page to start from. */
 function loginHint(submitterId: string | undefined): LoginHint {
-  const provider = submitterId === "connect-github" ? "github" : submitterId === "connect-google" ? "google" : undefined;
+  const provider = submitterId === "connect-github" ? "github" : undefined;
   const email = field("login-email").value.trim();
   return { ...(email ? { email } : {}), ...(provider ? { provider } : {}) };
 }
@@ -66,7 +66,7 @@ function renderStatus(status: DesktopStatus) {
   element("status-message").textContent = status.message;
   element("status-message").parentElement!.classList.toggle("error", status.phase === "error");
   busy = status.phase === "starting" || status.phase === "login";
-  for (const id of ["connect-github", "connect-google"]) element<HTMLButtonElement>(id).disabled = busy;
+  element<HTMLButtonElement>("connect-github").disabled = busy;
   field("login-email").disabled = busy;
   for (const [mode, action] of Object.entries(actions) as [DesktopMode, { id: string; label: string }][]) {
     element<HTMLButtonElement>(action.id).disabled = busy;

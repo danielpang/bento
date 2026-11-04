@@ -71,7 +71,7 @@ export function DeviceApproval() {
       <SignIn
         callbackURL={deviceApprovalCallbackUrl(code)}
         initialEmail={params.get("email") ?? ""}
-        {...(provider === "github" || provider === "google" ? { autoProvider: provider } : {})}
+        {...(provider === "github" ? { autoProvider: provider } : {})}
       />
     );
   }

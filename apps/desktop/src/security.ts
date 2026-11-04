@@ -50,7 +50,7 @@ export function validateSettings(input: unknown): DesktopSettings {
   const email = typeof hint.email === "string" ? hint.email.trim() : "";
   const loginHint: LoginHint = {
     ...(email.length <= 254 && /^[^\s@\0]+@[^\s@\0]+$/.test(email) ? { email } : {}),
-    ...(hint.provider === "github" || hint.provider === "google" ? { provider: hint.provider } : {}),
+    ...(hint.provider === "github" ? { provider: hint.provider } : {}),
   };
   return { mode, sandbox, dataDir, serverUrl, databaseUrl, sandboxImage, betaFeatures, modelProxy, ...(Object.keys(loginHint).length ? { loginHint } : {}) };
 }

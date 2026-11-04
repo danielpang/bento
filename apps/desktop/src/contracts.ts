@@ -13,7 +13,7 @@ export interface DesktopUpdateNotice {
 /** What the launcher's sign in card passes to the browser page, so it opens ready for this person. */
 export interface LoginHint {
   email?: string;
-  provider?: "github" | "google";
+  provider?: "github";
 }
 
 export interface DesktopSettings {

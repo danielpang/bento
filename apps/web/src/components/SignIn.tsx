@@ -57,7 +57,7 @@ export function SignIn({
   /** Replaces the tagline, so the invitation page can say whose team this is. */
   note?: string;
   /** Go straight to this provider, once: the desktop app's GitHub and Google buttons. */
-  autoProvider?: "github" | "google";
+  autoProvider?: "github";
 }) {
   const social = useSocialProviders(supplied);
   useEffect(() => {
