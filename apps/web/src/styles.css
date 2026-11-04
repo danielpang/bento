@@ -185,6 +185,22 @@ body,
   margin: 0;
 }
 
+/*
+ * The document never scrolls: every screen is an .app shell exactly as
+ * tall as the viewport, and the board, the swarm page and the drawers
+ * each scroll inside themselves. So a drag that lands on chrome rather
+ * than a scroller (the bottom bar, the topbar) has nothing to move but
+ * the page, and on iOS that rubber-banded the whole shell up and left
+ * a screen of empty background under Contact and Changelog.
+ *
+ * None on the root stops that bounce. The inner scrollers keep theirs,
+ * and their own `contain` already keeps a drag from chaining out here.
+ */
+html,
+body {
+  overscroll-behavior: none;
+}
+
 body {
   background: var(--bg);
   color: var(--text);
