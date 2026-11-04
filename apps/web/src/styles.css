@@ -5219,7 +5219,10 @@ a.pr-row:hover .pr-external {
   outline: 0;
   box-shadow: none;
   border-radius: 8px;
-  padding: 6px 6px 6px 8px;
+  /* 20px line + 7px above and below = the 34px of Stop and Send, so a
+     one-line message is centred against them, not riding the top. */
+  line-height: 20px;
+  padding: 7px 6px 7px 8px;
   font-size: 13.5px;
 }
 .composer .composer-input::placeholder {
@@ -5302,6 +5305,9 @@ a.pr-row:hover .pr-external {
   /* 16px keeps iOS from zooming the page when the field is focused. */
   .composer .composer-input {
     font-size: 16px;
+    line-height: 22px;
+    padding-top: 11px;
+    padding-bottom: 11px;
   }
   .composer-send,
   .composer .icon-button {
