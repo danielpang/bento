@@ -1017,13 +1017,13 @@ export function swarmRoutes(ctx: AppContext) {
         // this directory. Stop it before Git removes the checkout. The
         // leaves' machines wait on this route's lock, so they go in a
         // reap of their own once it commits.
-        await reapSwarmSandbox(ctx, swarm.id, { leaves: false });
+        await reapSwarmSandbox(ctx, swarm.id, { leaves: false, immediate: true });
         await releaseSwarmBranch(ctx.worktrees, swarm.id, swarm.branchName, repos);
       } catch (error) {
         return c.json({ error: error instanceof Error ? error.message : "Could not release the branch." }, 409);
       }
       await db(c, ctx).update(swarms).set({ branchReleasedAt: new Date() }).where(eq(swarms.id, swarm.id));
-      deferAfterCommit(c, () => queueSwarmSandboxReap(ctx, swarm.id));
+      deferAfterCommit(c, () => queueSwarmSandboxReap(ctx, swarm.id, { immediate: true }));
       saySwarmChanged(ctx, c, swarm, "done");
       return c.json({ released: true });
     })
@@ -1107,7 +1107,7 @@ export function swarmRoutes(ctx: AppContext) {
        * queue twice because a machine already gone is no rows.
        */
       if (archived === true && archiveReapsSandboxes(swarm)) {
-        deferAfterCommit(c, () => queueSwarmSandboxReap(ctx, swarm.id));
+        deferAfterCommit(c, () => queueSwarmSandboxReap(ctx, swarm.id, { immediate: true }));
       }
       saySwarmChanged(ctx, c, swarm);
       return c.json(updated);
@@ -1243,7 +1243,7 @@ export function swarmRoutes(ctx: AppContext) {
        * reap reads the cancelled runs rather than the active ones it
        * would refuse to reap under.
        */
-      deferAfterCommit(c, () => queueSwarmSandboxReap(ctx, swarm.id));
+      deferAfterCommit(c, () => queueSwarmSandboxReap(ctx, swarm.id, { immediate: true }));
       /*
        * And what it cost, because a swarm somebody stopped is one of
        * the more interesting things to know the spend of: it is the

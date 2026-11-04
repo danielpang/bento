@@ -848,9 +848,10 @@ async function succeed(
    * Here rather than at the next tick, because this is the moment the
    * machine stops being able to do anything: the branch it holds has
    * been landed, and a resumed worker would commit onto a branch the
-   * merge queue has already taken. Queued rather than destroyed inline,
-   * so a provider that is slow or down does not fail a landing that
-   * has already succeeded.
+   * merge queue has already taken. The reap keeps it for three days
+   * after it was last used, then takes it. Queued rather than destroyed
+   * inline, so a provider that is slow or down does not fail a landing
+   * that has already succeeded.
    */
   /**
    * The swarm's branch, and this task's in the form it landed, to

@@ -420,7 +420,13 @@ A swarm's reap takes its leaves' machines after its own
 (`reapSwarmWorkerSandboxes`), because only a landed leaf gave its
 machine back: a cancelled leaf, a failed one, one a person marked done,
 and the final check's judge each kept theirs after the pull request was
-open. Each goes through the leaf's reap, which on a clone driver pushes
+open. A completed worker (landed, done, or cancelled) keeps its machine
+until `COMPLETED_SWARM_IDLE_MS` (three days) after it was last used, or
+after its last run, whichever is later. A swarm that just finished
+keeps its own machine for the same window, measured on that machine's
+last use and its planner runs. Stopping, archiving, and releasing the
+branch still take the machines then. Each finished leaf goes through
+the leaf's reap, which on a clone driver pushes
 the leaf's branch first (`saveSwarmTaskBranch`, skipped for a leaf that
 landed, whose work is on the swarm's branch, and for a machine no worker
 or resolver started an agent in) and defers, captured as

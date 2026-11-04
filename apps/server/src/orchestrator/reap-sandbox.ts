@@ -54,6 +54,11 @@ export interface SandboxReapTarget {
   swarmTaskId?: string;
   /** How many times this job has already waited for an agent to finish. */
   deferrals?: number;
+  /**
+   * A person asked for the machines to go: stop, archive, or release
+   * the branch. The three day idle does not apply.
+   */
+  immediate?: boolean;
 }
 
 /**
@@ -115,9 +120,13 @@ export async function queueSandboxReap(ctx: AppContext, featureId: string): Prom
 }
 
 /** The same request for a swarm that is over, through the same queue. */
-export async function queueSwarmSandboxReap(ctx: AppContext, swarmId: string): Promise<void> {
+export async function queueSwarmSandboxReap(
+  ctx: AppContext,
+  swarmId: string,
+  options?: { immediate?: boolean },
+): Promise<void> {
   const machines = await ctx.db.select({ id: sandboxes.id, generation: sandboxes.generation }).from(sandboxes).where(eq(sandboxes.swarmId, swarmId));
-  await ctx.boss.send(REAP_SANDBOX_QUEUE, { swarmId, machines });
+  await ctx.boss.send(REAP_SANDBOX_QUEUE, { swarmId, machines, ...(options?.immediate ? { immediate: true } : {}) });
 }
 
 /** A swarm this reaper treats as over: nothing of it will run again. */
@@ -145,15 +154,30 @@ const RESUMABLE_SWARM_ENDINGS = ["failed", "budget_exhausted", "timed_out"] as c
 export const FAILED_SWARM_MACHINE_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
+ * How long a completed swarm worker keeps its machine after it was
+ * last used, and how long a swarm that just finished keeps its own.
+ *
+ * Landing a task, or the swarm reaching done, used to queue the reap
+ * in the same minute. A swarm created that day lost its machines
+ * before anyone had looked at the work. Three days with nothing
+ * touching the machine is the idle window; a later use starts it again.
+ * Archiving, stopping, and releasing the branch still take the machine
+ * then, because a person asked for it to go.
+ */
+export const COMPLETED_SWARM_IDLE_MS = 3 * 24 * 60 * 60 * 1000;
+
+/**
  * Asks for the machine one swarm leaf was worked on to be destroyed.
  *
  * A swarm is the case a card never was: one goal can be five machines,
  * and they are not five machines one after another but five at once. A
- * leaf whose branch has landed is finished with forever (its branch is
- * on the swarm's branch and its worker will not be resumed), so the
- * machine is pure cost from that moment, and a swarm of fifty leaves
- * that kept them all would be fifty sprites billed by the gigabyte
- * month for a goal that finished on Tuesday.
+ * leaf whose branch has landed is finished with its work (its branch is
+ * on the swarm's branch and its worker will not be resumed). The
+ * machine stays until it has gone COMPLETED_SWARM_IDLE_MS without
+ * being used, so a task that finished today is still there tomorrow.
+ * After that it is pure cost, and a swarm of fifty leaves that kept
+ * them past the idle window would be fifty sprites billed by the
+ * gigabyte month for a goal that finished last week.
  *
  * Keyed by the task rather than by the swarm, because the swarm's own
  * machine is where the planner and the merge queue live and must
@@ -300,6 +324,60 @@ export async function reapSandbox(ctx: AppContext, featureId: string, machines?:
  * agent or a landing is still at work: both for the reasons reapSandbox
  * states.
  */
+function latestStamp(stamps: Array<Date | null | undefined>): Date | null {
+  let latest: Date | null = null;
+  for (const stamp of stamps) {
+    if (!stamp) continue;
+    if (!latest || stamp.getTime() > latest.getTime()) latest = stamp;
+  }
+  return latest;
+}
+
+/** When `activity` has been quiet for the idle window, null. Otherwise the moment the window ends. */
+function idleUntil(activity: Date | null, now: Date): Date | null {
+  if (!activity) return null;
+  const until = new Date(activity.getTime() + COMPLETED_SWARM_IDLE_MS);
+  return until.getTime() > now.getTime() ? until : null;
+}
+
+async function runActivity(db: ReapDb, where: SQL): Promise<Date | null> {
+  const rows = await db
+    .select({ endedAt: agentRuns.endedAt, agentStartedAt: agentRuns.agentStartedAt, queuedAt: agentRuns.queuedAt })
+    .from(agentRuns)
+    .where(where);
+  return latestStamp(rows.flatMap((row) => [row.endedAt, row.agentStartedAt, row.queuedAt]));
+}
+
+/**
+ * A completed worker's last use. Null when the task is not finished,
+ * or when nothing recorded a use: a machine with no clock is reaped
+ * by the rules that already applied, which is what the tests build.
+ */
+async function completedWorkerIdleUntil(db: ReapDb, swarmTaskId: string, now: Date): Promise<Date | null> {
+  const [task] = await db
+    .select({ status: swarmTasks.status })
+    .from(swarmTasks)
+    .where(eq(swarmTasks.id, swarmTaskId))
+    .limit(1);
+  if (!task || !(FINISHED_TASK_STATUSES as readonly string[]).includes(task.status)) return null;
+  const boxes = await db
+    .select({ lastUsedAt: sandboxes.lastUsedAt })
+    .from(sandboxes)
+    .where(and(eq(sandboxes.swarmTaskId, swarmTaskId), ne(sandboxes.status, "destroyed")));
+  const runs = await runActivity(db, eq(agentRuns.swarmTaskId, swarmTaskId));
+  return idleUntil(latestStamp([...boxes.map((box) => box.lastUsedAt), runs]), now);
+}
+
+/** The swarm's own machine was used inside the idle window. */
+async function swarmMachineIdleUntil(db: ReapDb, swarmId: string, now: Date): Promise<Date | null> {
+  const boxes = await db
+    .select({ lastUsedAt: sandboxes.lastUsedAt })
+    .from(sandboxes)
+    .where(and(eq(sandboxes.swarmId, swarmId), isNull(sandboxes.swarmTaskId), ne(sandboxes.status, "destroyed")));
+  const runs = await runActivity(db, and(eq(agentRuns.swarmId, swarmId), isNull(agentRuns.swarmTaskId))!);
+  return idleUntil(latestStamp([...boxes.map((box) => box.lastUsedAt), runs]), now);
+}
+
 export async function reapSwarmSandbox(
   ctx: AppContext,
   swarmId: string,
@@ -314,6 +392,8 @@ export async function reapSwarmSandbox(
      * reap waits on that lock, and the route queues a reap for them.
      */
     leaves?: boolean;
+    /** Stop, archive, or release. The idle window does not apply. */
+    immediate?: boolean;
   } = {},
 ): Promise<void> {
   const now = options.now ?? new Date();
@@ -329,10 +409,25 @@ export async function reapSwarmSandbox(
     .from(swarms)
     .where(eq(swarms.id, swarmId))
     .limit(1);
+  const publishedAndSettled = await swarmPublishedAndSettled(ctx.db, swarmId);
+  const active = await swarmHasActiveRun(ctx.db, swarmId);
+  // An agent still in the machine is the deferral below, not this
+  // window. The window is for a machine nobody is using.
+  const holdForIdle =
+    !options.immediate &&
+    !active &&
+    current != null &&
+    !current.archivedAt &&
+    swarmMachineReleasable(current, now, publishedAndSettled) &&
+    (await swarmMachineIdleUntil(ctx.db, swarmId, now)) != null;
+  if (holdForIdle) {
+    console.log(`swarm ${swarmId} was used within the last 3 days; keeping its sandbox`);
+  }
   if (
     current &&
-    swarmMachineReleasable(current, now, await swarmPublishedAndSettled(ctx.db, swarmId)) &&
-    !(await swarmHasActiveRun(ctx.db, swarmId))
+    !holdForIdle &&
+    swarmMachineReleasable(current, now, publishedAndSettled) &&
+    !active
   ) {
     try {
       await saveSwarmBranch(ctx, swarmId, options.push);
@@ -346,6 +441,7 @@ export async function reapSwarmSandbox(
   }
   await ctx.db.transaction(async (tx) => {
     const swarm = await lockSwarmForReap(tx, swarmId);
+    if (holdForIdle) return;
     if (!swarmMachineReleasable(swarm, now, await swarmPublishedAndSettled(tx, swarmId))) {
       console.log(`swarm ${swarmId} is ${swarm?.status} and not archived; keeping its sandbox`);
       return;
@@ -428,7 +524,7 @@ export async function reapSwarmSandbox(
 async function reapSwarmWorkerSandboxes(
   ctx: AppContext,
   swarmId: string,
-  options: { now: Date; machines?: SandboxGeneration[]; deferrals?: number; push?: PushOptions },
+  options: { now: Date; machines?: SandboxGeneration[]; deferrals?: number; push?: PushOptions; immediate?: boolean },
 ): Promise<void> {
   const leaves = await ctx.db
     .selectDistinct({ swarmTaskId: sandboxes.swarmTaskId })
@@ -441,6 +537,7 @@ async function reapSwarmWorkerSandboxes(
     try {
       await reapSwarmTaskSandbox(ctx, swarmTaskId, {
         withSwarm: { now: options.now },
+        ...(options.immediate ? { immediate: true } : {}),
         ...(options.machines ? { machines: options.machines } : {}),
         ...(options.deferrals ? { deferrals: options.deferrals } : {}),
         ...(options.push ? { push: options.push } : {}),
@@ -736,13 +833,15 @@ export interface SwarmTaskReapOptions {
   machines?: SandboxGeneration[];
   /** How many times this job has already waited, so a branch that cannot be saved is recorded once. */
   deferrals?: number;
-  push?: PushOptions;
-  /**
-   * The leaf is starting over: its earlier attempts are thrown away on
-   * purpose, so nothing is saved first and its checkout goes whatever
-   * is in it.
-   */
-  discard?: boolean;
+    push?: PushOptions;
+    /** Stop, archive, or release. The idle window does not apply. */
+    immediate?: boolean;
+    /**
+     * The leaf is starting over: its earlier attempts are thrown away on
+     * purpose, so nothing is saved first and its checkout goes whatever
+     * is in it.
+     */
+    discard?: boolean;
   /**
    * Reaped as part of its swarm's reap. The swarm is read again under
    * its lock before the machine goes, for the reason the swarm's own
@@ -786,6 +885,23 @@ export async function reapSwarmTaskSandbox(ctx: AppContext, swarmTaskId: string,
   // Asked before anything is pushed, so a leaf that is staying does not
   // push on every sweep. Asked again under the lock below.
   if (now && !(await swarmTaskReleasable(ctx.db, swarmTaskId, now, false))) return;
+  if (!options.discard && !options.immediate && rows.length > 0) {
+    const until = await completedWorkerIdleUntil(ctx.db, swarmTaskId, now ?? new Date());
+    if (until) {
+      console.log(`swarm task ${swarmTaskId} was used recently; keeping its sandbox until ${until.toISOString()}`);
+      await ctx.boss
+        .send(
+          REAP_SANDBOX_QUEUE,
+          {
+            swarmTaskId,
+            machines: rows.map((row) => ({ id: row.id, generation: row.generation })),
+          },
+          { startAfter: until, singletonKey: `worker-idle:${swarmTaskId}` },
+        )
+        .catch((err) => console.warn(`could not schedule the idle reap of swarm task ${swarmTaskId}:`, err));
+      return;
+    }
+  }
 
   /*
    * On a clone driver the machine is the only copy of whatever the
@@ -990,6 +1106,7 @@ async function reapTarget(ctx: AppContext, data: SandboxReapTarget, now?: Date):
     await reapSwarmTaskSandbox(ctx, data.swarmTaskId, {
       ...(data.machines ? { machines: data.machines } : {}),
       ...(data.deferrals ? { deferrals: data.deferrals } : {}),
+      ...(data.immediate ? { immediate: true } : {}),
     });
   }
   else if (data.swarmId) {
@@ -997,6 +1114,7 @@ async function reapTarget(ctx: AppContext, data: SandboxReapTarget, now?: Date):
       ...(now ? { now } : {}),
       ...(data.machines ? { machines: data.machines } : {}),
       ...(data.deferrals ? { deferrals: data.deferrals } : {}),
+      ...(data.immediate ? { immediate: true } : {}),
     });
   }
   else if (data.featureId) await reapSandbox(ctx, data.featureId, data.machines);

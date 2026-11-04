@@ -401,6 +401,7 @@ test("a leaf's machine goes with its finished swarm only once GitHub holds the l
   const { swarm } = await swarmOnHost("leaf-reap");
   const worker = await workerCommits(swarm, "Cart", "cart.ts", 0);
   await db.update(swarmTasks).set({ status: "cancelled" }).where(eq(swarmTasks.id, worker.task.id));
+  const idle = new Date(Date.now() - 4 * 24 * 60 * 60 * 1000);
   await db.insert(agentRuns).values({
     type: "swarm",
     swarmId: swarm.id,
@@ -409,7 +410,9 @@ test("a leaf's machine goes with its finished swarm only once GitHub holds the l
     agentProfileId: PROFILE,
     prompt: "do the cart",
     status: "succeeded",
-    agentStartedAt: new Date(),
+    agentStartedAt: idle,
+    queuedAt: idle,
+    endedAt: idle,
   });
   const [leaf] = await db
     .insert(sandboxes)
