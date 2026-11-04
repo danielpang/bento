@@ -53,4 +53,3 @@ button.full { width: 100%; }
 .perks { list-style: none; margin: 0; padding: 12px 0 0; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; color: var(--muted); font-size: 13px; }
 .perks li { padding-left: 22px; position: relative; }
 .perks li::before { content: ""; position: absolute; left: 3px; top: 5px; width: 9px; height: 5px; border-left: 2px solid var(--accent); border-bottom: 2px solid var(--accent); transform: rotate(-45deg); }
-.card .fine { font-size: 12px; color: var(--muted); text-align: center; }
