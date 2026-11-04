@@ -5205,12 +5205,14 @@ a.pr-row:hover .pr-external {
   flex-shrink: 0;
   padding: 5px 5px 5px 6px;
   background: var(--bg);
-  border: 1px solid var(--field-line);
+  /* The edge is invisible until the field has focus, so the box blends
+     into the chat and only its softer fill marks where to type. */
+  border: 1px solid transparent;
   border-radius: 12px;
   transition: border-color 150ms ease;
 }
 .composer:focus-within {
-  border-color: var(--text-faint);
+  border-color: var(--line-bright);
 }
 .composer .composer-input,
 .composer .composer-input:focus {
