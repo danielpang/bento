@@ -65,6 +65,7 @@ import {
   SANDBOX_STOPPED_AGENT_PREFIX,
   SANDBOX_REFUSED_AGENT_PREFIX,
   SANDBOX_STALLED_AGENT_PREFIX,
+  SANDBOX_SESSION_LIST_PREFIX,
   RESTART_BEFORE_AGENT_PREFIX,
   PREVIOUS_AGENT_RUNNING_PREFIX,
   SWARM_BRANCH_LOST_MESSAGE,
@@ -770,12 +771,18 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       const checkpointId = await driver.snapshot(handle, subject.snapshotLabel);
       await ctx.db.update(agentRuns).set({ checkpointId }).where(eq(agentRuns.id, runId));
     } catch (err) {
-      // A missing snapshot costs rollback, not the run.
+      // A missing snapshot costs rollback, not the run. Said here,
+      // because a checkpoint call that hits its bound used to sit
+      // silent until the stall reaper, with nothing in the transcript
+      // to say the snapshot was the call that stopped answering.
       console.error(`could not snapshot before run ${runId}:`, err);
       ctx.analytics?.captureException(err, run.startedBy, subject.organizationId, {
         run_id: runId,
         source: "sandbox_snapshot",
       });
+      await saySystem(
+        "Could not save a snapshot of the sandbox before the agent starts. This run cannot be rolled back to this point, and the agent is starting anyway.",
+      );
     }
   }
 
@@ -889,6 +896,15 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     const leftover = await stopLeftoverAgent(driver, handle, await leftoverAgentCommands(ctx, subject.task.id, argv));
     if (leftover === "stopped") {
       await saySystem("An agent from an earlier run of this task was still running in its sandbox, so it was stopped first.");
+    } else if (leftover === "unanswered") {
+      await finishRun(ctx, runId, {
+        ok: false,
+        error: `${SANDBOX_SESSION_LIST_PREFIX}, so a second agent was not started.`,
+        fault: "sandbox",
+      }, null);
+      emitBoard("failed");
+      await subject.settle(ctx);
+      return;
     } else if (leftover === "running") {
       await finishRun(ctx, runId, {
         ok: false,
@@ -3477,9 +3493,32 @@ async function failRunAsInterrupted(
  */
 export const STALLED_RUN_MIN = 30;
 
-const STALLED_RUN_ERROR = `${SANDBOX_STALLED_AGENT_PREFIX}, so no agent ran.`;
-const STALLED_RUN_TRANSCRIPT =
-  "The sandbox stopped responding before the agent started, so the run ended here. Nothing was changed. Try the run again.";
+/**
+ * The stall sentence, plus where the run had got to.
+ *
+ * The prefix is what the infra rules match, so it stays the opening.
+ * The rest is the stage: whether the agent had been exec'd, and the
+ * last line the executor managed to write. A checkpoint listing or a
+ * session listing that never answers leaves no exception of its own,
+ * and without this the reaper's record says only that the run was quiet.
+ */
+function stalledRunError(lastLine: string | null, agentStarted: boolean): string {
+  const where = agentStarted
+    ? "The agent had been started and had not reported anything."
+    : "The agent had not been started yet.";
+  const stage = lastUpdate(lastLine);
+  return `${SANDBOX_STALLED_AGENT_PREFIX}, so no agent ran. ${where}${stage}`;
+}
+
+function stalledRunTranscript(lastLine: string | null): string {
+  return `The sandbox stopped responding before the agent started, so the run ended here.${lastUpdate(lastLine)} Nothing was changed. Try the run again.`;
+}
+
+function lastUpdate(lastLine: string | null): string {
+  const text = lastLine?.trim().replace(/\s+/g, " ");
+  if (!text) return "";
+  return ` The last update was: ${text.slice(0, 240)}`;
+}
 
 /** Whether this CLI says nothing until it exits (dsh), by its adapter. */
 function isTextModeCli(cli: string): boolean {
@@ -3524,7 +3563,17 @@ function isTextModeCli(cli: string): boolean {
  */
 export async function reapStalledRuns(ctx: AppContext, stallMin: number = STALLED_RUN_MIN): Promise<string[]> {
   const candidates = await ctx.db
-    .select({ run: agentRuns, cli: agentProfiles.cli })
+    .select({
+      run: agentRuns,
+      cli: agentProfiles.cli,
+      lastLine: sql<string | null>`(
+        select ${runEvents.payload} ->> 'text'
+        from ${runEvents}
+        where ${runEvents.runId} = ${agentRuns.id}
+        order by ${runEvents.ts} desc, ${runEvents.seq} desc
+        limit 1
+      )`,
+    })
     .from(agentRuns)
     .leftJoin(agentProfiles, eq(agentProfiles.id, agentRuns.agentProfileId))
     .where(
@@ -3545,7 +3594,7 @@ export async function reapStalledRuns(ctx: AppContext, stallMin: number = STALLE
     );
 
   const closed: string[] = [];
-  for (const { run, cli } of candidates) {
+  for (const { run, cli, lastLine } of candidates) {
     // A text-mode agent that was exec'd is working, however quiet.
     if (run.agentStartedAt && cli && isTextModeCli(cli)) continue;
     // A handler that is still waiting on the sandbox, here or on another
@@ -3553,14 +3602,30 @@ export async function reapStalledRuns(ctx: AppContext, stallMin: number = STALLE
     // move to running, and the read just before the agent is spawned)
     // and stops there. One that already spawned in this process is
     // aborted; its own close then loses the compare and set below.
+    const agentStarted = run.agentStartedAt !== null;
     requestRunAbort(ctx, run.id);
-    await failRunAsInterrupted(ctx, run, { error: STALLED_RUN_ERROR, transcript: STALLED_RUN_TRANSCRIPT, fault: "sandbox" });
-    closed.push(run.id);
-    ctx.analytics?.captureException(new Error(`run ${run.id} stalled before its agent started`), run.startedBy, run.organizationId, {
-      run_id: run.id,
-      source: "run_stalled",
-      role: run.role,
+    await failRunAsInterrupted(ctx, run, {
+      error: stalledRunError(lastLine, agentStarted),
+      transcript: stalledRunTranscript(lastLine),
+      fault: "sandbox",
     });
+    closed.push(run.id);
+    ctx.analytics?.captureException(
+      new Error(
+        `run ${run.id} stalled before its agent started, ${agentStarted ? "after the agent was exec'd" : "before the agent was exec'd"}`,
+      ),
+      run.startedBy,
+      run.organizationId,
+      {
+        run_id: run.id,
+        source: "run_stalled",
+        role: run.role,
+        agent_started: agentStarted,
+        run_status: run.status,
+        ...(run.sandboxProvider ? { sandbox_provider: run.sandboxProvider } : {}),
+        ...(lastLine ? { last_line: lastLine.slice(0, 500) } : {}),
+      },
+    );
   }
   if (closed.length > 0) console.warn(`closed ${closed.length} run(s) that stalled before their agent started`);
   return closed;

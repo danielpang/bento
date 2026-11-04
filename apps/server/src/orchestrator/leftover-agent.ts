@@ -8,7 +8,7 @@ import type { ExecChunk, SandboxDriver, SandboxHandle } from "@bento/sandbox";
  * stopped, or the sandbox could not say, so a second agent must not
  * be started beside it.
  */
-export type LeftoverAgent = "none" | "stopped" | "running";
+export type LeftoverAgent = "none" | "stopped" | "running" | "unanswered";
 
 /** How long a told-to-stop agent gets to exit before it counts as still running. */
 export const LEFTOVER_AGENT_STOP_MS = 30_000;
@@ -46,7 +46,7 @@ export async function stopLeftoverAgent(
   let stopped = false;
   for (const argv of commands) {
     const outcome = await stopOne(driver as Required<Pick<SandboxDriver, "attach">>, handle, argv, options);
-    if (outcome === "running") return "running";
+    if (outcome === "running" || outcome === "unanswered") return outcome;
     if (outcome === "stopped") stopped = true;
   }
   return stopped ? "stopped" : "none";
@@ -72,6 +72,10 @@ async function stopOne(
     () => driver.attach(handle, argv, { signal: controller.signal, timeoutMs: stopMs }),
     options.attachRetryMs ?? 2_000,
   );
+  // A listing that never answers is not an agent that refused to stop.
+  // Said apart from that, so the run record names the sandbox rather
+  // than a process that was not shown to be there.
+  if (stream === "listing-timeout") return "unanswered";
   if (stream === "unanswered") return "running";
   if (!stream) return "none";
 
@@ -79,6 +83,7 @@ async function stopOne(
   const exited = await drainUntilExit(stream, stopMs);
   if (!exited) return "running";
   const again = await attachWithRetry(() => driver.attach(handle, argv, { timeoutMs: stopMs }), options.attachRetryMs ?? 2_000);
+  if (again === "listing-timeout") return "unanswered";
   if (again === "unanswered") return "running";
   if (!again) return "stopped";
   // Still there: let go of the connection and say so.
@@ -89,15 +94,23 @@ async function stopOne(
 async function attachWithRetry(
   attach: () => Promise<AsyncIterable<ExecChunk> | null>,
   retryMs: number,
-): Promise<AsyncIterable<ExecChunk> | null | "unanswered"> {
+): Promise<AsyncIterable<ExecChunk> | null | "unanswered" | "listing-timeout"> {
   for (let attempt = 1; ; attempt++) {
     try {
       return await attach();
-    } catch {
+    } catch (err) {
+      // The session listing itself is bounded. Waiting out the same
+      // black hole three more times only holds the worker slot.
+      if (sessionListTimedOut(err)) return "listing-timeout";
       if (attempt >= ATTACH_ATTEMPTS) return "unanswered";
       await new Promise((resolve) => setTimeout(resolve, retryMs));
     }
   }
+}
+
+/** The sprite driver's bound on listSessions. The message is its own. */
+function sessionListTimedOut(err: unknown): boolean {
+  return err instanceof Error && /listing sessions did not finish within/.test(err.message);
 }
 
 /** Reads a stream until its exit, for at most `ms`. True when it exited. */

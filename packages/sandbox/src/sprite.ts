@@ -815,7 +815,10 @@ export class SpriteDriver implements SandboxDriver {
     for (let attempt = 0; attempt < attempts; attempt++) {
       if (attempt > 0) await sleep(SPRITE_LOOKUP_DELAYS_MS[attempt - 1]!);
       try {
-        const sprite = await this.client.getSprite(name);
+        // The client timeout does not cover a socket that never answers,
+        // and a lookup that sits there parks the run before the agent
+        // starts. A miss is transient, so the retries below still run.
+        const sprite = await bounded(this.client.getSprite(name), SPRITE_LOOKUP_TIMEOUT_MS, "looking up the sprite");
         report("recovered");
         return sprite;
       } catch (err) {
@@ -890,7 +893,7 @@ export class SpriteDriver implements SandboxDriver {
       }
     }
     const before = opts?.onExecution
-      ? await sprite.listSessions().then((rows) => new Set(rows.map((row) => row.id))).catch(() => undefined)
+      ? await sessionsOf(sprite).then((rows) => new Set(rows.map((row) => row.id))).catch(() => undefined)
       : undefined;
     // The identity lookup can outlast a Stop or an expired usage lease.
     // Do not install a future-only abort listener and then start an agent.
@@ -926,7 +929,7 @@ export class SpriteDriver implements SandboxDriver {
     const { command } = launch.spawn;
     const sprite = await this.openSprite(handle.externalId);
     if (opts?.execution && opts.execution.provider !== "sprite") throw new Error("Execution belongs to another provider");
-    const mine = selectSpriteSession(await sprite.listSessions(), launch.commandLines, opts?.execution?.id);
+    const mine = selectSpriteSession(await sessionsOf(sprite), launch.commandLines, opts?.execution?.id);
     if (!mine) return null;
 
     await opts?.onExecution?.({ provider: "sprite", id: mine.id });
@@ -969,7 +972,7 @@ export class SpriteDriver implements SandboxDriver {
       if (identityRequested || executionId || !before || !opts?.onExecution) return;
       identityRequested = true;
       identityPending = (async () => {
-        const sessions = await sprite.listSessions().catch(() => []);
+        const sessions = await sessionsOf(sprite).catch(() => []);
         const mine = sessions.filter((s) => !before.has(s.id) && !s.tty && launch.commandLines.some((line) => sessionCommandMatches(s.command, line)));
         // Ambiguity is not an identity. Legacy command matching remains available only when no ID was recorded.
         if (mine.length !== 1) return;
@@ -1123,7 +1126,7 @@ export class SpriteDriver implements SandboxDriver {
         if (done || killed || connectionOpened) return;
         try {
           const fresh = await this.openSprite(handle.externalId);
-          const sessions = await fresh.listSessions();
+          const sessions = await sessionsOf(fresh);
           if (done || killed || connectionOpened) return;
           const mine = newestSessionFor(
             sessions.filter((session) => session.created.getTime() >= startedAt - 15_000),
@@ -1194,7 +1197,7 @@ export class SpriteDriver implements SandboxDriver {
         if (done || killed) return;
         try {
           const fresh = await this.openSprite(handle.externalId);
-          const sessions = await fresh.listSessions();
+          const sessions = await sessionsOf(fresh);
           if (done || killed) return;
           const mine = selectSpriteSession(sessions, launch.commandLines, executionId);
           if (!mine) {
@@ -1357,7 +1360,7 @@ export class SpriteDriver implements SandboxDriver {
     const killOverHttp = async () => {
       try {
         const fresh = await this.openSprite(handle.externalId);
-        const mine = selectSpriteSession(await fresh.listSessions(), launch.commandLines, executionId);
+        const mine = selectSpriteSession(await sessionsOf(fresh), launch.commandLines, executionId);
         if (!mine) return;
         const stream = await fresh.killSession(mine.id, "SIGTERM", "10s");
         await stream.processAll(() => {});
@@ -1497,7 +1500,11 @@ export class SpriteDriver implements SandboxDriver {
     }
     if (failures.length > 0) throw new Error(`checkpoint failed: ${failures.join("; ")}`);
 
-    const checkpoints = await sprite.listCheckpoints();
+    // The stream above is bounded. This listing is a separate call, and
+    // the SDK documents it as having no timeout either. Left to sit, it
+    // parked the run in "starting" with the snapshot never failing,
+    // until the stall reaper closed it half an hour later.
+    const checkpoints = await bounded(sprite.listCheckpoints(), CHECKPOINT_TIMEOUT_MS, "listing checkpoints");
     let newest: { id: string; createTime: Date } | undefined;
     for (const checkpoint of checkpoints) {
       if (!newest || checkpoint.createTime > newest.createTime) newest = checkpoint;
@@ -1747,7 +1754,7 @@ function isTransientSpriteError(err: unknown): boolean {
   if (err instanceof APIError) {
     return err.statusCode !== undefined && TRANSIENT_SPRITE_STATUSES.has(err.statusCode);
   }
-  return err instanceof Error && /temporarily unavailable|Network error|fetch failed|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up|timed out/i.test(err.message);
+  return err instanceof Error && /temporarily unavailable|Network error|fetch failed|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up|timed out|did not finish within/i.test(err.message);
 }
 
 const TRANSIENT_SPRITE_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
@@ -1759,6 +1766,17 @@ const TRANSIENT_SPRITE_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
  * caller addresses the sprite by name instead of failing the run.
  */
 const SPRITE_LOOKUP_DELAYS_MS = [200, 500, 1_000, 2_000];
+
+/**
+ * How long one sprite info lookup may sit before it counts as a miss.
+ *
+ * The SDK client's own timeout does not fire when the socket never
+ * answers, and this lookup is on the path that writes MCP config and
+ * takes the pre-agent snapshot. Five attempts of this, which is what
+ * openSprite does with a transient miss, still finish well inside the
+ * stall reaper's half hour.
+ */
+export const SPRITE_LOOKUP_TIMEOUT_MS = 2 * 60_000;
 
 /**
  * Runs a script through a shell inside the sprite.
@@ -1970,7 +1988,7 @@ async function readExportIfReady(
  */
 async function exportSessionListed(sprite: Sprite, gitLine: string, bundlePath: string): Promise<boolean> {
   try {
-    const sessions = await sprite.listSessions();
+    const sessions = await sessionsOf(sprite);
     if (newestSessionFor(sessions, [gitLine])) return true;
     return sessions.some((session) => !session.tty && session.command.includes(bundlePath));
   } catch {
@@ -2148,6 +2166,15 @@ const EXEC_CONNECT_TIMEOUT_MS = 2 * 60_000;
  */
 const FILESYSTEM_TIMEOUT_MS = 5 * 60_000;
 const CHECKPOINT_TIMEOUT_MS = 5 * 60_000;
+
+/**
+ * How long a session listing may sit. The same class of call as a
+ * checkpoint: the SDK sets no timeout, and attach, the exec handshake,
+ * and a provision's "is the script still running" check all wait on it
+ * before the agent has said anything. Two minutes matches the connect
+ * budget a hibernated sprite already gets.
+ */
+export const SESSION_LIST_TIMEOUT_MS = 2 * 60_000;
 const RESTORE_TIMEOUT_MS = 10 * 60_000;
 
 /**
@@ -2236,6 +2263,11 @@ async function callFilesystem<T>(
  * that fires abandons it: that costs a socket, where the hang it
  * replaces cost a worker slot until a server restart.
  */
+/** A session listing that fails the run closed, rather than parking it. */
+function sessionsOf(sprite: Pick<Sprite, "listSessions">): Promise<SpriteSession[]> {
+  return bounded(sprite.listSessions(), SESSION_LIST_TIMEOUT_MS, "listing sessions");
+}
+
 function bounded<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const deadline = setTimeout(
@@ -2387,7 +2419,7 @@ function sleep(ms: number, keepAlive = false): Promise<void> {
  */
 async function findProvisionSession(sprite: Sprite, script: string): Promise<{ id: string } | null | "unknown"> {
   try {
-    const sessions = await sprite.listSessions();
+    const sessions = await sessionsOf(sprite);
     const needle = script.slice(0, 80);
     return (
       sessions

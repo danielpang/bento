@@ -65,6 +65,14 @@ export const RESTART_BEFORE_AGENT_PREFIX = "Bento restarted before the agent sta
 export const SANDBOX_STOPPED_AGENT_PREFIX = "The sandbox stopped while the agent was running";
 export const PREVIOUS_AGENT_RUNNING_PREFIX =
   "An agent from an earlier run of this task is still running in its sandbox and could not be stopped";
+/**
+ * How a run record opens when the sandbox never answered the question
+ * of whether an earlier agent was still in the machine. Distinct from
+ * an agent that was seen and would not stop: the listing itself hung,
+ * which is the sandbox, and another try is worth making.
+ */
+export const SANDBOX_SESSION_LIST_PREFIX =
+  "The sandbox did not answer when asked which agents were still running";
 
 /**
  * How a run record reads when the swarm's machine was lost with tasks
@@ -137,6 +145,11 @@ export const INFRA_FAILURE_REASONS: readonly InfraFailureReason[] = [
     id: "previous-agent-running",
     summary: "An earlier run's agent was still in the task's sandbox and could not be stopped, so no second agent ran.",
     match: { kind: "prefix", text: PREVIOUS_AGENT_RUNNING_PREFIX },
+  },
+  {
+    id: "sandbox-session-list",
+    summary: "The sandbox did not answer which agents were still running, so no second agent was started.",
+    match: { kind: "prefix", text: SANDBOX_SESSION_LIST_PREFIX },
   },
   {
     id: "swarm-branch-lost",
