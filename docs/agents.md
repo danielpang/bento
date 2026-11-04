@@ -198,11 +198,11 @@ MCP servers attach through `~/.gemini/config/mcp_config.json`, which Bento rewri
 
 ### Muse Code
 
-Meta's `muse`, run headlessly (`muse exec --json --yolo --user-input-auto-resolve`). Bare Muse Spark ids: `muse-spark-1.3`, `muse-spark-1.2`, `muse-spark-1.3-contributor`. Unlisted ids may be typed manually. Reasoning effort is a `--reasoning-effort` extra arg, not part of the model id.
+Meta's `muse`, run headlessly (`muse exec --json --yolo --disable-request-user-input --user-input-auto-resolve`). Bare Muse Spark ids: `muse-spark-1.3`, `muse-spark-1.2`, `muse-spark-1.3-contributor`. Unlisted ids may be typed manually. Reasoning effort is a `--reasoning-effort` extra arg, not part of the model id.
 
 Authentication is `META_API_KEY`. Muse Code normally signs in with a browser, which no sandbox can do, so the key is the whole of its authentication here. Local mode can share this machine's `~/.config/muse` (Agents, "Use this machine's logins"), with the same risk that sharing any login carries.
 
-`--yolo` disables Muse's own approvals and OS sandbox: Bento's sandbox is the boundary. `--user-input-auto-resolve` cancels prompts for a person so a headless run cannot hang. Runs resume by session id (`--session-id`). Headless mode accepts no mid-run input. Does not report cost.
+`--yolo` disables Muse's own approvals and OS sandbox: Bento's sandbox is the boundary. `--disable-request-user-input` withholds the question tool, which `--yolo` stopped doing in Muse Code 1.4.13, so a headless run cannot wait on a person. `--user-input-auto-resolve` still cancels a question on a binary that handles it that way. Runs resume by session id (`--session-id`). Headless mode accepts no mid-run input. Does not report cost.
 
 MCP servers attach through `~/.config/muse/settings.json`, which Bento rewrites before every run.
 

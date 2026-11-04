@@ -14,6 +14,7 @@ import {
   SpriteDriver,
   selectSpriteSession,
   EXEC_HANDSHAKE_RETRY_DELAYS_MS,
+  SESSION_LIST_TIMEOUT_MS,
   EXEC_URL_MAX_BYTES,
   execUrlBytes,
   launcherScript,
@@ -22,6 +23,7 @@ import {
   SPRITE_ACQUIRE_RETRY_DELAYS_MS,
   SPRITE_DESTROY_RETRY_DELAYS_MS,
   SPRITE_LOOKUP_RETRY_DELAYS_MS,
+  SPRITE_LOOKUP_TIMEOUT_MS,
   sandboxErrorKind,
   sessionCommandMatches,
   spriteExistsWithRetry,
@@ -2885,6 +2887,87 @@ test("Sprite snapshot surfaces a checkpoint the sandbox failed to take", async (
  * stream used to park the run in "starting" holding its worker slot
  * until a server restart.
  */
+test("Sprite snapshot gives up when listing checkpoints stalls", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const sprite = {
+    async createCheckpoint() {
+      return {
+        async processAll() {},
+        close() {},
+      };
+    },
+    listCheckpoints() {
+      return new Promise(() => {});
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const outcome = driver
+    .snapshot({ externalId: "sprite", provider: "sprite", workdir: "/workspace" }, "before stage")
+    .then(
+      () => "resolved",
+      (err: Error) => err,
+    );
+  await settle();
+  t.mock.timers.tick(6 * 60_000);
+  const result = await outcome;
+  assert.ok(result instanceof Error, "a stalled checkpoint listing must fail rather than hang");
+  assert.match(result.message, /listing checkpoints did not finish within/);
+});
+
+test("Sprite attach gives up when listing sessions stalls", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const sprite = {
+    listSessions() {
+      return new Promise(() => {});
+    },
+  };
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const outcome = driver
+    .attach({ externalId: "sprite", provider: "sprite", workdir: "/workspace" }, ["claude"])
+    .then(
+      () => "resolved",
+      (err: Error) => err,
+    );
+  await settle();
+  t.mock.timers.tick(SESSION_LIST_TIMEOUT_MS + 1_000);
+  const result = await outcome;
+  assert.ok(result instanceof Error, "a stalled session listing must fail rather than hang");
+  assert.match(result.message, /listing sessions did not finish within/);
+});
+
+test("Sprite lookup fails when the info endpoint never answers", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const driver = new SpriteDriver({ token: "token" });
+  (driver as unknown as { client: { getSprite(): Promise<unknown> } }).client = {
+    getSprite: () => new Promise(() => {}),
+  };
+
+  const outcome = driver
+    .snapshot({ externalId: "sprite", provider: "sprite", workdir: "/workspace" }, "before stage")
+    .then(
+      () => "resolved",
+      (err: Error) => err,
+    );
+  // One bound per attempt, then the short wait before the next lookup.
+  // The last attempt throws and does not sleep.
+  for (let attempt = 0; attempt < 5; attempt++) {
+    await settle();
+    t.mock.timers.tick(SPRITE_LOOKUP_TIMEOUT_MS);
+    await settle();
+    if (attempt < 4) {
+      t.mock.timers.tick(2_000);
+      await settle();
+    }
+  }
+  const result = await outcome;
+  assert.ok(result instanceof Error, "a stalled sprite lookup must fail rather than hang");
+  assert.match(result.message, /looking up the sprite did not finish within/);
+});
+
 test("Sprite snapshot gives up on a checkpoint stream that stalls", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
   let closed = false;

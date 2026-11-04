@@ -53,6 +53,15 @@ test("an agent that will not stop, or a sandbox that cannot say, means no second
   assert.equal(await stopLeftoverAgent(unreachable, handle, [argv], { attachRetryMs: 1 }), "running");
 });
 
+test("a session listing that never answers is not reported as an agent that is still running", async () => {
+  const driver: Pick<SandboxDriver, "attach"> = {
+    attach: async () => {
+      throw new Error("listing sessions did not finish within 2 minutes");
+    },
+  };
+  assert.equal(await stopLeftoverAgent(driver, handle, [argv]), "unanswered");
+});
+
 test("a blip is asked about again before it counts as a running agent", async () => {
   let calls = 0;
   const flaky: Pick<SandboxDriver, "attach"> = {

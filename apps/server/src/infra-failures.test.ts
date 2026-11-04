@@ -49,6 +49,12 @@ test("sandbox and restart failures are recognised from the record's opening line
     "previous-agent-running",
   );
   assert.equal(
+    infraFailureReason(
+      "The sandbox did not answer when asked which agents were still running, so a second agent was not started.",
+    )?.id,
+    "sandbox-session-list",
+  );
+  assert.equal(
     infraFailureReason("The sandbox stopped while the agent was running, so the run ended. Run again to continue.")?.id,
     "sandbox-stopped",
   );

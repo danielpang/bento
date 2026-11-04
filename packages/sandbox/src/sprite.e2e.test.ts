@@ -416,7 +416,7 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
    */
   await t.test("muse runs headlessly against its credential-free echo provider", { skip: needsSprite() }, async () => {
     const ran = await shell(
-      "muse exec --json --yolo --user-input-auto-resolve --provider echo --workspace /workspace 'verify Bento integration'",
+      "muse exec --json --yolo --disable-request-user-input --user-input-auto-resolve --provider echo --workspace /workspace 'verify Bento integration'",
     );
     assert.equal(ran.exitCode, 0, ran.stderr || ran.stdout);
     assert.match(ran.out, /run\.terminal\.completed/);

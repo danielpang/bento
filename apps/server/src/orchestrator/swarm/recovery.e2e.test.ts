@@ -274,6 +274,8 @@ test("a run that stalled before its agent started is closed, and its swarm is to
   const [row] = await db.select().from(agentRuns).where(eq(agentRuns.id, stalled.id));
   assert.equal(row!.status, "failed");
   assert.match(row!.error!, /^The sandbox stopped responding before the agent started/);
+  assert.match(row!.error!, /The agent had not been started yet/);
+  assert.match(row!.error!, /The last update was: Repository bento is ready on branch swarm\/x\./);
   assert.equal(infraFailureReason(row!.error)?.id, "sandbox-stalled", "and is not billed, so the coordinator restarts it");
   const lines = await db.select().from(runEvents).where(eq(runEvents.runId, stalled.id));
   assert.match(

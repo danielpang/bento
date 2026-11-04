@@ -34,8 +34,11 @@ interface MuseLine {
  * `--yolo` is what makes a headless run possible at all: without it
  * every tool call waits for an approval nobody is there to give, and
  * Muse's own OS sandbox sits inside the container that is already the
- * boundary. `--user-input-auto-resolve` cancels `request_user_input`
- * the same way, so a prompt for a person cannot hang the process.
+ * boundary. Muse Code 1.4.13 stopped treating `--yolo` as
+ * `--disable-request-user-input`, so a question tool stays available
+ * and a headless run waits on it until something kills the process.
+ * The disable flag withholds the tool. `--user-input-auto-resolve`
+ * stays for a binary that still cancels a question that way.
  *
  * Authentication is `META_API_KEY`. Muse Code can also sign in with a
  * browser, which no sandbox can do. Local mode can share this machine's
@@ -88,6 +91,7 @@ export const museAdapter: AgentAdapter = {
       // Our container is the boundary. Without this every tool call
       // waits for an approval nobody is there to give.
       "--yolo",
+      "--disable-request-user-input",
       "--user-input-auto-resolve",
       "--workspace",
       input.cwd,
