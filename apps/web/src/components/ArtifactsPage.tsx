@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useRef,
   useState,
   type CSSProperties,
@@ -245,6 +246,9 @@ export function ArtifactsPage({
   const [cardMissing, setCardMissing] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [paneWidth, setPaneWidth] = useState(() => rememberedPaneWidth());
+  /* Only a phone reads this: the list stacks above the reader there, so it folds away. */
+  const [filesOpen, setFilesOpen] = useState(false);
+  const filesListId = useId();
   const splitRef = useRef<HTMLDivElement>(null);
   const gridGate = useRef(createRequestGate());
   const detailGate = useRef(createRequestGate());
@@ -316,6 +320,7 @@ export function ArtifactsPage({
 
   const select = (artifact: RunArtifact) => {
     setSelectedId(artifact.id);
+    setFilesOpen(false);
     if (projectId && cardId) {
       captureArtifactOpened({
         source: "tab",
@@ -382,11 +387,30 @@ export function ArtifactsPage({
             className="artifacts-split"
             style={{ "--artifacts-pane": `${paneWidth}px` } as CSSProperties}
           >
-            <nav className="artifacts-files" aria-label="Files">
+            <nav className="artifacts-files" aria-label="Files" data-open={filesOpen ? "true" : "false"}>
               <p className="artifacts-files-count">
                 {detail.length === 1 ? "1 file" : `${detail.length} files`}
               </p>
-              <ul>
+              <button
+                type="button"
+                className="artifacts-files-toggle"
+                aria-expanded={filesOpen}
+                aria-controls={filesListId}
+                onClick={() => setFilesOpen((open) => !open)}
+              >
+                <span className="artifacts-files-toggle-text">
+                  <span className="artifacts-files-toggle-count">
+                    {detail.length === 1 ? "1 file" : `${detail.length} files`}
+                  </span>
+                  {selected && (
+                    <span className="artifacts-files-toggle-current">{artifactBaseName(selected.path)}</span>
+                  )}
+                </span>
+                <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false">
+                  <path d="M4 6l4 4 4-4" />
+                </svg>
+              </button>
+              <ul id={filesListId}>
                 {detail.map((artifact) => {
                   const current = artifact.id === selected?.id;
                   return (
