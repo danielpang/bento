@@ -395,16 +395,25 @@ export function ArtifactsGridSkeleton({
 }
 
 /** Rows on the card artifact detail view. */
-export function ArtifactsDetailSkeleton({ rows = 5 }: { rows?: number }) {
+export function ArtifactsDetailSkeleton({ rows = 4 }: { rows?: number }) {
   return (
-    <ul className="artifacts-detail-list" aria-busy="true">
+    <div className="artifacts-split" aria-busy="true">
       <LoadingStatus label="Loading artifacts" />
-      {Array.from({ length: rows }, (_, i) => (
-        <li key={i} aria-hidden="true">
-          <Skeleton height={44} width="100%" radius={8} />
-        </li>
-      ))}
-    </ul>
+      <div className="artifacts-files" aria-hidden="true">
+        {Array.from({ length: rows }, (_, i) => (
+          <Skeleton key={i} height={44} width="100%" radius={8} />
+        ))}
+      </div>
+      <div className="artifacts-divider" aria-hidden="true" />
+      <div className="artifacts-reader" aria-hidden="true">
+        <div className="artifacts-reader-body skeleton-stack">
+          <Skeleton height={18} width="40%" />
+          <Skeleton height={12} width="88%" />
+          <Skeleton height={12} width="74%" />
+          <Skeleton height={12} width="81%" />
+        </div>
+      </div>
+    </div>
   );
 }
 

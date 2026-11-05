@@ -4480,80 +4480,111 @@ a.pr-row:hover .pr-external {
 }
 
 /*
- * Project artifacts: a grid of cards between Board and Sessions.
- * Same slab as Sessions; tiles link into a per-card list.
+ * Project artifacts: a grid of cards between Board and Sessions, and a
+ * card's files beside a reader. The file list is a Finder column: its
+ * width is dragged on the divider and kept per browser.
  */
 .artifacts-screen {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
   width: 100%;
-  max-width: 1120px;
-  margin: 0 auto;
-  padding: 20px 28px 40px;
+  padding: 28px max(16px, calc((100% - 1200px) / 2 + 24px)) 48px;
   box-sizing: border-box;
+}
+.artifacts-screen-detail {
+  display: flex;
+  flex-direction: column;
+  padding-bottom: 24px;
+}
+.artifacts-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+.artifacts-heading-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
 }
 .artifacts-title {
   margin: 0;
   font-family: var(--sans);
-  font-size: 22px;
+  font-size: 24px;
   font-weight: 650;
   letter-spacing: -0.02em;
+  overflow-wrap: anywhere;
 }
 .artifacts-lede {
-  margin: 8px 0 0;
+  margin: 0;
   max-width: 62ch;
   color: var(--text-dim);
-  font-size: 13.5px;
+  font-size: 14px;
   line-height: 1.45;
 }
 .artifacts-back {
   display: inline-flex;
-  margin: 0 0 12px;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
   color: var(--text-dim);
   font-size: 13px;
   text-decoration: none;
+}
+.artifacts-back svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 .artifacts-back:hover {
   color: var(--text);
 }
 .artifacts-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: 16px;
-  margin-top: 20px;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 28px 20px;
 }
 .artifacts-tile {
   display: flex;
   flex-direction: column;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--surface);
+  gap: 12px;
   color: inherit;
   text-decoration: none;
-  overflow: hidden;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
-}
-@media (prefers-reduced-motion: reduce) {
-  .artifacts-tile {
-    transition: none;
-  }
+  border-radius: var(--radius-lg);
 }
 .artifacts-tile:focus-visible {
-  outline: 2px solid var(--focus);
-  outline-offset: 2px;
-}
-.artifacts-tile:hover {
-  border-color: var(--border-strong);
-  box-shadow: 0 2px 12px rgb(0 0 0 / 6%);
+  outline: 2px solid var(--brand);
+  outline-offset: 4px;
 }
 .artifacts-tile-preview {
-  aspect-ratio: 16 / 10;
-  background: var(--surface-2);
+  position: relative;
+  height: 168px;
+  box-sizing: border-box;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--panel-raised);
   display: flex;
   align-items: center;
   justify-content: center;
   overflow: hidden;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.artifacts-tile:hover .artifacts-tile-preview {
+  border-color: var(--line-bright);
+  box-shadow: 0 6px 18px var(--shadow-1);
+}
+.artifacts-tile:hover .artifacts-tile-title {
+  color: var(--brand);
+}
+@media (prefers-reduced-motion: reduce) {
+  .artifacts-tile-preview {
+    transition: none;
+  }
 }
 .artifacts-tile-image {
   width: 100%;
@@ -4561,104 +4592,385 @@ a.pr-row:hover .pr-external {
   object-fit: cover;
 }
 .artifacts-tile-markdown {
+  align-self: stretch;
   width: 100%;
-  height: 100%;
-  padding: 10px 12px;
+  padding: 16px 18px 0;
+  box-sizing: border-box;
   overflow: hidden;
-  font-size: 11px;
-  line-height: 1.35;
-  color: var(--text-dim);
-}
-.artifacts-tile-markdown .markdown {
-  display: -webkit-box;
-  -webkit-line-clamp: 6;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-.artifacts-kind-icon {
   font-size: 12px;
-  font-weight: 600;
+  line-height: 1.55;
   color: var(--text-dim);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  /* Fade the excerpt out where the frame cuts it, never mid letter. */
+  mask-image: linear-gradient(#000 60%, transparent);
 }
-.artifacts-tile-body {
-  padding: 12px 14px 14px;
+.artifacts-tile-markdown .markdown > :first-child {
+  margin-top: 0;
+}
+.artifacts-tile-markdown h1,
+.artifacts-tile-markdown h2,
+.artifacts-tile-markdown h3 {
+  margin: 10px 0 6px;
+  font-size: 14px;
+  line-height: 1.3;
+  color: var(--text);
+}
+.artifacts-tile-markdown p,
+.artifacts-tile-markdown ul,
+.artifacts-tile-markdown ol {
+  margin: 0 0 6px;
+}
+.artifacts-sketch {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.artifacts-sketch-diagram {
+  gap: 0;
+}
+.artifacts-sketch-diagram span {
+  width: 52px;
+  height: 28px;
+  border: 1.5px solid var(--text);
+  border-radius: 6px;
+}
+.artifacts-sketch-diagram span.artifacts-sketch-accent {
+  border-color: var(--brand);
+}
+.artifacts-sketch-diagram i {
+  width: 22px;
+  height: 1.5px;
+  background: var(--text-faint);
+}
+.artifacts-sketch-page {
+  align-self: stretch;
+  flex-direction: column;
+  align-items: stretch;
+  margin: 12px 16px;
+  width: calc(100% - 32px);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  overflow: hidden;
+}
+.artifacts-sketch-chrome {
+  display: flex;
+  gap: 4px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-raised);
+}
+.artifacts-sketch-chrome b {
+  width: 6px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--line-bright);
+}
+.artifacts-sketch-body {
+  flex: 1;
+  display: flex;
+  gap: 10px;
+  padding: 12px;
+}
+.artifacts-sketch-body > div {
+  flex: 2;
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+.artifacts-sketch-body em {
+  height: 8px;
+  width: 60%;
+  border-radius: 2px;
+  background: var(--line-bright);
+}
+.artifacts-sketch-body span {
+  height: 20px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel-raised);
+}
+.artifacts-sketch-body strong {
+  height: 20px;
+  width: 40%;
+  border-radius: 4px;
+  background: var(--text);
+}
+.artifacts-sketch-body aside {
+  flex: 1;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel-raised);
+}
+.artifacts-sketch-ext {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--text-faint);
+}
+.artifacts-tile-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 2px;
 }
 .artifacts-tile-title {
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 600;
   line-height: 1.35;
 }
 .artifacts-tile-meta {
-  font-size: 12px;
-  color: var(--text-dim);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  font-size: 13px;
+  color: var(--text-faint);
 }
 .artifacts-tile-kinds {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
 }
+.artifacts-kind {
+  padding: 2px 6px;
+  border-radius: 5px;
+  background: var(--panel-raised);
+  border: 1px solid var(--line);
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
 .artifacts-empty {
-  margin-top: 32px;
-  max-width: 36ch;
+  margin-top: 8px;
+  max-width: 44ch;
 }
 .artifacts-empty-title {
   font-size: 16px;
   font-weight: 600;
   margin: 0 0 8px;
 }
-.artifacts-detail-list {
+.artifacts-split {
+  --artifacts-pane: 300px;
+  flex: 1;
+  min-height: 480px;
+  display: grid;
+  grid-template-columns: var(--artifacts-pane) 12px minmax(0, 1fr);
+}
+.artifacts-files {
+  min-height: 0;
+  overflow-y: auto;
+  box-sizing: border-box;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.artifacts-files ul {
   list-style: none;
-  margin: 20px 0 0;
+  margin: 0;
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 2px;
 }
-.artifacts-detail-row {
+.artifacts-files-count {
+  margin: 0;
+  padding: 6px 10px 6px;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+.artifacts-file {
   width: 100%;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
+  gap: 12px;
+  padding: 8px 10px;
+  border: 0;
   border-radius: 8px;
-  background: var(--surface);
+  background: transparent;
   color: inherit;
   font: inherit;
   text-align: left;
   cursor: pointer;
 }
-.artifacts-detail-row:focus-visible {
-  outline: 2px solid var(--focus);
-  outline-offset: 2px;
+.artifacts-file:hover {
+  background: var(--panel-raised);
 }
-.artifacts-detail-name {
-  flex: 1;
+.artifacts-file[aria-current="true"] {
+  background: var(--panel-raised);
+  box-shadow: 0 0 0 1px var(--line-bright);
+}
+.artifacts-file:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: -2px;
+}
+.artifacts-file-ext {
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  box-sizing: border-box;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  background: var(--panel-raised);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-dim);
+}
+.artifacts-file-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   min-width: 0;
+}
+.artifacts-file-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 14px;
+  font-weight: 500;
 }
-.artifacts-detail-meta {
+.artifacts-file-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 12px;
-  color: var(--text-dim);
+  color: var(--text-faint);
 }
-.artifacts-open-tab {
-  display: inline-block;
-  margin-top: 4px;
+.artifacts-divider {
+  position: relative;
+  cursor: col-resize;
+  touch-action: none;
+}
+.artifacts-divider::after {
+  content: "";
+  position: absolute;
+  top: 12px;
+  bottom: 12px;
+  left: 5px;
+  width: 2px;
+  border-radius: 1px;
+  background: transparent;
+  transition: background 0.15s ease;
+}
+.artifacts-divider:hover::after,
+.artifacts-divider[data-dragging="true"]::after {
+  background: var(--line-bright);
+}
+.artifacts-divider:focus-visible {
+  outline: none;
+}
+.artifacts-divider:focus-visible::after {
+  background: var(--brand);
+}
+.artifacts-split:has(.artifacts-divider[data-dragging="true"]) {
+  cursor: col-resize;
+  user-select: none;
+}
+.artifacts-reader {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--panel-raised);
+  overflow: hidden;
+}
+.artifacts-reader-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 52px;
+  padding: 6px 10px 6px 20px;
+  box-sizing: border-box;
+  border-bottom: 1px solid var(--line);
+}
+.artifacts-reader-name {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.artifacts-reader-title {
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.artifacts-reader-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 12px;
+  color: var(--text-faint);
+}
+.artifacts-reader-head .icon-button svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.artifacts-reader-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 28px 40px;
+  box-sizing: border-box;
+}
+.artifacts-reader-body .markdown {
+  max-width: 72ch;
+}
+.artifacts-reader-body .artifact-frame {
+  width: 100%;
+  height: 100%;
+  min-height: 420px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
 }
 .artifacts-cap {
-  margin-top: 16px;
+  margin: 8px 10px;
+  font-size: 12px;
+}
+@media (max-width: 760px) {
+  .artifacts-heading {
+    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+  .artifacts-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .artifacts-split {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    min-height: 0;
+  }
+  .artifacts-divider {
+    display: none;
+  }
+  .artifacts-files {
+    flex-shrink: 0;
+    max-height: 40vh;
+  }
+  .artifacts-reader {
+    flex-shrink: 0;
+    min-height: 60vh;
+  }
+  .artifacts-reader-body {
+    padding: 20px;
+  }
 }
 .analytics-intro {
   display: flex;
