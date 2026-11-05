@@ -2569,14 +2569,15 @@ async function cardRestoreBundles(
     .limit(1);
   if (live) return {};
   const bundles = await remoteBranchBundles(ctx, { organizationId: feature.organizationId, branch, pushedHeads, repoRows });
-  const merged = new Set<string>();
-  for (const [name, bundle] of bundles) {
-    if (!bundle.inBase) continue;
-    bundles.delete(name);
-    merged.add(repoRows.find((repo) => repo.name === name)?.defaultBranch ?? "main");
-  }
-  for (const base of merged) {
-    await say(`Everything on ${branch} is already in ${base}, so this card continues from ${base} as it is now.`);
+  for (const repo of repoRows) {
+    if (!bundles.get(repo.name)?.inBase) continue;
+    bundles.delete(repo.name);
+    const base = repo.defaultBranch;
+    await say(
+      repoRows.length > 1
+        ? `Everything on ${branch} in ${repo.name} is already in ${base}, so ${repo.name} continues from ${base} as it is now.`
+        : `Everything on ${branch} is already in ${base}, so this card continues from ${base} as it is now.`,
+    );
   }
   if (bundles.size === 0) return {};
   await say(`This card's sandbox was released, so a new one is starting from ${branch} as it was saved to GitHub.`);

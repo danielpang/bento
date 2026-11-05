@@ -497,6 +497,8 @@ export async function pushBranches(
      * and pushing another one races the push that wrote the first.
      */
     skipIfHeadContained?: boolean;
+    /** Push nothing for a repository whose branch is already in its base branch on the remote. */
+    skipIfInBase?: boolean;
   },
 ): Promise<PushOutcome> {
   const pushed: PushOutcome["pushed"] = [];
@@ -529,6 +531,7 @@ export async function pushBranches(
         label: `${parsed.owner}/${parsed.repo}`,
         expectedRemoteHead: await plan.lease(remoteRepo),
         skipIfHeadContained: plan.skipIfHeadContained === true,
+        skipIfInBase: plan.skipIfInBase === true,
         ...(target ? { target } : {}),
       });
       if (head === null) continue;
@@ -764,6 +767,13 @@ async function pushBundle(
      * lease records the commit the branch actually has.
      */
     skipIfHeadContained?: boolean;
+    /**
+     * Return null without pushing when the base branch on the remote
+     * already holds the commit. The machine judges this against its own
+     * copy of the base, which can be older than the remote's, so a branch
+     * with nothing of its own could still reach here.
+     */
+    skipIfInBase?: boolean;
   },
 ): Promise<string | null> {
   const root = await mkdtemp(path.join(tmpdir(), "bento-publish-"));
@@ -842,6 +852,10 @@ async function pushBundle(
     // would open a pull request with no files changed, so it is held
     // back until a stage commits something a reviewer can read.
     if (head !== tip && (await sameTreeAsForkPoint(checkout, head, env))) return null;
+    if (options.skipIfInBase) {
+      const { stdout: baseTip } = await run("git", ["-C", checkout, "rev-parse", "HEAD^{commit}"], { env });
+      if (await contains(head, baseTip.trim())) return null;
+    }
 
     /**
      * The lease is the commit Bento itself last pushed. A different

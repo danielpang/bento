@@ -303,3 +303,31 @@ test("a finished card is left to the finished card reaper", async () => {
   // The sweep did pick up the card GitHub was down for earlier, now that it is back.
   assert.ok(machine.destroyed.includes("box-idle-offline"));
 });
+
+/**
+ * The machine judges "nothing of its own" against its own copy of the
+ * base, which can be older than GitHub's. A branch cut from a newer base
+ * with nothing on it then exported as if it had work, was pushed, and
+ * the next run's restore of it was an empty bundle git refused to write.
+ */
+test("an idle card whose branch has nothing past GitHub's base saves nothing and gives its sandbox back", async () => {
+  const card = await idleCard("idle-in-base", CARD_SANDBOX_IDLE_MS + DAY);
+  const mover = path.join(dataDir, "mover-in-base");
+  await exec("git", ["clone", "--quiet", remotePath, mover]);
+  await writeFile(path.join(mover, "merged.ts"), "export const merged = true;\n");
+  await git(mover, ["add", "."]);
+  await git(mover, ["commit", "--quiet", "-m", "main moves on"]);
+  await git(mover, ["push", "--quiet", "origin", "HEAD:main"]);
+  // By path rather than by remote name, so the machine's origin/main stays behind.
+  await git(card.checkout, ["fetch", "--quiet", remotePath, "main"]);
+  await git(card.checkout, ["reset", "--quiet", "--hard", "FETCH_HEAD"]);
+  await rm(path.join(card.checkout, "half-done.ts"));
+  assert.notEqual(await git(card.checkout, ["rev-parse", "origin/main"]), await git(card.checkout, ["rev-parse", "HEAD"]));
+  const machine = cloneMachine();
+
+  assert.equal(await reapIdleCardSandbox(machine.ctx, card.featureId, { push }), true);
+  assert.equal(await remoteHas(card.branch), false);
+  const [feature] = await db.select().from(features).where(eq(features.id, card.featureId));
+  assert.equal(feature!.pushedHeads[card.branch], undefined);
+  assert.deepEqual(machine.destroyed, ["box-idle-in-base"]);
+});
