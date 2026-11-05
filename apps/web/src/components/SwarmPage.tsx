@@ -19,6 +19,7 @@ import { formatBytes } from "@bento/core";
 import { externalHttpUrl } from "../external-url.js";
 import { copyText } from "../clipboard.js";
 import { browserStorage, readRailOpen, rememberRailOpen, type StorageLike, type SwarmView } from "../swarm/view-state.js";
+import { DropdownMark } from "./DropdownMark.js";
 
 /**
  * The page's clock: every second while something is running, and
@@ -355,9 +356,7 @@ export function SwarmPage({
             <details className="swarm-more-actions">
               <summary className="btn" aria-label="More swarm actions">
                 <span>Actions</span>
-                <svg className="swarm-actions-chevron" viewBox="0 0 12 12" width="12" height="12" fill="none" aria-hidden="true">
-                  <path d="m3 4.5 3 3 3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
+                <DropdownMark />
               </summary>
               <div className="swarm-more-menu">
                 {swarm.status === "planning" && plannerActive && canPause(swarm.status) && <button className="btn" disabled={busy} onClick={actions.onPause}>Pause planner</button>}

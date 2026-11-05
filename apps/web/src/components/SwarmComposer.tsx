@@ -35,6 +35,7 @@ import {
   swarmNameFor,
   withPlanSource,
 } from "../swarm/new-swarm.js";
+import { DropdownMark } from "./DropdownMark.js";
 
 /**
  * Starting a swarm, as one composer in the middle of the board.
@@ -416,7 +417,7 @@ export function SwarmComposer({
                 <Menu.Trigger className="swarm-tool" aria-label={`Workers at once: ${workers}`}>
                   <span className="swarm-tool-key">Workers</span>
                   <span className="swarm-tool-value swarm-mono">{workers}</span>
-                  <ChevronMark />
+                  <DropdownMark />
                 </Menu.Trigger>
                 <Menu.Portal>
                   <Menu.Content className="picker-menu swarm-workers-menu" align="start" sideOffset={6} data-portal-layer="">
@@ -740,7 +741,7 @@ export function SwarmAgentPicker({
       <Menu.Trigger className="swarm-tool" aria-label={`${role} agent: ${current}`}>
         <span className="swarm-tool-key">{role}</span>
         <span className="swarm-tool-value">{current}</span>
-        <ChevronMark />
+        <DropdownMark />
       </Menu.Trigger>
       <Menu.Portal>
         <Menu.Content
@@ -851,7 +852,7 @@ function SwarmAgentsMenu({
     <Menu.Root>
       <Menu.Trigger className="swarm-tool swarm-tool-wide">
         <span className="swarm-tool-value">{label}</span>
-        <ChevronMark />
+        <DropdownMark />
       </Menu.Trigger>
       <Menu.Portal>
         <Menu.Content className="picker-menu swarm-agent-menu" align="start" sideOffset={6} data-portal-layer="">

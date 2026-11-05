@@ -1,4 +1,5 @@
 import * as Menu from "@radix-ui/react-dropdown-menu";
+import { DropdownMark } from "./DropdownMark.js";
 
 /**
  * The project switcher in the topbar.
@@ -40,7 +41,7 @@ export function ProjectPicker({
             <span className="picker-kicker">Project</span>
             <span className="picker-current">{current?.name ?? "Choose a project"}</span>
           </span>
-          <span className="picker-caret" aria-hidden="true" />
+          <DropdownMark />
         </Menu.Trigger>
 
         {/* Anchored to the trigger by Radix rather than by the parent's
