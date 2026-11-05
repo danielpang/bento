@@ -28,6 +28,7 @@ import type {
   Pipeline,
   Project,
   ProjectAnalytics,
+  ProjectArtifactCard,
   ProjectCompletions,
   ProjectSession,
   ProjectUsage,
@@ -1242,6 +1243,13 @@ export class BentoClient {
   /** The card's artifacts, newest first: write-ups, mockups, screenshots. */
   listArtifacts(featureId: string) {
     return this.request<RunArtifact[]>(`/api/features/${featureId}/artifacts`);
+  }
+
+  /** Every card in a project that has pipeline artifacts, newest activity first. */
+  listProjectArtifacts(projectId: string) {
+    return this.request<ProjectArtifactCard[]>(
+      `/api/projects/${encodeURIComponent(projectId)}/artifacts`,
+    );
   }
 
   /** One artifact's body as text, for the kinds the console renders itself. */

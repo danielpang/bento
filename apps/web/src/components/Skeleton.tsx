@@ -362,6 +362,61 @@ export function AnalyticsPageSkeleton({
   );
 }
 
+/** Placeholder tiles while the project artifact grid loads. */
+export function ArtifactsGridSkeleton({
+  tiles = 8,
+  framed = true,
+}: {
+  tiles?: number;
+  framed?: boolean;
+}) {
+  const grid = (
+    <div className="artifacts-grid" aria-busy="true">
+      <LoadingStatus label="Loading artifacts" />
+      {Array.from({ length: tiles }, (_, i) => (
+        <div key={i} className="artifacts-tile" aria-hidden="true">
+          <Skeleton className="artifacts-tile-preview" radius={8} />
+          <Skeleton height={14} width={`${50 + ((i * 11) % 30)}%`} />
+          <Skeleton height={11} width="60%" />
+        </div>
+      ))}
+    </div>
+  );
+  if (!framed) return grid;
+  return (
+    <div className="artifacts-screen" aria-busy="true">
+      <div className="surface-heading" aria-hidden="true">
+        <Skeleton height={24} width="7rem" />
+        <Skeleton height={13} width="18rem" />
+      </div>
+      {grid}
+    </div>
+  );
+}
+
+/** Rows on the card artifact detail view. */
+export function ArtifactsDetailSkeleton({ rows = 4 }: { rows?: number }) {
+  return (
+    <div className="artifacts-split" aria-busy="true">
+      <LoadingStatus label="Loading artifacts" />
+      <div className="artifacts-files" aria-hidden="true">
+        {Array.from({ length: rows }, (_, i) => (
+          <Skeleton key={i} height={44} width="100%" radius={8} />
+        ))}
+      </div>
+      <div className="artifacts-divider" aria-hidden="true" />
+      <div className="artifacts-reader" aria-hidden="true">
+        <div className="artifacts-reader-body skeleton-stack">
+          <Skeleton height={18} width="40%" />
+          <Skeleton height={12} width="88%" />
+          <Skeleton height={12} width="74%" />
+          <Skeleton height={12} width="81%" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /** A card's conversation tab, before the transcript has arrived. */
 export function SessionPageSkeleton() {
   return (

@@ -29,6 +29,7 @@ export const BROWSER_PERSISTENCE = {
 } as const;
 
 type PostHogClient = {
+  capture: (event: string, properties?: Record<string, unknown>) => void;
   captureException: (error: unknown, properties?: Record<string, unknown>) => void;
   identify: (id: string, properties?: Record<string, unknown>) => void;
   reset: () => void;
@@ -81,6 +82,20 @@ export function shouldStartErrorTracking(health: {
 
 export function captureException(error: unknown, properties?: Record<string, unknown>): void {
   client?.captureException(error instanceof Error ? error : new Error(String(error)), properties);
+}
+
+export function captureArtifactsTabOpened(projectId: string): void {
+  client?.capture("artifacts_tab_opened", { project_id: projectId });
+}
+
+export function captureArtifactOpened(properties: {
+  source: "tab" | "card_panel";
+  project_id: string;
+  feature_id: string;
+  artifact_id: string;
+  kind: string;
+}): void {
+  client?.capture("artifact_opened", properties);
 }
 
 function identityProperties(traits?: { email?: string | null; name?: string | null }): Record<string, string> {
