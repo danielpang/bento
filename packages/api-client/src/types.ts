@@ -464,6 +464,8 @@ export interface ProjectArtifactCard {
   artifactCount: number;
   kinds: RunArtifactKind[];
   latestCreatedAt: string;
+  /** Every artifact's path on the card, newest first, for searching by file name. */
+  paths: string[];
   preview: {
     artifactId: string;
     kind: RunArtifactKind;
