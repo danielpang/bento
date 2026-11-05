@@ -340,8 +340,8 @@ export async function remoteBranchBundles(
     selfContained?: boolean;
   },
   options: PushOptions = {},
-): Promise<Map<string, { branch: string; data: Buffer; headSha: string; baseSha: string }>> {
-  const bundles = new Map<string, { branch: string; data: Buffer; headSha: string; baseSha: string }>();
+): Promise<Map<string, { branch: string; data: Buffer; headSha: string; baseSha: string; inBase: boolean }>> {
+  const bundles = new Map<string, { branch: string; data: Buffer; headSha: string; baseSha: string; inBase: boolean }>();
   if (!input.pushedHeads || Object.keys(input.pushedHeads).length === 0) return bundles;
   const publisher = options.publisher ?? (await githubConnectionFor(ctx, input.organizationId));
   if (!publisher) return bundles;
@@ -359,7 +359,7 @@ export async function remoteBranchBundles(
       { selfContained: input.selfContained === true, ...(options.remoteUrl ? { remoteUrl: options.remoteUrl } : {}) },
     );
     if (bundle) {
-      bundles.set(repo.name, { branch: input.branch, data: bundle.data, headSha: bundle.headSha, baseSha: bundle.baseSha });
+      bundles.set(repo.name, { branch: input.branch, data: bundle.data, headSha: bundle.headSha, baseSha: bundle.baseSha, inBase: bundle.inBase });
     }
   }
   return bundles;

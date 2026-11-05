@@ -497,6 +497,8 @@ export async function pushBranches(
      * and pushing another one races the push that wrote the first.
      */
     skipIfHeadContained?: boolean;
+    /** Push nothing for a repository whose branch is already in its base branch on the remote. */
+    skipIfInBase?: boolean;
   },
 ): Promise<PushOutcome> {
   const pushed: PushOutcome["pushed"] = [];
@@ -529,6 +531,7 @@ export async function pushBranches(
         label: `${parsed.owner}/${parsed.repo}`,
         expectedRemoteHead: await plan.lease(remoteRepo),
         skipIfHeadContained: plan.skipIfHeadContained === true,
+        skipIfInBase: plan.skipIfInBase === true,
         ...(target ? { target } : {}),
       });
       if (head === null) continue;
@@ -545,6 +548,8 @@ export async function pushBranches(
  * A branch Bento pushed, read back from GitHub as a bundle a sandbox
  * can fetch: how a machine that was lost is rebuilt from what was
  * pushed before it went. Null when the branch is not on the remote.
+ * `inBase` says everything on it is already in the base branch: it was
+ * merged, or pushed before anything was committed to it.
  *
  * `selfContained` carries every object (what a landing needs); without
  * it the bundle stops at the base branch, which a sandbox seeded from
@@ -555,7 +560,7 @@ export async function fetchRemoteBranchBundle(
   repo: { repoUrl: string; githubRepoId?: number | null; defaultBranch: string },
   branch: string,
   options: { selfContained?: boolean; remoteUrl?: (owner: string, repo: string) => string } = {},
-): Promise<RepositoryBundle | null> {
+): Promise<(RepositoryBundle & { inBase: boolean }) | null> {
   const parsed = parseRepoUrl(repo.repoUrl);
   if (!parsed) return null;
   const remote = options.remoteUrl?.(parsed.owner, parsed.repo) ?? `https://github.com/${parsed.owner}/${parsed.repo}.git`;
@@ -575,12 +580,22 @@ export async function fetchRemoteBranchBundle(
     const headSha = headOut.trim();
     const { stdout: baseOut } = await run("git", ["-C", checkout, "merge-base", `origin/${repo.defaultBranch}`, headSha], { env });
     const baseSha = baseOut.trim();
+    // A branch with nothing past the base (pushed with no commits, or
+    // merged into it since) has its head as the merge base, and
+    // `branch ^head` is an empty bundle git refuses to write. Stopping at
+    // the head's parents instead carries the one commit, which the seed
+    // already has, so the branch is still restored at the head Bento pushed.
+    const exclusions = options.selfContained
+      ? []
+      : baseSha === headSha
+        ? (await run("git", ["-C", checkout, "rev-list", "--parents", "-n", "1", headSha], { env })).stdout.trim().split(/\s+/).slice(1)
+        : [baseSha];
     await run(
       "git",
-      ["-C", checkout, "bundle", "create", bundlePath, `refs/heads/${branch}`, ...(options.selfContained ? [] : [`^${baseSha}`])],
+      ["-C", checkout, "bundle", "create", bundlePath, `refs/heads/${branch}`, ...exclusions.map((sha) => `^${sha}`)],
       { env },
     );
-    return { baseSha, headSha, data: await readFile(bundlePath) };
+    return { baseSha, headSha, data: await readFile(bundlePath), inBase: baseSha === headSha };
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -752,6 +767,13 @@ async function pushBundle(
      * lease records the commit the branch actually has.
      */
     skipIfHeadContained?: boolean;
+    /**
+     * Return null without pushing when the base branch on the remote
+     * already holds the commit. The machine judges this against its own
+     * copy of the base, which can be older than the remote's, so a branch
+     * with nothing of its own could still reach here.
+     */
+    skipIfInBase?: boolean;
   },
 ): Promise<string | null> {
   const root = await mkdtemp(path.join(tmpdir(), "bento-publish-"));
@@ -830,6 +852,10 @@ async function pushBundle(
     // would open a pull request with no files changed, so it is held
     // back until a stage commits something a reviewer can read.
     if (head !== tip && (await sameTreeAsForkPoint(checkout, head, env))) return null;
+    if (options.skipIfInBase) {
+      const { stdout: baseTip } = await run("git", ["-C", checkout, "rev-parse", "HEAD^{commit}"], { env });
+      if (await contains(head, baseTip.trim())) return null;
+    }
 
     /**
      * The lease is the commit Bento itself last pushed. A different

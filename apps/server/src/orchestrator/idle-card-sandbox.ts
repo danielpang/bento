@@ -269,6 +269,7 @@ async function saveCardBranch(
     const outcome = await pushBranches(publisher, {
       branch,
       includeStageNotes: true,
+      skipIfInBase: true,
       repositories: repoRows.map((repo) => {
         const githubRepoId = repo.githubRepoId ? Number(repo.githubRepoId) : undefined;
         return {
