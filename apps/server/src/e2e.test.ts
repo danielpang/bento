@@ -570,6 +570,7 @@ test("GET /api/projects/:id/artifacts aggregates pipeline cards without leaking 
       artifactCount: number;
       kinds: string[];
       latestCreatedAt: string;
+      paths: string[];
       preview: { artifactId: string; kind: string; markdownExcerpt?: string; content?: string; storageKey?: string };
     }[]
   >(await app.request(`/api/projects/${project.id}/artifacts`));
@@ -581,6 +582,8 @@ test("GET /api/projects/:id/artifacts aggregates pipeline cards without leaking 
   );
   assert.equal(listed[0]!.artifactCount, 2);
   assert.deepEqual(listed[0]!.kinds, ["markdown", "mermaid"]);
+  assert.deepEqual(listed[0]!.paths, ["artifacts/newest.md", "artifacts/diagram.mmd"], "every file name, newest first");
+  assert.deepEqual(listed[1]!.paths, ["artifacts/old.md"]);
   assert.equal(listed[0]!.preview.kind, "markdown");
   assert.ok(listed[0]!.preview.markdownExcerpt);
   assert.equal(listed[0]!.preview.markdownExcerpt!.length, 2000);

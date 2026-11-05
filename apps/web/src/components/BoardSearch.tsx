@@ -77,7 +77,7 @@ export function BoardSearch({
  * colour emoji on every platform that has one, at a size and a hue
  * neither this palette nor this row asked for.
  */
-function SearchMark() {
+export function SearchMark() {
   return (
     <svg
       className="search-mark"

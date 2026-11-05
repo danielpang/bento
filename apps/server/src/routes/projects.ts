@@ -697,7 +697,8 @@ export function projectRoutes(ctx: AppContext) {
     })
     /**
      * One row per card that has pipeline artifacts, newest activity
-     * first. Metadata only: previews may carry a capped markdown excerpt;
+     * first. Metadata only: previews may carry a capped markdown excerpt,
+     * and `paths` (newest first) lets the console search file names;
      * bytes and storage keys never leave the artifact routes.
      */
     .get("/:id/artifacts", async (c) => {
@@ -738,21 +739,26 @@ export function projectRoutes(ctx: AppContext) {
           .where(and(pipelineOnly, inArray(features.id, featureIds)))
           .orderBy(runArtifacts.featureId, desc(runArtifacts.createdAt)),
         db(c, ctx)
-          .select({ featureId: runArtifacts.featureId, kind: runArtifacts.kind })
+          .select({ featureId: runArtifacts.featureId, kind: runArtifacts.kind, path: runArtifacts.path })
           .from(runArtifacts)
           .innerJoin(features, eq(features.id, runArtifacts.featureId))
-          .where(and(pipelineOnly, inArray(features.id, featureIds))),
+          .where(and(pipelineOnly, inArray(features.id, featureIds)))
+          .orderBy(desc(runArtifacts.createdAt), asc(runArtifacts.id)),
       ]);
 
       const previewByFeature = new Map(
         newestRows.filter((row) => row.featureId).map((row) => [row.featureId!, row]),
       );
       const kindsByFeature = new Map<string, Set<string>>();
+      const pathsByFeature = new Map<string, string[]>();
       for (const row of kindRows) {
         if (!row.featureId) continue;
         const set = kindsByFeature.get(row.featureId) ?? new Set<string>();
         set.add(row.kind);
         kindsByFeature.set(row.featureId, set);
+        const paths = pathsByFeature.get(row.featureId) ?? [];
+        paths.push(row.path);
+        pathsByFeature.set(row.featureId, paths);
       }
 
       const kindOrder = ["markdown", "mermaid", "image", "html", "file"] as const;
@@ -776,6 +782,7 @@ export function projectRoutes(ctx: AppContext) {
           artifactCount: Number(row.artifactCount),
           kinds,
           latestCreatedAt: row.latestCreatedAt!.toISOString(),
+          paths: pathsByFeature.get(row.featureId) ?? [],
           preview,
         };
       });

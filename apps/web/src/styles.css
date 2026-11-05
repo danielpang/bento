@@ -4509,10 +4509,11 @@ a.pr-row:hover .pr-external {
   padding: 28px max(16px, calc((100% - 1200px) / 2 + 24px)) 48px;
   box-sizing: border-box;
 }
+/* A card's files and reader use the whole window, not the grid's column. */
 .artifacts-screen-detail {
   display: flex;
   flex-direction: column;
-  padding-bottom: 24px;
+  padding: 24px;
 }
 .artifacts-heading {
   display: flex;
@@ -4560,6 +4561,62 @@ a.pr-row:hover .pr-external {
 }
 .artifacts-back:hover {
   color: var(--text);
+}
+.artifacts-search {
+  height: 36px;
+  box-sizing: border-box;
+}
+.artifacts-search .search-input {
+  font-size: 13px;
+}
+.artifacts-cards-search {
+  width: 340px;
+  max-width: 100%;
+}
+.artifacts-search-count {
+  flex: none;
+  font-size: 12px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+.artifacts-files-search {
+  width: auto;
+  height: 34px;
+  flex-shrink: 0;
+  margin: 2px 2px 6px;
+}
+.artifacts-files-none {
+  padding: 8px 10px;
+  font-size: 13px;
+  color: var(--text-faint);
+}
+.artifacts-hit {
+  background: color-mix(in srgb, var(--brand) 24%, transparent);
+  color: inherit;
+  border-radius: 3px;
+}
+.artifacts-tile-files {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.artifacts-tile-file {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.artifacts-tile-more {
+  font-size: 11px;
+  color: var(--text-faint);
 }
 .artifacts-grid {
   display: grid;
@@ -4949,7 +5006,7 @@ a.pr-row:hover .pr-external {
   box-sizing: border-box;
 }
 .artifacts-reader-body .markdown {
-  max-width: 72ch;
+  max-width: 88ch;
 }
 .artifacts-reader-body .artifact-frame {
   width: 100%;
@@ -4964,6 +5021,12 @@ a.pr-row:hover .pr-external {
   font-size: 12px;
 }
 @media (max-width: 760px) {
+  .artifacts-screen-detail {
+    padding: 20px 16px;
+  }
+  .artifacts-cards-search {
+    width: 100%;
+  }
   .artifacts-heading {
     flex-wrap: wrap;
     align-items: flex-start;
@@ -5036,6 +5099,7 @@ a.pr-row:hover .pr-external {
   .artifacts-files[data-open="true"] .artifacts-files-toggle svg {
     transform: rotate(180deg);
   }
+  .artifacts-files[data-open="false"] .artifacts-files-search,
   .artifacts-files[data-open="false"] ul,
   .artifacts-files[data-open="false"] .artifacts-cap {
     display: none;

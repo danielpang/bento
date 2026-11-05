@@ -29,6 +29,8 @@ import {
 } from "../artifacts-pane.js";
 import { captureArtifactOpened, captureArtifactsTabOpened } from "../posthog.js";
 import { ArtifactsDetailSkeleton, ArtifactsGridSkeleton } from "./Skeleton.js";
+import { SearchMark } from "./BoardSearch.js";
+import { filterArtifactFiles, findMatch, normalizeQuery, searchArtifactCards } from "../artifacts-search.js";
 
 /** Arrow keys move the divider this far; Shift moves it four times as far. */
 const PANE_STEP = 16;
@@ -49,6 +51,77 @@ function kindExt(kind: string, path?: string): string {
     if (ext && ext !== path && ext.length <= 4) return ext.toUpperCase();
   }
   return KIND_EXT[kind] ?? "FILE";
+}
+
+/** How many matching file names a tile names before it says how many more. */
+const TILE_FILE_MATCHES = 2;
+
+function Highlighted({ text, query }: { text: string; query: string }) {
+  const match = findMatch(text, normalizeQuery(query));
+  if (!match) return <>{text}</>;
+  return (
+    <>
+      {match.before}
+      <mark className="artifacts-hit">{match.hit}</mark>
+      {match.after}
+    </>
+  );
+}
+
+/** A field that filters as it is typed. Escape clears it, as on the board. */
+function ArtifactSearchField({
+  value,
+  onChange,
+  label,
+  placeholder,
+  status,
+  className,
+}: {
+  value: string;
+  onChange: (next: string) => void;
+  label: string;
+  placeholder: string;
+  /** The count the query leaves, shown and announced while searching. */
+  status: string;
+  className?: string;
+}) {
+  const searching = value.trim().length > 0;
+  return (
+    <div className={`search artifacts-search${className ? ` ${className}` : ""}`} data-on={searching || undefined}>
+      <SearchMark />
+      <input
+        className="search-input"
+        type="search"
+        value={value}
+        placeholder={placeholder}
+        aria-label={label}
+        onChange={(event) => onChange(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Escape" && searching) {
+            event.preventDefault();
+            event.stopPropagation();
+            onChange("");
+          }
+        }}
+      />
+      {searching && (
+        <>
+          <span className="artifacts-search-count" role="status" aria-live="polite">
+            {status}
+          </span>
+          <button
+            type="button"
+            className="search-clear"
+            aria-label="Clear search"
+            title="Clear search"
+            onClick={() => onChange("")}
+          >
+            ×
+          </button>
+        </>
+      )}
+    </div>
+  );
 }
 
 /** A drawing of what a diagram or a page looks like, for tiles whose newest artifact is one. */
@@ -248,6 +321,8 @@ export function ArtifactsPage({
   const [paneWidth, setPaneWidth] = useState(() => rememberedPaneWidth());
   /* Only a phone reads this: the list stacks above the reader there, so it folds away. */
   const [filesOpen, setFilesOpen] = useState(false);
+  const [cardQuery, setCardQuery] = useState("");
+  const [fileQuery, setFileQuery] = useState("");
   const filesListId = useId();
   const splitRef = useRef<HTMLDivElement>(null);
   const gridGate = useRef(createRequestGate());
@@ -314,6 +389,7 @@ export function ArtifactsPage({
     setLoadFailed(false);
     setProjectMissing(false);
     setCardMissing(false);
+    setFileQuery("");
     if (cardId) void refreshDetail();
     else void refreshGrid();
   }, [refreshGrid, refreshDetail, cardId, projectId]);
@@ -339,6 +415,7 @@ export function ArtifactsPage({
 
   if (cardId) {
     const selected = detail?.find((artifact) => artifact.id === selectedId) ?? detail?.[0] ?? null;
+    const shownFiles = detail ? filterArtifactFiles(detail, fileQuery) : [];
     return (
       <div
         className="artifacts-screen artifacts-screen-detail"
@@ -410,8 +487,21 @@ export function ArtifactsPage({
                   <path d="M4 6l4 4 4-4" />
                 </svg>
               </button>
+              {detail.length > 1 && (
+                <ArtifactSearchField
+                  className="artifacts-files-search"
+                  value={fileQuery}
+                  onChange={setFileQuery}
+                  label="Filter files"
+                  placeholder={`Filter ${detail.length} files`}
+                  status={`${shownFiles.length} of ${detail.length}`}
+                />
+              )}
               <ul id={filesListId}>
-                {detail.map((artifact) => {
+                {shownFiles.length === 0 && (
+                  <li className="artifacts-files-none">No file names match.</li>
+                )}
+                {shownFiles.map((artifact) => {
                   const current = artifact.id === selected?.id;
                   return (
                     <li key={artifact.id}>
@@ -426,7 +516,7 @@ export function ArtifactsPage({
                         </span>
                         <span className="artifacts-file-text">
                           <span className="artifacts-file-name" title={artifact.path}>
-                            {artifactBaseName(artifact.path)}
+                            <Highlighted text={artifactBaseName(artifact.path)} query={fileQuery} />
                           </span>
                           <span className="artifacts-file-meta">
                             {artifact.stageName}
@@ -451,6 +541,9 @@ export function ArtifactsPage({
     );
   }
 
+  const results = cards ? searchArtifactCards(cards, cardQuery) : [];
+  const searchingCards = normalizeQuery(cardQuery) !== "";
+
   return (
     <div className="artifacts-screen" aria-busy={cards === null && !loadFailed && !projectMissing ? true : undefined}>
       <div className="artifacts-heading">
@@ -458,6 +551,16 @@ export function ArtifactsPage({
           <h1 className="artifacts-title">Artifacts</h1>
           <p className="artifacts-lede">Everything your agents produced, by card.</p>
         </div>
+        {cards !== null && cards.length > 0 && (
+          <ArtifactSearchField
+            className="artifacts-cards-search"
+            value={cardQuery}
+            onChange={setCardQuery}
+            label="Search artifacts"
+            placeholder="Search cards and file names"
+            status={results.length === 1 ? "1 card" : `${results.length} cards`}
+          />
+        )}
       </div>
       {projectMissing ? (
         <div className="artifacts-empty" role="alert">
@@ -485,9 +588,17 @@ export function ArtifactsPage({
             Go to Board
           </a>
         </div>
+      ) : results.length === 0 ? (
+        <div className="artifacts-empty">
+          <p className="artifacts-empty-title">No artifacts match “{cardQuery.trim()}”</p>
+          <p className="muted">Search looks at card titles and file names.</p>
+          <button className="btn" type="button" onClick={() => setCardQuery("")}>
+            Clear search
+          </button>
+        </div>
       ) : (
         <div className="artifacts-grid">
-          {cards.map((card) => (
+          {results.map(({ card, files }) => (
             <a
               key={card.featureId}
               className="artifacts-tile"
@@ -498,7 +609,9 @@ export function ArtifactsPage({
                 <TilePreview client={client} card={card} />
               </div>
               <div className="artifacts-tile-body">
-                <span className="artifacts-tile-title">{card.title}</span>
+                <span className="artifacts-tile-title">
+                  <Highlighted text={card.title} query={cardQuery} />
+                </span>
                 <span className="artifacts-tile-meta">
                   <span>
                     {artifactCountLabel(card.artifactCount)}
@@ -513,6 +626,18 @@ export function ArtifactsPage({
                     ))}
                   </span>
                 </span>
+                {searchingCards && files.length > 0 && (
+                  <span className="artifacts-tile-files">
+                    {files.slice(0, TILE_FILE_MATCHES).map((name) => (
+                      <span key={name} className="artifacts-tile-file">
+                        <Highlighted text={name} query={cardQuery} />
+                      </span>
+                    ))}
+                    {files.length > TILE_FILE_MATCHES && (
+                      <span className="artifacts-tile-more">+{files.length - TILE_FILE_MATCHES} more</span>
+                    )}
+                  </span>
+                )}
               </div>
             </a>
           ))}
