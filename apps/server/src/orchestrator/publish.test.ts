@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import { test } from "node:test";
 import {
   cloneBaseBranch,
+  fetchRemoteBranchBundle,
   inaccessibleCloneExplanation,
   isAncestryPublishFailure,
   publishFeatureBranches,
@@ -385,4 +386,57 @@ test("a branch that only changed stage notes opens no pull request", async () =>
   assert.deepEqual(withCode.notesOnly, []);
   assert.equal(withCode.published.length, 1);
   assert.equal(opened, 2);
+});
+
+/**
+ * A branch with nothing past the base: pushed before the agent
+ * committed anything, or merged into the base since. Its head is the
+ * merge base, and a bundle bounded there is one git refuses to write
+ * ("Refusing to create empty bundle"), which failed every provision of
+ * such a card.
+ */
+test("a branch is restored from the remote, and one already in its base says so", async () => {
+  const remote = await seedRemote("main");
+  const work = await mkdtemp(path.join(tmpdir(), "bento-restore-work-"));
+  await run("git", ["clone", "--quiet", remote, work]);
+  await git(work, "push", "origin", "main:refs/heads/at-base");
+  await git(work, "checkout", "-b", "open");
+  await writeFile(path.join(work, "open.txt"), "open\n");
+  await git(work, "add", "open.txt");
+  await git(work, "commit", "-m", "still open");
+  await git(work, "push", "origin", "open");
+  await git(work, "checkout", "main");
+  await git(work, "checkout", "-b", "merged");
+  await writeFile(path.join(work, "feature.txt"), "feature\n");
+  await git(work, "add", "feature.txt");
+  await git(work, "commit", "-m", "feature");
+  await git(work, "push", "origin", "merged");
+  await git(work, "checkout", "main");
+  await git(work, "merge", "--no-ff", "-m", "merge", "merged");
+  await writeFile(path.join(work, "later.txt"), "later\n");
+  await git(work, "add", "later.txt");
+  await git(work, "commit", "-m", "main moved on");
+  await git(work, "push", "origin", "main");
+
+  const publisher = { pushToken: async () => "unused" } as unknown as Parameters<typeof fetchRemoteBranchBundle>[0];
+  for (const [branch, inBase] of [["at-base", true], ["merged", true], ["open", false]] as const) {
+    const bundle = await fetchRemoteBranchBundle(
+      publisher,
+      { repoUrl: "https://github.com/acme/app", defaultBranch: "main" },
+      branch,
+      { remoteUrl: () => remote },
+    );
+    assert.ok(bundle, `${branch} came back`);
+    const { stdout: head } = await git(remote, "rev-parse", `refs/heads/${branch}`);
+    assert.equal(bundle.headSha, head.trim());
+    assert.equal(bundle.inBase, inBase, `${branch} is ${inBase ? "" : "not "}already in main`);
+
+    const fresh = await mkdtemp(path.join(tmpdir(), "bento-restore-fresh-"));
+    await run("git", ["clone", "--quiet", "--branch", "main", remote, fresh]);
+    const file = path.join(fresh, "..", `${path.basename(fresh)}.bundle`);
+    await writeFile(file, bundle.data);
+    await git(fresh, "fetch", "--quiet", file, `+refs/heads/${branch}:refs/heads/${branch}`);
+    const { stdout: restored } = await git(fresh, "rev-parse", `refs/heads/${branch}`);
+    assert.equal(restored.trim(), head.trim());
+  }
 });

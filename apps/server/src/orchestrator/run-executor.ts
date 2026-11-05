@@ -2547,6 +2547,11 @@ async function swarmRestoreBundles(
  * releases the machine (idle-card-sandbox.ts), and a publish pushes it
  * too. A card that still has a machine has its branch there, and a card
  * that never pushed this branch has nothing to restore.
+ *
+ * A branch already in the base branch (merged without the rotation in
+ * branch-rotation.ts seeing it, or pushed before anything was committed)
+ * is not restored: the machine cuts it from the base as it is now,
+ * which holds all of it, rather than from a point the base has moved past.
  */
 async function cardRestoreBundles(
   ctx: AppContext,
@@ -2564,6 +2569,15 @@ async function cardRestoreBundles(
     .limit(1);
   if (live) return {};
   const bundles = await remoteBranchBundles(ctx, { organizationId: feature.organizationId, branch, pushedHeads, repoRows });
+  const merged = new Set<string>();
+  for (const [name, bundle] of bundles) {
+    if (!bundle.inBase) continue;
+    bundles.delete(name);
+    merged.add(repoRows.find((repo) => repo.name === name)?.defaultBranch ?? "main");
+  }
+  for (const base of merged) {
+    await say(`Everything on ${branch} is already in ${base}, so this card continues from ${base} as it is now.`);
+  }
   if (bundles.size === 0) return {};
   await say(`This card's sandbox was released, so a new one is starting from ${branch} as it was saved to GitHub.`);
   return { startFromBundles: bundles };
