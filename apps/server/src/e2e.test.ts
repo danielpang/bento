@@ -506,34 +506,21 @@ test("a run's artifacts are captured, listed, and served safely", { timeout: 90_
 });
 
 test("GET /api/projects/:id/artifacts aggregates pipeline cards without leaking content", async () => {
-  const { project } = await setupProject("Artifact aggregate");
+  const { project, stages: projectStages } = await setupProject("Artifact aggregate");
   const older = await createFeature(project.id, "Older card");
   const newer = await createFeature(project.id, "Newer card");
   const profile = await fakeProfile("aggregate-fake");
-  await app.request(`/api/features/${newer.id}/advance`, { method: "POST" });
-  const runNew = (
-    await json<{ id: string }>(
-      await app.request("/api/runs", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ featureId: newer.id, agentProfileId: profile.id, prompt: "go" }),
-      }),
-    )
-  ).id;
-  const runOld = (
-    await json<{ id: string }>(
-      await app.request("/api/runs", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ featureId: older.id, agentProfileId: profile.id, prompt: "go" }),
-      }),
-    )
-  ).id;
+  const [runOld, runNew] = await ctx.db.insert(agentRuns).values(
+    [older, newer].map((feature) => ({
+      type: "pipeline" as const, featureId: feature.id, stageId: projectStages[0]!.id,
+      agentProfileId: profile.id, prompt: "", status: "succeeded" as const, executor: "server" as const,
+    })),
+  ).returning();
 
   const longBody = "x".repeat(2500);
   await ctx.db.insert(runArtifacts).values([
     {
-      runId: runOld.id,
+      runId: runOld!.id,
       type: "pipeline",
       featureId: older.id,
       stageSlug: "plan",
@@ -546,7 +533,7 @@ test("GET /api/projects/:id/artifacts aggregates pipeline cards without leaking 
       createdAt: new Date("2024-01-02T12:00:00.000Z"),
     },
     {
-      runId: runNew.id,
+      runId: runNew!.id,
       type: "pipeline",
       featureId: newer.id,
       stageSlug: "plan",
@@ -559,7 +546,7 @@ test("GET /api/projects/:id/artifacts aggregates pipeline cards without leaking 
       createdAt: new Date("2025-06-01T12:00:00.000Z"),
     },
     {
-      runId: runNew.id,
+      runId: runNew!.id,
       type: "pipeline",
       featureId: newer.id,
       stageSlug: "plan",
