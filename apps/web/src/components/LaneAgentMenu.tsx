@@ -2,6 +2,7 @@ import { useState } from "react";
 import * as Menu from "@radix-ui/react-dropdown-menu";
 import type { AgentProfile } from "@bento/api-client";
 import { ProviderMark } from "./ProviderMark.js";
+import { DropdownMark } from "./DropdownMark.js";
 
 const NONE = "none";
 
@@ -66,7 +67,7 @@ export function LaneAgentMenu({
         {saving ? (
           <span className="lane-agent-spinner" aria-hidden="true" />
         ) : (
-          <span className="picker-caret" aria-hidden="true" />
+          <DropdownMark />
         )}
       </Menu.Trigger>
       <Menu.Portal>

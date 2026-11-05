@@ -2,6 +2,7 @@ import * as Menu from "@radix-ui/react-dropdown-menu";
 import { CompletionRing } from "./CompletionRing.js";
 import { swarmTone, swarmWords } from "../swarm/status.js";
 import type { SwarmSummary } from "../swarm/types.js";
+import { DropdownMark } from "./DropdownMark.js";
 
 /**
  * A project's swarms in one switcher.
@@ -49,7 +50,7 @@ export function SwarmStrip({
             <span className="swarm-switcher-empty" aria-hidden="true" />
           )}
           <span className="swarm-switcher-name">{current?.name ?? "Choose a swarm"}</span>
-          <span className="swarm-switcher-caret" aria-hidden="true" />
+          <DropdownMark />
         </Menu.Trigger>
         <Menu.Portal>
           <Menu.Content className="picker-menu swarm-switcher-menu" align="start" sideOffset={6} data-portal-layer="">

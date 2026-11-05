@@ -490,12 +490,18 @@ button {
   max-width: min(420px, 40vw);
 }
 
+/* Inset on both sides, so the hover fill does not sit flush against
+   "Project" or against the mark. The negative margin keeps the label
+   where it was when nothing is hovered. */
 .workspace-nav .picker-trigger {
   background: transparent;
   border-color: transparent;
-  padding: 0 8px 0 0;
-  gap: 16px;
-  max-width: 100%;
+  padding: 2px 10px;
+  margin-left: -10px;
+  gap: 12px;
+  /* The margin shrinks the wrapper by as much, so the name would be cut
+     10px short of the room it has. */
+  max-width: calc(100% + 10px);
 }
 
 .workspace-nav .picker-trigger:hover {
@@ -684,9 +690,11 @@ select,
  * Nothing ever reset `appearance`, so every dropdown in the console was
  * drawing the platform widget: a grey bevelled arrow on macOS, a
  * different one elsewhere, neither of them ours and both of them dated.
- * The arrow is now a chevron on the same stroke weight as the other
- * drawn marks, and the field keeps room on the right so a long value
- * never runs under it.
+ * The mark is the console's one dropdown mark (`DropdownMark`), a pair
+ * of chevrons, drawn here as a background because a select has no
+ * children. It sits as far in from the right edge as the value does
+ * from the left, and the field keeps room for it so a long value never
+ * runs under it.
  *
  * The colour is baked into the data URI because a background image
  * cannot read currentColor, which is why each theme states its own.
@@ -696,7 +704,7 @@ select.input,
 .select {
   appearance: none;
   -webkit-appearance: none;
-  padding-right: 30px;
+  padding-right: 34px;
   /* The padding alone is not enough: Chromium lets a value too long
      for the field slide under it, over the chevron. Ellipsis at the
      content edge keeps the mark visible however long the value is. */
@@ -705,21 +713,21 @@ select.input,
   text-overflow: ellipsis;
   background-repeat: no-repeat;
   background-position: right 10px center;
-  background-size: 12px 12px;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none' stroke='%23a8a49b' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 4.75 6 7.75 9 4.75'/%3E%3C/svg%3E");
+  background-size: 14px 14px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none' stroke='%23a8a49b' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5.25 6.25 8 3.5l2.75 2.75M5.25 9.75 8 12.5l2.75-2.75'/%3E%3C/svg%3E");
 }
 
 :root[data-theme="light"] select,
 :root[data-theme="light"] select.input,
 :root[data-theme="light"] .select {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none' stroke='%23575145' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 4.75 6 7.75 9 4.75'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none' stroke='%23575145' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5.25 6.25 8 3.5l2.75 2.75M5.25 9.75 8 12.5l2.75-2.75'/%3E%3C/svg%3E");
 }
 
 /* The navy theme's --text-dim, which the warm chevron would clash with. */
 :root[data-theme="navy"] select,
 :root[data-theme="navy"] select.input,
 :root[data-theme="navy"] .select {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none' stroke='%238496b0' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 4.75 6 7.75 9 4.75'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none' stroke='%238496b0' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5.25 6.25 8 3.5l2.75 2.75M5.25 9.75 8 12.5l2.75-2.75'/%3E%3C/svg%3E");
 }
 
 .input {
@@ -3657,6 +3665,15 @@ a.pr-row:hover .pr-external {
   .select,
   .input {
     padding: 10px 12px;
+  }
+  /* The rule above weighs the same as the select rule and comes later,
+     so on a touch screen a `.select` lost its room on the right and its
+     value ran under the mark. */
+  select,
+  select.input,
+  .select {
+    padding-right: 38px;
+    background-position: right 12px center;
   }
   .lane-cards {
     gap: 12px;
@@ -6854,11 +6871,10 @@ button.lane-agent[data-saving] {
   opacity: 0.65;
   cursor: default;
 }
-.lane-agent .picker-caret {
-  margin-left: 1px;
-  border-left-width: 3px;
-  border-right-width: 3px;
-  border-top-width: 4px;
+.lane-agent .dropdown-mark {
+  width: 12px;
+  height: 12px;
+  margin-left: -2px;
 }
 .lane-agent-spinner {
   width: 8px;
@@ -6956,13 +6972,16 @@ button.lane-agent[data-saving] {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.picker-caret {
-  width: 0;
-  height: 0;
+/* The dropdown mark on every menu trigger (`DropdownMark`). Faint at
+   rest, like the select's, and brought up with the trigger on hover. */
+.dropdown-mark {
   flex: none;
-  border-left: 4px solid transparent;
-  border-right: 4px solid transparent;
-  border-top: 5px solid var(--text-faint);
+  color: var(--text-faint);
+  transition: color 120ms ease;
+}
+:is(button, summary):hover > .dropdown-mark,
+[data-state="open"] > .dropdown-mark {
+  color: var(--text-dim);
 }
 /* Radix places this now: it is portalled to the body and anchored to
    the trigger, so `align="start"` and `sideOffset={6}` say what
@@ -8686,16 +8705,6 @@ a.hours-person-name:hover {
   flex: none;
   border: 1.5px solid var(--line-bright);
   border-radius: 50%;
-}
-
-.swarm-switcher-caret {
-  width: 6px;
-  height: 6px;
-  margin: -3px 1px 0 3px;
-  flex: none;
-  border-right: 1.5px solid var(--text-faint);
-  border-bottom: 1.5px solid var(--text-faint);
-  transform: rotate(45deg);
 }
 
 .swarm-switcher-menu {
@@ -10453,13 +10462,6 @@ a.hours-person-name:hover {
 
 .swarm-more-actions > summary::-webkit-details-marker { display: none; }
 
-.swarm-actions-chevron {
-  flex: none;
-  transition: transform 160ms ease;
-}
-
-.swarm-more-actions[open] .swarm-actions-chevron { transform: rotate(180deg); }
-
 .swarm-more-menu {
   position: absolute;
   top: calc(100% + 7px);
@@ -11641,7 +11643,7 @@ a.hours-person-name:hover {
   height: 30px;
   min-width: 0;
   box-sizing: border-box;
-  padding: 0 8px 0 10px;
+  padding: 0 9px 0 10px;
   border: 1px solid var(--line-bright);
   border-radius: var(--radius);
   background: transparent;
@@ -11727,11 +11729,6 @@ a.hours-person-name:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   font-weight: 500;
-}
-
-.swarm-tool .swarm-chevron {
-  flex: none;
-  color: var(--text-faint);
 }
 
 .swarm-composer-agent-single,

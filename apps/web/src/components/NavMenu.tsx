@@ -1,4 +1,5 @@
 import * as Menu from "@radix-ui/react-dropdown-menu";
+import { DropdownMark } from "./DropdownMark.js";
 
 /**
  * One entry in the console's navigation.
@@ -20,9 +21,7 @@ export function ConfigureMenu({ actions }: { actions: NavAction[] }) {
   return <Menu.Root>
     <Menu.Trigger className="btn btn-ghost configure-trigger">
       Configure
-      <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
-        <path d="m3 4.5 3 3 3-3" />
-      </svg>
+      <DropdownMark />
     </Menu.Trigger>
     <Menu.Portal>
       <Menu.Content className="picker-menu" align="start" sideOffset={6} data-portal-layer="">
