@@ -318,6 +318,16 @@ export const features = pgTable(
    * the tenant column all assume a group lives in one project.
    */
   parentId: uuid("parent_id").references((): AnyPgColumn => features.id),
+  /**
+   * A conversation somebody started from the Sessions tab rather than
+   * a card put on the board: it begins in the backlog with no stage,
+   * and its agent is given the person's message instead of a stage's
+   * goal, write-up, gate, and automatic pull request. Moving it into a
+   * stage makes it an ordinary card from then on, which is why the
+   * executor asks `isSessionCard` (this flag and no current stage)
+   * rather than this column alone.
+   */
+  standalone: boolean("standalone").notNull().default(false),
   ...timestamps,
   },
   // Postgres does not index FK columns on its own, and every board,

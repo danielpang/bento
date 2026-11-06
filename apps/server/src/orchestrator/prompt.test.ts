@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { features, stages } from "@bento/db";
-import { buildConflictResolutionPrompt, buildStagePrompt } from "./prompt.js";
+import { buildConflictResolutionPrompt, buildSessionPrompt, buildStagePrompt } from "./prompt.js";
+import { SESSION_TITLE_MAX, isSessionCard, sessionTitle } from "./session-card.js";
 
 type Feature = typeof features.$inferSelect;
 type Stage = typeof stages.$inferSelect;
@@ -134,4 +135,40 @@ test("stage prompts describe server-owned publication and the actual automatic P
     assert.match(prompt, /do not ask the user for GitHub tokens/);
     assert.match(prompt, createPr ? /Automatic PR creation is enabled/ : /Automatic PR creation is off/);
   }
+});
+
+/**
+ * A session from the Sessions tab has no stage, so its agent must not be
+ * told about one: no stage goal, no write-up file, and no promise of an
+ * automatic pull request the executor will not open.
+ */
+test("a session's prompt names no stage and promises no automatic pull request", () => {
+  const prompt = buildSessionPrompt(
+    [{ name: "api", mountPath: "/workspace/api", testCommand: "pnpm test" }],
+    { name: "Claude Code (claude-sonnet-5)", skill: null },
+    "/workspace/artifacts",
+  );
+  assert.doesNotMatch(prompt, /stage/i);
+  assert.doesNotMatch(prompt, /docs\/bento/);
+  assert.match(prompt, /Nothing is published automatically/);
+  assert.match(prompt, /The repository is checked out at \/workspace\/api/);
+  assert.match(prompt, /Check your work by running: pnpm test/);
+  assert.match(prompt, /Never merge into main or master/);
+  // The fake agent reads these words as instructions, and a session
+  // prompt carrying one would fail or stall every run.
+  assert.doesNotMatch(prompt, /FAIL|SLOW|ARTIFACT|LIVE|VERDICT/);
+});
+
+test("a session is titled by the first line of its message, cut at a word", () => {
+  assert.equal(sessionTitle("  \n Why does login loop?\nMore detail here"), "Why does login loop?");
+  const long = sessionTitle("word ".repeat(40));
+  assert.ok(long.length <= SESSION_TITLE_MAX, long);
+  assert.ok(long.endsWith("…"));
+  assert.doesNotMatch(long, /wor…$/);
+});
+
+test("only a session still in the backlog is treated as one", () => {
+  assert.equal(isSessionCard({ standalone: true, currentStageId: null }), true);
+  assert.equal(isSessionCard({ standalone: true, currentStageId: "stage" }), false);
+  assert.equal(isSessionCard({ standalone: false, currentStageId: null }), false);
 });

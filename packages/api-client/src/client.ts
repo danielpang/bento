@@ -6,7 +6,7 @@ import type {
   PlanState,
   TeamPolicy,
 } from "./settings.js";
-import { SseParser, type AgentDelta, type AgentEvent, type RecordedRunEvent, type CatalogProvider, type CustomProviderProtocol, type GateCriteria, type TurnState } from "@bento/core";
+import { SseParser, type AgentCli, type AgentDelta, type AgentEvent, type RecordedRunEvent, type CatalogProvider, type CustomProviderProtocol, type GateCriteria, type TurnState } from "@bento/core";
 import { BUILD_HEADER } from "@bento/core";
 import type {
   AgentProfile,
@@ -744,6 +744,18 @@ export class BentoClient {
   /** Every conversation in the project, newest activity first. */
   listSessions(projectId: string) {
     return this.request<{ sessions: ProjectSession[] }>(`/api/projects/${projectId}/sessions`);
+  }
+
+  /**
+   * Starts a conversation with an agent without a stage: the chosen
+   * coding agent and model, given this message. The session is a card
+   * in the backlog, which the answer names.
+   */
+  startSession(projectId: string, input: { cli: AgentCli; model: string; prompt: string }) {
+    return this.request<{ featureId: string; run: AgentRun }>(`/api/projects/${projectId}/sessions`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
   }
 
   getPipeline(projectId: string) {

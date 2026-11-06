@@ -7,7 +7,8 @@ import { agentProfiles, agentRuns, features, projects, repositories, runEvents, 
 import { canAccessProject, visibleProjectFilter } from "../access.js";
 import type { AppContext } from "../context.js";
 import { tenantDb as db } from "../middleware/tenant.js";
-import { buildStagePrompt } from "../orchestrator/prompt.js";
+import { buildSessionPrompt, buildStagePrompt } from "../orchestrator/prompt.js";
+import { isSessionCard } from "../orchestrator/session-card.js";
 import { compactedConversation } from "../orchestrator/conversation-history.js";
 import { customProviderRunEnv } from "../orchestrator/custom-provider.js";
 import { isBetaRun } from "../feature-flags.js";
@@ -277,9 +278,11 @@ export function runnerRoutes(ctx: AppContext) {
          * Used when the run carries no explicit prompt. Empty for a
          * role that does not take one: see takesStagePrompt above.
          */
-        stagePrompt: takesStagePrompt
-          ? buildStagePrompt(candidate.feature, stage, allStages, [], { name: profile.name, skill: profile.skill })
-          : "",
+        stagePrompt: !takesStagePrompt
+          ? ""
+          : isSessionCard(candidate.feature)
+            ? buildSessionPrompt([], { name: profile.name, skill: profile.skill })
+            : buildStagePrompt(candidate.feature, stage, allStages, [], { name: profile.name, skill: profile.skill }),
         /**
          * Prior turns, compacted, for a follow-up that cannot resume a
          * CLI session. Empty when the run resumes or there is nothing

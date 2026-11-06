@@ -1,8 +1,18 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
 import type { AgentProfile, BentoClient, ProjectSession } from "@bento/api-client";
 import { runDot, runTime, runWords } from "./AgentSession.js";
 import { useToast } from "./Toasts.js";
 import { SessionPageSkeleton, SessionsListSkeleton } from "./Skeleton.js";
+import { SessionComposer } from "./SessionComposer.js";
+import {
+  SESSIONS_LIST_DEFAULT,
+  SESSIONS_LIST_MAX,
+  SESSIONS_LIST_MIN,
+  SESSIONS_LIST_STEP,
+  clampListWidth,
+  saveListWidth,
+  savedListWidth,
+} from "../sessions-split.js";
 
 // The same lazy chunk the /session route loads, so the split's right
 // pane and the standalone tab stay one piece of code arriving once.
@@ -44,6 +54,14 @@ export function SessionsPage({
    * subscription instead of opening a second one on the same project.
    */
   const [boardTick, setBoardTick] = useState(0);
+  /**
+   * The composer for a new session, open in the pane where a
+   * conversation would be. Exclusive with `selectedId`: the pane shows
+   * one or the other.
+   */
+  const [composing, setComposing] = useState(false);
+  /** The list's width beside an open pane, which the person drags. */
+  const [listWidth, setListWidth] = useState(savedListWidth);
   const screenRef = useRef<HTMLDivElement>(null);
   // Through a ref, because useToast without a ToastHost above it hands
   // back a fresh object per render, and that identity in refresh's
@@ -127,17 +145,30 @@ export function SessionsPage({
    * the way there.
    */
   useEffect(() => {
-    const onPop = () => setSelectedId(null);
+    const onPop = () => {
+      setSelectedId(null);
+      setComposing(false);
+    };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
+  const paneOpen = selectedId !== null || composing;
+
   const openSession = (featureId: string) => {
-    if (selectedId === null) window.history.pushState({ bentoSessionSplit: true }, "");
+    if (!paneOpen) window.history.pushState({ bentoSessionSplit: true }, "");
+    setComposing(false);
     setSelectedId(featureId);
   };
 
-  const closeSession = () => {
+  /** The composer takes the pane, on a phone as on a desktop: it is a page of its own there. */
+  const openComposer = () => {
+    if (!paneOpen) window.history.pushState({ bentoSessionSplit: true }, "");
+    setSelectedId(null);
+    setComposing(true);
+  };
+
+  const closePane = () => {
     // Through history when history is what opened it, so the entry
     // leaves with the pane instead of outliving it.
     if ((window.history.state as { bentoSessionSplit?: boolean } | null)?.bentoSessionSplit) {
@@ -145,6 +176,7 @@ export function SessionsPage({
       return;
     }
     setSelectedId(null);
+    setComposing(false);
   };
 
   /**
@@ -164,6 +196,33 @@ export function SessionsPage({
     return getComputedStyle(el).getPropertyValue("--split").trim() === "1";
   };
 
+  /**
+   * A session the composer just started: shown at once, in the pane the
+   * composer held where there is room, and on its own page where there
+   * is not, the same choice a click on its row makes. Replacing rather
+   * than adding the page, so Back from it skips the spent composer.
+   */
+  const sessionStarted = (featureId: string) => {
+    void refresh();
+    if (!splitFits()) {
+      window.location.replace(`/session/${featureId}`);
+      return;
+    }
+    if (paneOpen) {
+      setComposing(false);
+      setSelectedId(featureId);
+    } else {
+      openSession(featureId);
+    }
+  };
+
+  /** The agent behind the newest session, which the composer starts on. */
+  const newest = sessions?.[0]?.latestRun;
+  const recentProfile =
+    newest?.agentCli && newest.agentModel
+      ? { cli: newest.agentCli, model: newest.agentModel }
+      : profiles.find((p) => p.id === newest?.agentProfileId);
+
   // Only a first load with nothing to show becomes an error screen; a
   // failed background resync keeps the rows already on screen, because
   // a stale list beats an empty one with advice on it.
@@ -179,11 +238,34 @@ export function SessionsPage({
     );
   }
 
+  /*
+   * No conversations yet: the composer is the screen, the way the
+   * Swarms tab opens on its own, so the first thing a person sees is
+   * the thing they came to do.
+   */
+  if (sessions?.length === 0 && projectId && selectedId === null) {
+    return (
+      <div className="sessions-screen sessions-screen-compose" ref={screenRef}>
+        <SessionComposer
+          client={client}
+          projectId={projectId}
+          onStarted={sessionStarted}
+          footer={
+            <>
+              Or start an agent from a card on the <a href="/">board</a>.
+            </>
+          }
+        />
+      </div>
+    );
+  }
+
   return (
     <div
       className="sessions-screen"
-      data-split={selectedId !== null ? "" : undefined}
+      data-split={paneOpen ? "" : undefined}
       ref={screenRef}
+      style={{ "--sessions-list-width": `${listWidth}px` } as CSSProperties}
     >
       <div className="sessions-pane">
         <header className="surface-heading">
@@ -191,21 +273,26 @@ export function SessionsPage({
             <h1>Sessions</h1>
             <p>Conversations behind the work.</p>
           </div>
-          {sessions && <span className="surface-count">{sessions.length} conversations</span>}
+          <div className="surface-heading-actions">
+            {sessions && <span className="surface-count">{sessions.length} conversations</span>}
+            {projectId && (
+              <button
+                className="btn btn-primary"
+                aria-label="New session"
+                aria-pressed={composing}
+                onClick={openComposer}
+              >
+                New
+              </button>
+            )}
+          </div>
         </header>
         {sessions === null && <SessionsListSkeleton />}
-        {sessions?.length === 0 && (
-          <div className="surface-empty">
-            <h2>Your first conversation starts with a card.</h2>
-            <p className="muted">Start an agent from the board. Its progress and conversation will appear here.</p>
-            <a className="btn" href="/">Go to board</a>
-          </div>
-        )}
         {sessions && sessions.length > 0 && (
           <div className="sessions-list">
             {sessions.map((session) => {
               const run = session.latestRun;
-              const agent = profiles.find((p) => p.id === run.agentProfileId)?.name ?? "agent";
+              const agent = run.agentName ?? profiles.find((p) => p.id === run.agentProfileId)?.name ?? "agent";
               return (
                 <a
                   key={session.featureId}
@@ -257,6 +344,14 @@ export function SessionsPage({
           </div>
         )}
       </div>
+      {paneOpen && (
+        <ListResizeHandle
+          width={listWidth}
+          screen={screenRef}
+          onWidth={setListWidth}
+          onDone={(width) => saveListWidth(width)}
+        />
+      )}
       {selectedId !== null && (
         // Keyed so switching conversations starts the pane fresh
         // instead of showing the previous card's messages while the
@@ -266,13 +361,109 @@ export function SessionsPage({
             <SessionPage
               client={client}
               featureId={selectedId}
-              onClose={closeSession}
+              onClose={closePane}
               refreshSignal={boardTick}
             />
           </Suspense>
         </div>
       )}
+      {composing && projectId && (
+        <div className="sessions-detail">
+          <SessionComposer
+            client={client}
+            projectId={projectId}
+            {...(recentProfile ? { recentProfile } : {})}
+            onCancel={closePane}
+            onStarted={sessionStarted}
+          />
+        </div>
+      )}
     </div>
+  );
+}
+
+/**
+ * The line between the list and the open pane, dragged to resize the
+ * list. Also a keyboard control (arrows, Home, End), and a double
+ * click puts the list back to its default width. The width is saved
+ * when a drag or a key press ends, not on every move.
+ */
+function ListResizeHandle({
+  width,
+  screen,
+  onWidth,
+  onDone,
+}: {
+  width: number;
+  screen: RefObject<HTMLDivElement | null>;
+  onWidth: (width: number) => void;
+  onDone: (width: number) => void;
+}) {
+  const [dragging, setDragging] = useState(false);
+  /** Where the list starts, measured when a drag begins. */
+  const origin = useRef(0);
+  const latest = useRef(width);
+  latest.current = width;
+
+  const screenWidth = () => screen.current?.getBoundingClientRect().width ?? window.innerWidth;
+  const listLeft = () => {
+    const pane = screen.current?.querySelector<HTMLElement>(".sessions-pane");
+    return pane?.getBoundingClientRect().left ?? 0;
+  };
+  const set = (next: number) => {
+    const clamped = clampListWidth(next, screenWidth());
+    latest.current = clamped;
+    onWidth(clamped);
+    return clamped;
+  };
+
+  return (
+    <div
+      className="sessions-resize"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize the conversation list"
+      aria-valuemin={SESSIONS_LIST_MIN}
+      aria-valuemax={SESSIONS_LIST_MAX}
+      aria-valuenow={width}
+      title="Drag to resize. Double click to reset."
+      tabIndex={0}
+      data-dragging={dragging ? "" : undefined}
+      onPointerDown={(event) => {
+        if (event.button !== 0) return;
+        event.preventDefault();
+        origin.current = listLeft();
+        event.currentTarget.setPointerCapture(event.pointerId);
+        setDragging(true);
+      }}
+      onPointerMove={(event) => {
+        if (!dragging) return;
+        set(event.clientX - origin.current);
+      }}
+      onPointerUp={(event) => {
+        if (!dragging) return;
+        event.currentTarget.releasePointerCapture(event.pointerId);
+        setDragging(false);
+        onDone(latest.current);
+      }}
+      onPointerCancel={() => {
+        if (!dragging) return;
+        setDragging(false);
+        onDone(latest.current);
+      }}
+      onDoubleClick={() => onDone(set(SESSIONS_LIST_DEFAULT))}
+      onKeyDown={(event) => {
+        const step = event.shiftKey ? SESSIONS_LIST_STEP * 4 : SESSIONS_LIST_STEP;
+        let next: number | null = null;
+        if (event.key === "ArrowLeft") next = width - step;
+        else if (event.key === "ArrowRight") next = width + step;
+        else if (event.key === "Home") next = SESSIONS_LIST_MIN;
+        else if (event.key === "End") next = SESSIONS_LIST_MAX;
+        if (next === null) return;
+        event.preventDefault();
+        onDone(set(next));
+      }}
+    />
   );
 }
 

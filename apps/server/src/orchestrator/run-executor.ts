@@ -89,7 +89,8 @@ import { reportSandboxReady, runOwnerProperties, type SandboxOrigin } from "./sa
 export { sandboxProvisionConflict } from "./sandbox-provision.js";
 import { allCandidates, driversForRun, driverForSandbox, SandboxDriverUnavailable, type ProvisionDrivers } from "./sandbox-driver.js";
 import { evaluateFeatureGate } from "./gate-evaluator.js";
-import { buildResolverPrompt, buildStagePrompt, repositoryInstructions } from "./prompt.js";
+import { buildResolverPrompt, buildSessionPrompt, buildStagePrompt, repositoryInstructions } from "./prompt.js";
+import { isSessionCard } from "./session-card.js";
 import {
   buildPlannerPrompt,
   buildSubPlannerPrompt,
@@ -1596,8 +1597,11 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
     ...(subject.kind === "pipeline"
       ? {
           owner: { featureId: subject.feature.id },
-          stageSlug: subject.stage.slug,
-          stageName: subject.stage.name,
+          // A session's runs name the first stage only because every
+          // card run must name one; its files are the session's.
+          ...(isSessionCard(subject.feature)
+            ? { stageSlug: "session", stageName: "Session" }
+            : { stageSlug: subject.stage.slug, stageName: subject.stage.name }),
         }
       : {
           owner: { swarmId: subject.swarm.id, swarmTaskId: subject.task?.id ?? null },
@@ -1636,7 +1640,10 @@ async function settleAgentResult(ctx: AppContext, settlement: RunSettlement): Pr
     // request, and the resolve route already confirmed one exists. The
     // wording is picked once here so the two notes below cannot drift
     // apart and describe two different runs.
-    const mustPublish = stage.createPr || runRole === "rebase";
+    // A session in the backlog publishes only when its person asks
+    // (the card's Pull requests panel): the stage its runs name is
+    // bookkeeping, and its Create a pull request setting is not theirs.
+    const mustPublish = runRole === "rebase" || (stage.createPr && !isSessionCard(feature));
     const wording =
       runRole === "rebase"
         ? {
@@ -2147,6 +2154,14 @@ async function buildSubjectPrompt(
   /** The swarm's plan sources, each with its path in this workspace once written. */
   planSources: PlanSource[] = [],
 ): Promise<string> {
+  if (subject.kind === "pipeline" && isSessionCard(subject.feature)) {
+    return buildSessionPrompt(
+      mounted,
+      { name: subject.profile.name, skill: subject.profile.skill },
+      `${handle.workdir}/${WORKSPACE_ARTIFACT_DIR}`,
+      cardTools,
+    );
+  }
   if (subject.kind === "pipeline") {
     const allStages = await ctx.db
       .select()

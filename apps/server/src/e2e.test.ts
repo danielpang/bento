@@ -505,6 +505,82 @@ test("a run's artifacts are captured, listed, and served safely", { timeout: 90_
   assert.deepEqual(leftBehind, [], "captured files are removed from the artifacts directory");
 });
 
+/**
+ * A session from the Sessions tab: the person picks a harness and a
+ * model and says something, and an agent answers without the card ever
+ * entering a stage. Driven through the route and the real executor, so
+ * the backlog card, the reused agent, and the quiet gate are what the
+ * rows say rather than what a stub agreed to.
+ */
+test("a session starts an agent without a stage and stays in the backlog", { timeout: 90_000 }, async () => {
+  const { project } = await setupProject("Standalone session");
+  const start = (prompt: string) =>
+    app.request(`/api/projects/${project.id}/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ cli: "fake", model: "fake-session-1", prompt }),
+    });
+
+  const res = await start("Where does the login flow live?\nJust explain it.");
+  assert.equal(res.status, 201, await res.clone().text());
+  const first = (await res.json()) as { featureId: string; run: { id: string; agentProfileId: string } };
+  assert.equal(await waitForRun(first.run.id), "succeeded");
+
+  const [card] = await ctx.db.select().from(features).where(eq(features.id, first.featureId));
+  assert.ok(card);
+  assert.equal(card.standalone, true);
+  assert.equal(card.currentStageId, null, "a session never enters a stage on its own");
+  assert.equal(card.status, "backlog");
+  assert.equal(card.title, "Where does the login flow live?");
+  assert.match(card.description, /Just explain it\./);
+  assert.ok(card.branchName, "the session has a branch of its own from the start");
+
+  // The gate is never asked: nothing moved the card.
+  const transitions = await json<unknown[]>(await app.request(`/api/features/${first.featureId}/transitions`));
+  assert.deepEqual(transitions, []);
+
+  // The agent is one of exactly that harness and model, and the same
+  // pair again reuses it rather than filling the agents list.
+  const [profile] = await ctx.db.select().from(agentProfiles).where(eq(agentProfiles.id, first.run.agentProfileId));
+  assert.equal(profile?.cli, "fake");
+  assert.equal(profile?.model, "fake-session-1");
+  const again = await start("And the logout flow?");
+  assert.equal(again.status, 201);
+  const second = (await again.json()) as { featureId: string; run: { id: string; agentProfileId: string } };
+  assert.equal(second.run.agentProfileId, first.run.agentProfileId);
+  assert.notEqual(second.featureId, first.featureId, "every session is its own conversation");
+  assert.equal(await waitForRun(second.run.id), "succeeded");
+
+  // A follow-up continues the same session, still without a stage.
+  const followUp = await app.request(`/api/features/${first.featureId}/message`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text: "Thanks, one more question" }),
+  });
+  assert.equal(followUp.status, 201, await followUp.clone().text());
+  const resumed = (await followUp.json()) as { run: { id: string; agentProfileId: string } };
+  assert.equal(resumed.run.agentProfileId, first.run.agentProfileId);
+  assert.equal(await waitForRun(resumed.run.id), "succeeded");
+  const [after] = await ctx.db.select().from(features).where(eq(features.id, first.featureId));
+  assert.equal(after?.currentStageId, null);
+
+  const listed = await json<{ sessions: { featureId: string }[] }>(
+    await app.request(`/api/projects/${project.id}/sessions`),
+  );
+  assert.deepEqual(
+    new Set(listed.sessions.map((s) => s.featureId)),
+    new Set([first.featureId, second.featureId]),
+  );
+
+  // A pairing the harness cannot run is refused before anything is made.
+  const refused = await app.request(`/api/projects/${project.id}/sessions`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ cli: "fake", model: "x", prompt: "   " }),
+  });
+  assert.equal(refused.status, 400);
+});
+
 test("GET /api/projects/:id/artifacts aggregates pipeline cards without leaking content", async () => {
   const { project, stages: projectStages } = await setupProject("Artifact aggregate");
   const older = await createFeature(project.id, "Older card");

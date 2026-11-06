@@ -160,6 +160,12 @@ export interface Feature {
    * task too large for one branch and filed its parts separately.
    */
   parentId?: string | null;
+  /**
+   * Started from the Sessions tab rather than the board: in the backlog
+   * with no stage, its agent hears the person's message rather than a
+   * stage's goal, and nothing publishes on its own.
+   */
+  standalone?: boolean;
 }
 
 /** One card as the related-cards view draws it. */
@@ -385,7 +391,13 @@ export interface ProjectSession {
   latestRun: Pick<
     AgentRun,
     "id" | "status" | "agentProfileId" | "queuedAt" | "startedAt" | "endedAt" | "costUsd"
-  >;
+  > & {
+    /** The run's agent by name, null when that agent no longer exists. */
+    agentName?: string | null;
+    /** That agent's harness and model, so a new session can start where this one did. */
+    agentCli?: AgentCli | null;
+    agentModel?: string | null;
+  };
 }
 
 export interface AgentProfile {

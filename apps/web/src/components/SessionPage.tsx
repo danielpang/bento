@@ -5,6 +5,7 @@ import { AgentSession } from "./AgentSession.js";
 import { ChatSkeleton } from "./Skeleton.js";
 import { DiffReview, type LineQuote } from "./DiffReview.js";
 import { useToast } from "./Toasts.js";
+import { isSessionCard } from "./ui.js";
 import { needsSendBackPrompt, SEND_BACK_NOTICE } from "@bento/core";
 
 /**
@@ -248,7 +249,9 @@ export function SessionPage({
           featureId={feature.id}
           runs={feature.runs}
           profiles={profiles}
-          stages={stages}
+          // A session's runs name the first stage only as bookkeeping,
+          // so its picker names the agent instead.
+          {...(isSessionCard(feature) ? {} : { stages })}
           finished={finished}
           onChanged={() => void refresh()}
           quote={quote}
