@@ -4827,6 +4827,12 @@ a.pr-row:hover .pr-external {
   font-weight: 600;
   margin: 0 0 8px;
 }
+/* An anchor wearing .btn is inline, so a top margin alone moved
+   nothing and its padding spilled up over the paragraph above. */
+.artifacts-empty .btn {
+  display: inline-block;
+  margin-top: 16px;
+}
 .artifacts-split {
   --artifacts-pane: 300px;
   flex: 1;
@@ -10582,6 +10588,10 @@ a.hours-person-name:hover {
 
 /* Swarm workspace: one brief, one action area, then the plan. */
 .swarm-page {
+  /* The containing block for its absolutely positioned text (the merge
+     queue's screen reader labels), which would otherwise escape this
+     scroller and make the whole window scroll past the bottom bar. */
+  position: relative;
   background: var(--bg);
   overflow-x: hidden;
   overflow-y: auto;
