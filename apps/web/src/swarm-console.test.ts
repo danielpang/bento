@@ -1505,6 +1505,15 @@ test("every landing status draws a tone the stylesheet actually defines", () => 
   }
 });
 
+test("the swarm page contains its hidden labels, so only it scrolls", () => {
+  const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+  const scroller = [...css.matchAll(/^\.swarm-page \{([^}]*)\}/gm)]
+    .map((match) => match[1]!)
+    .find((body) => /overflow-y:\s*auto/.test(body));
+  assert.ok(scroller, "the swarm page scrolls itself");
+  assert.match(scroller, /position:\s*relative/);
+});
+
 test("what git said about a conflict is printed as text, and only while it stands", () => {
   const conflict = queueHtml([
     landing({ status: "conflicted", attempt: 2, error: "CONFLICT (content): Merge conflict in <script>x</script>" }),
