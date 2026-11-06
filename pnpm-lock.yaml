@@ -25,6 +25,9 @@ importers:
       '@bento/api-client':
         specifier: workspace:*
         version: link:../../packages/api-client
+      '@bento/core':
+        specifier: workspace:*
+        version: link:../../packages/core
       '@bento/sandbox':
         specifier: workspace:*
         version: link:../../packages/sandbox

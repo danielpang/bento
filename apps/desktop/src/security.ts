@@ -1,4 +1,5 @@
 import path from "node:path";
+import { isConsolePath } from "@bento/core";
 import type { DesktopSettings, LoginHint } from "./contracts.js";
 
 export const LAUNCHER_ORIGIN = "bento-desktop://launcher";
@@ -60,9 +61,9 @@ export function isApiPath(pathname: string): boolean {
     pathname.startsWith("/mcp-oauth/") || pathname.startsWith("/.well-known/");
 }
 
+/** The console's own pages, from the list the web app is tested against. */
 export function isConsolePage(pathname: string): boolean {
-  return ["/", "/index.html", "/settings", "/sessions", "/spend", "/analytics", "/changelog", "/device", "/connect-mcp", "/accept-invitation", "/reset-password"].includes(pathname) ||
-    /^\/(session|artifact)\/[0-9a-f-]{36}$/.test(pathname);
+  return isConsolePath(pathname);
 }
 
 export function isTrustedConsoleUrl(value: string, origin: string): boolean {
