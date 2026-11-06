@@ -5,7 +5,7 @@ import { zValidator } from "@hono/zod-validator";
 import { and, asc, count, desc, eq, inArray, isNull, max, ne, sql, sum } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
-import { TERMINAL_RUN_STATUSES, WORKSPACE_ARTIFACT_DIR } from "@bento/core";
+import { TERMINAL_RUN_STATUSES, WORKSPACE_ARTIFACT_DIR, agentCli, checkAgentPairing, modelGuidanceFor } from "@bento/core";
 import {
   agentProfiles,
   agentRuns,
@@ -23,7 +23,7 @@ import {
 import { parsePipelineFile, pipelineFile, writePipelineFile } from "../pipeline-file.js";
 import { upsertAgentsFromFile } from "../upsert-agents.js";
 import type { AppContext } from "../context.js";
-import { tenantDb as db } from "../middleware/tenant.js";
+import { deferAfterCommit, tenantDb as db } from "../middleware/tenant.js";
 import { actor } from "../middleware/actor.js";
 import { activeOrg } from "../middleware/actor.js";
 import {
@@ -34,9 +34,22 @@ import {
 import { candidateDrivers, driverForProject } from "../orchestrator/sandbox-driver.js";
 import { githubForOrganization } from "../github.js";
 import { branchExists, detectDefaultBranch, githubRemoteOf, linkGitHubRemotes } from "../orchestrator/repo-remote.js";
-import { ACTIVE_RUN_STATUSES } from "../orchestrator/start-run.js";
+import { ACTIVE_RUN_STATUSES, NO_REPOSITORIES, projectHasRepositories, startRunIfIdle } from "../orchestrator/start-run.js";
+import { enqueueRun } from "../orchestrator/queue.js";
+import { defaultFeatureBranch } from "../orchestrator/gate-evaluator.js";
+import { sessionTitle } from "../orchestrator/session-card.js";
 import { duplicateRepositoryLocation, sameRepositoryLocation } from "../repository-identity.js";
 import { projectAnalytics, resolveAnalyticsWindow } from "../project-analytics.js";
+
+/**
+ * A session started from the Sessions tab: which coding agent, which
+ * model, and the person's first message.
+ */
+const startSession = z.object({
+  cli: agentCli,
+  model: z.string().trim().min(1).max(200),
+  prompt: z.string().trim().min(1).max(20000),
+});
 
 /**
  * The two shells a repository can carry. Shared by the add and edit
@@ -675,9 +688,13 @@ export function projectRoutes(ctx: AppContext) {
             startedAt: agentRuns.startedAt,
             endedAt: agentRuns.endedAt,
             costUsd: agentRuns.costUsd,
+            // Named here rather than looked up by the console, whose
+            // agent list predates an agent a new session just made.
+            agentName: agentProfiles.name,
           })
           .from(agentRuns)
           .innerJoin(features, eq(features.id, agentRuns.featureId))
+          .leftJoin(agentProfiles, eq(agentProfiles.id, agentRuns.agentProfileId))
           .where(conversationRuns)
           .orderBy(agentRuns.featureId, desc(agentRuns.queuedAt)),
       ]);
@@ -694,6 +711,122 @@ export function projectRoutes(ctx: AppContext) {
         .filter((s) => s.latestRun !== undefined)
         .sort((a, b) => b.latestRun.queuedAt.getTime() - a.latestRun.queuedAt.getTime());
       return c.json({ sessions });
+    })
+    /**
+     * Starts a conversation with an agent without a stage.
+     *
+     * The person picks a coding agent and a model, and says what they
+     * want. That becomes a card in the backlog marked standalone, so
+     * the board's machinery (its sandbox, branch, transcript, follow
+     * ups, Stop) carries the conversation unchanged, while the agent
+     * hears the message rather than a stage's goal and nothing
+     * publishes or gates on its own (`isSessionCard`). The run names
+     * the pipeline's first stage only because every card run names one.
+     *
+     * The agent is an existing one with exactly that tool and model and
+     * nothing of its own (no instructions, arguments or keys), or a new
+     * one of that shape, so choosing the same pair twice reuses it.
+     */
+    .post("/:id/sessions", zValidator("json", startSession), async (c) => {
+      const projectId = c.req.param("id");
+      if (!(await canAccessProject(ctx, c, projectId))) return c.json({ error: "not found" }, 404);
+      const body = c.req.valid("json");
+      const pairing = checkAgentPairing(body.cli, body.model);
+      if (pairing.status === "impossible") return c.json({ error: pairing.detail }, 400);
+      const tx = db(c, ctx);
+      if (!(await projectHasRepositories(tx, projectId))) return c.json({ error: NO_REPOSITORIES }, 409);
+
+      const [project] = await tx.select().from(projects).where(eq(projects.id, projectId)).limit(1);
+      const [pipeline] = await tx.select().from(pipelines).where(eq(pipelines.projectId, projectId)).limit(1);
+      if (!project || !pipeline) return c.json({ error: "project has no pipeline" }, 400);
+      const [firstStage] = await tx
+        .select({ id: stages.id })
+        .from(stages)
+        .where(eq(stages.pipelineId, pipeline.id))
+        .orderBy(asc(stages.position))
+        .limit(1);
+      if (!firstStage) return c.json({ error: "Add a stage to this project's pipeline before starting a session." }, 400);
+
+      const sameTenant = project.organizationId === null
+        ? isNull(agentProfiles.organizationId)
+        : eq(agentProfiles.organizationId, project.organizationId);
+      const [existing] = await tx
+        .select({ id: agentProfiles.id })
+        .from(agentProfiles)
+        .where(
+          and(
+            sameTenant,
+            eq(agentProfiles.cli, body.cli),
+            eq(agentProfiles.model, body.model),
+            isNull(agentProfiles.skill),
+            sql`${agentProfiles.extraArgs} = '[]'::jsonb`,
+            sql`${agentProfiles.envRefs} = '[]'::jsonb`,
+          ),
+        )
+        .orderBy(asc(agentProfiles.createdAt))
+        .limit(1);
+      let profileId = existing?.id;
+      if (!profileId) {
+        const label = modelGuidanceFor(body.cli)?.label ?? body.cli;
+        const [created] = await tx
+          .insert(agentProfiles)
+          .values({
+            ownerId: actor(c),
+            organizationId: project.organizationId,
+            name: `${label} (${body.model})`,
+            cli: body.cli,
+            model: body.model,
+          })
+          .returning({ id: agentProfiles.id });
+        profileId = created?.id;
+      }
+      if (!profileId) return c.json({ error: "something went wrong saving the agent; try again" }, 500);
+
+      const featureId = crypto.randomUUID();
+      const title = sessionTitle(body.prompt);
+      const [feature] = await tx
+        .insert(features)
+        .values({
+          id: featureId,
+          projectId,
+          pipelineId: pipeline.id,
+          title,
+          description: body.prompt,
+          standalone: true,
+          branchName: defaultFeatureBranch({ id: featureId, title }),
+        })
+        .returning();
+      if (!feature) return c.json({ error: "something went wrong starting the session; try again" }, 500);
+
+      const executor = project.executor ?? "server";
+      const run = await startRunIfIdle(tx, {
+        type: "pipeline" as const,
+        featureId: feature.id,
+        stageId: firstStage.id,
+        agentProfileId: profileId,
+        prompt: body.prompt,
+        cliSessionId: null,
+        executor,
+        startedBy: actor(c),
+      }, ctx.entitlements, ctx.analytics, (task) => deferAfterCommit(c, async () => task()), ctx.env.BENTO_MODE);
+      if (run === "busy" || run === "gone" || "outOfCompute" in run) {
+        // A card nobody can talk to is not a session; take it back
+        // rather than leave an empty one in the backlog.
+        await tx.delete(features).where(eq(features.id, feature.id));
+        if (run !== "busy" && run !== "gone") return c.json({ error: run.outOfCompute, code: "PLAN_LIMIT" }, 402);
+        return c.json({ error: "something went wrong starting the session; try again" }, 500);
+      }
+      const startedBy = actor(c);
+      deferAfterCommit(c, async () => {
+        ctx.analytics?.capture({
+          event: "feature card created",
+          userId: startedBy,
+          organizationId: feature.organizationId,
+          properties: { feature_id: feature.id, project_id: projectId, source: "session" },
+        });
+      });
+      if (executor === "server") await enqueueRun(ctx, run.id);
+      return c.json({ featureId: feature.id, run }, 201);
     })
     /**
      * One row per card that has pipeline artifacts, newest activity

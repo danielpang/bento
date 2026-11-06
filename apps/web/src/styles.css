@@ -6614,7 +6614,29 @@ button.session-expand[aria-pressed="true"] {
   font-weight: 550;
   margin: 0 0 8px;
 }
-.surface-empty .btn { margin-top: 16px; }
+/*
+ * The empty state's actions sit on their own row. An anchor wearing
+ * .btn is inline, so a top margin on it moved nothing and its padding
+ * spilled up over the paragraph above; the row is what spaces them.
+ */
+.surface-empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+}
+.surface-heading-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+/* Harness and model side by side where there is room. */
+.new-session-runtime {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+}
 .management-drawer .drawer-title {
   font-size: 24px;
   letter-spacing: -0.035em;

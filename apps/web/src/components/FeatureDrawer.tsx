@@ -4,7 +4,7 @@ import { lazy, Suspense, useEffect, useId, useRef, useState } from "react";
 import * as Tabs from "@radix-ui/react-tabs";
 import { ProviderMark } from "./ProviderMark.js";
 import { AgentSession } from "./AgentSession.js";
-import { criterionName, useDismissable } from "./ui.js";
+import { criterionName, isSessionCard, useDismissable } from "./ui.js";
 import { useToast } from "./Toasts.js";
 import { captureArtifactOpened } from "../posthog.js";
 import { ConfirmDialog, PromptDialog } from "./PromptDialog.js";
@@ -1396,7 +1396,9 @@ export function FeatureDrawer({
             featureId={feature.id}
             runs={runs}
             profiles={profiles}
-            stages={stages}
+            // A session's runs name the first stage only as bookkeeping,
+            // so its picker names the agent instead.
+            {...(isSessionCard(feature) ? {} : { stages })}
             finished={finished}
             onChanged={onChanged}
             onEvent={onEvent}

@@ -204,3 +204,13 @@ export function toolCapability(cli: string, model?: string): string {
   const quiet = hasNoLiveTranscript(cli) ? "Prints nothing until the run ends. " : "";
   return quiet + toolCapabilities(cli, model).map((c) => c.detail).join(" ");
 }
+
+/**
+ * Whether a card is a session started from the Sessions tab that has
+ * not been moved into a stage. Its runs name the pipeline's first stage
+ * only because every card run must name one, so nothing should read
+ * that stage back as what the run was.
+ */
+export function isSessionCard(feature: { standalone?: boolean; currentStageId: string | null }): boolean {
+  return Boolean(feature.standalone) && feature.currentStageId === null;
+}

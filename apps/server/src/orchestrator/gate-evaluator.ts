@@ -1223,6 +1223,11 @@ function parseCriteria(raw: unknown): GateCriterion[] {
   return parsed.success ? parsed.data : [];
 }
 
+/** The branch a card works on when nothing has named one yet. */
+export function defaultFeatureBranch(feature: { title: string; id: string }): string {
+  return `feature/${slugify(feature.title)}-${feature.id.slice(0, 8)}`;
+}
+
 function slugify(title: string): string {
   return (
     title

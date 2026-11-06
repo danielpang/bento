@@ -3,6 +3,7 @@ import type { AgentProfile, BentoClient, ProjectSession } from "@bento/api-clien
 import { runDot, runTime, runWords } from "./AgentSession.js";
 import { useToast } from "./Toasts.js";
 import { SessionPageSkeleton, SessionsListSkeleton } from "./Skeleton.js";
+import { NewSessionDialog } from "./NewSessionDialog.js";
 
 // The same lazy chunk the /session route loads, so the split's right
 // pane and the standalone tab stay one piece of code arriving once.
@@ -44,6 +45,8 @@ export function SessionsPage({
    * subscription instead of opening a second one on the same project.
    */
   const [boardTick, setBoardTick] = useState(0);
+  /** The New session dialog, open or not. */
+  const [composing, setComposing] = useState(false);
   const screenRef = useRef<HTMLDivElement>(null);
   // Through a ref, because useToast without a ToastHost above it hands
   // back a fresh object per render, and that identity in refresh's
@@ -164,6 +167,23 @@ export function SessionsPage({
     return getComputedStyle(el).getPropertyValue("--split").trim() === "1";
   };
 
+  /**
+   * A session the dialog just started: shown at once, beside the list
+   * where there is room and on its own page where there is not, the
+   * same choice a click on its row makes.
+   */
+  const sessionStarted = (featureId: string) => {
+    setComposing(false);
+    void refresh();
+    if (splitFits()) openSession(featureId);
+    else window.location.href = `/session/${featureId}`;
+  };
+
+  /** The agent behind the newest session, which the dialog starts on. */
+  const recentProfile = sessions?.[0]
+    ? profiles.find((p) => p.id === sessions[0]!.latestRun.agentProfileId)
+    : undefined;
+
   // Only a first load with nothing to show becomes an error screen; a
   // failed background resync keeps the rows already on screen, because
   // a stale list beats an empty one with advice on it.
@@ -191,21 +211,38 @@ export function SessionsPage({
             <h1>Sessions</h1>
             <p>Conversations behind the work.</p>
           </div>
-          {sessions && <span className="surface-count">{sessions.length} conversations</span>}
+          <div className="surface-heading-actions">
+            {sessions && <span className="surface-count">{sessions.length} conversations</span>}
+            {projectId && (
+              <button className="btn btn-primary" onClick={() => setComposing(true)}>
+                New session
+              </button>
+            )}
+          </div>
         </header>
         {sessions === null && <SessionsListSkeleton />}
         {sessions?.length === 0 && (
           <div className="surface-empty">
-            <h2>Your first conversation starts with a card.</h2>
-            <p className="muted">Start an agent from the board. Its progress and conversation will appear here.</p>
-            <a className="btn" href="/">Go to board</a>
+            <h2>No conversations yet.</h2>
+            <p className="muted">
+              Start a session to talk to an agent directly, or start one from a card on the board. Every conversation
+              appears here.
+            </p>
+            <div className="surface-empty-actions">
+              {projectId && (
+                <button className="btn btn-primary" onClick={() => setComposing(true)}>
+                  New session
+                </button>
+              )}
+              <a className="btn" href="/">Go to board</a>
+            </div>
           </div>
         )}
         {sessions && sessions.length > 0 && (
           <div className="sessions-list">
             {sessions.map((session) => {
               const run = session.latestRun;
-              const agent = profiles.find((p) => p.id === run.agentProfileId)?.name ?? "agent";
+              const agent = run.agentName ?? profiles.find((p) => p.id === run.agentProfileId)?.name ?? "agent";
               return (
                 <a
                   key={session.featureId}
@@ -271,6 +308,15 @@ export function SessionsPage({
             />
           </Suspense>
         </div>
+      )}
+      {composing && projectId && (
+        <NewSessionDialog
+          client={client}
+          projectId={projectId}
+          {...(recentProfile ? { recentProfile } : {})}
+          onClose={() => setComposing(false)}
+          onStarted={sessionStarted}
+        />
       )}
     </div>
   );

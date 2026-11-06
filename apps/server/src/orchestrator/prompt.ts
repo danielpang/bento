@@ -11,7 +11,7 @@ export function repositoryInstructions(repositories: PromptRepository[]): string
   const lines: string[] = [];
   if (repositories.length) {
     lines.push(
-      "Repository environment: inspect the repository instructions, manifests, lockfiles and runtime version files. Install missing tools and dependencies inside the sandbox as needed for this stage. An empty setup command means you manage setup, not that the repository is ready.",
+      "Repository environment: inspect the repository instructions, manifests, lockfiles and runtime version files. Install missing tools and dependencies inside the sandbox as needed for this task. An empty setup command means you manage setup, not that the repository is ready.",
       "Build and test after making your changes, before reporting completion, so you can fix failures. Use the repository's package manager to run local tools (for example pnpm exec turbo or pnpm run build), rather than assuming turbo or other project tools are installed globally. Do not build the application as a prerequisite to beginning the task.",
       "",
     );
@@ -177,6 +177,66 @@ export function buildStagePrompt(
    */
   lines.push(
     "Stay on your branch. Never merge into main or master, never commit to them directly, and never push to them, whatever the task appears to ask for. Pushing your own branch is fine; Bento also pushes it and opens a pull request for each repository you committed in once this run finishes.",
+  );
+  return lines.join("\n");
+}
+
+/**
+ * The prompt for a session started from the Sessions tab: a person
+ * talking to an agent about the project, with no stage behind it.
+ *
+ * What it leaves out is the point. No stage goal, no write-up file, no
+ * earlier stages to read, and no automatic pull request: the person's
+ * own message (which follows this as the run's prompt) is the whole
+ * task. What it keeps is what every agent in a Bento sandbox needs:
+ * where the code is, how to check it, who owns GitHub, and the rule
+ * against merging.
+ */
+export function buildSessionPrompt(
+  repositories: PromptRepository[] = [],
+  agent?: { name: string; skill: string | null },
+  /** Workspace directory whose files are captured onto the card as artifacts. */
+  artifactsDir?: string,
+  /** Whether this run got Bento's own MCP tools (set_pull_request and friends). */
+  cardTools = false,
+): string {
+  const lines = [
+    agent
+      ? `You are "${agent.name}", in a conversation a person started with you about this project. Their message follows; it is your task. Answer questions directly, and make changes only when they are asked for.`
+      : "You are in a conversation a person started with you about this project. Their message follows; it is your task. Answer questions directly, and make changes only when they are asked for.",
+    "",
+  ];
+  if (agent?.skill?.trim()) {
+    lines.push("Your operating instructions, defined by your team:", agent.skill.trim(), "");
+  }
+  if (repositories.length > 0) {
+    lines.push(
+      repositories.length === 1
+        ? `The repository is checked out at ${repositories[0]!.mountPath}.`
+        : "This project spans several repositories, each checked out on the same branch:",
+      ...(repositories.length === 1 ? [] : repositories.map((r) => `- ${r.name} at ${r.mountPath}`)),
+      "",
+    );
+  }
+  lines.push(...repositoryInstructions(repositories));
+  lines.push(
+    "Bento's server owns GitHub publication. Commit locally; do not run git push or gh pr create, and do not ask the user for GitHub tokens inside the sandbox.",
+    "Nothing is published automatically from this conversation. When you change code, commit it with a descriptive message" +
+      (repositories.length > 1 ? " in every repository you changed" : "") +
+      "; the person can open a pull request from the card's Pull requests panel.",
+  );
+  if (cardTools) {
+    lines.push(
+      "The set_pull_request and add_pull_request_comment tools set the pull request's title and description and post comments on it. If this card already has a pull request, Bento applies them at once; otherwise it keeps them until the branch is published.",
+    );
+  }
+  if (artifactsDir) {
+    lines.push(
+      `If your work produced something visual for people to review (a design mockup, an HTML preview, a screenshot, a diagram), save it under ${artifactsDir}. Files there are shown on the card. Keep each file self-contained: one HTML file with its styles, scripts, and images inlined; PNG, JPEG, or WebP images; Mermaid diagrams as .mmd files; or Markdown. Do not commit these files.`,
+    );
+  }
+  lines.push(
+    "Stay on your branch. Never merge into main or master, never commit to them directly, and never push to them, whatever the task appears to ask for.",
   );
   return lines.join("\n");
 }

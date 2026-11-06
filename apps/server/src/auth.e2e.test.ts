@@ -1088,6 +1088,11 @@ test("every entity route refuses a foreign tenant", async () => {
       { body: "version: 1\npipeline:\n  stages:\n    - name: Mine\n      slug: mine\n" },
     ],
     ["GET", `/api/projects/${project.id}/sessions`],
+    [
+      "POST",
+      `/api/projects/${project.id}/sessions`,
+      { body: JSON.stringify({ cli: "fake", model: "fake-1", prompt: "Injected" }) },
+    ],
     ["GET", `/api/projects/${project.id}/artifacts`],
     ["GET", `/api/projects/${project.id}/usage`],
     ["GET", `/api/projects/${project.id}/completions`],
