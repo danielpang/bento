@@ -394,6 +394,9 @@ export interface ProjectSession {
   > & {
     /** The run's agent by name, null when that agent no longer exists. */
     agentName?: string | null;
+    /** That agent's harness and model, so a new session can start where this one did. */
+    agentCli?: AgentCli | null;
+    agentModel?: string | null;
   };
 }
 

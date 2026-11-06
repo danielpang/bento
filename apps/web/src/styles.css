@@ -6614,15 +6614,10 @@ button.session-expand[aria-pressed="true"] {
   font-weight: 550;
   margin: 0 0 8px;
 }
-/*
- * The empty state's actions sit on their own row. An anchor wearing
- * .btn is inline, so a top margin on it moved nothing and its padding
- * spilled up over the paragraph above; the row is what spaces them.
- */
-.surface-empty-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+/* An anchor wearing .btn is inline, so a top margin alone moved
+   nothing and its padding spilled up over the paragraph above. */
+.surface-empty .btn {
+  display: inline-block;
   margin-top: 16px;
 }
 .surface-heading-actions {
@@ -6631,11 +6626,36 @@ button.session-expand[aria-pressed="true"] {
   gap: 12px;
   flex-shrink: 0;
 }
-/* Harness and model side by side where there is room. */
-.new-session-runtime {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 12px;
+/*
+ * A new session's composer: the swarm composer's look, in the pane a
+ * conversation would take, or as the whole tab before there is one.
+ */
+.sessions-screen-compose {
+  display: flex;
+  flex-direction: column;
+}
+.sessions-detail > .session-composer-screen {
+  height: 100%;
+  box-sizing: border-box;
+  padding-top: 64px;
+}
+/* Harness and model wrap under the message rather than squeeze. */
+.session-composer-toolbar {
+  flex-wrap: wrap;
+}
+.session-composer-under {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px 16px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+.session-composer-under a {
+  color: inherit;
+}
+.session-composer-under > .swarm-composer-hint {
+  margin-left: auto;
 }
 .management-drawer .drawer-title {
   font-size: 24px;

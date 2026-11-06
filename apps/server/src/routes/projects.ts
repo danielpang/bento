@@ -691,6 +691,8 @@ export function projectRoutes(ctx: AppContext) {
             // Named here rather than looked up by the console, whose
             // agent list predates an agent a new session just made.
             agentName: agentProfiles.name,
+            agentCli: agentProfiles.cli,
+            agentModel: agentProfiles.model,
           })
           .from(agentRuns)
           .innerJoin(features, eq(features.id, agentRuns.featureId))

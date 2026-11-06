@@ -3,7 +3,7 @@ import type { AgentProfile, BentoClient, ProjectSession } from "@bento/api-clien
 import { runDot, runTime, runWords } from "./AgentSession.js";
 import { useToast } from "./Toasts.js";
 import { SessionPageSkeleton, SessionsListSkeleton } from "./Skeleton.js";
-import { NewSessionDialog } from "./NewSessionDialog.js";
+import { SessionComposer } from "./SessionComposer.js";
 
 // The same lazy chunk the /session route loads, so the split's right
 // pane and the standalone tab stay one piece of code arriving once.
@@ -45,7 +45,11 @@ export function SessionsPage({
    * subscription instead of opening a second one on the same project.
    */
   const [boardTick, setBoardTick] = useState(0);
-  /** The New session dialog, open or not. */
+  /**
+   * The composer for a new session, open in the pane where a
+   * conversation would be. Exclusive with `selectedId`: the pane shows
+   * one or the other.
+   */
   const [composing, setComposing] = useState(false);
   const screenRef = useRef<HTMLDivElement>(null);
   // Through a ref, because useToast without a ToastHost above it hands
@@ -130,17 +134,30 @@ export function SessionsPage({
    * the way there.
    */
   useEffect(() => {
-    const onPop = () => setSelectedId(null);
+    const onPop = () => {
+      setSelectedId(null);
+      setComposing(false);
+    };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
+  const paneOpen = selectedId !== null || composing;
+
   const openSession = (featureId: string) => {
-    if (selectedId === null) window.history.pushState({ bentoSessionSplit: true }, "");
+    if (!paneOpen) window.history.pushState({ bentoSessionSplit: true }, "");
+    setComposing(false);
     setSelectedId(featureId);
   };
 
-  const closeSession = () => {
+  /** The composer takes the pane, on a phone as on a desktop: it is a page of its own there. */
+  const openComposer = () => {
+    if (!paneOpen) window.history.pushState({ bentoSessionSplit: true }, "");
+    setSelectedId(null);
+    setComposing(true);
+  };
+
+  const closePane = () => {
     // Through history when history is what opened it, so the entry
     // leaves with the pane instead of outliving it.
     if ((window.history.state as { bentoSessionSplit?: boolean } | null)?.bentoSessionSplit) {
@@ -148,6 +165,7 @@ export function SessionsPage({
       return;
     }
     setSelectedId(null);
+    setComposing(false);
   };
 
   /**
@@ -168,21 +186,31 @@ export function SessionsPage({
   };
 
   /**
-   * A session the dialog just started: shown at once, beside the list
-   * where there is room and on its own page where there is not, the
-   * same choice a click on its row makes.
+   * A session the composer just started: shown at once, in the pane the
+   * composer held where there is room, and on its own page where there
+   * is not, the same choice a click on its row makes. Replacing rather
+   * than adding the page, so Back from it skips the spent composer.
    */
   const sessionStarted = (featureId: string) => {
-    setComposing(false);
     void refresh();
-    if (splitFits()) openSession(featureId);
-    else window.location.href = `/session/${featureId}`;
+    if (!splitFits()) {
+      window.location.replace(`/session/${featureId}`);
+      return;
+    }
+    if (paneOpen) {
+      setComposing(false);
+      setSelectedId(featureId);
+    } else {
+      openSession(featureId);
+    }
   };
 
-  /** The agent behind the newest session, which the dialog starts on. */
-  const recentProfile = sessions?.[0]
-    ? profiles.find((p) => p.id === sessions[0]!.latestRun.agentProfileId)
-    : undefined;
+  /** The agent behind the newest session, which the composer starts on. */
+  const newest = sessions?.[0]?.latestRun;
+  const recentProfile =
+    newest?.agentCli && newest.agentModel
+      ? { cli: newest.agentCli, model: newest.agentModel }
+      : profiles.find((p) => p.id === newest?.agentProfileId);
 
   // Only a first load with nothing to show becomes an error screen; a
   // failed background resync keeps the rows already on screen, because
@@ -199,10 +227,32 @@ export function SessionsPage({
     );
   }
 
+  /*
+   * No conversations yet: the composer is the screen, the way the
+   * Swarms tab opens on its own, so the first thing a person sees is
+   * the thing they came to do.
+   */
+  if (sessions?.length === 0 && projectId && selectedId === null) {
+    return (
+      <div className="sessions-screen sessions-screen-compose" ref={screenRef}>
+        <SessionComposer
+          client={client}
+          projectId={projectId}
+          onStarted={sessionStarted}
+          footer={
+            <>
+              Or start an agent from a card on the <a href="/">board</a>.
+            </>
+          }
+        />
+      </div>
+    );
+  }
+
   return (
     <div
       className="sessions-screen"
-      data-split={selectedId !== null ? "" : undefined}
+      data-split={paneOpen ? "" : undefined}
       ref={screenRef}
     >
       <div className="sessions-pane">
@@ -214,30 +264,13 @@ export function SessionsPage({
           <div className="surface-heading-actions">
             {sessions && <span className="surface-count">{sessions.length} conversations</span>}
             {projectId && (
-              <button className="btn btn-primary" onClick={() => setComposing(true)}>
+              <button className="btn btn-primary" aria-pressed={composing} onClick={openComposer}>
                 New session
               </button>
             )}
           </div>
         </header>
         {sessions === null && <SessionsListSkeleton />}
-        {sessions?.length === 0 && (
-          <div className="surface-empty">
-            <h2>No conversations yet.</h2>
-            <p className="muted">
-              Start a session to talk to an agent directly, or start one from a card on the board. Every conversation
-              appears here.
-            </p>
-            <div className="surface-empty-actions">
-              {projectId && (
-                <button className="btn btn-primary" onClick={() => setComposing(true)}>
-                  New session
-                </button>
-              )}
-              <a className="btn" href="/">Go to board</a>
-            </div>
-          </div>
-        )}
         {sessions && sessions.length > 0 && (
           <div className="sessions-list">
             {sessions.map((session) => {
@@ -303,20 +336,22 @@ export function SessionsPage({
             <SessionPage
               client={client}
               featureId={selectedId}
-              onClose={closeSession}
+              onClose={closePane}
               refreshSignal={boardTick}
             />
           </Suspense>
         </div>
       )}
       {composing && projectId && (
-        <NewSessionDialog
-          client={client}
-          projectId={projectId}
-          {...(recentProfile ? { recentProfile } : {})}
-          onClose={() => setComposing(false)}
-          onStarted={sessionStarted}
-        />
+        <div className="sessions-detail">
+          <SessionComposer
+            client={client}
+            projectId={projectId}
+            {...(recentProfile ? { recentProfile } : {})}
+            onCancel={closePane}
+            onStarted={sessionStarted}
+          />
+        </div>
       )}
     </div>
   );
