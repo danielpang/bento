@@ -6657,6 +6657,36 @@ button.session-expand[aria-pressed="true"] {
 .session-composer-under > .swarm-composer-hint {
   margin-left: auto;
 }
+.session-composer-cancel-under {
+  display: none;
+}
+/*
+ * On a phone the toolbar is one row: the harness and the model share
+ * the width evenly, each showing only its value (the menu it opens
+ * says which is which), and send sits at the end. Wrapping left the
+ * two pickers on lines of different lengths with Cancel squeezed
+ * between them; Cancel lives under the composer here instead.
+ */
+@media (max-width: 720px) {
+  .session-composer-toolbar {
+    flex-wrap: nowrap;
+  }
+  .session-composer-toolbar > .swarm-tool {
+    flex: 1 1 0;
+    justify-content: space-between;
+  }
+  .session-composer-toolbar .swarm-tool-key,
+  .session-composer-toolbar .swarm-composer-cancel {
+    display: none;
+  }
+  .session-composer-cancel-under {
+    display: inline;
+    font-size: 13px;
+  }
+  .session-composer-under {
+    align-items: center;
+  }
+}
 .management-drawer .drawer-title {
   font-size: 24px;
   letter-spacing: -0.035em;

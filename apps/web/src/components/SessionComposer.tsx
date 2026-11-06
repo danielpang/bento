@@ -167,7 +167,12 @@ export function SessionComposer({
 
           <div className="swarm-composer-toolbar session-composer-toolbar">
             <Menu.Root>
-              <Menu.Trigger className="swarm-tool" aria-label={`Harness: ${harness?.label ?? cli}`} disabled={busy}>
+              <Menu.Trigger
+                className="swarm-tool"
+                aria-label={`Harness: ${harness?.label ?? cli}`}
+                title={`Harness: ${harness?.label ?? cli}`}
+                disabled={busy}
+              >
                 <span className="swarm-tool-key">Harness</span>
                 <span className="swarm-tool-value">{harness?.label ?? cli}</span>
                 <DropdownMark />
@@ -216,6 +221,13 @@ export function SessionComposer({
 
         <div className="session-composer-under">
           {footer && <span>{footer}</span>}
+          {/* On a phone the toolbar has room for the pickers and send
+              only, so Cancel moves down here. */}
+          {onCancel && (
+            <button type="button" className="swarm-link session-composer-cancel-under" disabled={busy} onClick={onCancel}>
+              Cancel
+            </button>
+          )}
           <span className="swarm-composer-hint">{busy ? "Starting the agent…" : `${modifier}+Enter to send`}</span>
         </div>
       </div>
@@ -257,7 +269,12 @@ function ModelPicker({
         else setQuery("");
       }}
     >
-      <Menu.Trigger className="swarm-tool" aria-label={`Model: ${listed?.name ?? value}`} disabled={disabled}>
+      <Menu.Trigger
+        className="swarm-tool"
+        aria-label={`Model: ${listed?.name ?? value}`}
+        title={`Model: ${listed ? `${listed.name} (${listed.id})` : value}`}
+        disabled={disabled}
+      >
         <span className="swarm-tool-key">Model</span>
         <span className="swarm-tool-value">{listed?.name ?? (value || "Choose")}</span>
         <DropdownMark />

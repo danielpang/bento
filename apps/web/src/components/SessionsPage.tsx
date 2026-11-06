@@ -264,8 +264,13 @@ export function SessionsPage({
           <div className="surface-heading-actions">
             {sessions && <span className="surface-count">{sessions.length} conversations</span>}
             {projectId && (
-              <button className="btn btn-primary" aria-pressed={composing} onClick={openComposer}>
-                New session
+              <button
+                className="btn btn-primary"
+                aria-label="New session"
+                aria-pressed={composing}
+                onClick={openComposer}
+              >
+                New
               </button>
             )}
           </div>
