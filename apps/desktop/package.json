@@ -24,6 +24,7 @@
   },
   "dependencies": {
     "@bento/api-client": "workspace:*",
+    "@bento/core": "workspace:*",
     "@bento/sandbox": "workspace:*",
     "@bento/server": "workspace:*",
     "electron-updater": "6.8.3"

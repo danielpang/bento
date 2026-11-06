@@ -22,6 +22,9 @@ test("API pages and artifact downloads never acquire a privileged console bridge
   const origin = "https://bento.example";
   assert.ok(isTrustedConsoleUrl(`${origin}/session/00000000-0000-0000-0000-000000000000`, origin));
   assert.ok(isTrustedConsoleUrl(`${origin}/settings`, origin));
+  assert.ok(isTrustedConsoleUrl(`${origin}/artifacts`, origin));
+  assert.ok(isTrustedConsoleUrl(`${origin}/artifacts/00000000-0000-0000-0000-000000000000`, origin));
+  assert.equal(isTrustedConsoleUrl(`${origin}/artifacts/not-a-card`, origin), false);
   for (const url of [`${origin}/api/artifacts/secret/content`, `${origin}/assets/payload.html`, `${origin}.evil.test/`, "file:///tmp/payload.html", "about:srcdoc"]) {
     assert.equal(isTrustedConsoleUrl(url, origin), false);
   }

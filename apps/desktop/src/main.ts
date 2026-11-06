@@ -431,6 +431,7 @@ function installMenu() {
     { role: "editMenu" },
     { label: "View", submenu: [ { label: "Board", accelerator: "CmdOrCtrl+1", click: () => navigate("/") },
       { label: "Sessions", accelerator: "CmdOrCtrl+2", click: () => navigate("/sessions") },
+      { label: "Artifacts", accelerator: "CmdOrCtrl+3", click: () => navigate("/artifacts") },
       { label: "Settings", click: () => navigate("/settings") }, { type: "separator" },
       { role: "reload" }, { role: "forceReload" }, { role: "toggleDevTools" }, { type: "separator" },
       { role: "resetZoom" }, { role: "zoomIn" }, { role: "zoomOut" }, { type: "separator" }, { role: "togglefullscreen" } ] },
