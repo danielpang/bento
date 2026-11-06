@@ -1,9 +1,18 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
 import type { AgentProfile, BentoClient, ProjectSession } from "@bento/api-client";
 import { runDot, runTime, runWords } from "./AgentSession.js";
 import { useToast } from "./Toasts.js";
 import { SessionPageSkeleton, SessionsListSkeleton } from "./Skeleton.js";
 import { SessionComposer } from "./SessionComposer.js";
+import {
+  SESSIONS_LIST_DEFAULT,
+  SESSIONS_LIST_MAX,
+  SESSIONS_LIST_MIN,
+  SESSIONS_LIST_STEP,
+  clampListWidth,
+  saveListWidth,
+  savedListWidth,
+} from "../sessions-split.js";
 
 // The same lazy chunk the /session route loads, so the split's right
 // pane and the standalone tab stay one piece of code arriving once.
@@ -51,6 +60,8 @@ export function SessionsPage({
    * one or the other.
    */
   const [composing, setComposing] = useState(false);
+  /** The list's width beside an open pane, which the person drags. */
+  const [listWidth, setListWidth] = useState(savedListWidth);
   const screenRef = useRef<HTMLDivElement>(null);
   // Through a ref, because useToast without a ToastHost above it hands
   // back a fresh object per render, and that identity in refresh's
@@ -254,6 +265,7 @@ export function SessionsPage({
       className="sessions-screen"
       data-split={paneOpen ? "" : undefined}
       ref={screenRef}
+      style={{ "--sessions-list-width": `${listWidth}px` } as CSSProperties}
     >
       <div className="sessions-pane">
         <header className="surface-heading">
@@ -332,6 +344,14 @@ export function SessionsPage({
           </div>
         )}
       </div>
+      {paneOpen && (
+        <ListResizeHandle
+          width={listWidth}
+          screen={screenRef}
+          onWidth={setListWidth}
+          onDone={(width) => saveListWidth(width)}
+        />
+      )}
       {selectedId !== null && (
         // Keyed so switching conversations starts the pane fresh
         // instead of showing the previous card's messages while the
@@ -359,6 +379,91 @@ export function SessionsPage({
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * The line between the list and the open pane, dragged to resize the
+ * list. Also a keyboard control (arrows, Home, End), and a double
+ * click puts the list back to its default width. The width is saved
+ * when a drag or a key press ends, not on every move.
+ */
+function ListResizeHandle({
+  width,
+  screen,
+  onWidth,
+  onDone,
+}: {
+  width: number;
+  screen: RefObject<HTMLDivElement | null>;
+  onWidth: (width: number) => void;
+  onDone: (width: number) => void;
+}) {
+  const [dragging, setDragging] = useState(false);
+  /** Where the list starts, measured when a drag begins. */
+  const origin = useRef(0);
+  const latest = useRef(width);
+  latest.current = width;
+
+  const screenWidth = () => screen.current?.getBoundingClientRect().width ?? window.innerWidth;
+  const listLeft = () => {
+    const pane = screen.current?.querySelector<HTMLElement>(".sessions-pane");
+    return pane?.getBoundingClientRect().left ?? 0;
+  };
+  const set = (next: number) => {
+    const clamped = clampListWidth(next, screenWidth());
+    latest.current = clamped;
+    onWidth(clamped);
+    return clamped;
+  };
+
+  return (
+    <div
+      className="sessions-resize"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize the conversation list"
+      aria-valuemin={SESSIONS_LIST_MIN}
+      aria-valuemax={SESSIONS_LIST_MAX}
+      aria-valuenow={width}
+      title="Drag to resize. Double click to reset."
+      tabIndex={0}
+      data-dragging={dragging ? "" : undefined}
+      onPointerDown={(event) => {
+        if (event.button !== 0) return;
+        event.preventDefault();
+        origin.current = listLeft();
+        event.currentTarget.setPointerCapture(event.pointerId);
+        setDragging(true);
+      }}
+      onPointerMove={(event) => {
+        if (!dragging) return;
+        set(event.clientX - origin.current);
+      }}
+      onPointerUp={(event) => {
+        if (!dragging) return;
+        event.currentTarget.releasePointerCapture(event.pointerId);
+        setDragging(false);
+        onDone(latest.current);
+      }}
+      onPointerCancel={() => {
+        if (!dragging) return;
+        setDragging(false);
+        onDone(latest.current);
+      }}
+      onDoubleClick={() => onDone(set(SESSIONS_LIST_DEFAULT))}
+      onKeyDown={(event) => {
+        const step = event.shiftKey ? SESSIONS_LIST_STEP * 4 : SESSIONS_LIST_STEP;
+        let next: number | null = null;
+        if (event.key === "ArrowLeft") next = width - step;
+        else if (event.key === "ArrowRight") next = width + step;
+        else if (event.key === "Home") next = SESSIONS_LIST_MIN;
+        else if (event.key === "End") next = SESSIONS_LIST_MAX;
+        if (next === null) return;
+        event.preventDefault();
+        onDone(set(next));
+      }}
+    />
   );
 }
 

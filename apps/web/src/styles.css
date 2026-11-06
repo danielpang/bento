@@ -5743,7 +5743,10 @@ a.pr-row:hover .pr-external {
 .sessions-screen[data-split] {
   max-width: 1560px;
   display: grid;
-  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+  /* The list's width is the person's (SessionsPage drags it); the
+     share keeps a width saved on a big screen from crushing the
+     conversation on a smaller one. */
+  grid-template-columns: minmax(240px, min(var(--sessions-list-width, 340px), 60%)) auto minmax(0, 1fr);
   overflow: hidden;
   padding-bottom: 0;
 }
@@ -5777,7 +5780,42 @@ a.pr-row:hover .pr-external {
 .sessions-detail {
   min-width: 0;
   min-height: 0;
-  border-left: 1px solid var(--line);
+}
+/*
+ * The line between the list and the pane, and the handle that resizes
+ * the list. A wider hit area than the line it draws, so it is easy to
+ * catch without looking like a bar.
+ */
+.sessions-resize {
+  position: relative;
+  width: 9px;
+  margin: 0 -4px;
+  z-index: 1;
+  cursor: col-resize;
+  touch-action: none;
+  outline: none;
+}
+.sessions-resize::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 4px;
+  width: 1px;
+  background: var(--line);
+  transition: background 120ms ease, width 120ms ease, left 120ms ease;
+}
+.sessions-resize:hover::before,
+.sessions-resize:focus-visible::before,
+.sessions-resize[data-dragging]::before {
+  left: 3px;
+  width: 3px;
+  background: var(--brand);
+}
+/* A drag selects nothing on its way across the list. */
+.sessions-screen:has(.sessions-resize[data-dragging]) {
+  user-select: none;
+  cursor: col-resize;
 }
 /* The page sizes itself to the pane, not to the viewport it fills
    when it is a tab of its own. */
@@ -5798,11 +5836,9 @@ a.pr-row:hover .pr-external {
   .sessions-screen[data-split] {
     grid-template-columns: minmax(0, 1fr);
   }
-  .sessions-screen[data-split] .sessions-pane {
+  .sessions-screen[data-split] .sessions-pane,
+  .sessions-resize {
     display: none;
-  }
-  .sessions-detail {
-    border-left: none;
   }
   .sessions-detail .session-page {
     padding: 4px 0 10px;
