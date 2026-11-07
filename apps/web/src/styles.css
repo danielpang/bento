@@ -1319,12 +1319,14 @@ select.input,
 }
 
 .card {
+  /* The state colour, drawn as the marker beside the title. */
+  --card-accent: var(--idle);
   background: var(--panel-raised);
   border: 1px solid var(--line);
-  border-left: 2px solid var(--idle);
   /* One step softer than the controls inside it. */
   border-radius: var(--radius-lg);
-  padding: 14px 12px 12px;
+  /* The extra left inset is the marker's column: 4px wide, 10px gap. */
+  padding: 14px 12px 12px 26px;
   text-align: left;
   width: 100%;
   min-width: 0;
@@ -1362,7 +1364,7 @@ select.input,
 }
 
 .card[data-state="running"] {
-  border-left-color: var(--running);
+  --card-accent: var(--running);
 }
 
 /*
@@ -1513,16 +1515,17 @@ select.input,
   }
 }
 .card[data-state="succeeded"] {
-  border-left-color: var(--succeeded);
+  --card-accent: var(--succeeded);
 }
 .card[data-state="failed"] {
-  border-left-color: var(--failed);
+  --card-accent: var(--failed);
 }
 .card[data-state="gated"] {
-  border-left-color: var(--gated);
+  --card-accent: var(--gated);
 }
 
 .card-title {
+  position: relative;
   font-size: 13px;
   font-weight: 550;
   line-height: 1.5;
@@ -1531,6 +1534,29 @@ select.input,
   text-wrap: pretty;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+/*
+ * The status marker: a short rounded tick beside the title's first
+ * line, in the card's state colour. It used to be a border-left, which
+ * on a rounded card bent around both corners into a bracket. Set in
+ * from the edge, it stays a clean mark at any radius, and centring it
+ * on the first line (1lh) keeps it there whatever the title wraps to.
+ */
+.card-title::before {
+  content: "";
+  position: absolute;
+  left: -14px;
+  top: calc(0.5lh - 8px);
+  width: 4px;
+  height: 16px;
+  border-radius: 2px;
+  background: var(--card-accent);
+}
+
+/* The marker says the state, so the status line drops its own dot. */
+.card-meta .status .dot {
+  display: none;
 }
 
 .card-meta {
@@ -3679,7 +3705,7 @@ a.pr-row:hover .pr-external {
     gap: 12px;
   }
   .card {
-    padding: 12px;
+    padding: 12px 12px 12px 26px;
   }
 
   /* iOS Safari zooms the whole page into any focused text control
