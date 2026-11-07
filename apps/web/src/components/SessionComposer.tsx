@@ -1,7 +1,7 @@
 import * as Menu from "@radix-ui/react-dropdown-menu";
 import { useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import type { BentoClient } from "@bento/api-client";
-import { MODEL_GUIDANCE, modelStringFor, providersForCli, type AgentCli } from "@bento/core";
+import { MODEL_GUIDANCE, modelStringFor, providersForCli, sessionTitle, type AgentCli } from "@bento/core";
 import { growComposer, SendMark } from "./ChatComposer.js";
 import { CheckMark } from "./SwarmMarks.js";
 import { DropdownMark } from "./DropdownMark.js";
@@ -64,6 +64,7 @@ export function SessionComposer({
   onCancel,
   onStarted,
   footer,
+  card,
 }: {
   client: BentoClient;
   projectId: string;
@@ -74,6 +75,12 @@ export function SessionComposer({
   onStarted: (featureId: string) => void;
   /** A line under the composer, such as a way to the board. */
   footer?: ReactNode;
+  /**
+   * The board's new card: an optional title over the message, and a
+   * switch between adding the card to the backlog and starting an agent
+   * on it now. `onCreated` gets a card that was only added.
+   */
+  card?: { onCreated: (featureId: string) => void };
 }) {
   const initialCli =
     recentProfile && HARNESSES.some((h) => h.value === recentProfile.cli)
@@ -82,6 +89,8 @@ export function SessionComposer({
   const [cli, setCli] = useState<AgentCli>(initialCli);
   const [model, setModel] = useState(() => startingModel(initialCli, recentProfile));
   const [prompt, setPrompt] = useState("");
+  const [title, setTitle] = useState("");
+  const [startNow, setStartNow] = useState(() => (card ? savedStartNow() : true));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const input = useRef<HTMLTextAreaElement>(null);
@@ -94,7 +103,7 @@ export function SessionComposer({
 
   const models = useMemo(() => modelOptionsFor(cli), [cli]);
   const harness = HARNESSES.find((h) => h.value === cli);
-  const ready = !busy && model.trim() !== "" && prompt.trim() !== "";
+  const ready = !busy && prompt.trim() !== "" && (!startNow || model.trim() !== "");
   const modifier = sendModifierName(isApplePlatform());
 
   const pickCli = (next: AgentCli) => {
@@ -108,7 +117,22 @@ export function SessionComposer({
     setBusy(true);
     setError(null);
     try {
-      const { featureId } = await client.startSession(projectId, { cli, model: model.trim(), prompt: prompt.trim() });
+      const named = title.trim();
+      if (card && !startNow) {
+        const feature = await client.createFeature({
+          projectId,
+          title: named || sessionTitle(prompt, "New card"),
+          description: prompt.trim(),
+        });
+        card.onCreated(feature.id);
+        return;
+      }
+      const { featureId } = await client.startSession(projectId, {
+        cli,
+        model: model.trim(),
+        prompt: prompt.trim(),
+        ...(named ? { title: named } : {}),
+      });
       onStarted(featureId);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -128,7 +152,7 @@ export function SessionComposer({
     if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
       event.preventDefault();
       void submit();
-    } else if (event.key === "Escape" && onCancel && prompt.trim() === "") {
+    } else if (event.key === "Escape" && onCancel && prompt.trim() === "" && title.trim() === "") {
       event.preventDefault();
       onCancel();
     }
@@ -138,13 +162,41 @@ export function SessionComposer({
     <div className="swarm-composer-screen session-composer-screen">
       <div className="swarm-composer-column">
         <div className="swarm-composer-intro">
-          <h1 className="swarm-composer-title">What should the agent do?</h1>
+          <h1 className="swarm-composer-title">{card ? "What needs doing?" : "What should the agent do?"}</h1>
           <p className="swarm-composer-subtitle">
-            Ask about the code or describe a change. The agent works on its own branch, outside the pipeline.
+            {card
+              ? "Describe the work. Add it to the backlog for the pipeline, or start an agent on it now."
+              : "Ask about the code or describe a change. The agent works on its own branch, outside the pipeline."}
           </p>
         </div>
 
-        <section className="swarm-composer" aria-label="New session">
+        <section className="swarm-composer" aria-label={card ? "New card" : "New session"}>
+          {card && (
+            <>
+              <label htmlFor="session-composer-title" className="visually-hidden">Title</label>
+              <input
+                id="session-composer-title"
+                className="session-composer-title-input"
+                value={title}
+                disabled={busy}
+                placeholder="Title (optional)"
+                maxLength={200}
+                onChange={(event) => setTitle(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                    event.preventDefault();
+                    void submit();
+                  } else if (event.key === "Enter") {
+                    event.preventDefault();
+                    input.current?.focus();
+                  } else if (event.key === "Escape" && onCancel && prompt.trim() === "" && title.trim() === "") {
+                    event.preventDefault();
+                    onCancel();
+                  }
+                }}
+              />
+            </>
+          )}
           <label htmlFor="session-composer-message" className="visually-hidden">Message</label>
           <textarea
             id="session-composer-message"
@@ -154,7 +206,11 @@ export function SessionComposer({
             value={prompt}
             autoFocus
             disabled={busy}
-            placeholder="Where does the login flow live, and why does it redirect twice?"
+            placeholder={
+              card
+                ? "Add a rate limit to the public API. Which endpoints, the limits, and what to leave alone."
+                : "Where does the login flow live, and why does it redirect twice?"
+            }
             onChange={(event) => setPrompt(event.target.value)}
             onKeyDown={onKey}
           />
@@ -166,6 +222,25 @@ export function SessionComposer({
           )}
 
           <div className="swarm-composer-toolbar session-composer-toolbar">
+            {card && (
+              <button
+                type="button"
+                role="switch"
+                aria-checked={startNow}
+                className="swarm-tool session-composer-start-now"
+                disabled={busy}
+                title={startNow ? "The agent starts as soon as the card is added" : "The card waits in the backlog"}
+                onClick={() => {
+                  setStartNow(!startNow);
+                  saveStartNow(!startNow);
+                }}
+              >
+                <span className="session-composer-switch" aria-hidden="true" />
+                <span className="swarm-tool-value">Start agent now</span>
+              </button>
+            )}
+            {startNow && (
+            <>
             <Menu.Root>
               <Menu.Trigger
                 className="swarm-tool"
@@ -198,6 +273,8 @@ export function SessionComposer({
             </Menu.Root>
 
             <ModelPicker models={models} value={model} onChange={setModel} disabled={busy} />
+            </>
+            )}
 
             <span className="swarm-composer-spacer" />
 
@@ -209,8 +286,8 @@ export function SessionComposer({
             <button
               type="button"
               className="swarm-send"
-              aria-label="Start session"
-              title={`Start session (${modifier}+Enter)`}
+              aria-label={startNow ? "Start session" : "Add card"}
+              title={`${startNow ? "Start session" : "Add card"} (${modifier}+Enter)`}
               disabled={!ready}
               onClick={() => void submit()}
             >
@@ -228,7 +305,7 @@ export function SessionComposer({
               Cancel
             </button>
           )}
-          <span className="swarm-composer-hint">{busy ? "Starting the agent…" : `${modifier}+Enter to send`}</span>
+          <span className="swarm-composer-hint">{busy ? (startNow ? "Starting the agent…" : "Adding the card…") : `${modifier}+Enter to send`}</span>
         </div>
       </div>
     </div>
@@ -340,4 +417,23 @@ function ModelPicker({
       </Menu.Portal>
     </Menu.Root>
   );
+}
+
+const START_NOW_KEY = "bento.newCard.startNow";
+
+/** Whether the board's composer last started an agent, so the next card opens the same way. */
+function savedStartNow(): boolean {
+  try {
+    return localStorage.getItem(START_NOW_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function saveStartNow(on: boolean) {
+  try {
+    localStorage.setItem(START_NOW_KEY, on ? "1" : "0");
+  } catch {
+    /* Storage is optional. */
+  }
 }

@@ -52,7 +52,7 @@ import { CommandMenu } from "./components/CommandMenu.js";
 import { OutOfCompute } from "./components/OutOfCompute.js";
 import { LowDiskSpace } from "./components/LowDiskSpace.js";
 import { SignIn } from "./components/SignIn.js";
-import { NewFeatureDialog, NewProjectDialog, PromptDialog } from "./components/PromptDialog.js";
+import { NewProjectDialog, PromptDialog } from "./components/PromptDialog.js";
 import { ProjectPicker } from "./components/ProjectPicker.js";
 import { useToast } from "./components/Toasts.js";
 import { MASCOTS_REENABLE_NOTE } from "./board-mascots.js";
@@ -91,6 +91,8 @@ const RepositoriesPanel = lazy(() => import("./components/RepositoriesPanel.js")
 const ResetPassword = lazy(() => import("./components/ResetPassword.js").then((m) => ({ default: m.ResetPassword })));
 const ArtifactPage = lazy(() => import("./components/ArtifactViewer.js").then((m) => ({ default: m.ArtifactPage })));
 const SessionPage = lazy(() => import("./components/SessionPage.js").then((m) => ({ default: m.SessionPage })));
+const NewCardComposer = lazy(() => import("./components/NewCardComposer.js").then((m) => ({ default: m.NewCardComposer })));
+const SessionComposer = lazy(() => import("./components/SessionComposer.js").then((m) => ({ default: m.SessionComposer })));
 const SessionsPage = lazy(() => import("./components/SessionsPage.js").then((m) => ({ default: m.SessionsPage })));
 const ArtifactsPage = lazy(() => import("./components/ArtifactsPage.js").then((m) => ({ default: m.ArtifactsPage })));
 const SettingsPage = lazy(() => import("./components/SettingsPage.js").then((m) => ({ default: m.SettingsPage })));
@@ -562,6 +564,28 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
   const [lastOutput, setLastOutput] = useState<Record<string, string | undefined>>({});
   const [pulses, setPulses] = useState<Record<string, CardPulse | undefined>>({});
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  /**
+   * The new session composer, open where a card's drawer would be on
+   * the Sessions tab. Exclusive with a selected card: the pane shows
+   * one or the other.
+   */
+  const [composingSession, setComposingSession] = useState(false);
+  const sessionsList = beta && screen === "sessions";
+  /** The primary action: a session on the Sessions tab, a card everywhere else. */
+  const startNew = () => {
+    if (sessionsList) {
+      setSelectedId(null);
+      setComposingSession(true);
+    } else {
+      setDialog("feature");
+    }
+  };
+  useEffect(() => {
+    if (selectedId !== null) setComposingSession(false);
+  }, [selectedId]);
+  useEffect(() => {
+    setComposingSession(false);
+  }, [projectId]);
   const [panel, setPanel] = useState<"none" | "pipeline" | "repos" | "agents">("none");
   /**
    * How the Agents panel should open. Stays off the panel union because
@@ -593,7 +617,7 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
       }
       if (event.metaKey || event.ctrlKey || event.shiftKey || !workScreen) return;
       if (event.key === "n" && projectId && loadedFor === projectId) {
-        event.preventDefault(); setDialog("feature");
+        event.preventDefault(); startNew();
       } else if (event.key === "/") {
         event.preventDefault(); document.querySelector<HTMLInputElement>(".search-input")?.focus();
       }
@@ -1036,6 +1060,12 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
   }, []);
 
   const selected = useMemo(() => features.find((f) => f.id === selectedId) ?? null, [features, selectedId]);
+  /** The agent behind the newest session, which the composer starts on. */
+  const newestSessionRun = sessions[0]?.latestRun;
+  const recentSessionProfile =
+    newestSessionRun?.agentCli && newestSessionRun.agentModel
+      ? { cli: newestSessionRun.agentCli, model: newestSessionRun.agentModel }
+      : profiles.find((p) => p.id === newestSessionRun?.agentProfileId);
 
   /**
    * Claimed before the request, so this tab knows its own event, and
@@ -1092,12 +1122,6 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
     return null;
   }, [profiles, stages, repoCount]);
 
-  async function addFeature(title: string, description: string) {
-    if (!projectId) return;
-    await client.createFeature({ projectId, title, ...(description ? { description } : {}) });
-    await refresh();
-  }
-
   /**
    * Both fields in one dialog. As two browser prompts in a row there
    * was no way back from the second: cancelling it discarded the name
@@ -1116,7 +1140,7 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
   const dialogs = (
     <>
       {beta && commandsOpen && <CommandMenu onClose={() => setCommandsOpen(false)} commands={[
-        ...(projectId && loadedFor === projectId ? [{ id: "new", label: "Create a card", hint: "n", run: () => setDialog("feature") }] : []),
+        ...(projectId && loadedFor === projectId ? [{ id: "new", label: sessionsList ? "Start a session" : "Create a card", hint: "n", run: startNew }] : []),
         { id: "board", label: "Go to board", run: () => { window.location.href = "/"; } },
         { id: "sessions", label: "Go to sessions", run: () => { window.location.href = "/sessions"; } },
         { id: "agents", label: "Configure agents", run: () => setPanel("agents") },
@@ -1129,8 +1153,23 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
           else window.location.href = `/?feature=${encodeURIComponent(feature.id)}`;
         } })),
       ]} />}
-      {dialog === "feature" && (
-        <NewFeatureDialog onClose={() => setDialog("none")} onSubmit={addFeature} />
+      {dialog === "feature" && projectId && (
+        <Suspense fallback={null}>
+          <NewCardComposer
+            client={client}
+            projectId={projectId}
+            {...(recentSessionProfile ? { recentProfile: recentSessionProfile } : {})}
+            onClose={() => setDialog("none")}
+            onCreated={() => {
+              setDialog("none");
+              void refresh();
+            }}
+            onStarted={(featureId) => {
+              setDialog("none");
+              void refresh().then(() => setSelectedId(featureId));
+            }}
+          />
+        </Suspense>
       )}
       {dialog === "project" && (
         <NewProjectDialog client={client} onClose={() => setDialog("none")} onSubmit={addProject} />
@@ -1460,9 +1499,15 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
         }
         primary={
           workScreen && !swarming ? (
-            <button className="btn btn-primary" title={beta ? "New card (n)" : undefined} onClick={() => setDialog("feature")}>
-              New card
-            </button>
+            sessionsList ? (
+              <button className="btn btn-primary" title="New session (n)" aria-pressed={composingSession} onClick={startNew}>
+                New session
+              </button>
+            ) : (
+              <button className="btn btn-primary" title={beta ? "New card (n)" : undefined} onClick={() => setDialog("feature")}>
+                New card
+              </button>
+            )
           ) : undefined
         }
       />
@@ -1548,7 +1593,7 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
         sessions={sessions}
         onClearQuery={() => setQuery("")}
         onFocusedReviewChange={setFocusedReview}
-        drawerOpen={selected !== null}
+        drawerOpen={selected !== null || (sessionsList && composingSession)}
         query={query}
         stages={stages}
         features={features}
@@ -1559,7 +1604,7 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
         spendByFeature={spendByFeature}
         selectedId={selectedId}
         onSelect={setSelectedId}
-        onNewCard={() => setDialog("feature")}
+        onNewCard={startNew}
         mascots={mascots}
         onDismissMascots={dismissMascots}
         onMove={(featureId, stageId) => {
@@ -1645,6 +1690,22 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
         </section>
       )}
       <Suspense fallback={null}>
+        {sessionsList && composingSession && !selected && projectId && (
+          <section className="drawer session-compose-drawer" aria-label="New session">
+            <SessionComposer
+              client={client}
+              projectId={projectId}
+              {...(recentSessionProfile ? { recentProfile: recentSessionProfile } : {})}
+              onCancel={() => setComposingSession(false)}
+              onStarted={(featureId) => {
+                void refresh().then(() => {
+                  setComposingSession(false);
+                  setSelectedId(featureId);
+                });
+              }}
+            />
+          </section>
+        )}
         {workScreen && !swarming && selected && (
           <FeatureDrawer
             client={client}

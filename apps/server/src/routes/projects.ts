@@ -49,6 +49,7 @@ const startSession = z.object({
   cli: agentCli,
   model: z.string().trim().min(1).max(200),
   prompt: z.string().trim().min(1).max(20000),
+  title: z.string().trim().max(200).optional(),
 });
 
 /**
@@ -785,7 +786,7 @@ export function projectRoutes(ctx: AppContext) {
       if (!profileId) return c.json({ error: "something went wrong saving the agent; try again" }, 500);
 
       const featureId = crypto.randomUUID();
-      const title = sessionTitle(body.prompt);
+      const title = body.title || sessionTitle(body.prompt);
       const [feature] = await tx
         .insert(features)
         .values({
