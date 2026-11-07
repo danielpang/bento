@@ -93,3 +93,20 @@ export function childStatsFrom(
   }
   return stats;
 }
+
+/** How long a session's title may be before it is cut, in characters. */
+export const SESSION_TITLE_MAX = 80;
+
+/**
+ * A session's or card's title, from the first thing the person said: its first
+ * non-empty line, cut at a word where it can be. The whole message is
+ * kept as the card's description, so nothing is lost by cutting.
+ */
+export function sessionTitle(prompt: string, fallback = "New session"): string {
+  const line = prompt.split("\n").map((l) => l.trim()).find(Boolean) ?? "";
+  const flat = line.replace(/\s+/g, " ");
+  if (flat.length <= SESSION_TITLE_MAX) return flat || fallback;
+  const cut = flat.slice(0, SESSION_TITLE_MAX - 1);
+  const space = cut.lastIndexOf(" ");
+  return `${(space > SESSION_TITLE_MAX / 2 ? cut.slice(0, space) : cut).trimEnd()}…`;
+}

@@ -14205,3 +14205,100 @@ a.swarm-pr-name:hover {
     line-height: 1.55;
   }
 }
+
+/*
+ * The agent composer as the board's new card, over the darkened board,
+ * and as the Sessions tab's new session, where a card's drawer would be.
+ */
+.new-card-backdrop {
+  align-items: flex-start;
+  padding-top: 12vh;
+  overflow-y: auto;
+}
+.new-card-composer {
+  width: min(760px, 100%);
+  box-sizing: border-box;
+  padding: 28px 28px 20px;
+  border: 1px solid var(--line-bright);
+  border-radius: var(--radius-lg);
+  background: var(--bg);
+  box-shadow: 0 24px 64px var(--shadow-2);
+  outline: none;
+  animation: modal-fade 120ms ease-out;
+}
+.new-card-composer > .session-composer-screen {
+  padding: 0;
+  overflow: visible;
+}
+.new-card-composer .swarm-composer-intro {
+  margin-top: 0;
+}
+.session-composer-title-input {
+  width: 100%;
+  box-sizing: border-box;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 15px;
+  font-weight: 600;
+  padding: 14px 14px 10px;
+  outline: none;
+}
+.session-composer-title-input::placeholder {
+  color: var(--text-faint);
+  font-weight: 500;
+}
+.session-composer-start-now {
+  gap: 8px;
+}
+.session-composer-switch {
+  position: relative;
+  width: 26px;
+  height: 15px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: var(--line-bright);
+  transition: background 120ms ease-out;
+}
+.session-composer-switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--text);
+  transition: transform 120ms ease-out;
+}
+.session-composer-start-now[aria-checked="true"] .session-composer-switch {
+  background: var(--brand);
+}
+.session-composer-start-now[aria-checked="true"] .session-composer-switch::after {
+  transform: translateX(11px);
+}
+@media (max-width: 720px) {
+  .new-card-backdrop { padding: 16px; padding-top: 6vh; }
+  .new-card-composer { padding: 20px 16px 14px; }
+  .session-composer-toolbar:has(.session-composer-start-now) { flex-wrap: wrap; }
+  .session-composer-toolbar > .session-composer-start-now { flex: 1 0 100%; justify-content: flex-start; }
+}
+.session-compose-drawer > .session-composer-screen {
+  padding-top: 64px;
+}
+@media (min-width: 1280px) {
+  .board-workspace:has([data-review-queue]) > .session-compose-drawer {
+    position: static;
+    grid-area: 2 / 2 / 3 / 4;
+    width: auto;
+    max-width: none;
+    min-height: 0;
+    box-shadow: none;
+    animation: none;
+    z-index: auto;
+    border-left: 1px solid var(--line);
+    background: var(--bg);
+  }
+}

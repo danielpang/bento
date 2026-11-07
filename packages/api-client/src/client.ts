@@ -751,7 +751,7 @@ export class BentoClient {
    * coding agent and model, given this message. The session is a card
    * in the backlog, which the answer names.
    */
-  startSession(projectId: string, input: { cli: AgentCli; model: string; prompt: string }) {
+  startSession(projectId: string, input: { cli: AgentCli; model: string; prompt: string; title?: string }) {
     return this.request<{ featureId: string; run: AgentRun }>(`/api/projects/${projectId}/sessions`, {
       method: "POST",
       body: JSON.stringify(input),
