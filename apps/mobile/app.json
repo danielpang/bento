@@ -1,0 +1,30 @@
+{
+  "expo": {
+    "name": "Bento",
+    "slug": "bento-mobile",
+    "scheme": "bento",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "platforms": [
+      "ios",
+      "web"
+    ],
+    "ios": {
+      "bundleIdentifier": "ai.usebento.mobile",
+      "supportsTablet": true,
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store"
+    ],
+    "web": {
+      "bundler": "metro",
+      "output": "single"
+    },
+    "icon": "../../assets/brand/logo.png"
+  }
+}

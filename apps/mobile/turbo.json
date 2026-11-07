@@ -1,0 +1,11 @@
+{
+  "extends": ["//"],
+  "tasks": {
+    "build": {
+      "passThroughEnv": ["EXPO_NO_TELEMETRY", "EXPO_OFFLINE"]
+    },
+    "dev": {
+      "passThroughEnv": ["EXPO_NO_TELEMETRY", "EXPO_OFFLINE"]
+    }
+  }
+}

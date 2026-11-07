@@ -22,7 +22,9 @@
     "test": "turbo run test",
     "models:update": "pnpm --filter @bento/core exec tsx ../../scripts/update-models.ts",
     "db:generate": "pnpm --filter @bento/db db:generate",
-    "db:migrate": "pnpm --filter @bento/db db:migrate"
+    "db:migrate": "pnpm --filter @bento/db db:migrate",
+    "dev:mobile": "pnpm --filter @bento/api-client... build && pnpm --filter @bento/mobile dev",
+    "build:mobile": "turbo run build --filter=@bento/mobile"
   },
   "devDependencies": {
     "turbo": "^2.5.0",

@@ -1,0 +1,8 @@
+.expo/
+expo-env.d.ts
+ios/
+android/
+dist-web/
+
+test-results/
+playwright-report/

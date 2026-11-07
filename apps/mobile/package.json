@@ -1,0 +1,40 @@
+{
+  "name": "@bento/mobile",
+  "version": "0.1.0",
+  "private": true,
+  "main": "expo-router/entry",
+  "scripts": {
+    "dev": "expo start --dev-client",
+    "build": "expo export --platform ios",
+    "build:web": "expo export --platform web --output-dir dist-web",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --import tsx src/*.test.ts",
+    "eas-build-post-install": "pnpm --filter @bento/api-client... build",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "@bento/api-client": "workspace:*",
+    "@bento/core": "workspace:*",
+    "@tanstack/react-query": "^5.90.0",
+    "expo": "~55.0.32",
+    "expo-constants": "~55.0.17",
+    "expo-dev-client": "~55.0.41",
+    "expo-linking": "~55.0.17",
+    "expo-router": "~55.0.18",
+    "expo-secure-store": "~55.0.18",
+    "expo-status-bar": "~55.0.6",
+    "expo-web-browser": "~55.0.20",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "react-native": "0.83.10",
+    "react-native-safe-area-context": "~5.6.2",
+    "react-native-screens": "~4.23.0",
+    "react-native-web": "~0.21.0"
+  },
+  "devDependencies": {
+    "@types/react": "~19.2.0",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3",
+    "@playwright/test": "^1.63.0"
+  }
+}

@@ -23,6 +23,10 @@ With Bento, You define the stages of your software development process, for exam
 
 See the [Mac application guide](./apps/desktop/README.md) for packaging and setup.
 
+## iOS application
+
+The Expo app in `apps/mobile` connects to hosted Bento for projects, cards, live conversations, agent questions, and approvals. See the [iOS development guide](./apps/mobile/README.md) for setup, verification, and EAS builds.
+
 ## CLI
 
 Requires **Node.js 22.19+**, `curl`, `tar`, and macOS or glibc Linux (x64/ARM64). Local mode also needs **Docker running**.
