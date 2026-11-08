@@ -1,11 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  COLUMN_GAP,
   COLUMN_PITCH,
+  INDENT,
   LONG_RUN_WARNING_MS,
   NODE_HEIGHT,
   NODE_WIDTH,
+  RAIL_ENTRY,
+  RAIL_OFFSET,
   ROW_PITCH,
+  STACK_GAP,
   buildSwarmModel,
   createModelCache,
   formatCompletion,
@@ -355,10 +360,96 @@ test("an edge leaves the parent's bottom centre and arrives at the child's top c
   assert.equal(edge.parentId, "root");
   assert.equal(edge.childId, "a");
   const centre = NODE_WIDTH / 2;
-  assert.equal(
-    edge.path,
-    `M ${centre} ${NODE_HEIGHT} C ${centre} ${(NODE_HEIGHT + ROW_PITCH) / 2}, ${centre} ${(NODE_HEIGHT + ROW_PITCH) / 2}, ${centre} ${ROW_PITCH}`,
+  // One child straight below: a single upright line, no corners.
+  assert.equal(edge.path, `M ${centre} ${NODE_HEIGHT} V ${ROW_PITCH}`);
+});
+
+test("a branch's work stacks down one column, a step to the right per level", () => {
+  const model = buildSwarmModel(
+    [
+      node("root", null, "plan", "working", { position: 0 }),
+      node("pay", "root", "plan", "working", { position: 1 }),
+      node("pay-1", "pay", "leaf", "working", { position: 2 }),
+      node("pay-1a", "pay-1", "leaf", "open", { position: 3 }),
+      node("pay-2", "pay", "leaf", "open", { position: 4 }),
+      node("cart", "root", "plan", "working", { position: 5 }),
+      node("cart-1", "cart", "leaf", "open", { position: 6 }),
+      node("cart-2", "cart", "leaf", "open", { position: 7 }),
+      node("cart-3", "cart", "leaf", "open", { position: 8 }),
+    ],
+    { now: 0 },
   );
+  const at = (id: string) => [model.byId.get(id)!.x, model.byId.get(id)!.y];
+  const step = NODE_HEIGHT + STACK_GAP;
+  // Depth first down the first column, indented by depth under "pay".
+  assert.deepEqual(at("pay"), [0, ROW_PITCH]);
+  assert.deepEqual(at("pay-1"), [INDENT, ROW_PITCH + step]);
+  assert.deepEqual(at("pay-1a"), [INDENT * 2, ROW_PITCH + step * 2]);
+  assert.deepEqual(at("pay-2"), [INDENT, ROW_PITCH + step * 3]);
+  // The next column starts past the widest card in the first.
+  const second = INDENT * 2 + NODE_WIDTH + COLUMN_GAP;
+  assert.deepEqual(at("cart"), [second, ROW_PITCH]);
+  assert.deepEqual(at("cart-3"), [second + INDENT, ROW_PITCH + step * 3]);
+  // Two columns wide, however many leaves, rather than one per leaf.
+  assert.equal(model.width, second + INDENT + NODE_WIDTH);
+  assert.equal(model.height, ROW_PITCH + step * 3 + NODE_HEIGHT);
+  // The root sits over the middle of the two branch heads.
+  assert.deepEqual(at("root"), [second / 2, 0]);
+});
+
+test("several roots are the columns themselves, with nothing above them", () => {
+  const model = buildSwarmModel(
+    [
+      node("a", null, "plan", "working", { position: 0 }),
+      node("a1", "a", "leaf", "open", { position: 1 }),
+      node("b", null, "leaf", "open", { position: 2 }),
+    ],
+    { now: 0 },
+  );
+  assert.deepEqual([model.byId.get("a")!.x, model.byId.get("a")!.y], [0, 0]);
+  assert.deepEqual([model.byId.get("a1")!.x, model.byId.get("a1")!.y], [INDENT, NODE_HEIGHT + STACK_GAP]);
+  assert.equal(model.byId.get("b")!.x, INDENT + NODE_WIDTH + COLUMN_GAP);
+  assert.equal(model.byId.get("b")!.y, 0);
+});
+
+test("inside a column each child's rail starts where the sibling above turned off", () => {
+  const model = buildSwarmModel(
+    [
+      node("a", null, "plan", "working", { position: 0 }),
+      node("a1", "a", "leaf", "done", { position: 1 }),
+      node("a2", "a", "leaf", "working", { position: 2 }),
+      node("b", null, "leaf", "open", { position: 3 }),
+    ],
+    { now: 0 },
+  );
+  const edge = (child: string) => model.edges.find((item) => item.childId === child)!;
+  const rail = RAIL_OFFSET;
+  const step = NODE_HEIGHT + STACK_GAP;
+  assert.equal(
+    edge("a1").path,
+    `M ${rail} ${NODE_HEIGHT} V ${step + RAIL_ENTRY - 6} Q ${rail} ${step + RAIL_ENTRY}, ${rail + 6} ${step + RAIL_ENTRY} H ${INDENT}`,
+  );
+  assert.ok(edge("a2").path.startsWith(`M ${rail} ${step + RAIL_ENTRY} V`));
+  // The first stretch also leads to the working leaf below it, so it is lit.
+  assert.equal(edge("a1").live, true);
+  assert.equal(edge("a2").live, true);
+});
+
+test("a stretch of rail is dark when nothing below it is happening", () => {
+  const model = buildSwarmModel(
+    [
+      node("a", null, "plan", "working", { position: 0 }),
+      node("a1", "a", "leaf", "working", { position: 1 }),
+      node("a2", "a", "leaf", "open", { position: 2 }),
+      node("b", null, "leaf", "open", { position: 3 }),
+    ],
+    { now: 0 },
+  );
+  const edge = (child: string) => model.edges.find((item) => item.childId === child)!;
+  assert.equal(edge("a1").live, true);
+  assert.equal(edge("a2").live, false);
+  // Lit lines are drawn last, so they sit on top where lines meet.
+  assert.equal(model.edges[model.edges.length - 1]!.live, true);
 });
 
 test("an empty swarm is a model with nothing in it, not a crash", () => {
