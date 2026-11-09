@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Image, Pressable, ScrollView, View } from 'react-native';
+import { Image, Pressable, ScrollView, Text, View } from 'react-native';
 import Markdown from 'react-native-markdown-display';
 import { WebView, type WebViewNavigation } from 'react-native-webview';
 import * as WebBrowser from 'expo-web-browser';
@@ -96,7 +96,11 @@ function Source({ text }: { text: string }) {
 export function MarkdownView({ text, compact }: { text: string; compact?: boolean }) {
   const p = usePalette();
   const style = useMemo(() => markdownStyles(p, compact), [p, compact]);
-  return <Markdown style={style} onLinkPress={url => { if (/^https:\/\//i.test(url)) void WebBrowser.openBrowserAsync(url); return false; }}>{text}</Markdown>;
+  // Agent markdown never loads remote images: a URL the agent chose would learn the viewer's address.
+  const rules = useMemo(() => ({
+    image: (node: { key: string; attributes?: { alt?: string } }) => <Text key={node.key} style={{ color: p.textFaint, fontFamily: fonts.regular }}>[{node.attributes?.alt || 'image'}]</Text>,
+  }), [p]);
+  return <Markdown style={style} rules={rules} onLinkPress={url => { if (/^https:\/\//i.test(url)) void WebBrowser.openBrowserAsync(url); return false; }}>{text}</Markdown>;
 }
 
 function markdownStyles(p: Palette, compact?: boolean) {
@@ -152,6 +156,7 @@ function escapeHtml(text: string): string {
 
 function mermaidPage(source: string): string {
   return `<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' https://cdn.jsdelivr.net/npm/mermaid@11.4.1/; style-src 'unsafe-inline'; img-src data:; font-src data:">
 <style>body{margin:0;padding:16px;background:#ffffff;font-family:-apple-system,sans-serif}</style></head>
 <body><pre class="mermaid">${escapeHtml(source)}</pre>
 <script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js" integrity="sha384-rbtjAdnIQE/aQJGEgXrVUlMibdfTSa4PQju4HDhN3sR2PmaKFzhEafuePsl9H/9I" crossorigin="anonymous"></script>
