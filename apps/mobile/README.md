@@ -4,14 +4,17 @@ An Expo SDK 55 / React Native client for hosted Bento, inside the existing pnpm 
 
 ## Current scope
 
+The app follows the web console on a phone: the same palette, Geist type, and wording.
+
 - Browser device authorization, with the native bearer token stored in SecureStore.
-- Team and project selection, stage filtering, search, and card creation.
-- Card instructions, live agent output, paginated past conversations, and follow-up messages.
-- Single-choice, multiple-choice, and free-text answers to agent questions.
-- Start a backlog card, approve a gated stage, and open pull requests.
+- Board: swipeable lanes for the backlog, each stage, and Completed, with search, the project and team picker, and new cards.
+- Card drawer: stage progress, Overview actions (approve, reject, start, reopen, PR links), the conversation, and the card's artifacts.
+- Sessions: the list, each conversation, and new sessions with a harness and model.
+- Conversations: a run picker, live output, tool calls, agent questions, and follow-up messages.
+- Artifacts: the project grid with search and a per-card viewer. Markdown renders without raw HTML; HTML and diagrams run in a web view with no bridge to the app, no shared cookies, and no top-frame navigation.
 - Foreground stream recovery and cached data removal on team changes, expiry, and sign-out.
 
-This is the first mobile milestone. Push notifications, artifact previews, pipeline editing, Swarms, local Mac connectivity, and App Store submission are not implemented. Set up repositories and agents in the web console first. The native client requires an HTTPS server with hosted authentication enabled.
+Push notifications, pipeline editing, Swarms, local Mac connectivity, and App Store submission are not implemented. Set up repositories and agents in the web console first. Release builds require an HTTPS server with hosted authentication enabled; a development build may also use a plain HTTP server.
 
 ## Develop
 

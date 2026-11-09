@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 
-test('sign in, create a card, stream output, answer, approve, switch teams, expire session', async ({ page }) => {
+test('sign in, add a card, stream output, answer, message, approve, switch teams, expire session', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   let team = 'team-a';
@@ -32,7 +32,9 @@ test('sign in, create a card, stream output, answer, approve, switch teams, expi
     if (path === '/api/board/project-1/events') return route.fulfill({ headers, contentType: 'text/event-stream', body: ': connected\n\n' });
     if (path === '/api/features' && request.method() === 'POST') { expect(request.postDataJSON().title).toBe('Ship mobile'); return json(card); }
     if (path === '/api/features') return json([card]);
-    if (path === '/api/features/card-1') return json({ ...card, status: approved ? 'done' : card.status, runs: approved ? [] : [run], pullRequests: [] });
+    if (path === '/api/profiles') return json([{ id: 'agent-1', name: 'Engineer', cli: 'claude-code', model: 'claude-opus-5-5' }]);
+    if (path === '/api/projects/project-1/sessions') return json({ sessions: [] });
+    if (path === '/api/features/card-1') return json({ ...card, status: approved ? 'done' : card.status, runs: [{ ...run, status: postedMessage ? 'succeeded' : 'running' }], pullRequests: [] });
     if (path === '/api/features/card-1/conversation') return json({ blocks: [], pending: [] });
     if (path === '/api/features/card-1/message') { postedMessage = request.postDataJSON(); return json({ queued: true }); }
     if (path === '/api/features/card-1/approve') { approved = true; return json({ feature: { ...card, status: 'done' }, gateChecks: [] }); }
@@ -42,33 +44,35 @@ test('sign in, create a card, stream output, answer, approve, switch teams, expi
     throw new Error(`Unexpected API request: ${request.method()} ${path}`);
   });
   await page.goto('/');
-  await expect(page.getByText('Keep good work moving.')).toBeVisible();
+  await expect(page.getByText('One card, one agent, one branch.')).toBeVisible();
   await page.getByRole('button', { name: 'Sign in to Bento', exact: true }).click();
-  await expect(page.getByText('Your projects', { exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Open project' }).click();
-  await page.getByRole('button', { name: '+ New card', exact: true }).click();
+  await expect(page.getByText('Ready to enter the pipeline')).toBeVisible();
+  await expect(page.getByText('Bento project', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'New card', exact: true }).click();
   await page.getByRole('textbox', { name: 'Title', exact: true }).fill('Ship mobile');
-  await page.getByRole('textbox', { name: 'Instructions' }).fill('Build the iOS app');
-  await page.getByRole('button', { name: 'Create card', exact: true }).click();
+  await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Build the iOS app');
+  await page.getByRole('button', { name: 'Add card', exact: true }).click();
+  await expect(page.getByText('pending approval', { exact: true })).toBeVisible();
+  await page.getByRole('tab', { name: /Chat/ }).click();
   await expect(page.getByText('Which release?')).toBeVisible();
   await expect(page.getByText('The iOS app is ready for review.')).toBeVisible();
-  await page.getByRole('button', { name: 'TestFlight', exact: true }).click();
+  await page.getByRole('radio', { name: /TestFlight/ }).click();
   await page.getByRole('button', { name: 'Send answers' }).click();
   await expect(page.getByText('Which release?')).toHaveCount(0);
   expect(postedAnswer).toEqual({ answers: [{ question: 'Which release?', selected: ['TestFlight'], other: '' }] });
-  await page.getByRole('textbox', { name: 'Message your agent' }).fill('Include accessibility checks');
-  await page.getByRole('button', { name: 'Send message', exact: true }).click();
-  await expect(page.getByText('Message queued for your agent.')).toBeVisible();
-  expect(postedMessage).toEqual({ text: 'Include accessibility checks' });
-  await page.getByRole('button', { name: 'Approve stage' }).click();
-  await expect(page.getByText('DONE', { exact: true })).toBeVisible();
-  await page.goBack();
-  await page.goBack();
+  await page.getByRole('textbox', { name: 'Queue a message' }).fill('Include accessibility checks');
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
+  await expect.poll(() => postedMessage).toEqual({ text: 'Include accessibility checks' });
+  await page.getByRole('tab', { name: /Overview/ }).click();
+  await page.getByRole('button', { name: 'Approve and advance' }).click();
+  await expect(page.getByText('completed', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Close', exact: true }).click();
+  await page.getByRole('button', { name: /^Project Bento project/ }).click();
   await page.getByRole('button', { name: 'Other team', exact: true }).click();
   await expect(page.getByText('No projects yet', { exact: true })).toBeVisible();
   await expect(page.getByText('Bento project', { exact: true })).toHaveCount(0);
   expired = true;
-  await page.getByRole('button', { name: 'Refresh projects' }).click();
-  await expect(page.getByText('Keep good work moving.')).toBeVisible();
+  await page.getByRole('button', { name: 'Choose a project' }).click();
+  await expect(page.getByText('One card, one agent, one branch.')).toBeVisible();
   expect(errors).toEqual([]);
 });

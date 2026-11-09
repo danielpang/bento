@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
-import { Text, View } from 'react-native';
 import type { AgentEvent } from '@bento/core';
 import { useForeground, useSession } from './session';
-import { eventText, mergeEvent } from './model';
-import { ErrorMessage, styles } from './ui';
+import { mergeEvent } from './model';
 
-export function LiveTranscript({ runId, onDone }: { runId: string; onDone: () => void }) {
+/**
+ * A running run's events from its stream. The stream closes in the
+ * background and resumes from the last sequence it delivered.
+ */
+export function useLiveRun(runId: string | null, onDone: () => void) {
   const { client } = useSession();
   const active = useForeground();
   const cursor = useRef(0);
@@ -15,7 +17,11 @@ export function LiveTranscript({ runId, onDone }: { runId: string; onDone: () =>
   const [draft, setDraft] = useState('');
   const [error, setError] = useState<unknown>();
   useEffect(() => {
-    if (!active) return;
+    cursor.current = 0;
+    setEvents([]);
+  }, [runId]);
+  useEffect(() => {
+    if (!active || !runId) return;
     setDraft(''); setError(undefined);
     return client.streamRun(runId, {
       onEvent: (event, seq) => {
@@ -30,11 +36,5 @@ export function LiveTranscript({ runId, onDone }: { runId: string; onDone: () =>
       onDone: () => { setDraft(''); done.current(); },
     }, cursor.current);
   }, [client, runId, active]);
-  return <View style={{ gap: 12 }}><Text style={styles.heading}>Live conversation</Text>
-    <Text style={styles.muted}>{active ? 'Updates while this screen is open.' : 'Updates resume when you return.'} Showing up to 500 recent events.</Text>
-    <ErrorMessage error={error} />
-    {events.map(({ seq, event }) => <View key={seq} style={styles.card}><Text style={styles.muted}>{event.type === 'message' ? event.role : 'Activity'}</Text><Text selectable style={styles.text}>{eventText(event)}</Text></View>)}
-    {draft ? <Text selectable style={styles.text}>{draft}</Text> : null}
-    {!events.length && !error && <Text style={styles.muted}>Waiting for the agent…</Text>}
-  </View>;
+  return { events: events.map(item => item.event), draft, error, following: active };
 }

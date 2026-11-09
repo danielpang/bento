@@ -5,7 +5,7 @@
     "scheme": "bento",
     "version": "0.1.0",
     "orientation": "portrait",
-    "userInterfaceStyle": "dark",
+    "userInterfaceStyle": "automatic",
     "platforms": [
       "ios",
       "web"
@@ -19,7 +19,8 @@
     },
     "plugins": [
       "expo-router",
-      "expo-secure-store"
+      "expo-secure-store",
+      "expo-font"
     ],
     "web": {
       "bundler": "metro",

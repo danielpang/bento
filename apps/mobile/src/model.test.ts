@@ -8,6 +8,12 @@ test('credentials can only be bound to an HTTPS origin', () => {
     assert.throws(() => serverOrigin(input));
   }
 });
+test('only a development build may reach a server over plain HTTP', () => {
+  assert.equal(serverOrigin('http://192.168.2.90:4410', { allowHttp: true }), 'http://192.168.2.90:4410');
+  assert.throws(() => serverOrigin('http://192.168.2.90:4410'));
+  assert.throws(() => serverOrigin('ftp://example.com', { allowHttp: true }));
+  assert.throws(() => verificationUrl('http://192.168.2.90:4410', 'https://192.168.2.90:4410/device'));
+});
 test('device authorization cannot send a person to another origin', () => {
   const origin = 'https://app.usebento.ai';
   assert.equal(verificationUrl(origin, '/device?user_code=ABCD'), origin + '/device?user_code=ABCD');

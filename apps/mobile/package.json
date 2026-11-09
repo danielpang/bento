@@ -15,26 +15,32 @@
   "dependencies": {
     "@bento/api-client": "workspace:*",
     "@bento/core": "workspace:*",
+    "@expo-google-fonts/geist": "^0.4.2",
+    "@expo-google-fonts/geist-mono": "^0.4.3",
     "@tanstack/react-query": "^5.90.0",
     "expo": "~55.0.32",
     "expo-constants": "~55.0.17",
     "expo-dev-client": "~55.0.41",
+    "expo-font": "~55.0.8",
     "expo-linking": "~55.0.17",
     "expo-router": "~55.0.18",
     "expo-secure-store": "~55.0.18",
     "expo-status-bar": "~55.0.6",
     "expo-web-browser": "~55.0.20",
+    "punycode": "2.3.1",
     "react": "19.2.0",
     "react-dom": "19.2.0",
     "react-native": "0.83.10",
+    "react-native-markdown-display": "7.0.2",
     "react-native-safe-area-context": "~5.6.2",
     "react-native-screens": "~4.23.0",
-    "react-native-web": "~0.21.0"
+    "react-native-web": "~0.21.0",
+    "react-native-webview": "13.16.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@types/react": "~19.2.0",
     "tsx": "^4.19.3",
-    "typescript": "^5.7.3",
-    "@playwright/test": "^1.63.0"
+    "typescript": "^5.7.3"
   }
 }

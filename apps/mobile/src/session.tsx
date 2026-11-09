@@ -1,11 +1,12 @@
 import { createContext, useContext, useEffect, useMemo, useState, type PropsWithChildren } from 'react';
-import { AppState, Platform } from 'react-native';
+import { AppState, Platform, View } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import { fetch as expoFetch } from 'expo/fetch';
 import { BentoClient } from '@bento/api-client';
 import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query';
 import { serverOrigin } from './model';
-import { ErrorMessage, Loading, Screen, Button } from './ui';
+import { Button, ErrorMessage, Loading } from './ui';
+import { usePalette } from './theme';
 
 type Credentials = { origin: string; token: string };
 const key = 'bento.mobile.session';
@@ -33,7 +34,7 @@ export function SessionProvider({ children }: PropsWithChildren) {
       if (value) {
         const saved = JSON.parse(value) as Credentials;
         if (!saved.token || typeof saved.token !== 'string') throw new Error('Saved sign-in is invalid.');
-        setCredentials({ origin: serverOrigin(saved.origin), token: saved.token });
+        setCredentials({ origin: serverOrigin(saved.origin, { allowHttp: __DEV__ }), token: saved.token });
       }
     }).catch(setError).finally(() => setReady(true));
     const subscription = AppState.addEventListener('change', state => focusManager.setFocused(state === 'active'));
@@ -81,8 +82,8 @@ export function SessionProvider({ children }: PropsWithChildren) {
       setGeneration(value => value + 1);
     },
   };
-  if (!ready) return <Screen><Loading /></Screen>;
-  if (error) return <Screen><ErrorMessage error={error} /><Button title="Clear saved sign-in" onPress={() => void clear().catch(setError)} /></Screen>;
+  if (!ready) return <Centered><Loading /></Centered>;
+  if (error) return <Centered><ErrorMessage error={error} /><Button title="Clear saved sign-in" onPress={() => void clear().catch(setError)} /></Centered>;
   return <Context.Provider value={value}><QueryClientProvider client={queryClient}>{children}</QueryClientProvider></Context.Provider>;
 }
 export function useSession() {
@@ -97,4 +98,9 @@ export function useForeground() {
     return () => subscription.remove();
   }, []);
   return active;
+}
+
+function Centered({ children }: PropsWithChildren) {
+  const palette = usePalette();
+  return <View style={{ flex: 1, backgroundColor: palette.bg, justifyContent: 'center', padding: 24, gap: 16 }}>{children}</View>;
 }
