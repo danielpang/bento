@@ -361,6 +361,7 @@ test("a tool paired with its own provider's model is fine", () => {
   assert.equal(checkAgentPairing("claude-code", "claude-fable-5-1").status, "ok");
   assert.equal(providerForProfile("claude-code", "claude-fable-5-1")?.id, "anthropic");
   assert.equal(providerForProfile("cursor", "claude-fable-5-1")?.id, "anthropic");
+  assert.equal(checkAgentPairing("claude-code", "claude-fable-5-2").status, "ok");
   assert.equal(checkAgentPairing("opencode", "anthropic/claude-opus-5").status, "ok");
   assert.equal(checkAgentPairing("opencode", "openai/gpt-5-pro").status, "ok");
 });
