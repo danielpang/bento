@@ -177,6 +177,10 @@ export const GATEWAY_CATALOG: readonly CatalogProvider[] = [
         "name": "Claude Fable 5.1"
       },
       {
+        "id": "anthropic/claude-fable-5.2",
+        "name": "Claude Fable 5.2"
+      },
+      {
         "id": "anthropic/claude-haiku-4.5",
         "name": "Claude Haiku 4.5"
       },

@@ -29,6 +29,14 @@ export const MODEL_CATALOG: readonly CatalogProvider[] = [
         }
       },
       {
+        "id": "claude-fable-5-2",
+        "name": "Claude Fable 5.2",
+        "cost": {
+          "input": 10,
+          "output": 50
+        }
+      },
+      {
         "id": "claude-haiku-4-5",
         "name": "Claude Haiku 4.5 (latest)",
         "cost": {
@@ -827,6 +835,14 @@ export const MODEL_CATALOG: readonly CatalogProvider[] = [
       {
         "id": "anthropic/claude-fable-5.1",
         "name": "Claude Fable 5.1",
+        "cost": {
+          "input": 10,
+          "output": 50
+        }
+      },
+      {
+        "id": "anthropic/claude-fable-5.2",
+        "name": "Claude Fable 5.2",
         "cost": {
           "input": 10,
           "output": 50
