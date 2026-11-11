@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -16,8 +16,9 @@ import {
   TOOLCHAIN_VERSION,
   agentToolchainScript,
   toolchainBinaries,
+  toolchainCheck,
+  toolchainCheckScript,
   toolchainMissing,
-  toolchainPresenceProbe,
 } from "./agent-toolchain.js";
 
 const dockerfile = path.join(
@@ -896,6 +897,14 @@ EOF
     return this.run(this.relocate(agentToolchainScript(binaries)), env);
   }
 
+  /** The check a sprite runs first, for one card's agents. */
+  check(
+    binaries: readonly string[],
+    env: Record<string, string> = {},
+  ): { status: number | null; stdout: string; stderr: string } {
+    return this.run(this.relocate(toolchainCheckScript(binaries)), env);
+  }
+
   /** The binaries a run could actually spawn afterwards. */
   published(): string[] {
     return readdirSync(path.join(this.root, "usr/local/bin")).sort();
@@ -1331,7 +1340,7 @@ test("a pipeline's CLIs become the binaries to install, deduplicated and ordered
   // must not render a `for tool in ; do` that no shell will parse.
   assert.deepEqual(toolchainBinaries(["fake"]), []);
   assert.equal(spawnSync("sh", ["-n", "-c", agentToolchainScript([])]).status, 0);
-  assert.equal(spawnSync("sh", ["-n", "-c", toolchainPresenceProbe([])]).status, 0);
+  assert.equal(spawnSync("sh", ["-n", "-c", toolchainCheckScript([])]).status, 0);
 });
 
 /**
@@ -1354,42 +1363,116 @@ test("a card that asks for no agent still gets a usable sandbox", () => {
   }
 });
 
-test("the presence probe asks about this card's agents and touches no installer", () => {
-  const probe = toolchainPresenceProbe(["claude", "codex"]);
-  assert.match(probe, /for tool in claude codex; do/);
-  assert.ok(probe.includes(TOOLCHAIN_STAMPS));
-  assert.doesNotMatch(probe, /curl|apt-get|install/);
-  assert.equal(spawnSync("sh", ["-n", "-c", probe]).status, 0);
+/**
+ * The check is the first round trip of every provision, and on a warm
+ * machine the only one the toolchain costs. So it has to be the top of
+ * the real script and none of its installers: small enough to send
+ * whole, and unable to start a download.
+ */
+test("the check script carries no installer and is not mistaken for the install", () => {
+  const check = toolchainCheckScript(["claude", "codex"]);
+  const full = agentToolchainScript(["claude", "codex"]);
+  assert.match(check, /ALL='claude codex'/);
+  assert.doesNotMatch(check, /curl -fsSL|npm install|install_from/);
+  assert.ok(check.length < full.length / 2, "the check is most of the script it was meant to avoid sending");
+  assert.equal(spawnSync("sh", ["-n", "-c", check]).status, 0);
+  // The sprite driver finds a provisioning script still running by the
+  // first 80 characters of its body. A check read as an install that is
+  // still going would be joined instead of started.
+  assert.notEqual(check.slice(0, 80), full.slice(0, 80));
 });
 
 /**
- * The probe decides one thing: whether the run's transcript promises a
- * minutes-long wait. Reading only stamps would tell every warm sprite in
- * the fleet it was about to install, right before installing nothing.
+ * What the check decides: whether a provision is one round trip or an
+ * install, and whether the transcript promises a wait. It must say
+ * "ready" only when the full script would have nothing to do, and it
+ * must change nothing when it says otherwise.
  */
-test("the presence probe reads the pre-stamp marker too", () => {
-  const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-probe-"));
+test("the check names what a machine lacks, installs nothing, and says ready once it is there", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-check-"));
   try {
-    const stamps = path.join(root, TOOLCHAIN_STAMPS.replace(/^\//, ""));
-    const legacy = path.join(root, TOOLCHAIN_LEGACY_MARKER.replace(/^\//, ""));
-    const probe = toolchainPresenceProbe(["claude", "codex"])
-      .replaceAll(TOOLCHAIN_STAMPS, stamps)
-      .replaceAll(TOOLCHAIN_LEGACY_MARKER, legacy);
-    const ask = () => spawnSync("sh", ["-c", probe], { encoding: "utf8" }).stdout.trim();
+    const sandbox = new ToolchainSandbox(root);
 
-    assert.equal(ask(), "tools-absent", "a machine with nothing on it");
+    const cold = sandbox.check(["claude", "codex"]);
+    assert.equal(cold.status, 0, cold.stderr);
+    assert.deepEqual(toolchainCheck(cold.stdout), { ready: false, needed: ["claude", "codex"], git: true });
+    assert.deepEqual(sandbox.fetched(), [], "the check went to the network");
+    assert.deepEqual(sandbox.published(), []);
 
-    mkdirSync(path.dirname(legacy), { recursive: true });
-    writeFileSync(legacy, "");
-    assert.equal(ask(), "tools-present", "a warm sprite from before stamps");
+    assert.deepEqual(toolchainMissing(sandbox.runFor(["claude"]).stdout), []);
+    const warm = sandbox.check(["claude"]);
+    assert.equal(warm.status, 0, warm.stderr);
+    assert.deepEqual(toolchainCheck(warm.stdout), { ready: true, needed: [], git: false });
+    assert.deepEqual(sandbox.fetched(), []);
 
-    rmSync(legacy);
-    mkdirSync(stamps, { recursive: true });
-    writeFileSync(path.join(stamps, "claude"), "");
-    assert.equal(ask(), "tools-absent", "one of the two is stamped, the other is not");
-    writeFileSync(path.join(stamps, "codex"), "");
-    assert.equal(ask(), "tools-present");
+    // The next stage runs codex. The machine has never had it, so the
+    // check names that one CLI and leaves the one already here alone.
+    assert.deepEqual(toolchainCheck(sandbox.check(["codex"]).stdout).needed, ["codex"]);
+    assert.deepEqual(toolchainCheck(sandbox.check(["claude", "codex"]).stdout).needed, ["codex"]);
+
+    // A CLI that went missing after it was stamped is work again.
+    rmSync(path.join(root, "usr/local/bin/claude"));
+    rmSync(path.join(root, "home/.local/bin/claude"));
+    assert.deepEqual(toolchainCheck(sandbox.check(["claude"]).stdout), { ready: false, needed: ["claude"], git: true });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+/** A warm sprite from before stamps is ready too, and so is a card with no agent to install. */
+test("the check reads the pre-stamp marker, and a card with no agent is ready", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-check-legacy-"));
+  try {
+    const sandbox = new ToolchainSandbox(root);
+    assert.equal(toolchainCheck(sandbox.check([]).stdout).ready, true);
+
+    assert.deepEqual(toolchainMissing(sandbox.runFor(["claude"]).stdout), []);
+    rmSync(path.join(root, TOOLCHAIN_STAMPS.replace(/^\//, "")), { recursive: true });
+    assert.deepEqual(toolchainCheck(sandbox.check(["claude"]).stdout).needed, ["claude"]);
+    writeFileSync(path.join(root, TOOLCHAIN_LEGACY_MARKER.replace(/^\//, "")), "");
+    assert.equal(toolchainCheck(sandbox.check(["claude"]).stdout).ready, true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * "git is here" is what lets a checkout start beside the install. With
+ * another base package missing, the install runs a package manager,
+ * certificates included, and a clone beside that can fail for a reason
+ * that is only this machine's. So the check keeps quiet, and the two
+ * run in order.
+ */
+test("the check does not offer a side by side checkout when a base package is missing", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-check-packages-"));
+  try {
+    const sandbox = new ToolchainSandbox(root);
+    assert.equal(toolchainCheck(sandbox.check(["claude"]).stdout).git, true, "every base package is here");
+
+    // The same machine with unzip gone: git still resolves.
+    const bin = path.join(root, "bin-without-unzip");
+    mkdirSync(bin);
+    for (const dir of ["/usr/bin", "/bin"]) {
+      for (const name of readdirSync(dir)) {
+        if (name === "unzip") continue;
+        // /bin is often /usr/bin again, and either can hold a link that
+        // points nowhere, which existsSync reports as absent. The first
+        // link of a name wins; a second is not an error.
+        try {
+          symlinkSync(path.join(dir, name), path.join(bin, name));
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+        }
+      }
+    }
+    const without = sandbox.check(["claude"], { PATH: `${root}/stubs:${root}/usr/local/bin:${bin}` });
+    assert.equal(without.status, 0, without.stderr);
+    assert.deepEqual(toolchainCheck(without.stdout), { ready: false, needed: ["claude"], git: false });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("output that says nothing is work to do, never ready", () => {
+  assert.deepEqual(toolchainCheck(""), { ready: false, needed: [], git: false });
 });

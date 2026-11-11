@@ -16,6 +16,14 @@ export const agentEvent = z.discriminatedUnion("type", [
     type: z.literal("message"),
     role: z.enum(["assistant", "user", "system"]),
     text: z.string(),
+    /**
+     * A status line for a step that is under way ("Starting sandbox.",
+     * "Installing tools."), which the next one replaces on screen. The
+     * transcript keeps every one of them, in order: a restart and the
+     * stall reaper read what the last step was. Only how a console
+     * draws them changes; see `foldProgress`.
+     */
+    progress: z.boolean().optional(),
     raw: z.unknown().optional(),
   }),
   z.object({
@@ -49,6 +57,23 @@ export const agentEvent = z.discriminatedUnion("type", [
   }),
 ]);
 export type AgentEvent = z.infer<typeof agentEvent>;
+
+/**
+ * A run's events as a console draws them: a run of progress lines is
+ * one line, the latest. A boot that went through four steps reads
+ * "Agent started." rather than four rows, and while it is under way the
+ * one row changes in place.
+ *
+ * Only a progress line directly followed by another is dropped.
+ * Anything between them (a retry notice, a warning, the agent's first
+ * word) is a reason the earlier line still matters, so it stays where
+ * it was. Pure, so history and the live stream fold the same way.
+ */
+export function foldProgress<T extends AgentEvent>(events: readonly T[]): T[] {
+  const isProgress = (event: T | undefined): boolean =>
+    event !== undefined && event.type === "message" && event.progress === true;
+  return events.filter((event, index) => !(isProgress(event) && isProgress(events[index + 1])));
+}
 
 /** A transcript read includes the database's timestamp, not the agent's clock. */
 export type RecordedRunEvent = AgentEvent & { recordedAt?: string };

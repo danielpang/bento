@@ -1,12 +1,21 @@
 import { createHash } from "node:crypto";
 import { WORKSPACE_ARTIFACT_DIR } from "@bento/core";
-import { AGENT_BINARIES, TOOLCHAIN_VERSION, agentToolchainScript } from "./agent-toolchain.js";
+import {
+  AGENT_BINARIES,
+  TOOLCHAIN_VERSION,
+  agentToolchainScript,
+  toolchainCheck,
+  toolchainCheckScript,
+  toolchainMissing,
+} from "./agent-toolchain.js";
 import {
   execTimeoutMessage,
   collectExec,
   SandboxImageLost,
   type ExecChunk,
   type ExecOptions,
+  reportProvisionPhase,
+  reportToolchainMissing,
   type ProvisionSpec,
   type RepositoryBundle,
   type RepositoryExportOptions,
@@ -52,6 +61,10 @@ export const MODAL_WARM_WINDOW_MS = 5 * 60 * 1000;
  * outlast more than one of these.
  */
 export const MODAL_REPO_PREPARE_TIMEOUT_MS = 10 * 60 * 1000;
+/** The toolchain check: a few stats and a CLI's `--version`. */
+const MODAL_TOOLCHAIN_CHECK_TIMEOUT_MS = 30_000;
+/** One agent CLI's installer, with its retries. The same bound a checkout gets. */
+const MODAL_TOOLCHAIN_INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
 
 const SNAPSHOT_TIMEOUT_MS = 240_000;
 const CREATE_NAME_RETRY_MS = [2_000, 2_000];
@@ -293,19 +306,19 @@ export class ModalDriver implements SandboxDriver {
   }
 
   async provision(spec: ProvisionSpec): Promise<SandboxHandle> {
-    const say = async (message: string) => {
-      await spec.onProgress?.(message);
+    const say = async (message: string, step = false) => {
+      await spec.onProgress?.(message, step ? { step: true } : undefined);
     };
-    await say("Starting a Modal sandbox");
+    // Short, and never the provider: see the sprite driver's first line.
+    await say("Starting sandbox.", true);
+    const acquireStarted = performance.now();
     const name = modalSandboxName(spec.workspaceKey);
     const api = await this.api();
     const allowlist = modalOutboundAllowlist(spec);
     let box = await this.runningBox(api, name);
     let created = false;
     let recordedImageRef: string | null | undefined;
-    if (box) {
-      await say(`Reusing the Modal sandbox (${name}).`);
-    } else {
+    if (!box) {
       const picked = await this.imageForNewSandbox(api, spec, name, say);
       recordedImageRef = picked.recordedImageRef;
       box = await this.createNamed(api, picked.image, {
@@ -322,8 +335,16 @@ export class ModalDriver implements SandboxDriver {
     }
     this.remembered.set(name, box);
     try {
+      // Stopped where the sprite stops it, before the caller records the
+      // machine, so the two providers' numbers mean the same thing.
+      reportProvisionPhase(spec, "acquire", acquireStarted);
       await spec.onAcquired?.({ externalId: name, provider: "modal", workdir: "/workspace", createdSandbox: created });
+      const installStarted = performance.now();
+      const installed = await this.prepareAgentTools(box, spec, say);
+      reportProvisionPhase(spec, "install", installStarted, { installed });
+      const checkoutStarted = performance.now();
       await this.prepareRepositories(box, spec, say);
+      reportProvisionPhase(spec, "checkout", checkoutStarted);
     } catch (err) {
       if (created) {
         let stopped = false;
@@ -764,7 +785,7 @@ export class ModalDriver implements SandboxDriver {
     api: ModalApi,
     spec: ProvisionSpec,
     name: string,
-    say: (message: string) => Promise<void>,
+    say: (message: string, step?: boolean) => Promise<void>,
   ): Promise<{ image: ModalImageRef; recordedImageRef?: string | null }> {
     // An exit snapshot is the workspace after the last stored image.
     // It wins over that older id. A failure here is a fresh clone:
@@ -777,7 +798,7 @@ export class ModalDriver implements SandboxDriver {
       return { image: await this.toolchain(api, spec), recordedImageRef: null };
     }
     if (spec.imageRef) {
-      await say("Restoring the workspace from its last snapshot");
+      await say("Restoring workspace.", true);
       const saved = await api.imageFromId(spec.imageRef);
       if (saved) return { image: saved };
       await say("The saved workspace snapshot is gone, so this sandbox starts from a fresh clone.");
@@ -792,7 +813,10 @@ export class ModalDriver implements SandboxDriver {
 
   private async toolchain(api: ModalApi, spec: ProvisionSpec): Promise<ModalImageRef> {
     try {
-      return await api.toolchainImage(spec.agentBinaries ?? AGENT_BINARIES);
+      // The pipeline's whole set when the caller named one: an image is
+      // built once per set and cached, so the wider one costs a new
+      // card nothing and spares its later stages an install.
+      return await api.toolchainImage(spec.imageAgentBinaries ?? spec.agentBinaries ?? AGENT_BINARIES);
     } catch (err) {
       throw err instanceof Error ? err : new Error("toolchain image build failed");
     }
@@ -800,7 +824,7 @@ export class ModalDriver implements SandboxDriver {
 
   private async exitSnapshot(
     name: string,
-    say: (message: string) => Promise<void>,
+    say: (message: string, step?: boolean) => Promise<void>,
   ): Promise<{ image: ModalImageRef } | { unusable: true } | null> {
     const api = await this.api();
     const dead = await this.deadBox(api, name);
@@ -812,14 +836,15 @@ export class ModalDriver implements SandboxDriver {
       const image = await dead.experimentalGetExitSnapshot();
       await say(
         hitLifetime
-          ? "This Modal sandbox reached its 24 hour limit. Restoring the workspace from its exit snapshot."
-          : "Restoring the workspace from its last snapshot",
+          ? "This sandbox reached its 24 hour limit. Restoring the workspace from its exit snapshot."
+          : "Restoring workspace.",
+        !hitLifetime,
       );
       return { image };
     } catch {
       await say(
         hitLifetime
-          ? "This Modal sandbox reached its 24 hour limit, so the next start is a fresh clone."
+          ? "This sandbox reached its 24 hour limit, so the next start is a fresh clone."
           : "The previous sandbox left no usable snapshot, so this one starts from a fresh clone.",
       );
       return { unusable: true };
@@ -989,18 +1014,95 @@ export class ModalDriver implements SandboxDriver {
     await proc.wait().catch(() => {});
   }
 
+  /**
+   * Makes the workspace directory and sees that this run's CLI is in
+   * the machine. Answers whether an installer ran.
+   *
+   * The image a machine was made from carries the agents its card's
+   * pipeline named that day. A machine outlives that answer: a stage's
+   * agent is changed, a person starts a run with another one, or the
+   * workspace is restored from a snapshot of an older image, and the
+   * run died at spawn with the shell's "not found" because nothing
+   * here ever looked. So the check a sprite runs is run here too, in
+   * the exec that made the directory anyway, and a CLI it names is
+   * installed in place by the same script the image was built with. A
+   * later hibernation snapshot keeps it.
+   *
+   * Never on a locked network, where no installer is reachable and the
+   * attempt would only spend the retries: that machine keeps what its
+   * image has. And never the reason a provision fails. A CLI that
+   * could not be installed is said in the transcript and reported, as
+   * on a sprite, and the next run tries again.
+   */
+  private async prepareAgentTools(
+    box: ModalBox,
+    spec: ProvisionSpec,
+    say: (message: string, step?: boolean) => Promise<void>,
+  ): Promise<boolean> {
+    const binaries = spec.agentBinaries;
+    // A caller that named no agent gets the image as it is, as before.
+    if (!binaries || binaries.length === 0 || spec.network === "restricted") {
+      await runShell(box, "mkdir -p /workspace", 30_000);
+      return false;
+    }
+    /**
+     * The check is extra work this exec did not use to carry, and it
+     * runs the CLIs' own `--version`. So it cannot be what fails a
+     * provision: one that throws or runs out of time is read as a
+     * machine that said nothing, and the directory, which is all this
+     * exec was ever required to do, is made on its own. That call
+     * fails the provision when it fails, as it always did.
+     */
+    let checkOutput = "";
+    try {
+      const checked = await runShell(
+        box,
+        ["mkdir -p /workspace", toolchainCheckScript(binaries)].join("\n"),
+        MODAL_TOOLCHAIN_CHECK_TIMEOUT_MS,
+        undefined,
+        { cwd: "/" },
+      );
+      checkOutput = checked.stdout;
+    } catch (err) {
+      console.warn(`could not check the agent tools on ${box.sandboxId}:`, err);
+      await runShell(box, "mkdir -p /workspace", 30_000);
+    }
+    const check = toolchainCheck(checkOutput);
+    // Only a CLI the check named. A check that said nothing is a
+    // machine this cannot read, not a machine to run installers in.
+    if (check.ready || check.needed.length === 0) return false;
+
+    await say("Installing tools.", true);
+    const report = (missing: string[], output: string) =>
+      reportToolchainMissing(spec, say, { missing, output }, box.sandboxId);
+    const scriptPath = "/tmp/bento-toolchain.sh";
+    try {
+      // As a file, not an argument: the script is tens of kilobytes.
+      await box.writeBytes(Buffer.from(agentToolchainScript(binaries), "utf8"), scriptPath);
+      const result = await runShell(box, `sh ${scriptPath}; status=$?; rm -f ${scriptPath}; exit $status`, MODAL_TOOLCHAIN_INSTALL_TIMEOUT_MS, undefined, {
+        cwd: "/",
+      });
+      // The script tolerates an installer that failed and names what is
+      // absent. An exit that is not 0 never reached that line.
+      const missing = result.exitCode === 0 ? toolchainMissing(result.stdout) : check.needed;
+      if (missing.length > 0) await report(missing, result.stderr);
+    } catch (err) {
+      await report(check.needed, err instanceof Error ? err.message : String(err));
+    }
+    return true;
+  }
+
   private async prepareRepositories(
     box: ModalBox,
     spec: ProvisionSpec,
-    say: (message: string) => Promise<void>,
+    say: (message: string, step?: boolean) => Promise<void>,
   ): Promise<void> {
-    await runShell(box, "mkdir -p /workspace", 30_000);
+    if ((spec.repositories ?? []).some((repo) => repo.cloneUrl || repo.seedBundle)) await say("Preparing repositories.", true);
     for (const repo of spec.repositories ?? []) {
       if (!repo.cloneUrl && !repo.seedBundle) continue;
       const dir = `/workspace/${repo.name}`;
       const branch = repo.branch ?? "main";
       const baseBranch = repo.baseBranch ?? "main";
-      await say(`Preparing repository ${repo.name}...`);
       // Each step is judged by itself; see checkoutSteps.
       const runSteps = async (steps: CheckoutStep[]) => {
         for (const step of steps) {
@@ -1033,7 +1135,6 @@ export class ModalDriver implements SandboxDriver {
       } else if (repo.cloneUrl) {
         await runSteps(checkoutSteps({ dir, cloneUrl: repo.cloneUrl, branch, baseBranch }));
       }
-      await say(`Repository ${repo.name} is ready on branch ${branch}.`);
     }
     await this.sweepRemovedCheckouts(box, spec);
   }

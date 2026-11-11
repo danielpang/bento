@@ -194,23 +194,36 @@ export interface ProvisionSpec {
   mounts?: { hostPath: string; containerPath: string; readOnly?: boolean }[];
   image?: string;
   /**
-   * The agent binaries this sandbox must be able to spawn, which is the
-   * set the card's pipeline uses plus the one this run spawns. Absent
-   * means all of them, which is what a caller that does not know asks
-   * for.
+   * The agent binaries this run must be able to spawn: the CLI of the
+   * agent about to start, and nothing else. Absent means all of them,
+   * which is what a caller that does not know asks for.
    *
-   * Only the Sprite driver acts on it: a sprite is a bare machine that
-   * installs its CLIs on the way in, so installing two instead of ten
-   * is minutes off the first stage of every new card. The Docker image
-   * ships all of them already, and the local driver runs whatever is on
-   * the developer's own PATH.
+   * A sprite is a bare machine that installs its CLIs on the way in,
+   * so every CLI named here is an installer on the critical path of
+   * the run that is waiting. The stage's own agent is one installer;
+   * the pipeline's whole set made a card's first stage wait for the
+   * agents of stages it had not reached. The Docker image ships all
+   * of them already, and the local driver runs whatever is on the
+   * developer's own PATH.
    *
-   * Narrowing it cannot strand a run. Provisioning happens before every
-   * run, and a CLI that is absent from the PATH is installed then, so
-   * an agent added to the pipeline after the card was created arrives
-   * with the stage that first needs it.
+   * Narrowing it cannot strand a run. Provisioning happens before
+   * every run, and a clone driver installs a named CLI that is absent
+   * from the PATH then: the sprite through its toolchain script, and
+   * Modal the same way inside a machine whose image did not carry it.
+   * So the next stage's agent, one swapped into a stage this morning,
+   * or one a person picks by hand arrives with the run that needs it.
    */
   agentBinaries?: readonly AgentBinary[];
+  /**
+   * The agent binaries worth baking into a machine image: the card's
+   * whole pipeline. Absent means `agentBinaries`, then all of them.
+   *
+   * Only Modal reads it. Its CLIs come from an image built once per
+   * set and cached by name, so a wider set costs a new card nothing,
+   * and a machine whose network is locked cannot reach an installer
+   * later: what a later stage needs has to be there from the start.
+   */
+  imageAgentBinaries?: readonly AgentBinary[];
   env?: Record<string, string>;
   /**
    * Owning organization, stamped onto a Modal sandbox as a tag so the
@@ -242,14 +255,74 @@ export interface ProvisionSpec {
    * "starting" with no way to tell progress from a hang. Drivers await
    * each call so the lines land in order; a driver with nothing slow to
    * report may ignore it.
+   *
+   * `step` marks the routine line of a step that is under way, which
+   * the next one replaces on screen. A line without it (a retry, a
+   * failure, a snapshot that was gone) is something to keep reading.
    */
-  onProgress?: (message: string) => void | Promise<void>;
+  onProgress?: (message: string, options?: { step?: boolean }) => void | Promise<void>;
   /**
    * Called when the toolchain script left CLIs off the PATH. The
    * provision goes on, so this is how the failure reaches error
    * tracking. A throw here does not fail the provision.
    */
   onToolchainMissing?: (failure: ToolchainInstallFailure) => void | Promise<void>;
+  /**
+   * Called as each phase of a provision finishes, with how long it
+   * took, so the wait can be broken down where it is measured. The
+   * install and the checkout can overlap on a cold machine, so the
+   * phases are not a partition of the provision. `installed` is true
+   * when the install phase ran an installer rather than finding the
+   * CLIs there. A throw here does not fail the provision.
+   */
+  onPhase?: (timing: ProvisionPhaseTiming) => void;
+}
+
+/**
+ * How long a phase took, handed to the caller's metric. Shared by the
+ * clone drivers so the two time and report a phase the same way. Never
+ * the reason a provision fails.
+ */
+export function reportProvisionPhase(
+  spec: Pick<ProvisionSpec, "onPhase">,
+  phase: ProvisionPhase,
+  started: number,
+  extra: { installed?: boolean } = {},
+): void {
+  try {
+    spec.onPhase?.({ phase, ms: performance.now() - started, ...extra });
+  } catch (err) {
+    console.warn(`could not report the ${phase} phase of a provision:`, err);
+  }
+}
+
+/**
+ * Says, in the run's own transcript, which agent CLI an install left
+ * off the PATH, and hands it to error tracking. One sentence and one
+ * report for both clone drivers, so the next change to either is made
+ * once. The provision goes on: the other agents still run, and the
+ * next provision tries the install again.
+ */
+export async function reportToolchainMissing(
+  spec: Pick<ProvisionSpec, "onToolchainMissing">,
+  say: (message: string) => Promise<void>,
+  failure: ToolchainInstallFailure,
+  machine: string,
+): Promise<void> {
+  await say(
+    `Could not install ${failure.missing.join(", ")} in this sandbox. Cards that use those agents will fail to start until an install succeeds, which the next run tries again.`,
+  );
+  try {
+    await spec.onToolchainMissing?.(failure);
+  } catch (err) {
+    console.warn(`could not report the missing agent tools on ${machine}:`, err);
+  }
+}
+
+export interface ProvisionPhaseTiming {
+  phase: ProvisionPhase;
+  ms: number;
+  installed?: boolean;
 }
 
 export interface ToolchainInstallFailure {

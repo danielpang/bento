@@ -25,9 +25,9 @@ export type AgentBinary = (typeof AGENT_BINARIES)[number];
 
 /**
  * Which binary a profile's CLI spawns. This is what lets a sandbox
- * install the two agents a card's pipeline actually uses instead of all
- * ten, so the first stage of a new card waits for two installers rather
- * than for ten plus a Node runtime.
+ * install the one agent a run is about to spawn instead of all ten, so
+ * a run waits for one installer rather than for ten plus a Node
+ * runtime.
  *
  * `fake` maps to nothing: it is the in-process test agent, and a
  * sandbox never spawns a binary for it.
@@ -130,7 +130,7 @@ export const TOOLCHAIN_VERSION = 3;
  * cheaply and say so before the minutes-long wait rather than after.
  *
  * Per CLI rather than one marker for the whole set, because a provision
- * now installs only the agents a card's pipeline uses. One marker
+ * now installs only the agent the run in front of it uses. One marker
  * cannot answer "was claude installed at this version?" on a machine
  * where only codex has ever run, and answering that wrong is how a
  * version bump would silently skip the very CLI it was bumped for.
@@ -158,6 +158,14 @@ const FX_CUSTOM_MARKER = "/opt/bento/fx-custom-connections";
  * the run's transcript, where the person who started the run reads it.
  */
 export const TOOLCHAIN_MISSING_PREFIX = "bento-toolchain-missing:";
+
+/** What the check script prints when there is nothing to install. */
+const TOOLCHAIN_READY = "bento-toolchain-ready";
+/** And when there is: the CLIs the full script would install, after the colon. */
+const TOOLCHAIN_NEEDED_PREFIX = "bento-toolchain-needed:";
+const TOOLCHAIN_GIT_PRESENT = "bento-git-present";
+/** Where the check script ends. A comment line in the full one. */
+const INSTALLERS_START = "# bento-toolchain-installers";
 
 /** Node used only to run npm-distributed agents. Off the agent's PATH on purpose. */
 const NODE_VERSION = "22.22.2";
@@ -213,13 +221,22 @@ const DSH_HMR_PIN = "/opt/bento/dsh-hmr-pin";
  * What changed after that is the scope. A card whose pipeline runs
  * Claude Code and Codex used to wait on ten installers plus a private
  * Node it would never call, every one of them on the critical path of
- * its first stage. Asking for two installs two. An agent added to the
- * pipeline after the card was created is not a special case: it is
- * absent from the PATH and unstamped, so the provision that first needs
- * it installs it and the run proceeds.
+ * its first stage. Asking for two installs two, and the caller now
+ * asks for one: the agent the run is about to spawn. A stage that runs
+ * another agent, or an agent added to the pipeline after the card was
+ * created, is not a special case: it is absent from the PATH and
+ * unstamped, so the provision that first needs it installs it and the
+ * run proceeds.
+ *
+ * `checkOnly` renders the top of the script alone, up to where the
+ * installers begin: what `toolchainCheckScript` sends first.
  */
-export function agentToolchainScript(binaries: readonly string[] = AGENT_BINARIES): string {
-  return `set -eu
+export function agentToolchainScript(
+  binaries: readonly string[] = AGENT_BINARIES,
+  options: { checkOnly?: boolean } = {},
+): string {
+  const check = options.checkOnly === true;
+  const script = `set -eu
 STAMPS=${TOOLCHAIN_STAMPS}
 LEGACY_MARKER=${TOOLCHAIN_LEGACY_MARKER}
 FX_CUSTOM_MARKER=${FX_CUSTOM_MARKER}
@@ -365,7 +382,22 @@ command -v tar >/dev/null 2>&1 || packages="$packages tar"
 command -v unzip >/dev/null 2>&1 || packages="$packages unzip"
 command -v xz >/dev/null 2>&1 || packages="$packages xz-utils"
 command -v bash >/dev/null 2>&1 || packages="$packages bash"
-if [ -n "$packages" ] && command -v apt-get >/dev/null 2>&1; then
+${
+  check
+    ? `# Asked only whether there is work. Anything to install is named and
+# left for the full script, so the caller can say the wait is coming
+# and start the checkout beside it when git is already here.
+if [ -n "$needed" ] || [ -n "$packages" ]; then
+  echo "${TOOLCHAIN_NEEDED_PREFIX}$needed"
+  # Only when no base package is missing. The full script would then
+  # run apt-get, certificates included, and a clone started beside
+  # that can fail for a reason that is nobody's but this machine's.
+  if [ -z "$packages" ]; then echo "${TOOLCHAIN_GIT_PRESENT}"; fi
+  exit 0
+fi
+`
+    : ""
+}if [ -n "$packages" ] && command -v apt-get >/dev/null 2>&1; then
   apt-get update -qq
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \\
     ca-certificates $packages >/dev/null
@@ -383,8 +415,8 @@ git config --system --replace-all safe.directory '*' || true
 
 # Every asked-for CLI is stamped and on the PATH, which is every stage
 # of a card after its first.
-if [ -z "$needed" ]; then exit 0; fi
-
+if [ -z "$needed" ]; then${check ? ` echo "${TOOLCHAIN_READY}";` : ""} exit 0; fi
+${INSTALLERS_START}
 # Downloaded first and then run, rather than piped into a shell: a
 # pipeline reports the shell's exit status, so a fetch that answers 403
 # or times out hands an empty script to a shell that exits 0, and the
@@ -754,6 +786,53 @@ if [ -n "$missing" ]; then
   for tool in $missing; do echo "bento: $tool is not installed" >&2; done
 fi
 `;
+  return check ? script.slice(0, script.indexOf(INSTALLERS_START)) : script;
+}
+
+/**
+ * The first thing a sprite is asked on every provision: is there any
+ * toolchain work here at all?
+ *
+ * It is the top of the script above and none of its installers. On a
+ * machine that already has the asked-for CLIs, which is every stage of
+ * a card after the first one that used this agent, it does everything
+ * the full script would (publish, the staleness floors, the git
+ * identity) and says it is ready, so the warm path is one
+ * round trip where it used to be a probe and then the whole script.
+ * Otherwise it names what is missing and changes nothing, and the
+ * caller runs the full script.
+ *
+ * Opens with its own comment line on purpose. The sprite driver finds
+ * a provisioning script that is still running by the first characters
+ * of its body, and the check and the install must never be mistaken
+ * for each other.
+ */
+export function toolchainCheckScript(binaries: readonly string[] = AGENT_BINARIES): string {
+  return `# bento-toolchain-check\n${agentToolchainScript(binaries, { checkOnly: true })}`;
+}
+
+export interface ToolchainCheck {
+  /** Every asked-for CLI is installed, current, and on the PATH. Nothing is left to run. */
+  ready: boolean;
+  /** The CLIs the full script would install. Empty when only a base package is missing. */
+  needed: string[];
+  /**
+   * git and every other base package are already on the machine, so
+   * the full script will run no package manager and a checkout can
+   * start beside it. Only reported when there is work.
+   */
+  git: boolean;
+}
+
+/** What the check script said. Output that says nothing reads as work to do, never as ready. */
+export function toolchainCheck(output: string): ToolchainCheck {
+  const lines = output.split("\n").map((line) => line.trim());
+  const needed = lines.find((line) => line.startsWith(TOOLCHAIN_NEEDED_PREFIX));
+  return {
+    ready: needed === undefined && lines.includes(TOOLCHAIN_READY),
+    needed: needed ? needed.slice(TOOLCHAIN_NEEDED_PREFIX.length).trim().split(/\s+/).filter(Boolean) : [],
+    git: lines.includes(TOOLCHAIN_GIT_PRESENT),
+  };
 }
 
 /**
@@ -761,35 +840,6 @@ fi
  * and what a driver that names no agents installs.
  */
 export const AGENT_TOOLCHAIN_SCRIPT = agentToolchainScript();
-
-/**
- * Asks a sandbox whether the CLIs this card needs are already stamped,
- * so provisioning can name a minutes-long install before it happens
- * rather than after it. Cheap on purpose: one stat per CLI, no network,
- * and no installer.
- *
- * Reads the same two things the script does, a stamp or the pre-stamp
- * marker, so a warm machine is not told it is about to wait minutes for
- * an install that will take a second.
- *
- * Only as good as those, which say a CLI resolved when it was installed
- * rather than that it resolves now. The script itself checks
- * the PATH and reinstalls what has gone missing, so the cost of being
- * wrong here is a progress line that was too optimistic, never a run
- * that starts without its agent.
- */
-export function toolchainPresenceProbe(binaries: readonly string[] = AGENT_BINARIES): string {
-  if (binaries.length === 0) return "echo tools-present";
-  return [
-    `for tool in ${binaries.join(" ")}; do`,
-    `  if [ ! -f ${TOOLCHAIN_STAMPS}/"$tool" ] && [ ! -f ${TOOLCHAIN_LEGACY_MARKER} ]; then`,
-    "    echo tools-absent",
-    "    exit 0",
-    "  fi",
-    "done",
-    "echo tools-present",
-  ].join("\n");
-}
 
 /**
  * The CLIs the script could not put on the PATH, read back from its

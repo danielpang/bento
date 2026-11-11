@@ -174,6 +174,59 @@ test("a sandbox whose agent came up reports the wait from queueing, in slices on
   });
 });
 
+/**
+ * "The sandbox was slow" is four different problems, so the event says
+ * which: this server before a provider was asked, the provider making
+ * the machine, the agent CLI, or the repositories. Only what was
+ * measured is sent, because an absent phase and a zero are different
+ * answers on a chart.
+ */
+test("a sandbox's wait is broken down by phase, with only the phases that were measured", () => {
+  const { analytics, events } = recordingAnalytics();
+  const base = {
+    run: { id: "run-1", role: "stage", type: "pipeline" },
+    provider: "sprite",
+    origin: "new" as const,
+    queueWaitMs: 300,
+    sinceClaimMs: 30_000,
+    provisionMs: 25_000,
+    projectId: "project-1",
+    organizationId: "org-1",
+    userId: "user-1",
+    owner: { featureId: "feature-1" },
+  };
+
+  reportSandboxReady(analytics, {
+    ...base,
+    phases: {
+      prepareMs: 2_100.6,
+      acquireMs: 3_000,
+      installMs: 14_000,
+      checkoutMs: 9_000,
+      toolsInstalled: true,
+      snapshotMs: 1_200,
+      setupMs: -5,
+    },
+  });
+  reportSandboxReady(analytics, { ...base, phases: { prepareMs: 800, toolsInstalled: false } });
+
+  const cold = events[0]?.properties ?? {};
+  assert.equal(cold.prepare_ms, 2_101);
+  assert.equal(cold.acquire_ms, 3_000);
+  assert.equal(cold.install_ms, 14_000);
+  assert.equal(cold.checkout_ms, 9_000);
+  assert.equal(cold.tools_installed, true);
+  assert.equal(cold.snapshot_ms, 1_200);
+  assert.equal(cold.setup_ms, 0, "a duration is never negative");
+
+  const warm = events[1]?.properties ?? {};
+  assert.equal(warm.prepare_ms, 800);
+  assert.equal(warm.tools_installed, false);
+  for (const absent of ["acquire_ms", "install_ms", "checkout_ms", "snapshot_ms", "setup_ms"]) {
+    assert.ok(!(absent in warm), `${absent} was reported for a phase nobody measured`);
+  }
+});
+
 test("a swarm's machine names its swarm, and a runner's leaves out what it did not say", () => {
   const { analytics, events } = recordingAnalytics();
   reportSandboxReady(analytics, {

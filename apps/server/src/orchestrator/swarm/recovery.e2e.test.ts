@@ -260,8 +260,8 @@ test("a run that stalled before its agent started is closed, and its swarm is to
    */
   const swarm = await makeSwarm();
   const stalled = await stalledRun(swarm.id, 46, [
-    { minutesAgo: 44, payload: system("Starting a Modal sandbox") },
-    { minutesAgo: 42, payload: system("Repository bento is ready on branch swarm/x.") },
+    { minutesAgo: 44, payload: system("Starting sandbox.") },
+    { minutesAgo: 42, payload: system("Preparing repositories.") },
   ]);
   // The handler that is still waiting on the sandbox, in this process.
   const controller = new AbortController();
@@ -275,7 +275,7 @@ test("a run that stalled before its agent started is closed, and its swarm is to
   assert.equal(row!.status, "failed");
   assert.match(row!.error!, /^The sandbox stopped responding before the agent started/);
   assert.match(row!.error!, /The agent had not been started yet/);
-  assert.match(row!.error!, /The last update was: Repository bento is ready on branch swarm\/x\./);
+  assert.match(row!.error!, /The last update was: Preparing repositories\./);
   assert.equal(infraFailureReason(row!.error)?.id, "sandbox-stalled", "and is not billed, so the coordinator restarts it");
   const lines = await db.select().from(runEvents).where(eq(runEvents.runId, stalled.id));
   assert.match(
@@ -294,7 +294,7 @@ test("a run whose agent has spoken, or that is not yet stalled, is left alone", 
   const swarm = await makeSwarm();
   // An agent that started and then went quiet: a long command, not a stall.
   const quietAgent = await stalledRun(swarm.id, 60, [
-    { minutesAgo: 58, payload: system("Starting codex in the sandbox.") },
+    { minutesAgo: 58, payload: system("Starting agent.") },
     { minutesAgo: 57, type: "init", payload: { type: "init", sessionId: "s1" } },
   ]);
   // Still inside the window: repository setup can be silent for twenty minutes.
@@ -328,8 +328,8 @@ test("a text-mode agent that was launched is working, and a person's prompt is n
     swarm.id,
     60,
     [
-      { minutesAgo: 58, payload: system("Repository bento is ready on branch swarm/x.") },
-      { minutesAgo: 57, payload: system("Starting dsh in the sandbox.") },
+      { minutesAgo: 58, payload: system("Preparing repositories.") },
+      { minutesAgo: 57, payload: system("Starting agent.") },
     ],
     DSH,
     57,
@@ -337,12 +337,12 @@ test("a text-mode agent that was launched is working, and a person's prompt is n
   const neverLaunched = await stalledRun(
     swarm.id,
     60,
-    [{ minutesAgo: 58, payload: system("Repository bento is ready on branch swarm/x.") }],
+    [{ minutesAgo: 58, payload: system("Preparing repositories.") }],
     DSH,
   );
   const prompted = await stalledRun(swarm.id, 60, [
     { minutesAgo: 59, payload: { type: "message", role: "user", text: "Fix the login page" } },
-    { minutesAgo: 58, payload: system("Starting a Modal sandbox") },
+    { minutesAgo: 58, payload: system("Starting sandbox.") },
   ]);
 
   const closed = await reapStalledRuns(ctx);

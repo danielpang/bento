@@ -78,11 +78,12 @@ test("a pipeline asks for its own agents and nothing else", async () => {
 });
 
 /**
- * The whole pipeline, not this stage. A card keeps one machine for its
- * life, so the later stages' agents are installed during the cold
- * provision the first stage is already paying for.
+ * The whole pipeline, not this stage: this is the set a Modal image is
+ * built with, so a later stage's agent is in the machine before the
+ * card reaches that stage. What a run waits for on a sprite is its own
+ * agent alone, which the executor asks for separately.
  */
-test("a stage's agent is installed before the card reaches that stage", async () => {
+test("a later stage's agent is in the image set before the card reaches that stage", async () => {
   const claude = await profile("claude-code", "impl");
   const cursor = await profile("cursor", "qa");
   const pipelineId = await pipeline([claude, cursor]);

@@ -77,11 +77,16 @@ export interface ProvisionWorkspaceInput {
   authMounts: { hostPath: string; containerPath: string; readOnly?: boolean }[];
   restrictNetwork: boolean;
   /**
-   * The agent CLIs this machine needs, when the caller can narrow it.
-   * Omitted means the whole set, which is what a swarm's machine gets:
-   * only a card has a pipeline whose stages name their agents.
+   * The agent CLI this run spawns, which is all a clone driver puts on
+   * the run's critical path. Omitted means the whole set.
    */
   agentBinaries?: readonly AgentBinary[];
+  /**
+   * The agent CLIs worth baking into a machine image, when the caller
+   * knows more than this run's: a card's pipeline. Only Modal reads it;
+   * see `ProvisionSpec.imageAgentBinaries`.
+   */
+  imageAgentBinaries?: readonly AgentBinary[];
   /**
    * What the caller promised about where its agents work,
    * when the caller has one.
@@ -140,7 +145,7 @@ export interface ProvisionWorkspaceInput {
    */
   allowedHosts?: string[];
   /** Progress lines, which go into the transcript of whatever asked. */
-  say: (text: string) => Promise<void>;
+  say: (text: string, options?: { step?: boolean }) => Promise<void>;
   /**
    * The driver this machine belongs to. Chosen by the caller from the
    * live sandbox row, or from the project when there is no machine yet.
@@ -185,6 +190,28 @@ export interface ProvisionedWorkspace {
    * with the sandbox row standing in for a driver that has none.
    */
   origin: SandboxOrigin;
+  /** Where the provision's time went, for the `sandbox ready` metric. */
+  timings: ProvisionTimings;
+}
+
+/**
+ * The slices of one provision, each a monotonic interval measured in
+ * this process. `prepareMs` is everything before a provider was asked
+ * (the GitHub connection, the seed bundles read from GitHub, the clone
+ * URL check, the hibernated row of each provider tried); the rest are
+ * the phases of the driver that made the machine, absent for a driver
+ * that reports none. Both clone drivers stop `acquireMs` before the
+ * machine's row is recorded, so the two are comparable. The install and the
+ * checkout can overlap on a cold sprite, so they do not add up to the
+ * provision.
+ */
+export interface ProvisionTimings {
+  prepareMs: number;
+  acquireMs?: number;
+  installMs?: number;
+  checkoutMs?: number;
+  /** Whether an agent CLI installer ran, rather than the CLI being there. */
+  toolsInstalled?: boolean;
 }
 
 /** The sandbox rows this workspace owns, whichever board it is on. */
@@ -202,6 +229,8 @@ export async function provisionWorkspace(
   input: ProvisionWorkspaceInput,
 ): Promise<ProvisionedWorkspace> {
   const { repoRows, branch, workspaceKey, driver } = input;
+  const preparing = performance.now();
+  const timings: ProvisionTimings = { prepareMs: 0 };
   /**
    * Every driver that may make this machine, first choice first. A
    * fallback of another workspace shape is left out rather than tried:
@@ -382,8 +411,19 @@ export async function provisionWorkspace(
     ).catch(() => {});
   }
 
+  timings.prepareMs = performance.now() - preparing;
+
   const provisionWith = async (candidate: SandboxDriver): Promise<SandboxHandle> => {
+    // The phases of the driver that answers, not of one that failed first.
+    delete timings.acquireMs;
+    delete timings.installMs;
+    delete timings.checkoutMs;
+    delete timings.toolsInstalled;
+    // Reading the hibernated row is this server's work before the
+    // provider is asked, so it counts with the rest of that.
+    const restoring = performance.now();
     const restore = canHibernate(candidate) ? await hibernatedRestore(ctx, input.owner) : undefined;
+    timings.prepareMs += performance.now() - restoring;
     let completedHandle: SandboxHandle | undefined;
     try {
       return await sandboxOperation(ctx, { projectId: input.projectId, workspaceKey, provider: candidate.provider, action: "provision" }, async (recordHandle) => {
@@ -408,6 +448,13 @@ export async function provisionWorkspace(
           })),
           // Local mode can share the user's own agent logins and git identity.
           ...(input.agentBinaries ? { agentBinaries: input.agentBinaries } : {}),
+          ...(input.imageAgentBinaries ? { imageAgentBinaries: input.imageAgentBinaries } : {}),
+          onPhase: ({ phase, ms, installed }) => {
+            if (phase === "acquire") timings.acquireMs = ms;
+            else if (phase === "install") timings.installMs = ms;
+            else if (phase === "checkout") timings.checkoutMs = ms;
+            if (installed !== undefined) timings.toolsInstalled = installed;
+          },
           mounts: [...repoGitMounts(candidate), ...input.authMounts],
           image: ctx.env.BENTO_SANDBOX_IMAGE,
           onProgress: input.say,
@@ -594,6 +641,7 @@ export async function provisionWorkspace(
       sandboxRow,
       driver: sandboxRow ? usingSandboxDriver(ctx, driverUsed, sandboxRow.id) : driverUsed,
       origin: sandboxOrigin({ createdSandbox: handle.createdSandbox, hadMachine }),
+      timings,
     };
   } catch (err) {
     // The provision ends without a machine here too: the run fails and

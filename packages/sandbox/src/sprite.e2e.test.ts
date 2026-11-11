@@ -225,7 +225,7 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
     assert.equal(cold.externalId, handle.externalId);
     assert.equal(await exists(), true, "provisioning returned a handle for a sprite that is not there");
     assert.ok(
-      said.some((message) => message.includes("Installing the agent tools")),
+      said.some((message) => message.includes("Installing tools")),
       "a brand new sprite should have said it was installing",
     );
     // The failure this whole file exists for: provisioning must not
@@ -475,7 +475,7 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
     await provision();
     const elapsed = Date.now() - started;
     assert.ok(
-      said.some((message) => message.includes("already installed")),
+      !said.some((message) => message.includes("Installing tools")),
       `a warm sprite should have skipped the install: ${said.join(" | ")}`,
     );
     assert.deepEqual(
@@ -597,6 +597,83 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
   });
 
   /**
+   * What a stage whose agent this machine has never run looks like: one
+   * CLI to install and a repository to check out, at the same time.
+   * The stub agrees that the two overlap; only a machine can say that
+   * an installer and git do not trip over each other while they do,
+   * and that the check's "git is here" is true of a real sprite.
+   */
+  await t.test("a missing agent installs beside a real checkout", { skip: needsSprite() }, async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "bento-sprite-alongside-"));
+    try {
+      const repo = path.join(root, "repo");
+      const seedPath = path.join(root, "seed.bundle");
+      const identity = {
+        ...process.env,
+        GIT_AUTHOR_NAME: "Bento test",
+        GIT_AUTHOR_EMAIL: "bento@localhost",
+        GIT_COMMITTER_NAME: "Bento test",
+        GIT_COMMITTER_EMAIL: "bento@localhost",
+      };
+      await exec("git", ["init", "--quiet", "-b", "main", repo]);
+      await writeFile(path.join(repo, "base.txt"), "base\n");
+      await exec("git", ["-C", repo, "add", "."]);
+      await exec("git", ["-C", repo, "commit", "--quiet", "-m", "base"], { env: identity });
+      await exec("git", ["-C", repo, "bundle", "create", seedPath, "main"]);
+
+      await uninstall(["codex"]);
+      await shell(`rm -f ${TOOLCHAIN_STAMPS}/codex; rm -rf /workspace/alongside-e2e`);
+      assert.notEqual((await shell("command -v codex")).exitCode, 0, "codex should be gone before the provision that restores it");
+
+      const lines: string[] = [];
+      const phases: { phase: string; installed?: boolean }[] = [];
+      await driver.provision({
+        projectId: "sprite-e2e",
+        workspaceKey,
+        hostWorkspacePath: "/unused",
+        // The stage's own agent and nothing else.
+        agentBinaries: ["codex"],
+        repositories: [
+          {
+            name: "alongside-e2e",
+            cloneUrl: "https://example.invalid/alongside-e2e.git",
+            baseBranch: "main",
+            branch: "bento/alongside",
+            seedBundle: await readFile(seedPath),
+          },
+        ],
+        onProgress: (message) => {
+          lines.push(message);
+          console.log(`  ${message}`);
+        },
+        onPhase: ({ phase, installed }) => void phases.push({ phase, ...(installed !== undefined ? { installed } : {}) }),
+      });
+
+      assert.deepEqual(lines.filter((message) => message.includes("Could not install")), []);
+      assert.ok(lines.includes("Installing tools."));
+      assert.equal((await shell("codex --version")).exitCode, 0, "the agent this stage runs did not arrive");
+      assert.equal((await shell("git -C /workspace/alongside-e2e rev-parse --abbrev-ref HEAD")).out, "bento/alongside");
+      assert.deepEqual(phases.find((timing) => timing.phase === "install"), { phase: "install", installed: true });
+
+      // And the stage after it, on the same agent, is the one round trip.
+      lines.length = 0;
+      phases.length = 0;
+      await driver.provision({
+        projectId: "sprite-e2e",
+        workspaceKey,
+        hostWorkspacePath: "/unused",
+        agentBinaries: ["codex"],
+        onProgress: (message) => void lines.push(message),
+        onPhase: ({ phase, installed }) => void phases.push({ phase, ...(installed !== undefined ? { installed } : {}) }),
+      });
+      assert.deepEqual(lines, ["Starting sandbox."], lines.join(" | "));
+      assert.deepEqual(phases.find((timing) => timing.phase === "install"), { phase: "install", installed: false });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  /**
    * What a TOOLCHAIN_VERSION bump looks like from inside the sandbox:
    * the marker it knows is gone, so the whole set installs again. This
    * is the run that matters most after a bump, because it is the one
@@ -610,7 +687,7 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
     said.length = 0;
     await provision();
     assert.ok(
-      said.some((message) => message.includes("Installing the agent tools")),
+      said.some((message) => message.includes("Installing tools")),
       "a bumped marker should install rather than skip",
     );
     const failed = said.filter((message) => message.includes("Could not install"));

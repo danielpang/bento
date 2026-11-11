@@ -46,12 +46,14 @@ import {
   swarms,
 } from "@bento/db";
 import {
+  AGENT_BINARIES,
   AGENT_CLI_BINARIES,
   collectExec,
   isExecTimeout,
   LineChannel,
   repositoryPathIn,
   sandboxErrorKind,
+  toolchainBinaries,
   type ExecChunk,
   type PreparedRepository,
   type SandboxDriver,
@@ -85,7 +87,7 @@ import {
   provisionFailureContext,
   provisionWorkspace,
 } from "./sandbox-provision.js";
-import { reportSandboxReady, runOwnerProperties, type SandboxOrigin } from "./sandbox-metrics.js";
+import { reportSandboxReady, runOwnerProperties, type SandboxOrigin, type SandboxReadyPhases } from "./sandbox-metrics.js";
 export { sandboxProvisionConflict } from "./sandbox-provision.js";
 import { allCandidates, driversForRun, driverForSandbox, SandboxDriverUnavailable, type ProvisionDrivers } from "./sandbox-driver.js";
 import { evaluateFeatureGate } from "./gate-evaluator.js";
@@ -375,8 +377,13 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
    */
   const sayAsUser = (text: string) =>
     appendRunEvent(ctx, runId, { type: "message", role: "user", text });
-  const saySystem = (text: string) =>
-    appendRunEvent(ctx, runId, { type: "message", role: "system", text });
+  /**
+   * `step` marks the routine line of a boot step that is under way.
+   * Every one is still a row in the transcript; a console draws a run
+   * of them as one line that changes (`foldProgress` in @bento/core).
+   */
+  const saySystem = (text: string, options?: { step?: boolean }) =>
+    appendRunEvent(ctx, runId, { type: "message", role: "system", text, ...(options?.step ? { progress: true } : {}) });
   // The prompt the user typed is their own line in the conversation,
   // so it opens the transcript the way it would in a chat. Generated
   // prompts stay out: a stage run's prompt is empty here, and the
@@ -417,6 +424,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
    * the driver's to answer for.
    */
   let provisionMs = 0;
+  let readyPhases: SandboxReadyPhases = {};
   let sandboxOrigin: SandboxOrigin = "new";
   const publisher = await githubConnectionFor(ctx, subject.organizationId);
   /**
@@ -484,19 +492,40 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       restartedRepoUrls: replaced.map((pr) => pr.repoUrl),
       ...(modalNetwork.allowedHosts ? { allowedHosts: modalNetwork.allowedHosts } : {}),
       /**
-       * Install only the CLIs this run's pipeline actually uses, which
-       * is minutes off a new card's first stage.
+       * Install only the CLI this run spawns. Every other agent is an
+       * installer on the critical path of a run that will never call
+       * it: a card's first stage used to wait for the agents of every
+       * later stage, and a swarm's machine for all ten.
        *
-       * A card can be asked which agents its stages name. A swarm has
-       * no pipeline to ask, so it installs the whole set, which is what
-       * every machine did before this existed.
+       * Safe because this is asked before every run. A stage that runs
+       * a different agent, one whose agent was changed after the card
+       * got its machine, a judge, or an agent a person picks by hand
+       * names its own CLI here, and the driver installs it when the
+       * machine does not have it.
        */
-      ...(subject.kind === "pipeline"
+      agentBinaries: toolchainBinaries([profile.cli]),
+      /**
+       * A Modal machine comes from an image built once per set of
+       * CLIs, so there the wider set costs nothing and is still worth
+       * asking for: a later run finds its agent already there,
+       * including on a locked network no installer can cross. A card
+       * asks for its pipeline's agents. A swarm has no pipeline to
+       * ask, and its planner, resolvers and workers can each run a
+       * different agent in one machine, so it asks for all of them,
+       * which is what every swarm image held before runs named their
+       * own CLI. Without this a swarm's image would hold the first
+       * run's agent alone.
+       *
+       * Only when Modal may make the machine. Nothing else reads it,
+       * and the pipeline's set is two queries between the claim and
+       * the agent.
+       */
+      ...(allCandidates(chosenDrivers).some((candidate) => candidate.provider === "modal")
         ? {
-            agentBinaries: await pipelineAgentBinaries(ctx.db, {
-              pipelineId: subject.feature.pipelineId,
-              runCli: profile.cli,
-            }),
+            imageAgentBinaries:
+              subject.kind === "pipeline"
+                ? await pipelineAgentBinaries(ctx.db, { pipelineId: subject.feature.pipelineId, runCli: profile.cli })
+                : AGENT_BINARIES,
           }
         : {}),
       /**
@@ -561,6 +590,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     const provisionStarted = performance.now();
     const workspace = await provisionWorkspace(ctx, provisionInput);
     provisionMs = performance.now() - provisionStarted;
+    readyPhases = { ...workspace.timings };
     sandboxOrigin = workspace.origin;
     handle = workspace.handle;
     executionSandbox = workspace.sandboxRow;
@@ -768,6 +798,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   // Snapshot before the agent touches anything, so this run can be
   // undone wholesale. Drivers without snapshots (Docker) rely on git.
   if (driver.snapshot) {
+    const snapshotStarted = performance.now();
     try {
       const checkpointId = await driver.snapshot(handle, subject.snapshotLabel);
       await ctx.db.update(agentRuns).set({ checkpointId }).where(eq(agentRuns.id, runId));
@@ -785,6 +816,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
         "Could not save a snapshot of the sandbox before the agent starts. This run cannot be rolled back to this point, and the agent is starting anyway.",
       );
     }
+    readyPhases.snapshotMs = performance.now() - snapshotStarted;
   }
 
   /**
@@ -808,6 +840,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
    * anything.
    */
   const skipSetup = subject.kind === "swarm" && isDocumentSwarm(subject.swarm);
+  const setupStarted = performance.now();
   const setupFailure = skipSetup
     ? null
     : await runRepositorySetup(ctx, {
@@ -820,6 +853,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
         })),
         say: saySystem,
       });
+  if (!skipSetup) readyPhases.setupMs = performance.now() - setupStarted;
   if (setupFailure) {
     await saySystem("Dependency setup needs attention. Starting the agent with the error details so it can diagnose and repair the environment.");
   }
@@ -993,7 +1027,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   // be a long model turn, and these are what separate that wait from a
   // CLI that never started. Text-mode adapters emit their only event at
   // exit, so they skip the second line.
-  await saySystem(`Starting ${profile.cli} in the sandbox.`);
+  await saySystem("Starting agent.", { step: true });
   /**
    * The end of the wait the sandbox metric measures: an agent working
    * in a machine. For a streamed CLI that is its first event, so a
@@ -1012,6 +1046,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       queueWaitMs: claimed.queueWaitMs,
       sinceClaimMs: performance.now() - claimedTick,
       provisionMs,
+      phases: readyPhases,
       projectId: project.id,
       organizationId: subject.organizationId,
       userId: run.startedBy,
@@ -1083,7 +1118,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
           agentReported = true;
           if (announcesLaunchOnFirstEvent(adapter)) {
             reportAgentUp();
-            await saySystem(`${profile.cli} started and is working on the task.`);
+            await saySystem("Agent started.", { step: true });
           }
         }
         /**
@@ -1260,7 +1295,7 @@ export function museFailureAdvice(error: string): string | null {
 
 /**
  * Text-mode adapters emit their only event when the process exits, so a
- * "started and is working" line on that event reads as a stall that
+ * "Agent started." line on that event reads as a stall that
  * resolved instantly. Streamed CLIs still get the line on first output.
  */
 export function announcesLaunchOnFirstEvent(adapter: { stdoutMode?: string }): boolean {

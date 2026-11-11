@@ -1,4 +1,4 @@
-import { isSandboxCapacityError } from "@bento/core";
+import { foldProgress, isSandboxCapacityError } from "@bento/core";
 import { CapacityNotice } from "./CapacityNotice.js";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as Menu from "@radix-ui/react-dropdown-menu";
@@ -973,7 +973,9 @@ export function toChatItems(
     n += 1;
     calls = [];
   };
-  for (const event of events) {
+  // A boot's steps are one row that changes, not a row each. Keys are
+  // positions, so the row keeps its place as its text moves on.
+  for (const event of foldProgress(events)) {
     if (event.type === "tool") {
       const call = toolActivity(event);
       call.stopped = !running && call.phase === "start";

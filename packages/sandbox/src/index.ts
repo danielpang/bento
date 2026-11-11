@@ -39,6 +39,8 @@ export {
   TOOLCHAIN_VERSION,
   agentToolchainScript,
   toolchainBinaries,
+  toolchainCheck,
+  toolchainCheckScript,
   type AgentBinary,
 } from "./agent-toolchain.js";
 export { sandboxFileExists, writeSandboxFiles, type SandboxFile } from "./sandbox-files.js";

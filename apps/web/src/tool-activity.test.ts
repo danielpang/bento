@@ -31,12 +31,42 @@ function calls(events: AgentEvent[], run = "run", running = false) {
 test("Poolside thoughts appear in an agent bubble while Bento notices remain notes", () => {
   const items = toChatItems([
     { type: "message", role: "system", text: "Checking the repo", raw: { type: "thought" } },
-    { type: "message", role: "system", text: "Starting pool in the sandbox." },
+    { type: "message", role: "system", text: "Starting agent." },
   ], "Swarm Planner", "run");
   assert.deepEqual(items.map((item) => item.kind === "message" ? [item.role, item.speaker] : []), [
     ["assistant", "Swarm Planner thinking"],
     ["system", "bento"],
   ]);
+});
+
+/**
+ * A boot is one row that changes. Each step is still an event; the
+ * console draws the latest, and the row keeps its key so it updates in
+ * place rather than being replaced.
+ */
+test("a boot's steps are one row whose text moves on", () => {
+  const boot = ["Starting sandbox.", "Installing tools.", "Preparing repositories.", "Starting agent."].map((text) => ({
+    type: "message" as const,
+    role: "system" as const,
+    text,
+    progress: true,
+  }));
+  const rows = (count: number) =>
+    toChatItems(boot.slice(0, count), "Claude", "run").map((item) => [item.key, item.kind === "message" ? item.text : ""]);
+  assert.deepEqual(rows(1), [["run-0", "Starting sandbox."]]);
+  assert.deepEqual(rows(3), [["run-0", "Preparing repositories."]]);
+  assert.deepEqual(rows(4), [["run-0", "Starting agent."]]);
+
+  // A notice between steps is not folded away, and neither is the step before it.
+  const withNotice = toChatItems(
+    [boot[0]!, { type: "message", role: "system", text: "Failed to provision sandbox, retrying." }, boot[0]!, boot[1]!],
+    "Claude",
+    "run",
+  );
+  assert.deepEqual(
+    withNotice.map((item) => (item.kind === "message" ? item.text : "")),
+    ["Starting sandbox.", "Failed to provision sandbox, retrying.", "Installing tools."],
+  );
 });
 
 test("recorded Cursor tools describe files, searches, edits and commands", () => {

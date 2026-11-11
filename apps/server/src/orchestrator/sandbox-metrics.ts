@@ -247,6 +247,20 @@ export function reportToolchainInstallFailed(
  * (machine creation, tool install, clones). The rest is setup
  * commands, the snapshot, and the MCP attach.
  *
+ * The provision is broken down again, because "the sandbox was slow"
+ * is four different problems: `prepare_ms` is this server before any
+ * provider was asked (the seed bundles it reads from GitHub),
+ * `acquire_ms` the provider making or finding the machine,
+ * `install_ms` the agent CLI, and `checkout_ms` the repositories.
+ * The install and the checkout overlap on a cold sprite, so the four
+ * can add up to more than `provision_ms`. `tools_installed` says
+ * whether an installer ran at all: a stage whose agent the machine
+ * already had reports false and an `install_ms` of one round trip.
+ * After the provision, `snapshot_ms` is the checkpoint taken before
+ * the agent touches anything and `setup_ms` the repositories' own
+ * setup commands. Each is absent when the step did not happen or the
+ * driver reports no phases.
+ *
  * Every term is on one clock. The queue wait is computed by the
  * database when the run is claimed, from its own `queued_at` and its
  * own `now()`, and the rest is a monotonic interval measured by the
@@ -303,12 +317,43 @@ export interface SandboxReady {
   sinceClaimMs: number;
   /** How long the sandbox driver alone took, when known. */
   provisionMs?: number;
+  /** The slices of the provision and of what follows it; see the event's description. */
+  phases?: SandboxReadyPhases;
   projectId: string;
   organizationId: string | null;
   /** The person who started the run, when there is one. */
   userId: string | null;
   owner: SandboxOwner;
   stageId?: string;
+}
+
+export interface SandboxReadyPhases {
+  prepareMs?: number;
+  acquireMs?: number;
+  installMs?: number;
+  checkoutMs?: number;
+  toolsInstalled?: boolean;
+  snapshotMs?: number;
+  setupMs?: number;
+}
+
+/** The phases as event properties, each present only when it was measured. */
+function phaseProperties(phases: SandboxReadyPhases | undefined): Record<string, number | boolean> {
+  if (!phases) return {};
+  const properties: Record<string, number | boolean> = {};
+  const durations = {
+    prepare_ms: phases.prepareMs,
+    acquire_ms: phases.acquireMs,
+    install_ms: phases.installMs,
+    checkout_ms: phases.checkoutMs,
+    snapshot_ms: phases.snapshotMs,
+    setup_ms: phases.setupMs,
+  };
+  for (const [name, value] of Object.entries(durations)) {
+    if (value !== undefined) properties[name] = wholeMs(value);
+  }
+  if (phases.toolsInstalled !== undefined) properties.tools_installed = phases.toolsInstalled;
+  return properties;
 }
 
 /** A duration as PostHog gets it: whole milliseconds, never negative. */
@@ -328,6 +373,7 @@ export function reportSandboxReady(analytics: Analytics | null | undefined, info
         duration_ms: queueWait + sinceClaim,
         queue_wait_ms: queueWait,
         ...(info.provisionMs !== undefined ? { provision_ms: wholeMs(info.provisionMs) } : {}),
+        ...phaseProperties(info.phases),
         sandbox_origin: info.origin,
         provider: info.provider,
         ...(info.selection ? { selection: info.selection } : {}),
