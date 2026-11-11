@@ -255,8 +255,12 @@ export interface ProvisionSpec {
    * "starting" with no way to tell progress from a hang. Drivers await
    * each call so the lines land in order; a driver with nothing slow to
    * report may ignore it.
+   *
+   * `step` marks the routine line of a step that is under way, which
+   * the next one replaces on screen. A line without it (a retry, a
+   * failure, a snapshot that was gone) is something to keep reading.
    */
-  onProgress?: (message: string) => void | Promise<void>;
+  onProgress?: (message: string, options?: { step?: boolean }) => void | Promise<void>;
   /**
    * Called when the toolchain script left CLIs off the PATH. The
    * provision goes on, so this is how the failure reaches error

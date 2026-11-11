@@ -376,8 +376,13 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
    */
   const sayAsUser = (text: string) =>
     appendRunEvent(ctx, runId, { type: "message", role: "user", text });
-  const saySystem = (text: string) =>
-    appendRunEvent(ctx, runId, { type: "message", role: "system", text });
+  /**
+   * `step` marks the routine line of a boot step that is under way.
+   * Every one is still a row in the transcript; a console draws a run
+   * of them as one line that changes (`foldProgress` in @bento/core).
+   */
+  const saySystem = (text: string, options?: { step?: boolean }) =>
+    appendRunEvent(ctx, runId, { type: "message", role: "system", text, ...(options?.step ? { progress: true } : {}) });
   // The prompt the user typed is their own line in the conversation,
   // so it opens the transcript the way it would in a chat. Generated
   // prompts stay out: a stage run's prompt is empty here, and the
@@ -1012,7 +1017,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   // be a long model turn, and these are what separate that wait from a
   // CLI that never started. Text-mode adapters emit their only event at
   // exit, so they skip the second line.
-  await saySystem("Starting agent.");
+  await saySystem("Starting agent.", { step: true });
   /**
    * The end of the wait the sandbox metric measures: an agent working
    * in a machine. For a streamed CLI that is its first event, so a
@@ -1103,7 +1108,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
           agentReported = true;
           if (announcesLaunchOnFirstEvent(adapter)) {
             reportAgentUp();
-            await saySystem("Agent started.");
+            await saySystem("Agent started.", { step: true });
           }
         }
         /**

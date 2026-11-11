@@ -300,6 +300,17 @@ no provider, no list of tools, no timings (those are in `sandbox
 ready`), and nothing for a step that had nothing to do. A step that
 went wrong still says so in full.
 
+Those lines are marked as steps (`progress: true` on the message
+event; the drivers pass `{ step: true }` to `onProgress`, the executor
+to `saySystem`), and a console draws a run of them as one line that
+changes: `foldProgress` in `@bento/core`, which the web console and
+the TUI both call. Every step is still a row in `run_events`, in
+order, because a restart and the stall reaper read what the last one
+was; do not make the server update a row in place. Only a step
+directly followed by another is folded, so a retry or a warning
+between two steps keeps the step before it on screen. A new routine
+boot line gets the mark; a line someone should keep reading does not.
+
 `sandbox ready` says where the wait went: `prepare_ms` (this server
 before a provider is asked, mostly the seed bundles it reads from
 GitHub), `acquire_ms`, `install_ms`, `checkout_ms` (the driver's

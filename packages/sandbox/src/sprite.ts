@@ -400,8 +400,8 @@ export class SpriteDriver implements SandboxDriver {
   async provision(spec: ProvisionSpec): Promise<SandboxHandle> {
     const name = this.spriteName(spec.workspaceKey);
     const spriteLabel = name;
-    const say = async (message: string) => {
-      await spec.onProgress?.(message);
+    const say = async (message: string, step = false) => {
+      await spec.onProgress?.(message, step ? { step: true } : undefined);
     };
 
     /**
@@ -442,7 +442,7 @@ export class SpriteDriver implements SandboxDriver {
     // the tools it already has and how long each step took are not
     // what they opened the card to read. A step that went wrong still
     // says so in full.
-    await say("Starting sandbox.");
+    await say("Starting sandbox.", true);
 
     /**
      * The CLIs this run can spawn, which the caller narrows to the
@@ -487,7 +487,7 @@ export class SpriteDriver implements SandboxDriver {
      * sandbox was built, is installed here, and only that one.
      */
     const install = async () => {
-      await say("Installing tools.");
+      await say("Installing tools.", true);
       const toolchain = await runScript(sprite, agentToolchainScript(binaries));
 
       /**
@@ -537,7 +537,7 @@ export class SpriteDriver implements SandboxDriver {
       await say("The sandbox filesystem is temporarily unavailable. Retrying.");
     };
     const checkingOut = phase("checkout", async () => {
-    if ((spec.repositories ?? []).some((repo) => repo.cloneUrl || repo.seedBundle)) await say("Preparing repositories.");
+    if ((spec.repositories ?? []).some((repo) => repo.cloneUrl || repo.seedBundle)) await say("Preparing repositories.", true);
     for (const repo of spec.repositories ?? []) {
       /*
        * A repository with neither a remote nor a seed has nothing to

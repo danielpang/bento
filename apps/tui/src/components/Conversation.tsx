@@ -9,7 +9,7 @@ import type {
   RunArtifact,
   Stage,
 } from "@bento/api-client";
-import type { AgentEvent } from "@bento/core";
+import { foldProgress, type AgentEvent } from "@bento/core";
 import { terminalSelectionHint, terminalText } from "../terminal.js";
 import { useKeyboardInput, useMouseTarget } from "../mouse.js";
 import { MouseActions, MouseButton } from "./MouseControls.js";
@@ -371,11 +371,11 @@ export function Conversation({
     };
     for (const block of history.blocks) {
       output.push(runHeader(block.runId, block.agentName, block.status, block.queuedAt));
-      output.push(...block.events.flatMap((event) => conversationEvent(event, block.agentName)));
+      output.push(...foldProgress(block.events).flatMap((event) => conversationEvent(event, block.agentName)));
     }
     if (run) {
       output.push(runHeader(run.id, agent, run.status, run.queuedAt));
-      output.push(...live.flatMap((event) => conversationEvent(event, agent)));
+      output.push(...foldProgress(live).flatMap((event) => conversationEvent(event, agent)));
       if (draft) output.push({ kind: "assistant", label: `${agent} · Writing…`, text: draft });
       else if (!live.length) output.push({ kind: "system", label: "Waiting for agent output…", text: "" });
     }

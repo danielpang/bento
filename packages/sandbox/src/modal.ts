@@ -303,11 +303,11 @@ export class ModalDriver implements SandboxDriver {
   }
 
   async provision(spec: ProvisionSpec): Promise<SandboxHandle> {
-    const say = async (message: string) => {
-      await spec.onProgress?.(message);
+    const say = async (message: string, step = false) => {
+      await spec.onProgress?.(message, step ? { step: true } : undefined);
     };
     // Short, and never the provider: see the sprite driver's first line.
-    await say("Starting sandbox.");
+    await say("Starting sandbox.", true);
     const timed = (phase: ProvisionPhase, started: number, extra: { installed?: boolean } = {}) => {
       try {
         spec.onPhase?.({ phase, ms: performance.now() - started, ...extra });
@@ -787,7 +787,7 @@ export class ModalDriver implements SandboxDriver {
     api: ModalApi,
     spec: ProvisionSpec,
     name: string,
-    say: (message: string) => Promise<void>,
+    say: (message: string, step?: boolean) => Promise<void>,
   ): Promise<{ image: ModalImageRef; recordedImageRef?: string | null }> {
     // An exit snapshot is the workspace after the last stored image.
     // It wins over that older id. A failure here is a fresh clone:
@@ -800,7 +800,7 @@ export class ModalDriver implements SandboxDriver {
       return { image: await this.toolchain(api, spec), recordedImageRef: null };
     }
     if (spec.imageRef) {
-      await say("Restoring workspace.");
+      await say("Restoring workspace.", true);
       const saved = await api.imageFromId(spec.imageRef);
       if (saved) return { image: saved };
       await say("The saved workspace snapshot is gone, so this sandbox starts from a fresh clone.");
@@ -826,7 +826,7 @@ export class ModalDriver implements SandboxDriver {
 
   private async exitSnapshot(
     name: string,
-    say: (message: string) => Promise<void>,
+    say: (message: string, step?: boolean) => Promise<void>,
   ): Promise<{ image: ModalImageRef } | { unusable: true } | null> {
     const api = await this.api();
     const dead = await this.deadBox(api, name);
@@ -840,6 +840,7 @@ export class ModalDriver implements SandboxDriver {
         hitLifetime
           ? "This Modal sandbox reached its 24 hour limit. Restoring the workspace from its exit snapshot."
           : "Restoring workspace.",
+        !hitLifetime,
       );
       return { image };
     } catch {
@@ -1038,7 +1039,7 @@ export class ModalDriver implements SandboxDriver {
   private async prepareAgentTools(
     box: ModalBox,
     spec: ProvisionSpec,
-    say: (message: string) => Promise<void>,
+    say: (message: string, step?: boolean) => Promise<void>,
   ): Promise<boolean> {
     const binaries = spec.agentBinaries;
     // A caller that named no agent gets the image as it is, as before.
@@ -1054,7 +1055,7 @@ export class ModalDriver implements SandboxDriver {
     // machine this cannot read, not a machine to run installers in.
     if (check.ready || check.needed.length === 0) return false;
 
-    await say("Installing tools.");
+    await say("Installing tools.", true);
     const report = async (missing: string[], output: string) => {
       await say(
         `Could not install ${missing.join(", ")} in this sandbox. Cards that use those agents will fail to start until an install succeeds, which the next run tries again.`,
@@ -1085,9 +1086,9 @@ export class ModalDriver implements SandboxDriver {
   private async prepareRepositories(
     box: ModalBox,
     spec: ProvisionSpec,
-    say: (message: string) => Promise<void>,
+    say: (message: string, step?: boolean) => Promise<void>,
   ): Promise<void> {
-    if ((spec.repositories ?? []).some((repo) => repo.cloneUrl || repo.seedBundle)) await say("Preparing repositories.");
+    if ((spec.repositories ?? []).some((repo) => repo.cloneUrl || repo.seedBundle)) await say("Preparing repositories.", true);
     for (const repo of spec.repositories ?? []) {
       if (!repo.cloneUrl && !repo.seedBundle) continue;
       const dir = `/workspace/${repo.name}`;

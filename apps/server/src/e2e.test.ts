@@ -893,6 +893,18 @@ test("a run asks its sandbox for its own agent, and names the pipeline's only fo
     assert.equal(typeof ready.properties?.prepare_ms, "number", "the wait is not broken down");
     assert.equal(typeof ready.properties?.setup_ms, "number");
 
+    // The boot's own lines are every one of them in the transcript,
+    // marked as steps so a console draws them as one line that changes.
+    const recorded = await ctx.db
+      .select({ payload: runEvents.payload })
+      .from(runEvents)
+      .where(eq(runEvents.runId, first.id))
+      .orderBy(runEvents.seq);
+    const steps = recorded
+      .map((row) => row.payload as { type: string; text?: string; progress?: boolean })
+      .filter((event) => event.type === "message" && event.progress === true);
+    assert.deepEqual(steps.map((event) => event.text), ["Starting agent.", "Agent started."]);
+
     // A person runs the card with Codex. Whatever becomes of the run
     // (this machine has no Codex), its provision named that one CLI.
     const second = await start(codex.id);

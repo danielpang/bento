@@ -145,7 +145,7 @@ export interface ProvisionWorkspaceInput {
    */
   allowedHosts?: string[];
   /** Progress lines, which go into the transcript of whatever asked. */
-  say: (text: string) => Promise<void>;
+  say: (text: string, options?: { step?: boolean }) => Promise<void>;
   /**
    * The driver this machine belongs to. Chosen by the caller from the
    * live sandbox row, or from the project when there is no machine yet.

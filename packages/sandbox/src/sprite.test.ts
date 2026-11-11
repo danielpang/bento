@@ -4742,6 +4742,42 @@ const oneRepository = [{ name: "api", cloneUrl: "https://github.com/acme/api.git
  * "ready" is the whole answer, and sending the script after it was a
  * second exec and a second session listing on every warm start.
  */
+/**
+ * The routine lines of a boot are marked as steps, which is what lets
+ * a console draw them as one line that changes. A line about something
+ * that went wrong is not one, so it stays on screen.
+ */
+test("a sprite marks its boot lines as steps, and a failure to install as a line to keep", async () => {
+  const { sprite } = recordingSprite((script) => {
+    if (isCheck(script)) return { stdout: "bento-toolchain-needed: opencode\n" };
+    if (isInstall(script)) return { stdout: "bento-toolchain-missing: opencode \n" };
+    return {};
+  });
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+  const said: [string, boolean][] = [];
+
+  await driver.provision({
+    projectId: "project",
+    workspaceKey: "feature",
+    hostWorkspacePath: "/unused",
+    agentBinaries: ["opencode"],
+    repositories: oneRepository,
+    onToolchainMissing: () => {},
+    onProgress: (message, options) => void said.push([message, options?.step === true]),
+  });
+
+  assert.deepEqual(
+    said.map(([message, step]) => [message.split(" in this sandbox")[0], step]),
+    [
+      ["Starting sandbox.", true],
+      ["Installing tools.", true],
+      ["Could not install opencode", false],
+      ["Preparing repositories.", true],
+    ],
+  );
+});
+
 test("a sprite that already has this run's agent settles the toolchain in one round trip", async () => {
   const { sprite, scripts } = recordingSprite((script) => (isCheck(script) ? { stdout: "bento-toolchain-ready\n" } : {}));
   const driver = new SpriteDriver({ token: "token" });
