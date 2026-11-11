@@ -866,11 +866,19 @@ test("a run asks its sandbox for its own agent, and names the pipeline's only fo
       ...(spec.agentBinaries ? { agentBinaries: spec.agentBinaries } : {}),
       ...(spec.imageAgentBinaries ? { imageAgentBinaries: spec.imageAgentBinaries } : {}),
     });
-    return local.provision(spec);
+    return { ...(await local.provision(spec)), provider: "modal" as const };
   };
+  // "Modal" is the local driver under another name, as in the fallback
+  // test above: the image set is only worked out when Modal may make
+  // the machine, since nothing else reads it.
+  Object.defineProperty(recording, "provider", { value: "modal" });
   const before = analytics.events.length;
   const previousDrivers = ctx.drivers;
-  ctx.drivers = singleDriver(recording);
+  ctx.drivers = {
+    default: recording,
+    get: (provider) => (provider === "modal" ? recording : undefined),
+    selectable: () => ["modal"],
+  };
   try {
     const start = async (agentProfileId: string) =>
       json<{ id: string }>(
@@ -910,6 +918,32 @@ test("a run asks its sandbox for its own agent, and names the pipeline's only fo
     const second = await start(codex.id);
     await waitForRun(second.id);
     assert.deepEqual(asked[1], { agentBinaries: ["codex"], imageAgentBinaries: ["claude", "codex"] });
+  } finally {
+    ctx.drivers = previousDrivers;
+  }
+
+  // A driver that bakes no image is not handed one to bake, and the
+  // run does not spend two queries working it out.
+  const elsewhere = await createFeature(project.id, "No image to bake");
+  await app.request(`/api/features/${elsewhere.id}/advance`, { method: "POST" });
+  const plain = new LocalProcessDriver();
+  const plainAsked: unknown[] = [];
+  const provisionPlain = plain.provision.bind(plain);
+  plain.provision = async (spec) => {
+    plainAsked.push({ agentBinaries: spec.agentBinaries, imageAgentBinaries: spec.imageAgentBinaries });
+    return provisionPlain(spec);
+  };
+  ctx.drivers = singleDriver(plain);
+  try {
+    const run = await json<{ id: string }>(
+      await app.request("/api/runs", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ featureId: elsewhere.id, agentProfileId: fake.id, prompt: "hello" }),
+      }),
+    );
+    assert.equal(await waitForRun(run.id), "succeeded");
+    assert.deepEqual(plainAsked, [{ agentBinaries: [], imageAgentBinaries: undefined }]);
   } finally {
     ctx.drivers = previousDrivers;
   }

@@ -278,6 +278,47 @@ export interface ProvisionSpec {
   onPhase?: (timing: ProvisionPhaseTiming) => void;
 }
 
+/**
+ * How long a phase took, handed to the caller's metric. Shared by the
+ * clone drivers so the two time and report a phase the same way. Never
+ * the reason a provision fails.
+ */
+export function reportProvisionPhase(
+  spec: Pick<ProvisionSpec, "onPhase">,
+  phase: ProvisionPhase,
+  started: number,
+  extra: { installed?: boolean } = {},
+): void {
+  try {
+    spec.onPhase?.({ phase, ms: performance.now() - started, ...extra });
+  } catch (err) {
+    console.warn(`could not report the ${phase} phase of a provision:`, err);
+  }
+}
+
+/**
+ * Says, in the run's own transcript, which agent CLI an install left
+ * off the PATH, and hands it to error tracking. One sentence and one
+ * report for both clone drivers, so the next change to either is made
+ * once. The provision goes on: the other agents still run, and the
+ * next provision tries the install again.
+ */
+export async function reportToolchainMissing(
+  spec: Pick<ProvisionSpec, "onToolchainMissing">,
+  say: (message: string) => Promise<void>,
+  failure: ToolchainInstallFailure,
+  machine: string,
+): Promise<void> {
+  await say(
+    `Could not install ${failure.missing.join(", ")} in this sandbox. Cards that use those agents will fail to start until an install succeeds, which the next run tries again.`,
+  );
+  try {
+    await spec.onToolchainMissing?.(failure);
+  } catch (err) {
+    console.warn(`could not report the missing agent tools on ${machine}:`, err);
+  }
+}
+
 export interface ProvisionPhaseTiming {
   phase: ProvisionPhase;
   ms: number;

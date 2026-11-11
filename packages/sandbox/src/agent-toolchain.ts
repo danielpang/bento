@@ -389,7 +389,10 @@ ${
 # and start the checkout beside it when git is already here.
 if [ -n "$needed" ] || [ -n "$packages" ]; then
   echo "${TOOLCHAIN_NEEDED_PREFIX}$needed"
-  if command -v git >/dev/null 2>&1; then echo "${TOOLCHAIN_GIT_PRESENT}"; fi
+  # Only when no base package is missing. The full script would then
+  # run apt-get, certificates included, and a clone started beside
+  # that can fail for a reason that is nobody's but this machine's.
+  if [ -z "$packages" ]; then echo "${TOOLCHAIN_GIT_PRESENT}"; fi
   exit 0
 fi
 `
@@ -814,8 +817,9 @@ export interface ToolchainCheck {
   /** The CLIs the full script would install. Empty when only a base package is missing. */
   needed: string[];
   /**
-   * git is already on the PATH, so a checkout does not have to wait
-   * for the script's base packages. Only reported when there is work.
+   * git and every other base package are already on the machine, so
+   * the full script will run no package manager and a checkout can
+   * start beside it. Only reported when there is work.
    */
   git: boolean;
 }

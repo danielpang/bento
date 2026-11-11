@@ -274,11 +274,18 @@ the exec that makes the workspace and installs in place. Do not add a
 path that starts an agent in a machine without provisioning it for
 that agent first.
 
-Modal keeps the pipeline's whole set too, as `imageAgentBinaries`
-(`pipelineAgentBinaries`): its image is built once per set and cached,
-so the wider set costs a new card nothing, and a machine with the
-network lock on cannot reach an installer later. Such a machine is
-never asked to install; it runs what its image has.
+Modal keeps a wider set too, as `imageAgentBinaries`: its image is
+built once per set and cached, so the wider set costs a new machine
+nothing, and a machine with the network lock on cannot reach an
+installer later. Such a machine is never asked to install; it runs
+what its image has. A card names its pipeline's agents
+(`pipelineAgentBinaries`). A swarm names all of them, because its
+planner, resolvers and workers can each run a different agent in one
+machine; a swarm that passed no image set got an image holding the
+first run's agent alone. The executor works the set out only when
+Modal may make the machine, since nothing else reads it. Modal's check
+can never fail a provision: one that throws or times out is read as a
+machine that said nothing.
 
 Two more things keep the sprite's wait short, and both have a rule.
 The check is the only toolchain round trip on a machine that already
@@ -286,7 +293,9 @@ has the agent (every stage after the first that used it), so keep the
 warm path at one exec: anything the full script does before its
 installers, the check does too. And on a cold machine the install and
 the checkout run side by side, but only when the check found git
-already there, both are awaited before the provision returns or
+and every other base package already there (otherwise the script runs
+a package manager, certificates included, under the clone), both are
+awaited before the provision returns or
 throws, and the install's failure wins when both fail, because it is
 always the provider's and a broken checkout would fail on the next
 provider the same way. The check and the install open differently on

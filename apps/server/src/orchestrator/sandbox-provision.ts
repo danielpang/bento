@@ -198,8 +198,10 @@ export interface ProvisionedWorkspace {
  * The slices of one provision, each a monotonic interval measured in
  * this process. `prepareMs` is everything before a provider was asked
  * (the GitHub connection, the seed bundles read from GitHub, the clone
- * URL check); the rest are the phases of the driver that made the
- * machine, absent for a driver that reports none. The install and the
+ * URL check, the hibernated row of each provider tried); the rest are
+ * the phases of the driver that made the machine, absent for a driver
+ * that reports none. Both clone drivers stop `acquireMs` before the
+ * machine's row is recorded, so the two are comparable. The install and the
  * checkout can overlap on a cold sprite, so they do not add up to the
  * provision.
  */
@@ -417,7 +419,11 @@ export async function provisionWorkspace(
     delete timings.installMs;
     delete timings.checkoutMs;
     delete timings.toolsInstalled;
+    // Reading the hibernated row is this server's work before the
+    // provider is asked, so it counts with the rest of that.
+    const restoring = performance.now();
     const restore = canHibernate(candidate) ? await hibernatedRestore(ctx, input.owner) : undefined;
+    timings.prepareMs += performance.now() - restoring;
     let completedHandle: SandboxHandle | undefined;
     try {
       return await sandboxOperation(ctx, { projectId: input.projectId, workspaceKey, provider: candidate.provider, action: "provision" }, async (recordHandle) => {

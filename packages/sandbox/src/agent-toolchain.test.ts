@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -898,8 +898,11 @@ EOF
   }
 
   /** The check a sprite runs first, for one card's agents. */
-  check(binaries: readonly string[]): { status: number | null; stdout: string; stderr: string } {
-    return this.run(this.relocate(toolchainCheckScript(binaries)));
+  check(
+    binaries: readonly string[],
+    env: Record<string, string> = {},
+  ): { status: number | null; stdout: string; stderr: string } {
+    return this.run(this.relocate(toolchainCheckScript(binaries)), env);
   }
 
   /** The binaries a run could actually spawn afterwards. */
@@ -1428,6 +1431,36 @@ test("the check reads the pre-stamp marker, and a card with no agent is ready", 
     assert.deepEqual(toolchainCheck(sandbox.check(["claude"]).stdout).needed, ["claude"]);
     writeFileSync(path.join(root, TOOLCHAIN_LEGACY_MARKER.replace(/^\//, "")), "");
     assert.equal(toolchainCheck(sandbox.check(["claude"]).stdout).ready, true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * "git is here" is what lets a checkout start beside the install. With
+ * another base package missing, the install runs a package manager,
+ * certificates included, and a clone beside that can fail for a reason
+ * that is only this machine's. So the check keeps quiet, and the two
+ * run in order.
+ */
+test("the check does not offer a side by side checkout when a base package is missing", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "bento-toolchain-check-packages-"));
+  try {
+    const sandbox = new ToolchainSandbox(root);
+    assert.equal(toolchainCheck(sandbox.check(["claude"]).stdout).git, true, "every base package is here");
+
+    // The same machine with unzip gone: git still resolves.
+    const bin = path.join(root, "bin-without-unzip");
+    mkdirSync(bin);
+    for (const dir of ["/usr/bin", "/bin"]) {
+      for (const name of readdirSync(dir)) {
+        if (name === "unzip" || existsSync(path.join(bin, name))) continue;
+        symlinkSync(path.join(dir, name), path.join(bin, name));
+      }
+    }
+    const without = sandbox.check(["claude"], { PATH: `${root}/stubs:${root}/usr/local/bin:${bin}` });
+    assert.equal(without.status, 0, without.stderr);
+    assert.deepEqual(toolchainCheck(without.stdout), { ready: false, needed: ["claude"], git: false });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

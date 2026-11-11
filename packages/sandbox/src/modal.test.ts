@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { AGENT_BINARIES } from "./agent-toolchain.js";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -457,7 +458,7 @@ test("a missing exit snapshot starts from a fresh clone and says so", async () =
     },
   });
   assert.ok(
-    lines.includes("This Modal sandbox reached its 24 hour limit, so the next start is a fresh clone."),
+    lines.includes("This sandbox reached its 24 hour limit, so the next start is a fresh clone."),
   );
 });
 
@@ -1102,4 +1103,46 @@ test("a Modal check that says nothing runs no installer", async () => {
   const { env, written } = toolsFake({ running: true, check: "" });
   await driver(env.api).provision({ ...spec, agentBinaries: ["codex"] });
   assert.deepEqual(written, []);
+});
+
+/**
+ * The check is extra work in an exec that used to make a directory and
+ * nothing else, so it must not be what fails a provision. One that
+ * throws is read as a machine that said nothing, and the directory is
+ * made on its own.
+ */
+test("a Modal toolchain check that throws does not fail the provision", async () => {
+  const { env, scripts, written } = toolsFake({ running: true, check: "" });
+  const answer = env.box.exec;
+  env.box.exec = async (argv, options) => {
+    if ((argv[2] ?? "").includes("bento-toolchain-check")) {
+      scripts.push(argv[2] ?? "");
+      throw new Error("exec stream closed");
+    }
+    return answer(argv, options);
+  };
+  const handle = await driver(env.api).provision({ ...spec, agentBinaries: ["codex"] });
+  assert.equal(handle.externalId, "bento-feature-1");
+  assert.ok(scripts.includes("mkdir -p /workspace"), "the workspace directory was never made");
+  assert.deepEqual(written, [], "an installer ran on a machine nothing could read");
+});
+
+/**
+ * A swarm names the whole set for its image, because its planner,
+ * resolvers and workers can each run a different agent in one machine
+ * and a locked one cannot install later. The image follows what the
+ * caller named for it, not the one CLI this run spawns.
+ */
+test("a Modal image is built from the image set, not from the run's own agent", async () => {
+  const { env, imageSets } = toolsFake({ running: false, check: "bento-toolchain-ready\n" });
+  await driver(env.api).provision({ ...spec, agentBinaries: ["claude"], imageAgentBinaries: AGENT_BINARIES });
+  assert.deepEqual(imageSets, [AGENT_BINARIES]);
+});
+
+test("the 24 hour limit is said without naming the provider", async () => {
+  const source = await readFile(new URL("./modal.ts", import.meta.url), "utf8");
+  const said = [...source.matchAll(/say\(\s*(?:[\w.!]+\s*\?\s*)?"([^"]+)"/g)].map((match) => match[1] ?? "");
+  assert.ok(said.length > 3, "the pattern no longer finds the driver's transcript lines");
+  assert.deepEqual(said.filter((line) => /modal/i.test(line)), []);
+  assert.doesNotMatch(source, /"This Modal sandbox/);
 });

@@ -14,7 +14,8 @@ import {
   SandboxImageLost,
   type ExecChunk,
   type ExecOptions,
-  type ProvisionPhase,
+  reportProvisionPhase,
+  reportToolchainMissing,
   type ProvisionSpec,
   type RepositoryBundle,
   type RepositoryExportOptions,
@@ -60,6 +61,8 @@ export const MODAL_WARM_WINDOW_MS = 5 * 60 * 1000;
  * outlast more than one of these.
  */
 export const MODAL_REPO_PREPARE_TIMEOUT_MS = 10 * 60 * 1000;
+/** The toolchain check: a few stats and a CLI's `--version`. */
+const MODAL_TOOLCHAIN_CHECK_TIMEOUT_MS = 30_000;
 /** One agent CLI's installer, with its retries. The same bound a checkout gets. */
 const MODAL_TOOLCHAIN_INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -308,13 +311,6 @@ export class ModalDriver implements SandboxDriver {
     };
     // Short, and never the provider: see the sprite driver's first line.
     await say("Starting sandbox.", true);
-    const timed = (phase: ProvisionPhase, started: number, extra: { installed?: boolean } = {}) => {
-      try {
-        spec.onPhase?.({ phase, ms: performance.now() - started, ...extra });
-      } catch (err) {
-        console.warn(`could not report the ${phase} phase of a Modal provision:`, err);
-      }
-    };
     const acquireStarted = performance.now();
     const name = modalSandboxName(spec.workspaceKey);
     const api = await this.api();
@@ -339,14 +335,16 @@ export class ModalDriver implements SandboxDriver {
     }
     this.remembered.set(name, box);
     try {
+      // Stopped where the sprite stops it, before the caller records the
+      // machine, so the two providers' numbers mean the same thing.
+      reportProvisionPhase(spec, "acquire", acquireStarted);
       await spec.onAcquired?.({ externalId: name, provider: "modal", workdir: "/workspace", createdSandbox: created });
-      timed("acquire", acquireStarted);
       const installStarted = performance.now();
       const installed = await this.prepareAgentTools(box, spec, say);
-      timed("install", installStarted, { installed });
+      reportProvisionPhase(spec, "install", installStarted, { installed });
       const checkoutStarted = performance.now();
       await this.prepareRepositories(box, spec, say);
-      timed("checkout", checkoutStarted);
+      reportProvisionPhase(spec, "checkout", checkoutStarted);
     } catch (err) {
       if (created) {
         let stopped = false;
@@ -838,7 +836,7 @@ export class ModalDriver implements SandboxDriver {
       const image = await dead.experimentalGetExitSnapshot();
       await say(
         hitLifetime
-          ? "This Modal sandbox reached its 24 hour limit. Restoring the workspace from its exit snapshot."
+          ? "This sandbox reached its 24 hour limit. Restoring the workspace from its exit snapshot."
           : "Restoring workspace.",
         !hitLifetime,
       );
@@ -846,7 +844,7 @@ export class ModalDriver implements SandboxDriver {
     } catch {
       await say(
         hitLifetime
-          ? "This Modal sandbox reached its 24 hour limit, so the next start is a fresh clone."
+          ? "This sandbox reached its 24 hour limit, so the next start is a fresh clone."
           : "The previous sandbox left no usable snapshot, so this one starts from a fresh clone.",
       );
       return { unusable: true };
@@ -1047,25 +1045,36 @@ export class ModalDriver implements SandboxDriver {
       await runShell(box, "mkdir -p /workspace", 30_000);
       return false;
     }
-    const checked = await runShell(box, ["mkdir -p /workspace", toolchainCheckScript(binaries)].join("\n"), 30_000, undefined, {
-      cwd: "/",
-    });
-    const check = toolchainCheck(checked.stdout);
+    /**
+     * The check is extra work this exec did not use to carry, and it
+     * runs the CLIs' own `--version`. So it cannot be what fails a
+     * provision: one that throws or runs out of time is read as a
+     * machine that said nothing, and the directory, which is all this
+     * exec was ever required to do, is made on its own. That call
+     * fails the provision when it fails, as it always did.
+     */
+    let checkOutput = "";
+    try {
+      const checked = await runShell(
+        box,
+        ["mkdir -p /workspace", toolchainCheckScript(binaries)].join("\n"),
+        MODAL_TOOLCHAIN_CHECK_TIMEOUT_MS,
+        undefined,
+        { cwd: "/" },
+      );
+      checkOutput = checked.stdout;
+    } catch (err) {
+      console.warn(`could not check the agent tools on ${box.sandboxId}:`, err);
+      await runShell(box, "mkdir -p /workspace", 30_000);
+    }
+    const check = toolchainCheck(checkOutput);
     // Only a CLI the check named. A check that said nothing is a
     // machine this cannot read, not a machine to run installers in.
     if (check.ready || check.needed.length === 0) return false;
 
     await say("Installing tools.", true);
-    const report = async (missing: string[], output: string) => {
-      await say(
-        `Could not install ${missing.join(", ")} in this sandbox. Cards that use those agents will fail to start until an install succeeds, which the next run tries again.`,
-      );
-      try {
-        await spec.onToolchainMissing?.({ missing, output });
-      } catch (err) {
-        console.warn(`could not report the missing agent tools on ${box.sandboxId}:`, err);
-      }
-    };
+    const report = (missing: string[], output: string) =>
+      reportToolchainMissing(spec, say, { missing, output }, box.sandboxId);
     const scriptPath = "/tmp/bento-toolchain.sh";
     try {
       // As a file, not an argument: the script is tens of kilobytes.

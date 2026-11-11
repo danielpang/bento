@@ -23,6 +23,8 @@ import {
   type SandboxHandle,
   ProvisionFailure,
   checkoutScriptBlame,
+  reportProvisionPhase,
+  reportToolchainMissing,
   type SandboxNeverStarted,
   type ProvisionBlame,
   type ProvisionPhase,
@@ -399,7 +401,6 @@ export class SpriteDriver implements SandboxDriver {
 
   async provision(spec: ProvisionSpec): Promise<SandboxHandle> {
     const name = this.spriteName(spec.workspaceKey);
-    const spriteLabel = name;
     const say = async (message: string, step = false) => {
       await spec.onProgress?.(message, step ? { step: true } : undefined);
     };
@@ -412,26 +413,18 @@ export class SpriteDriver implements SandboxDriver {
      * answering in the middle of it. The caller asks another provider
      * only for Fly's failures: the project's would fail there too.
      */
-    const tagged = async <T>(name: ProvisionPhase, work: () => Promise<T>): Promise<T> => {
+    const tagged = async <T>(phaseName: ProvisionPhase, work: () => Promise<T>): Promise<T> => {
       try {
         return await work();
       } catch (err) {
         if (err instanceof ProvisionFailure) throw err;
-        throw new ProvisionFailure("sprite", name, spriteBlame(name, err), err);
+        throw new ProvisionFailure("sprite", phaseName, spriteBlame(phaseName, err), err);
       }
     };
-    /** How long a phase took, for the caller's metric. Never the reason a provision fails. */
-    const timed = (name: ProvisionPhase, started: number, extra: { installed?: boolean } = {}) => {
-      try {
-        spec.onPhase?.({ phase: name, ms: performance.now() - started, ...extra });
-      } catch (err) {
-        console.warn(`could not report the ${name} phase of ${spriteLabel}:`, err);
-      }
-    };
-    const phase = async <T>(name: ProvisionPhase, work: () => Promise<T>): Promise<T> => {
+    const phase = async <T>(phaseName: ProvisionPhase, work: () => Promise<T>): Promise<T> => {
       const started = performance.now();
-      const result = await tagged(name, work);
-      timed(name, started);
+      const result = await tagged(phaseName, work);
+      reportProvisionPhase(spec, phaseName, started);
       return result;
     };
 
@@ -490,36 +483,25 @@ export class SpriteDriver implements SandboxDriver {
       await say("Installing tools.", true);
       const toolchain = await runScript(sprite, agentToolchainScript(binaries));
 
-      /**
-       * A CLI whose installer was unreachable is said here, in the run's
-       * own transcript, rather than left for the agent to fail on with a
-       * shell's "not found". The script only reports what is genuinely
-       * absent from the PATH afterwards, and the next provision retries
-       * it, so this is a delay to name rather than a sandbox to throw
-       * away: the other agents still run.
-       */
+      // A CLI whose installer was unreachable is said in the run's own
+      // transcript, rather than left for the agent to fail on with a
+      // shell's "not found". The script reports only what is genuinely
+      // absent from the PATH afterwards.
       const missing = toolchainMissing(toolchain.stdout);
-      if (missing.length > 0) {
-        await say(
-          `Could not install ${missing.join(", ")} in this sandbox. Cards that use those agents will fail to start until an install succeeds, which the next run tries again.`,
-        );
-        try {
-          await spec.onToolchainMissing?.({ missing, output: toolchain.stderr });
-        } catch (err) {
-          console.warn(`could not report the missing agent tools on ${name}:`, err);
-        }
-      }
+      if (missing.length > 0) await reportToolchainMissing(spec, say, { missing, output: toolchain.stderr }, name);
     };
     const installing = (check.ready ? Promise.resolve() : tagged("install", install)).then(() =>
-      timed("install", installStarted, { installed: !check.ready }),
+      reportProvisionPhase(spec, "install", installStarted, { installed: !check.ready }),
     );
     /**
      * An install and a checkout are both waits on the network and
      * neither needs the other, so on a machine that has work to do in
      * both they run side by side: a new card's first stage waits for
-     * the longer of the two instead of their sum. Only when git is
-     * already on the machine. Without it the checkout has to wait for
-     * the script's base packages, and the two run in order as before.
+     * the longer of the two instead of their sum. Only when git and
+     * the script's other base packages are already on the machine.
+     * Without them the script runs a package manager, certificates
+     * included, and a clone beside that can fail for a reason that is
+     * only this machine's, so the two run in order as before.
      */
     const alongside = !check.ready && check.git;
     // Awaited below either way; this only keeps a failure that lands

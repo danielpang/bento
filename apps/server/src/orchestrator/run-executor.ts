@@ -46,6 +46,7 @@ import {
   swarms,
 } from "@bento/db";
 import {
+  AGENT_BINARIES,
   AGENT_CLI_BINARIES,
   collectExec,
   isExecTimeout,
@@ -505,17 +506,26 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       agentBinaries: toolchainBinaries([profile.cli]),
       /**
        * A Modal machine comes from an image built once per set of
-       * CLIs, so there the whole pipeline's set costs nothing and is
-       * still worth asking for: a later stage finds its agent already
-       * there, including on a locked network no installer can cross.
-       * A swarm has no pipeline to ask, and its image carries them all.
+       * CLIs, so there the wider set costs nothing and is still worth
+       * asking for: a later run finds its agent already there,
+       * including on a locked network no installer can cross. A card
+       * asks for its pipeline's agents. A swarm has no pipeline to
+       * ask, and its planner, resolvers and workers can each run a
+       * different agent in one machine, so it asks for all of them,
+       * which is what every swarm image held before runs named their
+       * own CLI. Without this a swarm's image would hold the first
+       * run's agent alone.
+       *
+       * Only when Modal may make the machine. Nothing else reads it,
+       * and the pipeline's set is two queries between the claim and
+       * the agent.
        */
-      ...(subject.kind === "pipeline"
+      ...(allCandidates(chosenDrivers).some((candidate) => candidate.provider === "modal")
         ? {
-            imageAgentBinaries: await pipelineAgentBinaries(ctx.db, {
-              pipelineId: subject.feature.pipelineId,
-              runCli: profile.cli,
-            }),
+            imageAgentBinaries:
+              subject.kind === "pipeline"
+                ? await pipelineAgentBinaries(ctx.db, { pipelineId: subject.feature.pipelineId, runCli: profile.cli })
+                : AGENT_BINARIES,
           }
         : {}),
       /**
