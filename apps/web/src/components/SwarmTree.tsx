@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { CompletionRing } from "./CompletionRing.js";
-import { NODE_HEIGHT, NODE_WIDTH, visibleNodes, type SwarmModel, type SwarmNode } from "../swarm/layout.js";
+import { NODE_HEIGHT, NODE_WIDTH, busPath, visibleNodes, type SwarmModel, type SwarmNode } from "../swarm/layout.js";
 import { diagramAttentionWords, diagramTaskTone, diagramTaskWords, isAttention } from "../swarm/status.js";
 import { AgentOrb } from "./AgentOrb.js";
 import { cappedUsd, formatUsd, hasReportedSpend } from "../swarm/money.js";
@@ -29,8 +29,9 @@ function zoomAt(view: Viewport, scale: number, x: number, y: number): Viewport {
 /**
  * The plan, drawn.
  *
- * Top down from the root, one card per node, bezier edges between a
- * parent and its children. Every position, every edge path, and every
+ * Top down from the planner: the plan fans out into one column per
+ * branch where it first branches, and each branch's work stacks down
+ * its column, indented by depth. Every position, every edge path, and every
  * number on every card comes from `layout.ts`: this file places what
  * that module worked out and adds no arithmetic of its own, which is
  * why the Outline can render the same figures and why the maths is
@@ -74,6 +75,14 @@ export function SwarmTree({
   const width = Math.max(model.width, 340);
   const shift = (width - model.width) / 2;
   const roots = nodes.filter((node) => node.parentId === null);
+  /*
+   * The planner sits over the middle of what it planned, not the middle
+   * of the canvas: a column of indented work is wider on its right, so
+   * the two differ, and the line down from the planner would jog.
+   */
+  const plannerX = roots.length > 0
+    ? pad + shift + (roots[0]!.x + roots[roots.length - 1]!.x) / 2 + NODE_WIDTH / 2
+    : pad + width / 2;
   const contentWidth = width + pad * 2;
   const stageRef = useRef<HTMLDivElement>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
@@ -239,7 +248,7 @@ export function SwarmTree({
       <div className="swarm-tree-content" style={{ top: `${toolbarHeight}px`, width: `${contentWidth}px`, transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})` }}>
         {plannerRun && (
           <>
-            <div className="swarm-planner-tree-position">
+            <div className="swarm-planner-tree-position" style={{ transform: `translateX(${plannerX - (width + pad * 2) / 2}px)` }}>
               <SwarmPlannerStep run={plannerRun} now={now} busy={busy} onRetry={onRetryPlanner ?? (() => {})} onOpenOutput={onOpenPlannerOutput} canRetry={canRetryPlanner} variant="tree" />
             </div>
             {nodes.length > 0 && (
@@ -247,7 +256,7 @@ export function SwarmTree({
                 {roots.map((root) => (
                   <path
                     key={root.id}
-                    d={`M ${pad + width / 2} 0 C ${pad + width / 2} 24, ${pad + shift + root.x + NODE_WIDTH / 2} 24, ${pad + shift + root.x + NODE_WIDTH / 2} 48`}
+                    d={busPath(plannerX, 0, pad + shift + root.x + NODE_WIDTH / 2, 48)}
                     className="swarm-edge"
                     fill="none"
                   />
@@ -280,9 +289,7 @@ export function SwarmTree({
                 fill="none"
                 className="swarm-edge"
                 data-relation={edge.relation}
-                data-live={
-                  model.byId.get(edge.childId)?.frontierPath ? "" : undefined
-                }
+                data-live={edge.live ? "" : undefined}
               />
             ))}
           </g>
