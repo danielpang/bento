@@ -293,6 +293,13 @@ provider the same way. The check and the install open differently on
 purpose: the driver finds a provisioning script still running by the
 first 80 characters of its body.
 
+What a boot writes to the transcript is one short line per step that
+did something: "Starting sandbox.", "Installing tools.", "Preparing
+repositories.", "Starting agent.", "Agent started.". No machine name,
+no provider, no list of tools, no timings (those are in `sandbox
+ready`), and nothing for a step that had nothing to do. A step that
+went wrong still says so in full.
+
 `sandbox ready` says where the wait went: `prepare_ms` (this server
 before a provider is asked, mostly the seed bundles it reads from
 GitHub), `acquire_ms`, `install_ms`, `checkout_ms` (the driver's

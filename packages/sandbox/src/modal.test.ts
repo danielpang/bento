@@ -190,7 +190,7 @@ test("provision creates a sandbox with no idle timeout and a 24 hour cap", async
   assert.equal(created.tags.bento_feature, "feature-1");
   assert.equal(created.tags.bento_org, "org-1");
   assert.equal(created.name, "bento-feature-1");
-  assert.ok(lines.includes("Starting a Modal sandbox"));
+  assert.deepEqual(lines, ["Starting sandbox."], "a boot says one short line, and never the provider");
   assert.equal(driver(env.api).sandboxSize, "modal-standard");
   assert.equal(driver(env.api).supportsStdin, true);
 });
@@ -205,7 +205,7 @@ test("provision reuses a running sandbox", async () => {
     },
   });
   assert.equal(env.creates.length, 0);
-  assert.ok(lines.some((line) => line.startsWith("Reusing the Modal sandbox")));
+  assert.deepEqual(lines, ["Starting sandbox."]);
 });
 
 test("a failed toolchain build does not provision", async () => {
@@ -229,7 +229,7 @@ test("provision restores a hibernated image and says when it is gone", async () 
     },
   });
   assert.equal(saved.creates[0]?.name, "bento-feature-1");
-  assert.ok(lines.includes("Restoring the workspace from its last snapshot"));
+  assert.ok(lines.includes("Restoring workspace."));
 
   const gone = fake({ running: false });
   gone.api.imageFromId = async () => null;
@@ -262,7 +262,7 @@ test("an exit snapshot wins over an older hibernation image", async () => {
   });
   assert.deepEqual(env.images, ["im-exit"]);
   assert.equal(handle.recordedImageRef, "im-exit");
-  assert.ok(lines.includes("Restoring the workspace from its last snapshot"));
+  assert.ok(lines.includes("Restoring workspace."));
   assert.equal(lines.some((line) => line.includes("fresh clone")), false);
 });
 
@@ -1061,7 +1061,7 @@ test("a reused Modal sandbox installs an agent its image never had", async () =>
   assert.equal(env.creates.length, 0);
   assert.deepEqual(written, ["/tmp/bento-toolchain.sh"]);
   assert.equal(scripts.filter((script) => script.includes("sh /tmp/bento-toolchain.sh")).length, 1);
-  assert.ok(lines.includes("Installing the agent tools this run uses (codex)."));
+  assert.ok(lines.includes("Installing tools."));
   assert.deepEqual(reported, []);
   assert.deepEqual(phases[1], { phase: "install", installed: true });
 });

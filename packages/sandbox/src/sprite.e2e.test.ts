@@ -225,7 +225,7 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
     assert.equal(cold.externalId, handle.externalId);
     assert.equal(await exists(), true, "provisioning returned a handle for a sprite that is not there");
     assert.ok(
-      said.some((message) => message.includes("Installing the agent tools")),
+      said.some((message) => message.includes("Installing tools")),
       "a brand new sprite should have said it was installing",
     );
     // The failure this whole file exists for: provisioning must not
@@ -475,7 +475,7 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
     await provision();
     const elapsed = Date.now() - started;
     assert.ok(
-      said.some((message) => message.includes("already installed")),
+      !said.some((message) => message.includes("Installing tools")),
       `a warm sprite should have skipped the install: ${said.join(" | ")}`,
     );
     assert.deepEqual(
@@ -650,7 +650,7 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
       });
 
       assert.deepEqual(lines.filter((message) => message.includes("Could not install")), []);
-      assert.ok(lines.some((message) => message.includes("Installing the agent tools this run uses (codex)")));
+      assert.ok(lines.includes("Installing tools."));
       assert.equal((await shell("codex --version")).exitCode, 0, "the agent this stage runs did not arrive");
       assert.equal((await shell("git -C /workspace/alongside-e2e rev-parse --abbrev-ref HEAD")).out, "bento/alongside");
       assert.deepEqual(phases.find((timing) => timing.phase === "install"), { phase: "install", installed: true });
@@ -666,7 +666,7 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
         onProgress: (message) => void lines.push(message),
         onPhase: ({ phase, installed }) => void phases.push({ phase, ...(installed !== undefined ? { installed } : {}) }),
       });
-      assert.ok(lines.includes("Agent tools are already installed (codex)."), lines.join(" | "));
+      assert.deepEqual(lines, ["Starting sandbox."], lines.join(" | "));
       assert.deepEqual(phases.find((timing) => timing.phase === "install"), { phase: "install", installed: false });
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -687,7 +687,7 @@ test("a real sprite ends up with every agent CLI, and heals when one goes missin
     said.length = 0;
     await provision();
     assert.ok(
-      said.some((message) => message.includes("Installing the agent tools")),
+      said.some((message) => message.includes("Installing tools")),
       "a bumped marker should install rather than skip",
     );
     const failed = said.filter((message) => message.includes("Could not install"));

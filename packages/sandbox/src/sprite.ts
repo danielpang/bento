@@ -437,7 +437,12 @@ export class SpriteDriver implements SandboxDriver {
 
     const { sprite, created } = await phase("acquire", () => this.acquireSprite(name, say));
     await spec.onAcquired?.({ externalId: name, provider: "sprite", workdir: this.workdir, createdSandbox: created });
-    await say(created ? `Created cloud sandbox ${name}.` : `Reusing this card's cloud sandbox (${name}).`);
+    // One short line per step of a boot, and only for a step that does
+    // something: the transcript is a person's, and the machine's name,
+    // the tools it already has and how long each step took are not
+    // what they opened the card to read. A step that went wrong still
+    // says so in full.
+    await say("Starting sandbox.");
 
     /**
      * The CLIs this run can spawn, which the caller narrows to the
@@ -445,10 +450,6 @@ export class SpriteDriver implements SandboxDriver {
      * all of them.
      */
     const binaries = spec.agentBinaries ?? AGENT_BINARIES;
-    // Named when there are any. A run of the in-process test agent
-    // asks for none, and "installed ()" reads as a bug in the
-    // transcript the person is watching.
-    const named = binaries.length > 0 ? ` (${binaries.join(", ")})` : "";
 
     /**
      * One round trip prepares the workspace and settles the toolchain
@@ -486,10 +487,8 @@ export class SpriteDriver implements SandboxDriver {
      * sandbox was built, is installed here, and only that one.
      */
     const install = async () => {
-      await say(`Installing the agent tools this run uses${named}. This can take a minute on a new sandbox.`);
-      const started = Date.now();
+      await say("Installing tools.");
       const toolchain = await runScript(sprite, agentToolchainScript(binaries));
-      await say(`Agent tools installed in ${Math.round((Date.now() - started) / 1000)}s.`);
 
       /**
        * A CLI whose installer was unreachable is said here, in the run's
@@ -511,7 +510,6 @@ export class SpriteDriver implements SandboxDriver {
         }
       }
     };
-    if (check.ready) await say(`Agent tools are already installed${named}.`);
     const installing = (check.ready ? Promise.resolve() : tagged("install", install)).then(() =>
       timed("install", installStarted, { installed: !check.ready }),
     );
@@ -539,6 +537,7 @@ export class SpriteDriver implements SandboxDriver {
       await say("The sandbox filesystem is temporarily unavailable. Retrying.");
     };
     const checkingOut = phase("checkout", async () => {
+    if ((spec.repositories ?? []).some((repo) => repo.cloneUrl || repo.seedBundle)) await say("Preparing repositories.");
     for (const repo of spec.repositories ?? []) {
       /*
        * A repository with neither a remote nor a seed has nothing to
@@ -550,7 +549,6 @@ export class SpriteDriver implements SandboxDriver {
       const dir = `${this.workdir}/${repo.name}`;
       const branch = repo.branch ?? "main";
       const baseBranch = repo.baseBranch ?? "main";
-      await say(`Preparing repository ${repo.name}...`);
       // Each step is judged by itself; see checkoutSteps.
       const runSteps = async (steps: CheckoutStep[]) => {
         for (const step of steps) {
@@ -629,7 +627,6 @@ export class SpriteDriver implements SandboxDriver {
       } else if (repo.cloneUrl) {
         await runSteps(checkoutSteps({ dir, cloneUrl: repo.cloneUrl, branch, baseBranch }));
       }
-      await say(`Repository ${repo.name} is ready on branch ${branch}.`);
     }
     });
     if (alongside) {

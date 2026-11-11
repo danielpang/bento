@@ -259,9 +259,8 @@ test("Sprite provisioning transfers a credential-free repository bundle", async 
   assert.ok(removed.includes("/workspace/removed-repository"));
 
   // The transcript's picture of provisioning: sandbox, tools, repos.
-  assert.ok(messages.some((m) => m.includes("cloud sandbox")));
-  assert.ok(messages.some((m) => m.includes("Installing the agent tools")));
-  assert.ok(messages.includes("Repository api is ready on branch feature/work."));
+  // One short line per step, with no machine name and no timings.
+  assert.deepEqual(messages, ["Starting sandbox.", "Installing tools.", "Preparing repositories."]);
 });
 
 /**
@@ -3745,7 +3744,7 @@ test("Sprite provisioning retries a control-plane 500 and reuses the sprite a fa
     assert.equal(handle.externalId, "bento-feature");
     assert.equal(creates, 1);
     assert.ok(messages.some((message) => message.includes("Creating the sandbox failed on the control plane")));
-    assert.ok(messages.some((message) => message.startsWith("Created cloud sandbox")));
+    assert.ok(messages.includes("Starting sandbox."));
   }
 
   // Still missing after the failed create: one confirming lookup, then
@@ -3983,7 +3982,7 @@ test("Sprite provisioning waits out a rate limit even after the short retries ar
     const handle = await pending;
     assert.equal(handle.externalId, "bento-feature");
     assert.equal(creates, 3);
-    assert.ok(messages.some((message) => message.startsWith("Created cloud sandbox")));
+    assert.ok(messages.includes("Starting sandbox."));
   }
 
   // A limit that never clears still ends the provision, after exactly
@@ -4763,7 +4762,9 @@ test("a sprite that already has this run's agent settles the toolchain in one ro
   assert.equal(scripts.filter(isInstall).length, 0, "the installer script was sent to a machine with nothing to install");
   assert.match(scripts.find(isCheck) ?? "", /mkdir -p '?\/workspace'?/);
   assert.match(scripts.find(isCheck) ?? "", /ALL='claude'/);
-  assert.ok(messages.includes("Agent tools are already installed (claude)."));
+  // A warm start is one line: nothing was installed and there is no
+  // repository, so there is nothing else to say.
+  assert.deepEqual(messages, ["Starting sandbox."]);
   assert.deepEqual(phases, [
     { phase: "acquire" },
     { phase: "install", installed: false },

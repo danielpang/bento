@@ -31,7 +31,7 @@ function calls(events: AgentEvent[], run = "run", running = false) {
 test("Poolside thoughts appear in an agent bubble while Bento notices remain notes", () => {
   const items = toChatItems([
     { type: "message", role: "system", text: "Checking the repo", raw: { type: "thought" } },
-    { type: "message", role: "system", text: "Starting pool in the sandbox." },
+    { type: "message", role: "system", text: "Starting agent." },
   ], "Swarm Planner", "run");
   assert.deepEqual(items.map((item) => item.kind === "message" ? [item.role, item.speaker] : []), [
     ["assistant", "Swarm Planner thinking"],

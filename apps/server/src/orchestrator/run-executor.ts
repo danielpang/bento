@@ -1012,7 +1012,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   // be a long model turn, and these are what separate that wait from a
   // CLI that never started. Text-mode adapters emit their only event at
   // exit, so they skip the second line.
-  await saySystem(`Starting ${profile.cli} in the sandbox.`);
+  await saySystem("Starting agent.");
   /**
    * The end of the wait the sandbox metric measures: an agent working
    * in a machine. For a streamed CLI that is its first event, so a
@@ -1103,7 +1103,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
           agentReported = true;
           if (announcesLaunchOnFirstEvent(adapter)) {
             reportAgentUp();
-            await saySystem(`${profile.cli} started and is working on the task.`);
+            await saySystem("Agent started.");
           }
         }
         /**
@@ -1280,7 +1280,7 @@ export function museFailureAdvice(error: string): string | null {
 
 /**
  * Text-mode adapters emit their only event when the process exits, so a
- * "started and is working" line on that event reads as a stall that
+ * "Agent started." line on that event reads as a stall that
  * resolved instantly. Streamed CLIs still get the line on first output.
  */
 export function announcesLaunchOnFirstEvent(adapter: { stdoutMode?: string }): boolean {

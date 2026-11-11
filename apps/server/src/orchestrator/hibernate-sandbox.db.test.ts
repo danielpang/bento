@@ -232,7 +232,7 @@ test("a hibernation with no reachable exit snapshot does not keep the previous i
   const restarted = new ModalDriver({ tokenId: "id", tokenSecret: "secret", api: idleApi() });
   const lines = await provisionLines(restarted, card.featureId, card.projectId);
   assert.ok(lines.includes("The previous sandbox left no usable snapshot, so this one starts from a fresh clone."));
-  assert.equal(lines.includes("Restoring the workspace from its last snapshot"), false);
+  assert.equal(lines.includes("Restoring workspace."), false);
   assert.equal(modal.provider, "modal");
 });
 
@@ -246,7 +246,7 @@ test("a thrown exit snapshot is a fresh clone, not the older image", async () =>
   const restarted = new ModalDriver({ tokenId: "id", tokenSecret: "secret", api: idleApi() });
   const lines = await provisionLines(restarted, card.featureId, card.projectId);
   assert.ok(lines.includes("The previous sandbox left no usable snapshot, so this one starts from a fresh clone."));
-  assert.equal(lines.includes("Restoring the workspace from its last snapshot"), false);
+  assert.equal(lines.includes("Restoring workspace."), false);
 });
 
 test("a job armed before the run ended waits out the warm window from the run's end", async () => {
