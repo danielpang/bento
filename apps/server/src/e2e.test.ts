@@ -830,6 +830,79 @@ test("a run that auto moved from a sprite to Modal records Modal as its provider
   }
 });
 
+/**
+ * What a run waits for is its own agent, not its pipeline's. A sprite
+ * installs every CLI it is asked for before the agent starts, so the
+ * pipeline's whole set put the agents of later stages on the critical
+ * path of the first. The pipeline's set still travels, as the set worth
+ * baking into a Modal image, and the stage that runs another agent
+ * names that one when its own run provisions.
+ */
+test("a run asks its sandbox for its own agent, and names the pipeline's only for the image", { timeout: 90_000 }, async () => {
+  const { project, stages: projectStages } = await setupProject("Stage agent only");
+  const feature = await createFeature(project.id, "One installer");
+  await app.request(`/api/features/${feature.id}/advance`, { method: "POST" });
+  const profileFor = async (name: string, cli: string) =>
+    json<{ id: string }>(
+      await app.request("/api/profiles", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name, cli, model: cli === "fake" ? "fake-1" : "default" }),
+      }),
+    );
+  const fake = await fakeProfile("stage-only-fake");
+  const claude = await profileFor("stage-only-claude", "claude-code");
+  const codex = await profileFor("stage-only-codex", "codex");
+  // Later stages, so nothing starts by itself while the card sits in its first.
+  const later = projectStages.slice(-2);
+  await patchStage(later[0]!.id, { defaultAgentProfileId: claude.id });
+  await patchStage(later[1]!.id, { defaultAgentProfileId: codex.id });
+
+  const local = new LocalProcessDriver();
+  const asked: { agentBinaries?: readonly string[]; imageAgentBinaries?: readonly string[] }[] = [];
+  const recording = Object.create(local) as SandboxDriver;
+  recording.provision = async (spec) => {
+    asked.push({
+      ...(spec.agentBinaries ? { agentBinaries: spec.agentBinaries } : {}),
+      ...(spec.imageAgentBinaries ? { imageAgentBinaries: spec.imageAgentBinaries } : {}),
+    });
+    return local.provision(spec);
+  };
+  const before = analytics.events.length;
+  const previousDrivers = ctx.drivers;
+  ctx.drivers = singleDriver(recording);
+  try {
+    const start = async (agentProfileId: string) =>
+      json<{ id: string }>(
+        await app.request("/api/runs", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ featureId: feature.id, agentProfileId, prompt: "hello" }),
+        }),
+      );
+    const first = await start(fake.id);
+    assert.equal(await waitForRun(first.id), "succeeded");
+    // The in-process agent needs no binary, and the two later stages'
+    // agents are not this run's to wait for.
+    assert.deepEqual(asked[0], { agentBinaries: [], imageAgentBinaries: ["claude", "codex"] });
+
+    const ready = analytics.events
+      .slice(before)
+      .find((e) => e.event === SANDBOX_READY_EVENT && e.properties?.run_id === first.id);
+    assert.ok(ready, "the run's wait was not reported");
+    assert.equal(typeof ready.properties?.prepare_ms, "number", "the wait is not broken down");
+    assert.equal(typeof ready.properties?.setup_ms, "number");
+
+    // A person runs the card with Codex. Whatever becomes of the run
+    // (this machine has no Codex), its provision named that one CLI.
+    const second = await start(codex.id);
+    await waitForRun(second.id);
+    assert.deepEqual(asked[1], { agentBinaries: ["codex"], imageAgentBinaries: ["claude", "codex"] });
+  } finally {
+    ctx.drivers = previousDrivers;
+  }
+});
+
 test("a run whose sandbox never came up records no provider, and says so once in analytics", { timeout: 90_000 }, async () => {
   const { project } = await setupProject("No provider");
   const feature = await createFeature(project.id, "Nothing provisions");

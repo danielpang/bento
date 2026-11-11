@@ -989,3 +989,117 @@ test("cancelling an attached Modal execution before its first output still kills
   assert.ok(env.execs.some((argv) => argv[1] === "kill" && argv[2] === id));
   assert.equal(env.execs.some((argv) => argv[1] === "start"), false);
 });
+
+/**
+ * A Modal fake whose machine answers the toolchain check, and which
+ * records the set each image was asked for and what was installed.
+ */
+function toolsFake(options: { running: boolean; check: string; install?: { exitCode: number; stdout?: string; stderr?: string } }) {
+  const env = fake({ running: options.running });
+  const imageSets: (readonly string[])[] = [];
+  const written: string[] = [];
+  const scripts: string[] = [];
+  env.api.toolchainImage = async (binaries) => {
+    imageSets.push(binaries);
+    return TOOLCHAIN;
+  };
+  env.box.writeBytes = async (_data, file) => {
+    written.push(file);
+  };
+  env.box.exec = async (argv) => {
+    const script = argv[2] ?? "";
+    scripts.push(script);
+    if (script.includes("bento-toolchain-check")) return textProc(0, options.check);
+    if (script.includes("/tmp/bento-toolchain.sh")) {
+      const install = options.install ?? { exitCode: 0 };
+      return textProc(install.exitCode, install.stdout ?? "", install.stderr ?? "");
+    }
+    return textProc(0);
+  };
+  return { env, imageSets, written, scripts };
+}
+
+/**
+ * An image is built once per set and cached, so the pipeline's whole
+ * set costs a new card nothing, and a locked machine cannot reach an
+ * installer later. The run's own agent is what gets checked.
+ */
+test("a new Modal sandbox is made from the pipeline's image and checks the run's agent", async () => {
+  const { env, imageSets, scripts } = toolsFake({ running: false, check: "bento-toolchain-ready\n" });
+  const phases: { phase: string; installed?: boolean }[] = [];
+  await driver(env.api).provision({
+    ...spec,
+    agentBinaries: ["claude"],
+    imageAgentBinaries: ["claude", "codex"],
+    onPhase: ({ phase, installed }) => void phases.push({ phase, ...(installed !== undefined ? { installed } : {}) }),
+  });
+  assert.deepEqual(imageSets, [["claude", "codex"]]);
+  const check = scripts.find((script) => script.includes("bento-toolchain-check")) ?? "";
+  assert.match(check, /^mkdir -p \/workspace\n/);
+  assert.match(check, /ALL='claude'/);
+  assert.ok(!scripts.some((script) => script.includes("/tmp/bento-toolchain.sh")));
+  assert.deepEqual(phases, [{ phase: "acquire" }, { phase: "install", installed: false }, { phase: "checkout" }]);
+});
+
+/**
+ * The bug narrowing would have made common and that a changed pipeline
+ * already caused: a machine built for one agent, asked to run another.
+ * Nothing looked, and the run died at spawn with "not found".
+ */
+test("a reused Modal sandbox installs an agent its image never had", async () => {
+  const { env, written, scripts } = toolsFake({ running: true, check: "bento-toolchain-needed: codex\nbento-git-present\n" });
+  const lines: string[] = [];
+  const reported: unknown[] = [];
+  const phases: { phase: string; installed?: boolean }[] = [];
+  await driver(env.api).provision({
+    ...spec,
+    agentBinaries: ["codex"],
+    onProgress: (line) => void lines.push(line),
+    onToolchainMissing: (failure) => void reported.push(failure),
+    onPhase: ({ phase, installed }) => void phases.push({ phase, ...(installed !== undefined ? { installed } : {}) }),
+  });
+  assert.equal(env.creates.length, 0);
+  assert.deepEqual(written, ["/tmp/bento-toolchain.sh"]);
+  assert.equal(scripts.filter((script) => script.includes("sh /tmp/bento-toolchain.sh")).length, 1);
+  assert.ok(lines.includes("Installing the agent tools this run uses (codex)."));
+  assert.deepEqual(reported, []);
+  assert.deepEqual(phases[1], { phase: "install", installed: true });
+});
+
+test("a Modal install that leaves the agent missing is said and reported, and the provision goes on", async () => {
+  const { env } = toolsFake({
+    running: true,
+    check: "bento-toolchain-needed: codex\n",
+    install: { exitCode: 0, stdout: "bento-toolchain-missing: codex \n", stderr: "bento: codex is not installed\n" },
+  });
+  const lines: string[] = [];
+  const reported: unknown[] = [];
+  const handle = await driver(env.api).provision({
+    ...spec,
+    agentBinaries: ["codex"],
+    onProgress: (line) => void lines.push(line),
+    onToolchainMissing: (failure) => void reported.push(failure),
+  });
+  assert.equal(handle.externalId, "bento-feature-1");
+  assert.ok(lines.some((line) => line.startsWith("Could not install codex in this sandbox.")));
+  assert.deepEqual(reported, [{ missing: ["codex"], output: "bento: codex is not installed\n" }]);
+});
+
+/** No installer is reachable from a locked machine, so it keeps what its image has and nothing is tried. */
+test("a locked Modal sandbox is never asked to install", async () => {
+  const { env, scripts, written } = toolsFake({ running: true, check: "bento-toolchain-needed: codex\n" });
+  await driver(env.api).provision({
+    ...spec,
+    agentBinaries: ["codex"],
+    network: "restricted",
+    allowedHosts: ["github.com"],
+  });
+  assert.ok(!scripts.some((script) => script.includes("bento-toolchain-check")));
+  assert.deepEqual(written, []);
+});
+
+test("a Modal check that says nothing runs no installer", async () => {
+  const { env, written } = toolsFake({ running: true, check: "" });
+  await driver(env.api).provision({ ...spec, agentBinaries: ["codex"] });
+  assert.deepEqual(written, []);
+});

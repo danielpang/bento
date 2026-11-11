@@ -52,6 +52,7 @@ import {
   LineChannel,
   repositoryPathIn,
   sandboxErrorKind,
+  toolchainBinaries,
   type ExecChunk,
   type PreparedRepository,
   type SandboxDriver,
@@ -85,7 +86,7 @@ import {
   provisionFailureContext,
   provisionWorkspace,
 } from "./sandbox-provision.js";
-import { reportSandboxReady, runOwnerProperties, type SandboxOrigin } from "./sandbox-metrics.js";
+import { reportSandboxReady, runOwnerProperties, type SandboxOrigin, type SandboxReadyPhases } from "./sandbox-metrics.js";
 export { sandboxProvisionConflict } from "./sandbox-provision.js";
 import { allCandidates, driversForRun, driverForSandbox, SandboxDriverUnavailable, type ProvisionDrivers } from "./sandbox-driver.js";
 import { evaluateFeatureGate } from "./gate-evaluator.js";
@@ -417,6 +418,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
    * the driver's to answer for.
    */
   let provisionMs = 0;
+  let readyPhases: SandboxReadyPhases = {};
   let sandboxOrigin: SandboxOrigin = "new";
   const publisher = await githubConnectionFor(ctx, subject.organizationId);
   /**
@@ -484,16 +486,28 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       restartedRepoUrls: replaced.map((pr) => pr.repoUrl),
       ...(modalNetwork.allowedHosts ? { allowedHosts: modalNetwork.allowedHosts } : {}),
       /**
-       * Install only the CLIs this run's pipeline actually uses, which
-       * is minutes off a new card's first stage.
+       * Install only the CLI this run spawns. Every other agent is an
+       * installer on the critical path of a run that will never call
+       * it: a card's first stage used to wait for the agents of every
+       * later stage, and a swarm's machine for all ten.
        *
-       * A card can be asked which agents its stages name. A swarm has
-       * no pipeline to ask, so it installs the whole set, which is what
-       * every machine did before this existed.
+       * Safe because this is asked before every run. A stage that runs
+       * a different agent, one whose agent was changed after the card
+       * got its machine, a judge, or an agent a person picks by hand
+       * names its own CLI here, and the driver installs it when the
+       * machine does not have it.
+       */
+      agentBinaries: toolchainBinaries([profile.cli]),
+      /**
+       * A Modal machine comes from an image built once per set of
+       * CLIs, so there the whole pipeline's set costs nothing and is
+       * still worth asking for: a later stage finds its agent already
+       * there, including on a locked network no installer can cross.
+       * A swarm has no pipeline to ask, and its image carries them all.
        */
       ...(subject.kind === "pipeline"
         ? {
-            agentBinaries: await pipelineAgentBinaries(ctx.db, {
+            imageAgentBinaries: await pipelineAgentBinaries(ctx.db, {
               pipelineId: subject.feature.pipelineId,
               runCli: profile.cli,
             }),
@@ -561,6 +575,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     const provisionStarted = performance.now();
     const workspace = await provisionWorkspace(ctx, provisionInput);
     provisionMs = performance.now() - provisionStarted;
+    readyPhases = { ...workspace.timings };
     sandboxOrigin = workspace.origin;
     handle = workspace.handle;
     executionSandbox = workspace.sandboxRow;
@@ -768,6 +783,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   // Snapshot before the agent touches anything, so this run can be
   // undone wholesale. Drivers without snapshots (Docker) rely on git.
   if (driver.snapshot) {
+    const snapshotStarted = performance.now();
     try {
       const checkpointId = await driver.snapshot(handle, subject.snapshotLabel);
       await ctx.db.update(agentRuns).set({ checkpointId }).where(eq(agentRuns.id, runId));
@@ -785,6 +801,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
         "Could not save a snapshot of the sandbox before the agent starts. This run cannot be rolled back to this point, and the agent is starting anyway.",
       );
     }
+    readyPhases.snapshotMs = performance.now() - snapshotStarted;
   }
 
   /**
@@ -808,6 +825,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
    * anything.
    */
   const skipSetup = subject.kind === "swarm" && isDocumentSwarm(subject.swarm);
+  const setupStarted = performance.now();
   const setupFailure = skipSetup
     ? null
     : await runRepositorySetup(ctx, {
@@ -820,6 +838,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
         })),
         say: saySystem,
       });
+  if (!skipSetup) readyPhases.setupMs = performance.now() - setupStarted;
   if (setupFailure) {
     await saySystem("Dependency setup needs attention. Starting the agent with the error details so it can diagnose and repair the environment.");
   }
@@ -1012,6 +1031,7 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
       queueWaitMs: claimed.queueWaitMs,
       sinceClaimMs: performance.now() - claimedTick,
       provisionMs,
+      phases: readyPhases,
       projectId: project.id,
       organizationId: subject.organizationId,
       userId: run.startedBy,

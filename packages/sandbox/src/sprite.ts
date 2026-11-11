@@ -4,8 +4,9 @@ import { randomUUID } from "node:crypto";
 import {
   AGENT_BINARIES,
   agentToolchainScript,
+  toolchainCheck,
+  toolchainCheckScript,
   toolchainMissing,
-  toolchainPresenceProbe,
 } from "./agent-toolchain.js";
 import {
   collectExec,
@@ -398,6 +399,7 @@ export class SpriteDriver implements SandboxDriver {
 
   async provision(spec: ProvisionSpec): Promise<SandboxHandle> {
     const name = this.spriteName(spec.workspaceKey);
+    const spriteLabel = name;
     const say = async (message: string) => {
       await spec.onProgress?.(message);
     };
@@ -410,7 +412,7 @@ export class SpriteDriver implements SandboxDriver {
      * answering in the middle of it. The caller asks another provider
      * only for Fly's failures: the project's would fail there too.
      */
-    const phase = async <T>(name: ProvisionPhase, work: () => Promise<T>): Promise<T> => {
+    const tagged = async <T>(name: ProvisionPhase, work: () => Promise<T>): Promise<T> => {
       try {
         return await work();
       } catch (err) {
@@ -418,76 +420,115 @@ export class SpriteDriver implements SandboxDriver {
         throw new ProvisionFailure("sprite", name, spriteBlame(name, err), err);
       }
     };
+    /** How long a phase took, for the caller's metric. Never the reason a provision fails. */
+    const timed = (name: ProvisionPhase, started: number, extra: { installed?: boolean } = {}) => {
+      try {
+        spec.onPhase?.({ phase: name, ms: performance.now() - started, ...extra });
+      } catch (err) {
+        console.warn(`could not report the ${name} phase of ${spriteLabel}:`, err);
+      }
+    };
+    const phase = async <T>(name: ProvisionPhase, work: () => Promise<T>): Promise<T> => {
+      const started = performance.now();
+      const result = await tagged(name, work);
+      timed(name, started);
+      return result;
+    };
 
     const { sprite, created } = await phase("acquire", () => this.acquireSprite(name, say));
     await spec.onAcquired?.({ externalId: name, provider: "sprite", workdir: this.workdir, createdSandbox: created });
     await say(created ? `Created cloud sandbox ${name}.` : `Reusing this card's cloud sandbox (${name}).`);
 
     /**
-     * The CLIs this card can spawn, which the caller narrows to its
-     * pipeline's agents plus the one this run uses. A caller that names
-     * none asks for all of them.
+     * The CLIs this run can spawn, which the caller narrows to the
+     * agent it is about to start. A caller that names none asks for
+     * all of them.
      */
     const binaries = spec.agentBinaries ?? AGENT_BINARIES;
+    // Named when there are any. A run of the in-process test agent
+    // asks for none, and "installed ()" reads as a bug in the
+    // transcript the person is watching.
+    const named = binaries.length > 0 ? ` (${binaries.join(", ")})` : "";
 
-    await phase("install", async () => {
-    // One round trip prepares the workspace and answers whether those
-    // CLIs are already there, so the wait that follows can be named
-    // before it happens rather than discovered after.
-    const probe = await runScript(
-      sprite,
-      ["set -eu", `mkdir -p ${shellQuote(this.workdir)}`, toolchainPresenceProbe(binaries)].join("\n"),
+    /**
+     * One round trip prepares the workspace and settles the toolchain
+     * on a machine that already has this run's CLI, which is every
+     * stage of a card after the first that used the agent: the check
+     * is the top of the toolchain script, so "ready" means the script
+     * itself would have had nothing to do. It used to be a probe and
+     * then the whole script, two execs and two session listings, on
+     * every warm start.
+     *
+     * Otherwise the check names what is missing, so the wait that
+     * follows is said before it happens rather than discovered after.
+     */
+    const installStarted = performance.now();
+    const check = await tagged("install", async () =>
+      toolchainCheck(
+        (
+          await runScript(
+            sprite,
+            ["# bento-workspace-check", `mkdir -p ${shellQuote(this.workdir)}`, toolchainCheckScript(binaries)].join("\n"),
+          )
+        ).stdout,
+      ),
     );
-    const toolsPresent = probe.stdout.includes("tools-present");
 
     /**
      * A sprite is a bare machine, not an image: there is nowhere to bake
      * the agent CLIs the way the Docker driver does, so they are
-     * installed on the way in. Only the ones this card asked for, which
-     * is what keeps the first stage of a new card down to the installers
-     * it will actually use rather than all ten plus a private Node.
+     * installed on the way in. Only the one this run spawns, which is
+     * what keeps a card's first stage down to a single installer.
      *
-     * The script exits at once when every asked-for CLI is stamped and
-     * resolves, which is every stage after a card's first. A CLI that is
-     * missing, whether because its installer had a bad minute or because
-     * it joined the pipeline after this sandbox was built, is installed
-     * here, and only that one.
+     * A CLI that is missing, whether because its installer had a bad
+     * minute, because this stage runs a different agent than the last
+     * one did, or because the stage's agent was changed after this
+     * sandbox was built, is installed here, and only that one.
      */
-    // Named when there are any. A pipeline built entirely from the
-    // in-process test agent asks for none, and "installed ()" reads as
-    // a bug in the transcript the person is watching.
-    const named = binaries.length > 0 ? ` (${binaries.join(", ")})` : "";
-    let toolchain: { stdout: string; stderr: string };
-    if (toolsPresent) {
-      await say(`Agent tools are already installed${named}.`);
-      toolchain = await runScript(sprite, agentToolchainScript(binaries));
-    } else {
-      await say(`Installing the agent tools this card uses${named}. This takes a few minutes on a new sandbox.`);
+    const install = async () => {
+      await say(`Installing the agent tools this run uses${named}. This can take a minute on a new sandbox.`);
       const started = Date.now();
-      toolchain = await runScript(sprite, agentToolchainScript(binaries));
+      const toolchain = await runScript(sprite, agentToolchainScript(binaries));
       await say(`Agent tools installed in ${Math.round((Date.now() - started) / 1000)}s.`);
-    }
 
-    /**
-     * A CLI whose installer was unreachable is said here, in the run's
-     * own transcript, rather than left for the agent to fail on with a
-     * shell's "not found". The script only reports what is genuinely
-     * absent from the PATH afterwards, and the next provision retries
-     * it, so this is a delay to name rather than a sandbox to throw
-     * away: the other agents still run.
-     */
-    const missing = toolchainMissing(toolchain.stdout);
-    if (missing.length > 0) {
-      await say(
-        `Could not install ${missing.join(", ")} in this sandbox. Cards that use those agents will fail to start until an install succeeds, which the next run tries again.`,
-      );
-      try {
-        await spec.onToolchainMissing?.({ missing, output: toolchain.stderr });
-      } catch (err) {
-        console.warn(`could not report the missing agent tools on ${name}:`, err);
+      /**
+       * A CLI whose installer was unreachable is said here, in the run's
+       * own transcript, rather than left for the agent to fail on with a
+       * shell's "not found". The script only reports what is genuinely
+       * absent from the PATH afterwards, and the next provision retries
+       * it, so this is a delay to name rather than a sandbox to throw
+       * away: the other agents still run.
+       */
+      const missing = toolchainMissing(toolchain.stdout);
+      if (missing.length > 0) {
+        await say(
+          `Could not install ${missing.join(", ")} in this sandbox. Cards that use those agents will fail to start until an install succeeds, which the next run tries again.`,
+        );
+        try {
+          await spec.onToolchainMissing?.({ missing, output: toolchain.stderr });
+        } catch (err) {
+          console.warn(`could not report the missing agent tools on ${name}:`, err);
+        }
       }
-    }
-    });
+    };
+    if (check.ready) await say(`Agent tools are already installed${named}.`);
+    const installing = (check.ready ? Promise.resolve() : tagged("install", install)).then(() =>
+      timed("install", installStarted, { installed: !check.ready }),
+    );
+    /**
+     * An install and a checkout are both waits on the network and
+     * neither needs the other, so on a machine that has work to do in
+     * both they run side by side: a new card's first stage waits for
+     * the longer of the two instead of their sum. Only when git is
+     * already on the machine. Without it the checkout has to wait for
+     * the script's base packages, and the two run in order as before.
+     */
+    const alongside = !check.ready && check.git;
+    // Awaited below either way; this only keeps a failure that lands
+    // while the checkout is still running from being reported as
+    // unhandled before then.
+    installing.catch(() => {});
+    if (!alongside) await installing;
 
     // Repositories live inside the sprite, so clone what is missing and
     // fetch what is already there.
@@ -497,7 +538,7 @@ export class SpriteDriver implements SandboxDriver {
       mentionedFilesystemRetry = true;
       await say("The sandbox filesystem is temporarily unavailable. Retrying.");
     };
-    await phase("checkout", async () => {
+    const checkingOut = phase("checkout", async () => {
     for (const repo of spec.repositories ?? []) {
       /*
        * A repository with neither a remote nor a seed has nothing to
@@ -591,6 +632,20 @@ export class SpriteDriver implements SandboxDriver {
       await say(`Repository ${repo.name} is ready on branch ${branch}.`);
     }
     });
+    if (alongside) {
+      /**
+       * Both are waited for, so nothing is still writing to the machine
+       * when this returns or throws. The install's failure is reported
+       * first: it is always the provider's, which is what lets another
+       * provider be asked, and a checkout the project broke fails there
+       * the same way.
+       */
+      const [installed, checkedOut] = await Promise.allSettled([installing, checkingOut]);
+      if (installed.status === "rejected") throw installed.reason;
+      if (checkedOut.status === "rejected") throw checkedOut.reason;
+    } else {
+      await checkingOut;
+    }
 
     await phase("cleanup", async () => {
     // A Sprite persists for the life of a feature. Removing a repository

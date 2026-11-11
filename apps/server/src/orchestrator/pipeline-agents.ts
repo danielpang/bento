@@ -4,36 +4,29 @@ import { agentProfiles, stages, type Db } from "@bento/db";
 import { toolchainBinaries, type AgentBinary } from "@bento/sandbox";
 
 /**
- * The agent binaries a card's sandbox has to be able to spawn.
+ * The agent binaries a card's pipeline uses: the set worth baking into
+ * a machine image.
  *
- * A sprite installs its CLIs on the way in, and there are ten of them,
- * so the first stage of a new card used to wait on every installer plus
- * a private Node it would never call. A pipeline that runs Claude Code
- * and Codex should wait for two.
+ * This is not what a run waits for. A sprite installs its CLIs on the
+ * way in, and there only the agent the run is about to spawn is asked
+ * for (`agentBinaries` in the executor), so a card's first stage waits
+ * on one installer rather than on the agents of stages it has not
+ * reached. Each later stage names its own agent the same way, and the
+ * driver installs it when the machine does not have it.
  *
- * The set is the whole pipeline's, not this stage's, on purpose. A card
- * keeps one machine for its whole life, so installing the later stages'
- * agents while the first stage is already paying for a cold provision
- * costs nothing extra there and saves those stages their own wait. It
- * also covers the judge a gate runs, which is an agent nothing else in
- * the stage would name.
+ * Modal is where the whole pipeline still matters. Its machines come
+ * from an image built once per set of CLIs and cached by name, so the
+ * wider set costs a new card nothing, saves its later stages an
+ * install inside the machine, and is the only way those stages get
+ * their agent on a locked network, where no installer is reachable.
+ * It also covers the judge a gate runs, which is an agent nothing
+ * else in the stage would name.
  *
- * Only the stages that assign an agent, though. A stage left unassigned
- * names nobody here and is run by whoever a person or a follow-up picks
- * at the time, so that run pays for its own CLI if the sandbox does not
- * already have it. `runCli` below is what makes that safe rather than
- * merely late.
- *
- * Narrowing this can never strand a run, and the reason is worth being
- * precise about, because the failure it would cause is the one
- * `TOOLCHAIN_VERSION` exists to remember: an agent that is absent at
- * spawn. Provisioning happens before every run, and the toolchain
- * script installs any asked-for CLI that is not on the PATH. So an
- * agent added to the pipeline after the card was created, or swapped
- * into a stage this morning, is simply missing from that sandbox on the
- * next provision and is installed then. `runCli` is unioned in
- * separately for the same reason: whatever the pipeline says, the agent
- * this run is about to spawn is in the set.
+ * Only the stages that assign an agent. A stage left unassigned names
+ * nobody here and is run by whoever a person or a follow-up picks at
+ * the time. `runCli` is unioned in so that, whatever the pipeline
+ * says, the agent this run is about to spawn is in the image made for
+ * it.
  */
 export async function pipelineAgentBinaries(
   db: Db,

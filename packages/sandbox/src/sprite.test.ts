@@ -8,6 +8,14 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { APIError, FilesystemError, Sprite as SpriteClass, SpriteCommand, type Sprite } from "@fly/sprites";
 import { AGENT_BINARIES, agentToolchainScript } from "./agent-toolchain.js";
+
+/**
+ * The two toolchain scripts a provision sends. The check is the top of
+ * the install, so a fake that looks for the install's own lines has to
+ * rule the check out by its opening comment.
+ */
+const isCheck = (script: string): boolean => script.includes("bento-toolchain-check");
+const isInstall = (script: string): boolean => script.includes("\nSTAMPS=") && !isCheck(script);
 import { LineChannel, ProvisionFailure, collectExec, type ToolchainInstallFailure } from "./driver.js";
 import {
   FILESYSTEM_RETRY_DELAYS_MS,
@@ -501,7 +509,7 @@ test("Sprite provisioning leaves the artifacts directory and unreadable director
     spawn(_file: string, args: string[]) {
       const child = fakeChild();
       queueMicrotask(() => {
-        if ((args[1] ?? "").includes("tools-absent")) child.stdout.write("tools-present\n");
+        if ((args[1] ?? "").includes("bento-toolchain-check")) child.stdout.write("bento-toolchain-needed: claude\n");
         child.stdout.end();
         child.stderr.end();
         child.emit("exit", 0);
@@ -598,7 +606,7 @@ test("Sprite provisioning still fails when the checkout probe fails for other re
       spawn(_file: string, args: string[]) {
         const child = fakeChild();
         queueMicrotask(() => {
-          if ((args[1] ?? "").includes("tools-absent")) child.stdout.write("tools-present\n");
+          if ((args[1] ?? "").includes("bento-toolchain-check")) child.stdout.write("bento-toolchain-needed: claude\n");
           child.stdout.end();
           child.stderr.end();
           child.emit("exit", 0);
@@ -687,7 +695,7 @@ test("Sprite provisioning tags each failure with its phase and whose fault it is
 
   // The installer died: Fly's, in the install phase.
   const installFails = new SpriteDriver({ token: "token" });
-  stubClient(installFails, scripted((script) => (script.includes("tools-absent") ? { exit: 1, stderr: "curl: (7) could not reach the installer\n" } : { exit: 0 })));
+  stubClient(installFails, scripted((script) => (script.includes("bento-toolchain-check") ? { exit: 1, stderr: "curl: (7) could not reach the installer\n" } : { exit: 0 })));
   const install = await failure(installFails);
   assert.ok(install instanceof ProvisionFailure);
   assert.equal(install.phase, "install");
@@ -697,7 +705,7 @@ test("Sprite provisioning tags each failure with its phase and whose fault it is
   // git refused the clone: the project's, in the checkout phase.
   const cloneFails = new SpriteDriver({ token: "token" });
   stubClient(cloneFails, scripted((script) => {
-    if (script.includes("tools-absent")) return { exit: 0, stdout: "tools-present\n" };
+    if (script.includes("bento-toolchain-check")) return { exit: 0, stdout: "bento-toolchain-needed: claude\n" };
     if (script.includes("git clone")) return { exit: 128, stderr: "fatal: repository 'https://github.com/acme/api.git/' not found\n" };
     return { exit: 0 };
   }));
@@ -711,7 +719,7 @@ test("Sprite provisioning tags each failure with its phase and whose fault it is
   // The machine could not reach the remote at all: Fly's network, not the repository.
   const noRoute = new SpriteDriver({ token: "token" });
   stubClient(noRoute, scripted((script) => {
-    if (script.includes("tools-absent")) return { exit: 0, stdout: "tools-present\n" };
+    if (script.includes("bento-toolchain-check")) return { exit: 0, stdout: "bento-toolchain-needed: claude\n" };
     if (script.includes("git clone")) return { exit: 128, stderr: "fatal: unable to access 'https://github.com/acme/api.git/': Could not resolve host: github.com\n" };
     return { exit: 0 };
   }));
@@ -725,7 +733,7 @@ test("Sprite provisioning tags each failure with its phase and whose fault it is
   stubClient(
     sweepFails,
     scripted(
-      (script) => (script.includes("tools-absent") ? { exit: 0, stdout: "tools-present\n" } : { exit: 0 }),
+      (script) => (script.includes("bento-toolchain-check") ? { exit: 0, stdout: "bento-toolchain-needed: claude\n" } : { exit: 0 }),
       () => ({
         async readdir() {
           throw new TypeError("fetch failed", { cause: new Error("ECONNRESET") });
@@ -750,7 +758,7 @@ test("Sprite provisioning still fails when listing the workspace hits a transpor
     spawn(_file: string, args: string[]) {
       const child = fakeChild();
       queueMicrotask(() => {
-        if ((args[1] ?? "").includes("tools-absent")) child.stdout.write("tools-present\n");
+        if ((args[1] ?? "").includes("bento-toolchain-check")) child.stdout.write("bento-toolchain-needed: claude\n");
         child.stdout.end();
         child.stderr.end();
         child.emit("exit", 0);
@@ -793,7 +801,7 @@ test("Sprite provisioning survives an empty workspace", async () => {
     spawn(_file: string, args: string[]) {
       const child = fakeChild();
       queueMicrotask(() => {
-        if ((args[1] ?? "").includes("tools-absent")) child.stdout.write("tools-present\n");
+        if ((args[1] ?? "").includes("bento-toolchain-check")) child.stdout.write("bento-toolchain-needed: claude\n");
         child.stdout.end();
         child.stderr.end();
         child.emit("exit", 0);
@@ -835,7 +843,7 @@ test("Sprite provisioning still fails when the filesystem API does", async () =>
     spawn(_file: string, args: string[]) {
       const child = fakeChild();
       queueMicrotask(() => {
-        if ((args[1] ?? "").includes("tools-absent")) child.stdout.write("tools-present\n");
+        if ((args[1] ?? "").includes("bento-toolchain-check")) child.stdout.write("bento-toolchain-needed: claude\n");
         child.stdout.end();
         child.stderr.end();
         child.emit("exit", 0);
@@ -879,7 +887,7 @@ test("Sprite provisioning retries a temporarily unavailable filesystem and still
     spawn(_file: string, args: string[]) {
       const child = fakeChild();
       queueMicrotask(() => {
-        if ((args[1] ?? "").includes("tools-absent")) child.stdout.write("tools-present\n");
+        if ((args[1] ?? "").includes("bento-toolchain-check")) child.stdout.write("bento-toolchain-needed: claude\n");
         child.stdout.end();
         child.stderr.end();
         child.emit("exit", 0);
@@ -940,7 +948,7 @@ test("Sprite provisioning stops retrying when the filesystem stays unavailable",
     spawn(_file: string, args: string[]) {
       const child = fakeChild();
       queueMicrotask(() => {
-        if ((args[1] ?? "").includes("tools-absent")) child.stdout.write("tools-present\n");
+        if ((args[1] ?? "").includes("bento-toolchain-check")) child.stdout.write("bento-toolchain-needed: claude\n");
         child.stdout.end();
         child.stderr.end();
         child.emit("exit", 0);
@@ -987,7 +995,7 @@ test("Sprite provisioning says which agent CLI could not be installed", async ()
       queueMicrotask(() => {
         // The probe answers first; the toolchain script reports what it
         // could not put on the PATH.
-        if ((args[1] ?? "").includes("tools-absent")) child.stdout.write("tools-absent\n");
+        if ((args[1] ?? "").includes("bento-toolchain-check")) child.stdout.write("bento-toolchain-needed: claude\n");
         else {
           child.stdout.write("bento-toolchain-missing: opencode \n");
           child.stderr.write("bento: opencode install failed\nbento: opencode: curl: (22) 403\n");
@@ -1668,7 +1676,7 @@ test("Sprite provisioning holds the sandbox awake while its scripts run", async 
     spawn() {
       const child = fakeChild();
       queueMicrotask(() => {
-        child.stdout.write("tools-present\n");
+        child.stdout.write("bento-toolchain-needed: claude\n");
         child.stdout.end();
         child.stderr.end();
         child.emit("exit", 0);
@@ -2211,7 +2219,7 @@ test("Sprite provisioning retries a refused exec upgrade and then installs", asy
       const child = fakeChild();
       const body = args[1] ?? "";
       queueMicrotask(() => {
-        if (body.includes("\nSTAMPS=")) {
+        if (isInstall(body)) {
           toolchainSpawns += 1;
           if (toolchainSpawns === 1) {
             child.emit(
@@ -2223,7 +2231,7 @@ test("Sprite provisioning retries a refused exec upgrade and then installs", asy
             return;
           }
         }
-        if (body.includes("tools-absent")) child.stdout.write("tools-present\n");
+        if (body.includes("bento-toolchain-check")) child.stdout.write("bento-toolchain-needed: claude\n");
         child.stdout.end();
         child.stderr.end();
         child.emit("exit", 0);
@@ -2266,7 +2274,7 @@ test("Sprite provisioning reports a refused exec upgrade without the exec URL", 
       const child = fakeChild();
       const body = args[1] ?? "";
       queueMicrotask(() => {
-        if (body.includes("\nSTAMPS=")) {
+        if (isInstall(body)) {
           toolchainSpawns += 1;
           child.emit(
             "error",
@@ -2276,7 +2284,7 @@ test("Sprite provisioning reports a refused exec upgrade without the exec URL", 
           );
           return;
         }
-        if (body.includes("tools-absent")) child.stdout.write("tools-present\n");
+        if (body.includes("bento-toolchain-check")) child.stdout.write("bento-toolchain-needed: claude\n");
         child.stdout.end();
         child.stderr.end();
         child.emit("exit", 0);
@@ -2325,20 +2333,20 @@ test("Sprite provisioning attaches to a script the refused upgrade already start
       const body = args[1] ?? "";
       queueMicrotask(() => {
         if (options?.sessionId) {
-          child.stdout.write("tools-present\nbento-toolchain-missing: \n");
+          child.stdout.write("bento-toolchain-missing: \n");
           child.stdout.end();
           child.stderr.end();
           child.emit("exit", 0);
           return;
         }
-        if (body.includes("\nSTAMPS=")) {
+        if (isInstall(body)) {
           child.emit(
             "error",
             new Error("WebSocket error: Received network error or non-101 status code. (url: wss://api.sprites.dev/x)"),
           );
           return;
         }
-        if (body.includes("tools-absent")) child.stdout.write("tools-present\n");
+        if (body.includes("bento-toolchain-check")) child.stdout.write("bento-toolchain-needed: claude\n");
         child.stdout.end();
         child.stderr.end();
         child.emit("exit", 0);
@@ -2346,7 +2354,7 @@ test("Sprite provisioning attaches to a script the refused upgrade already start
       return child;
     },
     async listSessions() {
-      const toolchain = spawns.find((spawn) => (spawn.args[1] ?? "").includes("\nSTAMPS="));
+      const toolchain = spawns.find((spawn) => isInstall((spawn.args[1] ?? "")));
       if (!toolchain) return [];
       return [
         {
@@ -2377,7 +2385,7 @@ test("Sprite provisioning attaches to a script the refused upgrade already start
   await settle();
   await pending;
 
-  const installs = spawns.filter((spawn) => (spawn.args[1] ?? "").includes("\nSTAMPS=") || spawn.sessionId);
+  const installs = spawns.filter((spawn) => isInstall((spawn.args[1] ?? "")) || spawn.sessionId);
   assert.equal(installs.length, 2);
   assert.equal(installs[0]?.sessionId, undefined);
   assert.equal(installs[1]?.sessionId, "install-1");
@@ -2396,7 +2404,7 @@ test("Sprite provisioning does not retry a script that exited", async () => {
       const child = fakeChild();
       const body = args[1] ?? "";
       queueMicrotask(() => {
-        if (body.includes("\nSTAMPS=")) {
+        if (isInstall(body)) {
           toolchainSpawns += 1;
           child.stderr.write("installer exploded\n");
           child.stdout.end();
@@ -2404,7 +2412,7 @@ test("Sprite provisioning does not retry a script that exited", async () => {
           child.emit("exit", 1);
           return;
         }
-        if (body.includes("tools-absent")) child.stdout.write("tools-present\n");
+        if (body.includes("bento-toolchain-check")) child.stdout.write("bento-toolchain-needed: claude\n");
         child.stdout.end();
         child.stderr.end();
         child.emit("exit", 0);
@@ -2447,18 +2455,18 @@ test("Sprite provisioning reattaches when the exec socket closes without an exit
       const body = args[1] ?? "";
       queueMicrotask(() => {
         if (options?.sessionId) {
-          child.stdout.write("tools-present\nbento-toolchain-missing: \n");
+          child.stdout.write("bento-toolchain-missing: \n");
           child.stdout.end();
           child.stderr.end();
           child.emit("exit", 0);
           return;
         }
-        if (body.includes("\nSTAMPS=")) {
+        if (isInstall(body)) {
           child.stderr.write("still installing\n");
           child.emit("exit", -1);
           return;
         }
-        if (body.includes("tools-absent")) child.stdout.write("tools-present\n");
+        if (body.includes("bento-toolchain-check")) child.stdout.write("bento-toolchain-needed: claude\n");
         child.stdout.end();
         child.stderr.end();
         child.emit("exit", 0);
@@ -2466,7 +2474,7 @@ test("Sprite provisioning reattaches when the exec socket closes without an exit
       return child;
     },
     async listSessions() {
-      const toolchain = spawns.find((spawn) => (spawn.args[1] ?? "").includes("\nSTAMPS="));
+      const toolchain = spawns.find((spawn) => isInstall((spawn.args[1] ?? "")));
       if (!toolchain) return [];
       return [
         {
@@ -2497,7 +2505,7 @@ test("Sprite provisioning reattaches when the exec socket closes without an exit
   await settle();
   await pending;
 
-  const installs = spawns.filter((spawn) => (spawn.args[1] ?? "").includes("\nSTAMPS=") || spawn.options?.sessionId);
+  const installs = spawns.filter((spawn) => isInstall((spawn.args[1] ?? "")) || spawn.options?.sessionId);
   assert.equal(installs.length, 2);
   assert.equal(installs[0]?.options?.maxRunAfterDisconnect, "10m");
   assert.equal(installs[0]?.options?.sessionId, undefined);
@@ -2519,14 +2527,14 @@ test("Sprite provisioning starts a script again when the closed socket took the 
       const child = fakeChild();
       const body = args[1] ?? "";
       queueMicrotask(() => {
-        if (body.includes("\nSTAMPS=")) {
+        if (isInstall(body)) {
           toolchainSpawns += 1;
           if (toolchainSpawns === 1) {
             child.emit("exit", -1);
             return;
           }
         }
-        if (body.includes("tools-absent")) child.stdout.write("tools-present\n");
+        if (body.includes("bento-toolchain-check")) child.stdout.write("bento-toolchain-needed: claude\n");
         child.stdout.end();
         child.stderr.end();
         child.emit("exit", 0);
@@ -2582,12 +2590,12 @@ test("Sprite provisioning stays reattach-only after a reattach's own upgrade is 
           child.emit("error", new Error("Received network error or non-101 status code (url: wss://x)"));
           return;
         }
-        if (body.includes("\nSTAMPS=")) {
+        if (isInstall(body)) {
           toolchainSpawns += 1;
           child.emit("exit", null); // the socket dropped under the installer
           return;
         }
-        if (body.includes("tools-absent")) child.stdout.write("tools-present\n");
+        if (body.includes("bento-toolchain-check")) child.stdout.write("bento-toolchain-needed: claude\n");
         child.stdout.end();
         child.stderr.end();
         child.emit("exit", 0);
@@ -2650,14 +2658,14 @@ test("Sprite provisioning joins a copy of the script already running on the mach
       queueMicrotask(() => {
         if (options?.sessionId) {
           attaches += 1;
-          child.stdout.write("tools-present\nbento-toolchain-missing: \n");
+          child.stdout.write("bento-toolchain-missing: \n");
           child.stdout.end();
           child.stderr.end();
           child.emit("exit", 0);
           return;
         }
-        if (body.includes("\nSTAMPS=")) toolchainSpawns += 1;
-        if (body.includes("tools-absent")) child.stdout.write("tools-present\n");
+        if (isInstall(body)) toolchainSpawns += 1;
+        if (body.includes("bento-toolchain-check")) child.stdout.write("bento-toolchain-needed: claude\n");
         child.stdout.end();
         child.stderr.end();
         child.emit("exit", 0);
@@ -2693,12 +2701,12 @@ test("Sprite provisioning does not start a second script while the session list 
       const child = fakeChild();
       const body = args[1] ?? "";
       queueMicrotask(() => {
-        if (body.includes("\nSTAMPS=")) {
+        if (isInstall(body)) {
           toolchainSpawns += 1;
           child.emit("exit", -1);
           return;
         }
-        if (body.includes("tools-absent")) child.stdout.write("tools-present\n");
+        if (body.includes("bento-toolchain-check")) child.stdout.write("bento-toolchain-needed: claude\n");
         child.stdout.end();
         child.stderr.end();
         child.emit("exit", 0);
@@ -2754,7 +2762,7 @@ test("Sprite provisioning blames a checkout whose socket closed on the provider"
           child.emit("exit", null);
           return;
         }
-        if (body.includes("tools-absent")) child.stdout.write("tools-present\n");
+        if (body.includes("bento-toolchain-check")) child.stdout.write("bento-toolchain-needed: claude\n");
         child.stdout.end();
         child.stderr.end();
         child.emit("exit", 0);
@@ -3011,7 +3019,7 @@ test("Sprite provisioning fails rather than hangs when a filesystem call stalls"
     spawn() {
       const child = fakeChild();
       queueMicrotask(() => {
-        child.stdout.write("tools-present\n");
+        child.stdout.write("bento-toolchain-needed: claude\n");
         child.stdout.end();
         child.stderr.end();
         child.emit("exit", 0);
@@ -3673,7 +3681,7 @@ function acquiredSprite() {
     spawn(_file: string, args: string[]) {
       const child = fakeChild();
       queueMicrotask(() => {
-        if ((args[1] ?? "").includes("tools-absent")) child.stdout.write("tools-present\n");
+        if ((args[1] ?? "").includes("bento-toolchain-check")) child.stdout.write("bento-toolchain-needed: claude\n");
         child.stdout.end();
         child.stderr.end();
         child.emit("exit", 0);
@@ -4686,4 +4694,226 @@ test("cancelling during the initial execution identity lookup never starts an ag
   finishListing([]);
   await assert.rejects(result, /run was cancelled/);
   assert.equal(spawns, 0);
+});
+
+/**
+ * A sprite stand-in for the toolchain tests below: every script is
+ * recorded when it starts and when it ends, and `behave` decides what
+ * it prints, how it exits, and whether it waits on something first.
+ */
+function recordingSprite(
+  behave: (script: string) => { exit?: number; stdout?: string; stderr?: string; wait?: Promise<void> },
+): { sprite: unknown; events: string[]; scripts: string[] } {
+  const events: string[] = [];
+  const scripts: string[] = [];
+  const label = (script: string) =>
+    isCheck(script) ? "check" : isInstall(script) ? "install" : script.includes("git clone") ? "clone" : "other";
+  const sprite = {
+    spawn(_file: string, args: string[]) {
+      const script = args[1] ?? "";
+      scripts.push(script);
+      events.push(`start:${label(script)}`);
+      const outcome = behave(script);
+      const child = fakeChild();
+      void (outcome.wait ?? Promise.resolve()).then(() =>
+        queueMicrotask(() => {
+          events.push(`end:${label(script)}`);
+          if (outcome.stdout) child.stdout.write(outcome.stdout);
+          if (outcome.stderr) child.stderr.write(outcome.stderr);
+          child.stdout.end();
+          child.stderr.end();
+          child.emit("exit", outcome.exit ?? 0);
+        }),
+      );
+      return child;
+    },
+    async listSessions() {
+      return [];
+    },
+    filesystem: () => ({ async readdir() { return []; } }),
+  };
+  return { sprite, events, scripts };
+}
+
+const oneRepository = [{ name: "api", cloneUrl: "https://github.com/acme/api.git", branch: "bento/card" }];
+
+/**
+ * Every stage after a card's first lands here: the machine already has
+ * the agent. The check is the top of the toolchain script, so its
+ * "ready" is the whole answer, and sending the script after it was a
+ * second exec and a second session listing on every warm start.
+ */
+test("a sprite that already has this run's agent settles the toolchain in one round trip", async () => {
+  const { sprite, scripts } = recordingSprite((script) => (isCheck(script) ? { stdout: "bento-toolchain-ready\n" } : {}));
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+  const messages: string[] = [];
+  const phases: { phase: string; installed?: boolean }[] = [];
+
+  await driver.provision({
+    projectId: "project",
+    workspaceKey: "feature",
+    hostWorkspacePath: "/unused",
+    agentBinaries: ["claude"],
+    onProgress: (message) => void messages.push(message),
+    onPhase: ({ phase, installed }) => void phases.push({ phase, ...(installed !== undefined ? { installed } : {}) }),
+  });
+
+  assert.equal(scripts.filter(isCheck).length, 1);
+  assert.equal(scripts.filter(isInstall).length, 0, "the installer script was sent to a machine with nothing to install");
+  assert.match(scripts.find(isCheck) ?? "", /mkdir -p '?\/workspace'?/);
+  assert.match(scripts.find(isCheck) ?? "", /ALL='claude'/);
+  assert.ok(messages.includes("Agent tools are already installed (claude)."));
+  assert.deepEqual(phases, [
+    { phase: "acquire" },
+    { phase: "install", installed: false },
+    { phase: "checkout" },
+    { phase: "cleanup" },
+  ]);
+});
+
+/**
+ * The stage's agent is the only CLI on the critical path. A card whose
+ * next stage runs another agent, or whose stage was given a different
+ * one after the machine was made, is a machine the check finds that
+ * CLI missing from, and the install names exactly it.
+ */
+test("a sprite missing this run's agent installs that one CLI", async () => {
+  const { sprite, scripts } = recordingSprite((script) => (isCheck(script) ? { stdout: "bento-toolchain-needed: codex\n" } : {}));
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+  const phases: { phase: string; installed?: boolean }[] = [];
+
+  await driver.provision({
+    projectId: "project",
+    workspaceKey: "feature",
+    hostWorkspacePath: "/unused",
+    agentBinaries: ["codex"],
+    onPhase: ({ phase, installed }) => void phases.push({ phase, ...(installed !== undefined ? { installed } : {}) }),
+  });
+
+  const installs = scripts.filter(isInstall);
+  assert.equal(installs.length, 1);
+  assert.match(installs[0] ?? "", /ALL='codex'/);
+  assert.deepEqual(phases[1], { phase: "install", installed: true });
+});
+
+/**
+ * A new card waits on an installer and on a clone, and neither needs
+ * the other. Side by side, the wait is the longer of the two.
+ */
+test("a cold sprite with git starts the checkout while the agent is still installing", async () => {
+  let finishInstall = () => {};
+  const installing = new Promise<void>((resolve) => {
+    finishInstall = resolve;
+  });
+  const { sprite, events } = recordingSprite((script) => {
+    if (isCheck(script)) return { stdout: "bento-toolchain-needed: claude\nbento-git-present\n" };
+    if (isInstall(script)) return { wait: installing };
+    return {};
+  });
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const pending = driver.provision({
+    projectId: "project",
+    workspaceKey: "feature",
+    hostWorkspacePath: "/unused",
+    agentBinaries: ["claude"],
+    repositories: oneRepository,
+  });
+  for (let turn = 0; turn < 20; turn++) await settle();
+  assert.ok(events.includes("end:clone"), `the clone waited for the install: ${events.join(", ")}`);
+  assert.ok(!events.includes("end:install"));
+  finishInstall();
+  await pending;
+  assert.ok(events.indexOf("end:install") > events.indexOf("end:clone"));
+});
+
+/**
+ * Without git the checkout cannot start until the script's base
+ * packages are in, so the two keep their old order.
+ */
+test("a cold sprite without git installs before it checks out", async () => {
+  const { sprite, events } = recordingSprite((script) =>
+    isCheck(script) ? { stdout: "bento-toolchain-needed: claude\n" } : {},
+  );
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  await driver.provision({
+    projectId: "project",
+    workspaceKey: "feature",
+    hostWorkspacePath: "/unused",
+    agentBinaries: ["claude"],
+    repositories: oneRepository,
+  });
+  assert.ok(events.indexOf("end:install") < events.indexOf("start:clone"), events.join(", "));
+});
+
+/**
+ * Side by side, either can fail. Nothing is left running when the
+ * provision throws, and the install's failure is the one reported: it
+ * is the provider's, which is what lets another provider be asked,
+ * while a checkout the project broke fails there the same way.
+ */
+test("when the install and the checkout both fail, the install's failure is the provision's", async () => {
+  let failInstall = () => {};
+  const installing = new Promise<void>((resolve) => {
+    failInstall = resolve;
+  });
+  const { sprite, events } = recordingSprite((script) => {
+    if (isCheck(script)) return { stdout: "bento-toolchain-needed: claude\nbento-git-present\n" };
+    if (isInstall(script)) return { wait: installing, exit: 1, stderr: "apt-get: could not resolve the mirror\n" };
+    if (script.includes("git clone")) return { exit: 128, stderr: "fatal: repository 'https://github.com/acme/api.git/' not found\n" };
+    return {};
+  });
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const pending = driver
+    .provision({
+      projectId: "project",
+      workspaceKey: "feature",
+      hostWorkspacePath: "/unused",
+      agentBinaries: ["claude"],
+      repositories: oneRepository,
+    })
+    .then(
+      () => null,
+      (err: unknown) => err,
+    );
+  for (let turn = 0; turn < 20; turn++) await settle();
+  assert.ok(events.includes("end:clone"));
+  failInstall();
+  const err = await pending;
+  assert.ok(err instanceof ProvisionFailure);
+  assert.equal(err.phase, "install");
+  assert.equal(err.blame, "provider");
+});
+
+test("a checkout the project broke is still the project's when it ran beside a good install", async () => {
+  const { sprite } = recordingSprite((script) => {
+    if (isCheck(script)) return { stdout: "bento-toolchain-needed: claude\nbento-git-present\n" };
+    if (script.includes("git clone")) return { exit: 128, stderr: "fatal: repository 'https://github.com/acme/api.git/' not found\n" };
+    return {};
+  });
+  const driver = new SpriteDriver({ token: "token" });
+  stubClient(driver, sprite);
+
+  const err = await driver
+    .provision({
+      projectId: "project",
+      workspaceKey: "feature",
+      hostWorkspacePath: "/unused",
+      agentBinaries: ["claude"],
+      repositories: oneRepository,
+    })
+    .then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+  assert.ok(err instanceof ProvisionFailure);
+  assert.equal(err.phase, "checkout");
+  assert.equal(err.blame, "project");
 });

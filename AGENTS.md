@@ -250,6 +250,58 @@ runner route, with what the runner said about its sandbox. The whole
 path, from a run asking for a machine to an agent starting in one,
 is drawn in `docs/images/auto-sandbox-flow.png`.
 
+## A run waits for its own agent, and every clone driver installs one that is missing
+
+A sprite installs agent CLIs on the way in, so every CLI a provision
+names is an installer between a card moving into a stage and its agent
+working. The executor names one: the CLI of the agent the run is about
+to spawn (`agentBinaries: toolchainBinaries([profile.cli])`), for a
+card and for a swarm alike. It once named the whole pipeline's set (and
+all ten for a swarm), which made a card's first stage wait for the
+agents of stages it had not reached.
+
+That is only safe because a missing CLI is installed by the run that
+needs it, on both clone drivers. A later stage on another agent, a
+stage whose agent was changed after the card got its machine, a judge,
+and an agent a person picks by hand all provision before they run and
+name their own CLI. The sprite checks first
+(`toolchainCheckScript`, the top of the toolchain script and none of
+its installers) and runs the full script only when the check names
+work. Modal used to bake its CLIs into the image and never look again,
+so a machine built for one agent died at spawn with "not found" when
+asked to run another; `prepareAgentTools` now runs the same check in
+the exec that makes the workspace and installs in place. Do not add a
+path that starts an agent in a machine without provisioning it for
+that agent first.
+
+Modal keeps the pipeline's whole set too, as `imageAgentBinaries`
+(`pipelineAgentBinaries`): its image is built once per set and cached,
+so the wider set costs a new card nothing, and a machine with the
+network lock on cannot reach an installer later. Such a machine is
+never asked to install; it runs what its image has.
+
+Two more things keep the sprite's wait short, and both have a rule.
+The check is the only toolchain round trip on a machine that already
+has the agent (every stage after the first that used it), so keep the
+warm path at one exec: anything the full script does before its
+installers, the check does too. And on a cold machine the install and
+the checkout run side by side, but only when the check found git
+already there, both are awaited before the provision returns or
+throws, and the install's failure wins when both fail, because it is
+always the provider's and a broken checkout would fail on the next
+provider the same way. The check and the install open differently on
+purpose: the driver finds a provisioning script still running by the
+first 80 characters of its body.
+
+`sandbox ready` says where the wait went: `prepare_ms` (this server
+before a provider is asked, mostly the seed bundles it reads from
+GitHub), `acquire_ms`, `install_ms`, `checkout_ms` (the driver's
+phases, reported through `ProvisionSpec.onPhase`; the last two overlap
+on a cold sprite), `snapshot_ms`, `setup_ms`, and `tools_installed`
+(whether an installer ran). The PostHog dashboard "Sandbox startup
+latency" reads them. A new slow step between the claim and the agent
+gets its own property rather than disappearing into "the rest".
+
 ## A sprite command that does not fit the exec URL is staged, not retried
 
 The Sprites SDK puts every argv entry and every environment variable
