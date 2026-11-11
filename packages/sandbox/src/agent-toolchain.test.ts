@@ -1454,8 +1454,15 @@ test("the check does not offer a side by side checkout when a base package is mi
     mkdirSync(bin);
     for (const dir of ["/usr/bin", "/bin"]) {
       for (const name of readdirSync(dir)) {
-        if (name === "unzip" || existsSync(path.join(bin, name))) continue;
-        symlinkSync(path.join(dir, name), path.join(bin, name));
+        if (name === "unzip") continue;
+        // /bin is often /usr/bin again, and either can hold a link that
+        // points nowhere, which existsSync reports as absent. The first
+        // link of a name wins; a second is not an error.
+        try {
+          symlinkSync(path.join(dir, name), path.join(bin, name));
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+        }
       }
     }
     const without = sandbox.check(["claude"], { PATH: `${root}/stubs:${root}/usr/local/bin:${bin}` });
