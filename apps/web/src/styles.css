@@ -10641,12 +10641,29 @@ a.hours-person-name:hover {
 }
 
 .swarm-row-status {
-  font-size: 11px;
+  gap: 7px;
+  font-size: 11.5px;
+  color: var(--text-faint);
 }
 
+/* The status as a word in its own colour, as on the tree's cards. */
+.swarm-row-status:has(> .dot[data-state="running"]) { color: var(--running); }
+.swarm-row-status:has(> .dot[data-state="succeeded"]) { color: var(--succeeded); }
+.swarm-row-status:has(> .dot[data-state="failed"]) { color: var(--failed); }
+.swarm-row-status:has(> .dot[data-state="gated"]) { color: var(--gated); }
+.swarm-row-status > .dot { background: currentColor; animation: none; }
+
+/* What wants a person, in a few words on one line; the sentence is in the drawer. */
 .swarm-attention-chip {
-  border-color: var(--gated);
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border-color: color-mix(in srgb, var(--gated) 55%, transparent);
   color: var(--gated);
+  font-family: var(--sans);
+  font-size: 11px;
 }
 
 /* Reopening a finished swarm. */
