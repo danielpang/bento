@@ -31,7 +31,8 @@ function zoomAt(view: Viewport, scale: number, x: number, y: number): Viewport {
  *
  * Top down from the planner: the plan fans out into one column per
  * branch where it first branches, and each branch's work stacks down
- * its column, indented by depth. Every position, every edge path, and every
+ * its column, indented by depth. A card a person opens from folded
+ * fans its children out sideways, centred under it. Every position, every edge path, and every
  * number on every card comes from `layout.ts`: this file places what
  * that module worked out and adds no arithmetic of its own, which is
  * why the Outline can render the same figures and why the maths is
@@ -151,6 +152,36 @@ export function SwarmTree({
     observer.observe(stage);
     return () => observer.disconnect();
   }, [contentWidth]);
+
+  /*
+   * The card a person opens or folds stays where it was on screen.
+   *
+   * Opening a card fans its children out on both sides of it, so the
+   * layout moves the card itself to make room, and so do the cards
+   * beside it. Without this the card jumps out from under the pointer
+   * that just pressed it. The view is panned by however far the card
+   * moved, measured on screen after the new layout has rendered.
+   */
+  const toggleAnchor = useRef<{ id: string; left: number; top: number } | null>(null);
+  const toggle = (id: string) => {
+    const rect = nodeElements.current.get(id)?.getBoundingClientRect();
+    if (rect) {
+      toggleAnchor.current = { id, left: rect.left, top: rect.top };
+      // Re-centring on the wider canvas would undo the hold.
+      autoCenter.current = false;
+    }
+    onToggle(id);
+  };
+  useLayoutEffect(() => {
+    const held = toggleAnchor.current;
+    if (!held) return;
+    toggleAnchor.current = null;
+    const rect = nodeElements.current.get(held.id)?.getBoundingClientRect();
+    if (!rect) return;
+    const dx = held.left - rect.left;
+    const dy = held.top - rect.top;
+    if (dx !== 0 || dy !== 0) setView((current) => ({ ...current, x: current.x + dx, y: current.y + dy }));
+  }, [model]);
 
   useEffect(() => {
     const stage = stageRef.current;
@@ -309,7 +340,7 @@ export function SwarmTree({
               else nodeElements.current.delete(node.id);
             }}
             onSelect={onSelect}
-            onToggle={onToggle}
+            onToggle={toggle}
           />
         ))}
         </div>

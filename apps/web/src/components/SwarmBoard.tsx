@@ -376,6 +376,8 @@ export function SwarmBoard({
       // Reveal matching paths temporarily. Never mutate the person's folds.
       expanded: [...expanded, ...nodeSearch.revealIds],
       folded: folded.filter((id) => !nodeSearch.revealIds.has(id)),
+      // Only what the person opened fans out, never a search's reveals.
+      opened: expanded,
       autoCollapseCompleted: detail?.swarm.status !== "done",
       now,
       // An empty list is an answer: nobody is in a sandbox. A fixture
