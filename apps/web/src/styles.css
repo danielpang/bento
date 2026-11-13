@@ -6618,8 +6618,10 @@ a.pr-row:hover .pr-external {
   box-shadow: var(--inner-highlight), var(--shadow-float);
   transition: border-color 150ms ease;
 }
+/* The field edge on focus, as the swarm composer draws it: the 3:1
+   value, so the change is visible in every theme. */
 .composer:focus-within {
-  border-color: var(--control-line);
+  border-color: var(--field-line);
 }
 .composer .composer-input,
 .composer .composer-input:focus {
@@ -14787,6 +14789,48 @@ a.swarm-pr-name:hover {
   letter-spacing: -0.02em;
 }
 
+/* The node drawer is the card drawer's sibling: the same title size,
+   and the same tab row, inset from the panel's edge and underlined in
+   the text colour rather than the accent. */
+.swarm-node-drawer .drawer-title {
+  font-size: 22px;
+  line-height: 1.2;
+  letter-spacing: -0.025em;
+}
+
+.swarm-node-drawer .feature-tabs {
+  margin: 0 24px;
+  padding: 0;
+}
+
+.swarm-node-drawer .feature-tabs > button {
+  color: var(--text-dim);
+}
+
+.swarm-node-drawer .feature-tabs > button:hover,
+.swarm-node-drawer .feature-tabs > button[data-state="active"] {
+  color: var(--text);
+}
+
+.swarm-node-drawer .feature-tabs > button[data-state="active"] {
+  font-weight: 500;
+}
+
+.swarm-node-drawer .feature-tabs > button[data-state="active"]::after {
+  height: 1px;
+  background: var(--text);
+}
+
+@media (max-width: 720px) {
+  .swarm-node-drawer .feature-tabs {
+    margin-inline: 16px;
+  }
+
+  .swarm-node-drawer .drawer-title {
+    font-size: 20px;
+  }
+}
+
 /* Section names in the node drawer: small, faint, sans. */
 .swarm-node-pane > .section > .label {
   font-size: 11.5px;
@@ -14796,6 +14840,12 @@ a.swarm-pr-name:hover {
 
 .swarm-node-pane > .section {
   gap: 8px;
+}
+
+/* The note says why the task needs you; the actions panel under it is
+   a separate object, so the two do not touch. */
+.swarm-node-pane > .swarm-attention-note + .swarm-node-actions {
+  margin-top: 12px;
 }
 
 .swarm-node-pane > .swarm-node-actions,
