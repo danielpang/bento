@@ -345,7 +345,10 @@ body {
 .status-word[data-tone="succeeded"] { --status-tone: var(--succeeded); }
 .status-word[data-tone="failed"] { --status-tone: var(--failed); }
 .status-word[data-tone="gated"] { --status-tone: var(--gated); }
-.status-word[data-tone="idle"] { --status-tone: var(--idle); }
+/* --idle is a dot's colour (3.4:1 on a panel), too quiet for a word:
+   the word takes the faint text colour and the dot keeps the grey. */
+.status-word[data-tone="idle"] { --status-tone: var(--text-faint); }
+.status-word[data-tone="idle"]::before { background: var(--idle); }
 
 /* A running dot carries a soft halo of its own colour. */
 .status-word[data-tone="running"]::before {
@@ -355,29 +358,6 @@ body {
 /* A failure is a square, so it does not rest on colour alone. */
 .status-word[data-tone="failed"]::before {
   border-radius: 1px;
-}
-
-/* A surface that sits on the page: hairline edge, 14px corners. */
-.surface-panel {
-  border: 1px solid var(--line-edge);
-  border-radius: var(--radius-panel);
-  background: var(--panel);
-}
-
-/* A surface that floats: a tray, a drawer, a popover. */
-.surface-float {
-  border: 1px solid var(--line-edge);
-  border-radius: var(--radius-panel);
-  background: var(--panel);
-  box-shadow: var(--inner-highlight), var(--shadow-float);
-}
-
-/* A card raised off a panel. */
-.surface-raised {
-  border: 1px solid var(--line-bright);
-  border-radius: var(--radius-card);
-  background: var(--panel-raised);
-  box-shadow: var(--inner-highlight);
 }
 
 button {
@@ -1192,23 +1172,8 @@ select.input,
   color: var(--text-dim);
 }
 
-/* .btn-quiet is the same control under the name the design uses. */
-.btn-quiet {
-  background: transparent;
-  border-color: transparent;
-  color: var(--text-dim);
-}
-
-@media (hover: hover) {
-  .btn-quiet:hover:not(:disabled) {
-    background: var(--nav-current);
-    border-color: transparent;
-    color: var(--text);
-  }
-}
-
 /*
- * The icon-only control in the topbar.
+ * An icon-only control.
  *
  * Below `.btn` on purpose. Both selectors weigh the same, so anything
  * this sets that `.btn` also sets has to come after it or it silently
@@ -1219,7 +1184,6 @@ select.input,
  * clickable region is what grows: the pseudo-element takes the hit
  * area past the 44x44 floor without moving a pixel of what is drawn.
  */
-.settings-gear,
 .icon-button {
   position: relative;
   display: inline-flex;
@@ -1228,13 +1192,9 @@ select.input,
   line-height: 1;
 }
 
-.settings-gear::after,
 .icon-button::after {
   content: "";
   position: absolute;
-}
-.settings-gear::after {
-  inset: -7px -1px;
 }
 
 /* Text that acts, inside a sentence. The stacked ghost buttons this
@@ -2268,41 +2228,12 @@ select.input,
   margin-top: 4px;
 }
 
-.feature-stage-heading {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  gap: 12px;
-  font-size: 13px;
-  font-weight: 600;
-}
-
 .feature-stage-position {
   font-family: var(--mono);
   font-size: 10px;
   font-weight: 400;
   color: var(--text-faint);
   flex: none;
-}
-
-.feature-progress {
-  display: flex;
-  list-style: none;
-  padding: 0;
-  margin: 0;
-  gap: 5px;
-}
-
-.feature-progress li {
-  position: relative;
-  height: 3px;
-  flex: 1;
-  border-radius: 2px;
-  background: var(--line-bright);
-}
-
-.feature-progress li[aria-current="step"] {
-  background: var(--brand);
 }
 
 .feature-agent {
@@ -3283,9 +3214,14 @@ a.pr-row:hover .pr-external {
 }
 
 /* A quiet chip, for a label that states a fact rather than a status. */
+/* A soft chip is always a word ("primary", "preview", a question's
+   header), never a figure or an id, so it speaks in the sans. */
 .chip-soft {
   color: var(--text-dim);
   border-color: var(--line);
+  font-family: var(--sans);
+  font-size: 11px;
+  letter-spacing: 0;
 }
 
 /*
@@ -4079,6 +4015,10 @@ a.pr-row:hover .pr-external {
   border: 1px solid color-mix(in srgb, var(--failed) 55%, transparent);
   border-radius: var(--radius);
   background: color-mix(in srgb, var(--failed) 12%, transparent);
+  /* The tint costs the failed hue its margin on the light page (4.2:1),
+     so the words lean a fifth of the way toward the text colour, which
+     is darker on light and lighter on dark: 4.5:1 or better in each. */
+  color: color-mix(in srgb, var(--failed) 80%, var(--text));
   max-width: 100%;
   min-width: 0;
   word-break: break-word;
@@ -4318,11 +4258,6 @@ a.pr-row:hover .pr-external {
 .topbar .skeleton-search,
 .topbar .skeleton-btn {
   align-self: center;
-}
-
-.skeleton-avatar {
-  width: 38px;
-  height: 38px;
 }
 
 .skeleton-card {
@@ -14710,7 +14645,6 @@ a.swarm-pr-name:hover {
 }
 
 /* The rail's cards and the merge queue are panels. */
-.swarm-brief,
 .swarm-card {
   border-color: var(--line-edge);
   border-radius: var(--radius-lg);
@@ -14854,8 +14788,7 @@ a.swarm-pr-name:hover {
 }
 
 /* Section names in the node drawer: small, faint, sans. */
-.swarm-node-pane > .section > .label,
-.swarm-node-body .swarm-worker-output-head > .label {
+.swarm-node-pane > .section > .label {
   font-size: 11.5px;
   font-weight: 400;
   color: var(--text-faint);

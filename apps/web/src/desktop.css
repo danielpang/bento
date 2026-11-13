@@ -1,7 +1,7 @@
 /* The Mac app's window chrome. Only Electron's isolated preload sets
    data-desktop="mac"; browser layout stays the same.
 
-   The traffic lights sit at x 18, y 20 (main.ts). Two shapes of page
+   The traffic lights sit at x 18, y 20 (main.ts). Three shapes of page
    make room for them:
 
    - The workspace (.app-shell): the top of the sidebar is a strip as
