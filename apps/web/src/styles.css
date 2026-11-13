@@ -4800,6 +4800,14 @@ a.pr-row:hover .pr-external {
   animation: modal-rise 140ms ease-out;
 }
 
+/* The dialog itself takes focus when it opens with nothing to land on.
+   It is a container, not a control: a ring in the accent around the
+   whole panel says nothing, and the next Tab lands on a field that has
+   its own. */
+.modal:focus-visible {
+  outline: none;
+}
+
 .modal-title {
   margin: 0;
   font-family: var(--sans);
