@@ -548,7 +548,8 @@ export function ArtifactsPage({
     <div className="artifacts-screen" aria-busy={cards === null && !loadFailed && !projectMissing ? true : undefined}>
       <div className="artifacts-heading">
         <div className="artifacts-heading-copy">
-          <h1 className="artifacts-title">Artifacts</h1>
+          {/* The page header already says Artifacts; the heading stays for a reader. */}
+          <h1 className="visually-hidden">Artifacts</h1>
           <p className="artifacts-lede">Everything your agents produced, by card.</p>
         </div>
         {cards !== null && cards.length > 0 && (
@@ -609,22 +610,20 @@ export function ArtifactsPage({
                 <TilePreview client={client} card={card} />
               </div>
               <div className="artifacts-tile-body">
+                <span className="artifacts-tile-kinds">
+                  {card.kinds.map((kind) => (
+                    <span key={kind} className="artifacts-kind">
+                      {kindExt(kind)}
+                    </span>
+                  ))}
+                </span>
                 <span className="artifacts-tile-title">
                   <Highlighted text={card.title} query={cardQuery} />
                 </span>
                 <span className="artifacts-tile-meta">
-                  <span>
-                    {artifactCountLabel(card.artifactCount)}
-                    <span aria-hidden="true"> · </span>
-                    {formatUpdatedAgo(card.latestCreatedAt)}
-                  </span>
-                  <span className="artifacts-tile-kinds">
-                    {card.kinds.map((kind) => (
-                      <span key={kind} className="artifacts-kind">
-                        {kindExt(kind)}
-                      </span>
-                    ))}
-                  </span>
+                  {artifactCountLabel(card.artifactCount)}
+                  <span aria-hidden="true"> · </span>
+                  {formatUpdatedAgo(card.latestCreatedAt)}
                 </span>
                 {searchingCards && files.length > 0 && (
                   <span className="artifacts-tile-files">

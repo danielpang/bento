@@ -379,7 +379,16 @@ export function SwarmPage({
                 </button>
               </div>
             </details>
-            {primaryAction && <button className="btn btn-primary swarm-main-action" disabled={busy} onClick={primaryAction.onClick}>{primaryAction.label}</button>}
+            {/* Pausing is a step back, not the next step forward, so it is an outline. */}
+            {primaryAction && (
+              <button
+                className={primaryAction.label === "Pause work" ? "btn swarm-main-action" : "btn btn-primary swarm-main-action"}
+                disabled={busy}
+                onClick={primaryAction.onClick}
+              >
+                {primaryAction.label}
+              </button>
+            )}
           </div>
         </header>
 

@@ -94,7 +94,7 @@ function Segment({
   );
 }
 
-function Lock() {
+export function Lock() {
   return (
     <span className="seg-lock" aria-hidden="true" title="Not on this plan">
       <LockMark />

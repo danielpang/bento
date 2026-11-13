@@ -52,7 +52,12 @@ function ToolCallDetail({ call }: { call: ToolActivity }) {
     }
   }
   return (
-    <details className="chat-tool-call" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
+    <details
+      className="chat-tool-call"
+      data-running={(!call.failed && call.phase === "start" && !call.stopped) || undefined}
+      open={open}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
       <summary className="chat-tool-call-summary">
         <span className="chat-tool-action">{call.summary}</span>
         <span className={call.failed ? "chat-tool-failed" : "chat-tool-state"}>{state}</span>

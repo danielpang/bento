@@ -32,7 +32,7 @@ function systemTheme(): "dark" | "light" {
 }
 
 const THEME_COLOR: Record<ResolvedTheme, string> = {
-  dark: "#0e0d0b",
+  dark: "#0b0a09",
   light: "#f2f1ed",
   navy: "#0a0e16",
 };
@@ -95,7 +95,7 @@ export function AppearanceSettings() {
     <>
       <div className="section settings-card">
         <h3 className="settings-title">Accent</h3>
-        <p className="muted">A highlight for selected items, progress, and primary actions.</p>
+        <p className="muted">A highlight for selected items, focus, progress, and what needs you.</p>
         <div className="accent-row" role="radiogroup" aria-label="Accent">
           {ACCENTS.map((option) => (
             <button
