@@ -1,5 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
 import type { AgentProfile, BentoClient, ProjectSession } from "@bento/api-client";
+import { MODEL_GUIDANCE } from "@bento/core";
 import { runDot, runTime, runWords } from "./AgentSession.js";
 import { useToast } from "./Toasts.js";
 import { SessionPageSkeleton, SessionsListSkeleton } from "./Skeleton.js";
@@ -270,7 +271,8 @@ export function SessionsPage({
       <div className="sessions-pane">
         <header className="surface-heading">
           <div>
-            <h1>Sessions</h1>
+            {/* The page header already says Sessions; the heading stays for a reader. */}
+            <h1 className="visually-hidden">Sessions</h1>
             <p>Conversations behind the work.</p>
           </div>
           <div className="surface-heading-actions">
@@ -290,6 +292,14 @@ export function SessionsPage({
         {sessions === null && <SessionsListSkeleton />}
         {sessions && sessions.length > 0 && (
           <div className="sessions-list">
+            <div className="sessions-list-head" aria-hidden="true">
+              <span>Card</span>
+              <span>Agent</span>
+              <span>Status</span>
+              <span>Runs</span>
+              <span>Started</span>
+              <span>Cost</span>
+            </div>
             {sessions.map((session) => {
               const run = session.latestRun;
               const agent = run.agentName ?? profiles.find((p) => p.id === run.agentProfileId)?.name ?? "agent";
@@ -312,31 +322,30 @@ export function SessionsPage({
                     openSession(session.featureId);
                   }}
                 >
-                  <span className="session-avatar" aria-hidden="true">
-                    {initialsOf(agent)}
+                  {/* One row of a quiet table: the card, its agent and tool,
+                      the status word, then the figures in mono. Beside an
+                      open conversation the row folds to two lines. */}
+                  <span className="session-card-title">{session.title}</span>
+                  <span className="session-card-agent">
+                    {agent}
+                    {run.agentCli && <span className="session-card-tool"> {toolLabel(run.agentCli)}</span>}
                   </span>
-                  <span className="session-card-main">
-                    <span className="session-card-top">
-                      <span className="session-card-title">{session.title}</span>
-                      <span className="session-card-time">{runTime(run.queuedAt)}</span>
-                    </span>
-                    <span className="session-card-sub">
-                      <span className="dot" data-state={runDot(run.status)} />
-                      <span className="session-card-status">
-                        {agent} {runWords(run.status)}
-                      </span>
-                      <span
-                        className="session-card-tail"
-                        // The topbar's spend chip counts every run including
-                        // the gate evaluator's judges, and several tools
-                        // report no cost at all, so this figure is neither
-                        // that one nor exact. Say so where it is shown.
-                        title="This conversation's agent runs. Judge runs are not counted, and runs that report no cost are missing from the total, so it is a floor, not a total."
-                      >
-                        {session.runCount === 1 ? "1 run" : `${session.runCount} runs`}
-                        {session.totalCostUsd !== null ? ` · $${session.totalCostUsd.toFixed(2)}` : ""}
-                      </span>
-                    </span>
+                  <span className="status-word session-card-status" data-tone={sessionTone(run.status)}>
+                    {runWords(run.status)}
+                  </span>
+                  <span
+                    className="session-card-runs"
+                    // The topbar's spend chip counts every run including
+                    // the gate evaluator's judges, and several tools
+                    // report no cost at all, so this figure is neither
+                    // that one nor exact. Say so where it is shown.
+                    title="This conversation's agent runs. Judge runs are not counted, and runs that report no cost are missing from the total, so it is a floor, not a total."
+                  >
+                    {session.runCount === 1 ? "1 run" : `${session.runCount} runs`}
+                  </span>
+                  <span className="session-card-time">{runTime(run.queuedAt)}</span>
+                  <span className="session-card-cost">
+                    {session.totalCostUsd !== null ? `$${session.totalCostUsd.toFixed(2)}` : ""}
                   </span>
                 </a>
               );
@@ -467,15 +476,13 @@ function ListResizeHandle({
   );
 }
 
-/** "Code Reviewer" wears CR, the way a chat list draws its contacts. */
-function initialsOf(name: string): string {
-  return (
-    name
-      .split(/\s+/)
-      .map((word) => word[0])
-      .filter(Boolean)
-      .slice(0, 2)
-      .join("")
-      .toUpperCase() || "A"
-  );
+/** The tool by the name people know it by: "claude-code" is Claude Code. */
+function toolLabel(cli: string): string {
+  return MODEL_GUIDANCE.find((tool) => tool.cli === cli)?.label ?? cli;
+}
+
+/** A run's status as the console's status words colour it. */
+function sessionTone(status: string): "running" | "succeeded" | "failed" | "idle" {
+  const dot = runDot(status);
+  return dot === "cancelled" ? "idle" : dot;
 }

@@ -772,59 +772,64 @@ export function FeatureDrawer({
    */
   const description = descriptionText(feature.description);
   const descriptionClamps = needsClamp(description);
+  const stageIndex = stage ? stages.indexOf(stage) : -1;
+  const waitingForCapacity = !finished && latestRun?.status === "failed" && isSandboxCapacityError(latestRun.error);
+  /** The card's state in a few words, as the header says it. */
+  const headline = runActive
+    ? latestRun?.status === "queued"
+      ? "Waiting to start"
+      : latestRun?.status === "starting"
+        ? "Starting agent"
+        : "Agent working"
+    : waitingForCapacity
+      ? "Waiting for capacity"
+      : statusWords(feature.status);
+  const headlineTone = runActive
+    ? "running"
+    : waitingForCapacity || feature.status === "gated"
+      ? "gated"
+      : feature.status === "done"
+        ? "succeeded"
+        : "idle";
+  /**
+   * Where the card stands in each stage: done behind it, its own state
+   * where it is, and the stage it goes to next. Words from the board's
+   * own vocabulary, so the strip and the card face agree.
+   */
+  const pipelineSteps = stages.map((step, i) => {
+    if (finished || (stageIndex >= 0 && i < stageIndex)) return { step, word: "done", tone: "succeeded" };
+    if (i === stageIndex) {
+      if (runActive) return { step, word: headline.toLowerCase(), tone: "running" };
+      if (stageRun?.status === "failed") return { step, word: "agent failed", tone: "failed" };
+      if (feature.status === "gated") return { step, word: "pending approval", tone: "gated" };
+      return { step, word: "in progress", tone: "idle" };
+    }
+    return { step, word: i === stageIndex + 1 ? "up next" : "later", tone: "idle" };
+  });
 
   return (
     <Tabs.Root value={activeDrawerTab} onValueChange={setDrawerTab} asChild>
     <aside
-      className={`drawer feature-drawer${activeDrawerTab === "activity" ? " sheet-chat" : ""}`}
+      className={`drawer feature-drawer card-drawer${activeDrawerTab === "activity" ? " sheet-chat" : ""}`}
       role="dialog"
       aria-label={feature.title}
       ref={panel}
     >
       <header className="drawer-head">
         <div className="feature-topline">
-          <span className="feature-kicker">Feature</span>
-          <span className="chip" data-status={runActive ? "active" : feature.status}>
-            {runActive ? latestRun?.status === "queued" ? "Waiting to start" : latestRun?.status === "starting" ? "Starting agent" : "Agent working" : !finished && latestRun?.status === "failed" && isSandboxCapacityError(latestRun.error) ? "Waiting for capacity" : statusWords(feature.status)}
+          <span className="card-drawer-stage">
+            {/* A finished card keeps the stage it finished in. */}
+            {stage && <span className="mono">{String(stageIndex + 1).padStart(2, "0")}</span>}
+            {stage?.name ?? (finished ? "Finished" : "Backlog")}
+          </span>
+          <span className="status-word" data-tone={headlineTone}>
+            {headline}
           </span>
           <button className="btn btn-ghost feature-close" onClick={onClose} aria-label="Close" title="Close (Esc)">
             <span aria-hidden="true">×</span>
           </button>
         </div>
         <h2 className="drawer-title">{feature.title}</h2>
-        {feature.branchName && (
-          <div className="feature-branch">
-            <span className="meta-label">Branch</span>
-            <code title={feature.branchName}>{feature.branchName}</code>
-          </div>
-        )}
-        <div className="feature-stage">
-          <div className="feature-stage-heading">
-            <span>{finished ? "Finished" : stage?.name ?? "Backlog"}</span>
-            <span className="feature-stage-position">
-              {stage && !finished ? `Stage ${stages.indexOf(stage) + 1} of ${stages.length}` : finished ? "End of pipeline" : "Before the first stage"}
-            </span>
-          </div>
-          <ol className="feature-progress" aria-label="Pipeline position">
-            {[{ id: "backlog", name: "Backlog" }, ...stages, { id: "completed", name: "Completed" }].map((step) => {
-              const current = finished ? step.id === "completed" : step.id === (feature.currentStageId ?? "backlog");
-              return (
-                <li key={step.id} title={step.name} aria-current={current ? "step" : undefined}>
-                  <span className="visually-hidden">{step.name}</span>
-                </li>
-              );
-            })}
-          </ol>
-          <div className="feature-agent">
-            {detailsPending ? <Skeleton height={14} width="11rem" /> : displayedAgent ? (
-              <>
-                <ProviderMark cli={displayedAgent.cli} model={displayedAgent.model} decorative />
-                <span>{displayedAgent.name}</span>
-              </>
-            ) : <span>{finished ? "Work finished" : stage ? "No agent assigned" : "Assign agents in Pipeline"}</span>}
-            {stage && !finished && <span className="feature-gate-mode">{stage.gateType === "manual" ? "Manual approval" : "Automatic advancement"}</span>}
-          </div>
-        </div>
       </header>
       <Tabs.List className="feature-tabs" aria-label="Feature details">
         <Tabs.Trigger value="overview">Overview</Tabs.Trigger>
@@ -1050,6 +1055,29 @@ export function FeatureDrawer({
           )}
         </section>
 
+        {stages.length > 0 && (
+          <section className="section card-drawer-pipeline-section">
+            <ol className="card-drawer-pipeline" aria-label="Pipeline position">
+              {pipelineSteps.map(({ step, word, tone }) => (
+                <li key={step.id} aria-current={step.id === stage?.id && !finished ? "step" : undefined} data-tone={tone}>
+                  <span className="card-drawer-pipeline-name" title={step.name}>{step.name}</span>
+                  <span className="card-drawer-pipeline-state">{word}</span>
+                </li>
+              ))}
+            </ol>
+            <div className="feature-agent">
+              {detailsPending ? <Skeleton height={14} width="11rem" /> : displayedAgent ? (
+                <>
+                  <ProviderMark cli={displayedAgent.cli} model={displayedAgent.model} decorative />
+                  <span>{displayedAgent.name}</span>
+                </>
+              ) : <span>{finished ? "Work finished" : stage ? "No agent assigned" : "Assign agents in Pipeline"}</span>}
+              {stage && !finished && <span className="feature-gate-mode">{stage.gateType === "manual" ? "Manual approval" : "Automatic advancement"}</span>}
+              {stage && !finished && <span className="feature-stage-position mono">Stage {stageIndex + 1} of {stages.length}</span>}
+            </div>
+          </section>
+        )}
+
         {/*
           The original brief remains readable on the overview, including
           Linear bodies and Slack permalinks. It uses the card row already
@@ -1196,6 +1224,13 @@ export function FeatureDrawer({
                 when you press Re-check requirements.
               </p>
             )}
+          </section>
+        )}
+
+        {feature.branchName && (
+          <section className="section">
+            <span className="label">Branch</span>
+            <code className="card-drawer-branch" title={feature.branchName}>{feature.branchName}</code>
           </section>
         )}
 

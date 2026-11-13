@@ -11,6 +11,8 @@ for (const name of ["preload", "launcher-preload"]) {
 await mkdir(path.join(dist, "launcher"), { recursive: true });
 await cp(path.join(root, "src/launcher"), path.join(dist, "launcher"), { recursive: true });
 await cp(path.join(root, "../web/public/apple-touch-icon.png"), path.join(dist, "launcher/icon.png"));
+// The console's sans, so the launcher speaks in the same type as the windows it opens.
+await cp(path.join(root, "../web/public/fonts/geist-latin-variable.woff2"), path.join(dist, "launcher/geist.woff2"));
 await build({ entryPoints: [path.join(root, "src/launcher.ts")], outfile: path.join(dist, "launcher/launcher.js"),
   bundle: true, platform: "browser", format: "esm", target: "chrome140" });
 await rm(path.join(dist, "web"), { recursive: true, force: true });

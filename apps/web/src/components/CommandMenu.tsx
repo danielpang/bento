@@ -26,7 +26,7 @@ export function CommandMenu({ commands, onClose }: { commands: Command[]; onClos
       if (event.key === "ArrowUp" && index === 0) input.current?.focus();
       else buttons[Math.max(0, Math.min(buttons.length - 1, index + (event.key === "ArrowDown" ? 1 : -1)))]?.focus();
     }}>
-      {matches.map((command) => <button className="command-result" key={command.id} onClick={() => choose(command)}><span>{command.label}</span>{command.hint && <kbd>{command.hint}</kbd>}</button>)}
+      {matches.map((command) => <button className="command-result" key={command.id} onClick={() => choose(command)}><span>{command.label}</span>{command.hint && (command.hint.length === 1 ? <kbd className="kbd">{command.hint}</kbd> : <span className="command-kind">{command.hint}</span>)}</button>)}
       {matches.length === 0 && <p className="muted" role="status">No matching cards or actions.</p>}
     </div>
   </Modal>;

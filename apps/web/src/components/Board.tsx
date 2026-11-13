@@ -101,14 +101,16 @@ function drawerReserve(board: HTMLElement): number {
   const drawer = document.querySelector<HTMLElement>(".drawer");
   if (drawer) {
     const box = drawer.getBoundingClientRect();
-    // Docked on the right only: on small screens it is a bottom sheet,
-    // which covers nothing horizontally.
-    return box.top === 0 ? box.width + 24 : 0;
+    // Docked on the right only, floating a few pixels in from the top:
+    // on small screens it is a bottom sheet, which covers nothing
+    // horizontally. What it covers runs from its left edge to the
+    // window's right, inset included.
+    return box.top < 40 ? window.innerWidth - box.left + 24 : 0;
   }
   // The panel's code is still arriving: fall back to the rule the CSS
   // declares for the side-panel layout rather than read a style that
   // has not settled.
-  return window.innerWidth > 720 ? Math.min(560, window.innerWidth) + 24 : 0;
+  return window.innerWidth > 720 ? Math.min(620, window.innerWidth - 24) + 36 : 0;
 }
 
 /** Time constant of the reveal's approach. */
@@ -630,6 +632,9 @@ export function Board({
       data-drawer-open={drawerOpen || undefined}
       data-grouped={relatedIds ? "" : undefined}
     >
+      {/* One tray, the lanes its compartments: the pipeline reads as a
+          single object rather than five floating columns. */}
+      <div className="board-tray">
       <Lane
         name="Backlog"
         ordinal="00"
@@ -708,6 +713,7 @@ export function Board({
       >
         {finished.map(card)}
       </Lane>
+      </div>
     </div>
     {mascots && <BoardMascots onNewCard={onNewCard} onDismiss={onDismissMascots} />}
     </>
@@ -771,13 +777,17 @@ function Lane({
           </span>
           <span className="lane-count">{count}</span>
         </div>
-        {agentMenu ?? (
-          // Backlog and Completed carry no agent. Stage lanes pass the
-          // menu, which is the pill and the way to change it.
-          <span className="lane-agent lane-agent-empty">{note ?? "no agent assigned"}</span>
-        )}
+        {/* One faint line: who works the lane, and what happens when
+            they finish. */}
+        <div className="lane-sub">
+          {agentMenu ?? (
+            // Backlog and Completed carry no agent. Stage lanes pass the
+            // menu, which is the pill and the way to change it.
+            <span className="lane-agent lane-agent-empty">{note ?? "no agent assigned"}</span>
+          )}
+          {kind === "stage" && <span className="lane-policy" title={gateType === "manual" ? "You review the work before it advances" : "Advances when its requirements pass"}>{gateType === "manual" ? "Review before advancing" : "Advances automatically"}</span>}
+        </div>
       </header>
-      {kind === "stage" && <span className="lane-policy" title={gateType === "manual" ? "You review the work before it advances" : "Advances when its requirements pass"}>{gateType === "manual" ? "Review before advancing" : "Advances automatically"}</span>}
       <div className="lane-cards">
         {count === 0 && empty}
         {children}
@@ -877,6 +887,9 @@ const Card = memo(function Card({
       className="card"
       data-feature={feature.id}
       data-state={state}
+      /* Waiting or finished work sits flat on the tray; a card in a
+         stage is raised off it. */
+      data-quiet={finished || !feature.currentStageId || undefined}
       data-finish={finishing ?? undefined}
       data-related={inGroup ? "" : undefined}
       aria-pressed={selected}
@@ -893,8 +906,22 @@ const Card = memo(function Card({
       }}
     >
       <span className="card-title">{feature.title}</span>
+      {/*
+        The agent's own words while it works, and its last words when it
+        fails, which is why the run ended where it did. Keyed on the run
+        rather than the card state: a run that fails under a gate still
+        holding the card leaves the card reading "gated", and the reason
+        it failed is exactly what a person needs at that point. Hidden
+        once everything settles: yesterday's sentence on an idle card
+        reads as though something is still happening.
+      */}
+      {lastOutput && (runActive || runStatus === "failed") && (
+        <span className="card-line" title={lastOutput}>
+          {lastOutput}
+        </span>
+      )}
       <span className="card-meta">
-        <span className="status">
+        <span className="status" data-state={state}>
           <span className="dot" data-state={state} />
           {attentionLabel ?? stateLabel(state)}
         </span>
@@ -963,20 +990,6 @@ const Card = memo(function Card({
           {session.totalCostUsd !== null && <span title="Reported cost across agent runs. Some agents do not report cost, so this is a minimum."> · ${session.totalCostUsd.toFixed(2)}+</span>}
         </span>
       </span>}
-      {/*
-        The agent's own words while it works, and its last words when it
-        fails, which is why the run ended where it did. Keyed on the run
-        rather than the card state: a run that fails under a gate still
-        holding the card leaves the card reading "gated", and the reason
-        it failed is exactly what a person needs at that point. Hidden
-        once everything settles: yesterday's sentence on an idle card
-        reads as though something is still happening.
-      */}
-      {lastOutput && (runActive || runStatus === "failed") && (
-        <span className="card-line" title={lastOutput}>
-          {lastOutput}
-        </span>
-      )}
       <Pulse pulse={pulse} />
     </button>
   );
