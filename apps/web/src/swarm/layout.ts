@@ -38,6 +38,8 @@ export const STACK_GAP = 20;
 export const RAIL_OFFSET = 12;
 /** Where a rail turns into a child, measured down from the child's top. */
 export const RAIL_ENTRY = 26;
+/** Between a fanned out card and the row of its children, room for the bus. */
+export const FAN_GAP = 48;
 
 /**
  * How long a leaf may work before the console says so, in
@@ -196,6 +198,15 @@ export interface ModelOptions {
   expanded?: Iterable<string>;
   /** Nodes a person folded by hand, even while work below them is active. */
   folded?: Iterable<string>;
+  /**
+   * Nodes a person opened from folded, which fan their children out
+   * sideways rather than stacking them down the column.
+   *
+   * Separate from `expanded` because that also carries the paths a node
+   * search reveals for the moment, and a search should not set the
+   * tree spreading out as somebody types.
+   */
+  opened?: Iterable<string>;
   /** Finished swarms keep their full tree visible unless a person folds it. */
   autoCollapseCompleted?: boolean;
   /** The instant the model is for. Passed, never read from the clock. */
@@ -284,8 +295,9 @@ export function elapsedFor(task: Pick<SwarmTask, "startedAt" | "endedAt">, now: 
  * The whole model, from the task rows.
  *
  * Depth first through the tree. The plan fans out sideways only where
- * it first branches: each branch there is a column, and everything
- * under a branch stacks down its column, indented a step per level.
+ * it first branches, and where a person opened a folded card: each
+ * branch there is a column, and everything else under a branch stacks
+ * down its column, indented a step per level.
  * Fanning every level sideways put each leaf in a column of its own,
  * so a plan of five branches and fifteen leaves was fifteen cards
  * wide and a branch's work was spread across the screen. A collapsed
@@ -296,6 +308,7 @@ export function buildSwarmModel(tasks: SwarmTask[], options: ModelOptions = {}):
   const longRunMs = options.longRunMs ?? LONG_RUN_WARNING_MS;
   const expanded = new Set(options.expanded ?? []);
   const folded = new Set(options.folded ?? []);
+  const opened = new Set(options.opened ?? []);
 
   const byId = new Map<string, SwarmNode>();
   const childIds = new Map<string, string[]>();
@@ -508,22 +521,55 @@ export function buildSwarmModel(tasks: SwarmTask[], options: ModelOptions = {}):
   }
   const inSpine = new Set(spine.map((node) => node.id));
 
+  /*
+   * A subtree a person opened fans out instead: its children sit side
+   * by side on a row below it, each with its own subtree stacked under
+   * it, and the opened card is centred over the first and last of them.
+   * Opening a card makes room sideways, which is what a person who
+   * opened it is asking for; everything nobody opened stays compact.
+   */
+  const fanned = new Set<string>();
+  const place = (node: SwarmNode, x: number, y: number): Extent => {
+    node.x = x;
+    node.y = y;
+    const extent = { left: x, right: x + NODE_WIDTH, bottom: y + NODE_HEIGHT };
+    const kids = shown(node);
+    if (kids.length === 0) return extent;
+    if (opened.has(node.id)) {
+      fanned.add(node.id);
+      const row = y + NODE_HEIGHT + FAN_GAP;
+      // Measured at the origin first: a child's subtree can reach left
+      // of the child itself when something inside it is fanned too.
+      const sizes = kids.map((kid) => place(kid, 0, row));
+      const starts: number[] = [];
+      let run = 0;
+      for (const size of sizes) {
+        starts.push(run - size.left);
+        run += size.right - size.left + COLUMN_GAP;
+      }
+      const shift = x - (starts[0]! + starts[starts.length - 1]!) / 2;
+      kids.forEach((kid, index) => grow(extent, place(kid, starts[index]! + shift, row)));
+      return extent;
+    }
+    let below = extent.bottom + STACK_GAP;
+    for (const kid of kids) {
+      const size = place(kid, x + INDENT, below);
+      grow(extent, size);
+      below = size.bottom + STACK_GAP;
+    }
+    return extent;
+  };
+
   const top = spine.length * ROW_PITCH;
   let cursor = 0;
   let bottom = spine.length > 0 ? top - ROW_GAP : 0;
   for (const head of heads) {
-    let y = top;
-    let right = cursor + NODE_WIDTH;
-    const stack = (node: SwarmNode, level: number): void => {
-      node.x = cursor + level * INDENT;
-      node.y = y;
-      right = Math.max(right, node.x + NODE_WIDTH);
-      y += NODE_HEIGHT + STACK_GAP;
-      for (const kid of shown(node)) stack(kid, level + 1);
-    };
-    stack(head, 0);
-    bottom = Math.max(bottom, y - STACK_GAP);
-    cursor = right + COLUMN_GAP;
+    // A fan can reach left of its column's head, so the column starts
+    // where its leftmost card does.
+    const reach = place(head, 0, top).left;
+    const size = place(head, cursor - reach, top);
+    bottom = Math.max(bottom, size.bottom);
+    cursor = size.right + COLUMN_GAP;
   }
   const spineX = heads.length > 0 ? (heads[0]!.x + heads[heads.length - 1]!.x) / 2 : 0;
   spine.forEach((node, row) => {
@@ -551,10 +597,10 @@ export function buildSwarmModel(tasks: SwarmTask[], options: ModelOptions = {}):
         parentId: node.id,
         childId: child.id,
         relation: child.parentRelation,
-        path: inSpine.has(node.id)
+        path: inSpine.has(node.id) || fanned.has(node.id)
           ? edgePath(node, child)
           : railPath(node, child, index > 0 ? kids[index - 1]! : null),
-        live: inSpine.has(node.id)
+        live: inSpine.has(node.id) || fanned.has(node.id)
           ? child.frontierPath
           : kids.slice(index).some((kid) => kid.frontierPath),
       });
@@ -594,6 +640,18 @@ export function buildSwarmModel(tasks: SwarmTask[], options: ModelOptions = {}):
     height: bottom,
     orphanIds,
   };
+}
+
+interface Extent {
+  left: number;
+  right: number;
+  bottom: number;
+}
+
+function grow(extent: Extent, by: Extent): void {
+  extent.left = Math.min(extent.left, by.left);
+  extent.right = Math.max(extent.right, by.right);
+  extent.bottom = Math.max(extent.bottom, by.bottom);
 }
 
 function hideSubtree(node: SwarmNode, byId: Map<string, SwarmNode>): void {
@@ -840,7 +898,7 @@ export function createModelCache(): (tasks: SwarmTask[], options?: ModelOptions)
       .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
       .map(([id, at]) => `${id}=${at}`)
       .join(",");
-    const key = `${[...(options.expanded ?? [])].sort().join(",")}|${[...(options.folded ?? [])].sort().join(",")}|${options.autoCollapseCompleted !== false}|${options.now ?? 0}|${options.longRunMs ?? LONG_RUN_WARNING_MS}|${running}|${started}`;
+    const key = `${[...(options.expanded ?? [])].sort().join(",")}|${[...(options.folded ?? [])].sort().join(",")}|${[...(options.opened ?? [])].sort().join(",")}|${options.autoCollapseCompleted !== false}|${options.now ?? 0}|${options.longRunMs ?? LONG_RUN_WARNING_MS}|${running}|${started}`;
     if (last && lastTasks === tasks && lastKey === key) return last;
     last = buildSwarmModel(tasks, options);
     lastTasks = tasks;

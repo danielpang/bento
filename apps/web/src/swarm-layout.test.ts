@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   COLUMN_GAP,
+  FAN_GAP,
   COLUMN_PITCH,
   INDENT,
   LONG_RUN_WARNING_MS,
@@ -433,6 +434,86 @@ test("inside a column each child's rail starts where the sibling above turned of
   // The first stretch also leads to the working leaf below it, so it is lit.
   assert.equal(edge("a1").live, true);
   assert.equal(edge("a2").live, true);
+});
+
+test("a card a person opened fans its children out, centred under it", () => {
+  const tasks = [
+    node("root", null, "plan", "working", { position: 0 }),
+    node("pay", "root", "plan", "working", { position: 1 }),
+    node("pay-1", "pay", "leaf", "working", { position: 2 }),
+    node("cart", "root", "plan", "done", { position: 3 }),
+    node("cart-1", "cart", "leaf", "done", { position: 4 }),
+    node("cart-2", "cart", "leaf", "done", { position: 5 }),
+    node("cart-3", "cart", "leaf", "done", { position: 6 }),
+    node("tests", "root", "leaf", "open", { position: 7 }),
+  ];
+  const model = buildSwarmModel(tasks, { now: 0, expanded: ["cart"], opened: ["cart"] });
+  const at = (id: string) => model.byId.get(id)!;
+  const row = at("cart").y + NODE_HEIGHT + FAN_GAP;
+  // Side by side on one row, a column's width apart.
+  assert.deepEqual(["cart-1", "cart-2", "cart-3"].map((id) => at(id).y), [row, row, row]);
+  assert.equal(at("cart-2").x - at("cart-1").x, COLUMN_PITCH);
+  assert.equal(at("cart-3").x - at("cart-2").x, COLUMN_PITCH);
+  // The opened card sits over the middle of its first and last child.
+  assert.equal(at("cart").x, (at("cart-1").x + at("cart-3").x) / 2);
+  // Its column starts where its leftmost card does, clear of the one before.
+  assert.equal(at("cart-1").x, INDENT + NODE_WIDTH + COLUMN_GAP);
+  // And the column after starts clear of its rightmost card.
+  assert.equal(at("tests").x, at("cart-3").x + NODE_WIDTH + COLUMN_GAP);
+  // Its edges are the bus, not a rail.
+  const edge = model.edges.find((item) => item.childId === "cart-1")!;
+  assert.ok(edge.path.includes(" H "), edge.path);
+  assert.ok(edge.path.startsWith(`M ${at("cart").x + NODE_WIDTH / 2} ${at("cart").y + NODE_HEIGHT}`), edge.path);
+});
+
+test("an open card nobody opened by hand still stacks, so a search never spreads the tree", () => {
+  const tasks = [
+    node("root", null, "plan", "working", { position: 0 }),
+    node("cart", "root", "plan", "done", { position: 1 }),
+    node("cart-1", "cart", "leaf", "done", { position: 2 }),
+    node("cart-2", "cart", "leaf", "done", { position: 3 }),
+    node("tests", "root", "leaf", "open", { position: 4 }),
+  ];
+  // What a search reveals arrives as expanded, never as opened.
+  const model = buildSwarmModel(tasks, { now: 0, expanded: ["cart"] });
+  const at = (id: string) => model.byId.get(id)!;
+  assert.equal(at("cart").collapsed, false);
+  assert.equal(at("cart-1").x, at("cart").x + INDENT);
+  assert.equal(at("cart-2").y, at("cart-1").y + NODE_HEIGHT + STACK_GAP);
+});
+
+test("a fan inside a fan keeps every card clear of its neighbours", () => {
+  const tasks = [
+    node("a", null, "plan", "working", { position: 0 }),
+    node("a1", "a", "plan", "working", { position: 1 }),
+    node("a1x", "a1", "leaf", "open", { position: 2 }),
+    node("a1y", "a1", "leaf", "open", { position: 3 }),
+    node("a2", "a", "leaf", "open", { position: 4 }),
+    node("b", null, "leaf", "open", { position: 5 }),
+  ];
+  const model = buildSwarmModel(tasks, { now: 0, opened: ["a", "a1"] });
+  const cards = visibleNodes(model);
+  for (const one of cards) {
+    for (const other of cards) {
+      if (one === other) continue;
+      const apart = one.x + NODE_WIDTH <= other.x || other.x + NODE_WIDTH <= one.x ||
+        one.y + NODE_HEIGHT <= other.y || other.y + NODE_HEIGHT <= one.y;
+      assert.ok(apart, `${one.id} overlaps ${other.id}`);
+    }
+  }
+  assert.ok(Math.min(...cards.map((card) => card.x)) >= 0);
+  assert.equal(model.width, Math.max(...cards.map((card) => card.x + NODE_WIDTH)));
+});
+
+test("the model cache tells opened apart from expanded", () => {
+  const tasks = [
+    node("root", null, "plan", "working", { position: 0 }),
+    node("cart", "root", "plan", "done", { position: 1 }),
+    node("cart-1", "cart", "leaf", "done", { position: 2 }),
+  ];
+  const cache = createModelCache();
+  const plain = cache(tasks, { now: 0, expanded: ["cart"] });
+  assert.notEqual(cache(tasks, { now: 0, expanded: ["cart"], opened: ["cart"] }), plain);
 });
 
 test("a stretch of rail is dark when nothing below it is happening", () => {
