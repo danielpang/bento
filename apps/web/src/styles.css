@@ -11179,6 +11179,18 @@ a.hours-person-name:hover {
   letter-spacing: 0;
 }
 .board[data-focused] .lane:not([data-occupied]) { display: none; }
+/* With lanes hidden, :first-child and :last-child no longer name the
+   tray's ends: the end compartments are the first and last lanes still
+   shown, so the last one drops its rule against the tray's edge. */
+.board[data-focused] .lane[data-occupied]:not(:has(~ .lane[data-occupied])) {
+  border-right: none;
+  border-top-right-radius: calc(var(--radius-panel) - 1px);
+  border-bottom-right-radius: calc(var(--radius-panel) - 1px);
+}
+.board[data-focused] .lane[data-occupied]:not(.lane[data-occupied] ~ .lane) {
+  border-top-left-radius: calc(var(--radius-panel) - 1px);
+  border-bottom-left-radius: calc(var(--radius-panel) - 1px);
+}
 .board-controls { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 24px 0; flex-shrink: 0; }
 /* The filter is a segmented control: one hairline box, the current
    choice filled with the nav fill and its own ring. */
@@ -11233,7 +11245,7 @@ a.hours-person-name:hover {
 @media (max-width: 720px) {
   .board-controls { padding: 12px 16px 12px; gap: 8px; flex-wrap: wrap; }
   .board-filter { padding: 0 8px; gap: 5px; }
-  .board.work-list, .work-list[data-drawer-open] { padding: 0 12px 24px; }
+  .board.work-list, .work-list[data-drawer-open] { padding: 0 16px 24px; }
   .work-row .card { padding-right: 12px; padding-bottom: 36px; }
   .work-stage { top: auto; bottom: 12px; left: 14px; right: auto; max-width: calc(100% - 28px); text-align: left; }
 }
@@ -11244,6 +11256,62 @@ a.hours-person-name:hover {
 @media (max-width: 720px) { .search-command { display: none; } }
 .work-group { container-type: inline-size; }
 .work-list .card { animation: none; }
+/*
+ * The list speaks the sessions table's language: each group is one
+ * panel under its label, the rows divided by hairlines, the open row
+ * marked the way the sessions list marks its selection. A card here is
+ * a row, so it drops its own edge, lift and running rim (the status
+ * word already says the agent is working).
+ */
+.work-group { margin: 0 0 26px; }
+.work-group h2 { margin: 12px 0 8px; color: var(--text-soft); }
+.work-row {
+  margin: 0;
+  border: 1px solid var(--line-edge);
+  border-top-color: var(--line);
+  border-bottom: none;
+  background: var(--panel);
+}
+div.work-row:first-of-type {
+  border-top-color: var(--line-edge);
+  border-radius: var(--radius-panel) var(--radius-panel) 0 0;
+}
+div.work-row:last-of-type {
+  border-bottom: 1px solid var(--line-edge);
+  border-radius: 0 0 var(--radius-panel) var(--radius-panel);
+  box-shadow: var(--inner-highlight);
+}
+div.work-row:first-of-type:last-of-type { border-radius: var(--radius-panel); }
+.work-row .card {
+  min-height: 0;
+  padding-top: 13px;
+  padding-left: 18px;
+}
+.work-row .card,
+.work-row .card[data-quiet] {
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  box-shadow: none;
+  transform: none;
+}
+.work-row .card:focus-visible { outline-offset: -2px; }
+.work-row .card::before,
+.work-row .card::after { display: none; }
+@media (hover: hover) {
+  .work-row .card:hover { background: var(--nav-current); transform: none; }
+}
+.work-row .card[aria-pressed="true"] {
+  background: var(--nav-current);
+  box-shadow: inset 2px 0 0 var(--brand);
+}
+.work-stage { color: var(--text-faint); }
+@container (min-width: 521px) {
+  .work-stage { top: 15px; right: 18px; }
+}
+@container (max-width: 520px) {
+  .work-row .work-stage { left: 18px; }
+}
 @container (max-width: 520px) {
   .work-row .card { padding-right: 12px; padding-bottom: 36px; }
   .work-stage { top: auto; bottom: 12px; left: 14px; right: auto; max-width: calc(100% - 28px); text-align: left; }
