@@ -248,6 +248,9 @@ interface BoardProps {
   mascots?: boolean;
   /** The mascots' circled x: put them away. */
   onDismissMascots?: () => void;
+  /** The filter, when the caller holds it (the sidebar's "Needs you" sets it). */
+  focus?: BoardFocus;
+  onFocusChange?: (next: BoardFocus) => void;
 }
 
 /** A card whose work is over: finished or abandoned, either way not moving. */
@@ -394,6 +397,8 @@ export function Board({
   sessions = [],
   mascots: keepMascots = false,
   onDismissMascots = () => {},
+  focus: focusProp,
+  onFocusChange,
 }: BoardProps) {
   /**
    * Groups are unfinished product, so the badge and the ring are only
@@ -402,9 +407,16 @@ export function Board({
    * there is nothing for a caller to supply.
    */
   const showGroups = useBetaTesters();
-  const [focus, setFocus] = useState<BoardFocus>(() => {
+  const [ownFocus, setOwnFocus] = useState<BoardFocus>(() => {
     try { return readBoardFocus(localStorage.getItem("bento.board.focus")); } catch { return "all"; }
   });
+  // Held by the caller when it passes one, so the sidebar's "Needs you"
+  // can open this filter; held here otherwise.
+  const focus = focusProp ?? ownFocus;
+  const setFocus = (next: BoardFocus) => {
+    setOwnFocus(next);
+    onFocusChange?.(next);
+  };
   const sessionByFeature = useMemo(() => new Map(sessions.map((session) => [session.featureId, session])), [sessions]);
   const activeFocus = showGroups ? focus : "all";
   const focusedReview = showGroups && (activeFocus !== "all" || view === "list") && drawerOpen;

@@ -18,16 +18,31 @@
   color-scheme: dark;
 
   /*
-   * A warm near-black, not a blue one. The neutrals carry a slight
-   * amber cast so the orange brand sits inside the palette instead of
-   * fighting a cool navy for the same eye. Same three-plane structure
-   * as before: page, panel, raised panel, each one step lighter.
+   * Lacquer: a warm near-black, almost colourless, expensive through
+   * restraint. The neutrals carry a slight amber cast so the orange
+   * brand sits inside the palette instead of fighting a cool navy for
+   * the same eye. Three planes, each one step lighter: the page, the
+   * panel (the board's tray, a sidebar section, a dialog), and the
+   * raised card that sits on a panel.
+   *
+   * Depth comes from hairlines, a 1px inner highlight along the top of
+   * a raised surface, and one deep soft shadow under anything that
+   * floats. Never from a wash or a glow across the page.
    */
-  --bg: #0e0d0b;
-  --panel: #161411;
-  --panel-raised: #1d1b17;
-  --line: #2a2722;
-  --line-bright: #3d392f;
+  --bg: #0b0a09;
+  --panel: #100e0c;
+  --panel-raised: #171411;
+  /* Quiet dividers: lane rules, list rows, the sidebar's edge. */
+  --line: #1f1c18;
+  /* The edge of a panel or tray. */
+  --line-edge: #26221c;
+  /* The edge of a raised card, a menu, a chip. */
+  --line-bright: #2a2620;
+  /* The outline of a secondary control: a button you can press. */
+  --control-line: #3a352c;
+  /* The fill under the current entry in a list of places (the sidebar,
+     a segmented control), with a hairline ring of --line-edge. */
+  --nav-current: #1a1714;
   /*
    * The edge of a control you type into, which is a different job from
    * a divider. WCAG puts a 3:1 floor on the visual information needed
@@ -38,37 +53,57 @@
    * (3.27), and a raised card (3.06) alike.
    */
   --field-line: #6d6759;
-  --text: #ededed;
-  --text-dim: #a8a49b;
+  --text: #f1ede6;
+  /* Card titles at rest and other text one step under --text. */
+  --text-soft: #cfcac1;
+  --text-dim: #a8a299;
   /*
    * The small-text floor is 4.5:1 and this is not decoration: it
    * carries every field label, the lane counts, and "no agent
-   * assigned". 4.75 on a raised panel, 5.08 on a card, 5.36 on the
-   * page. Quiet is the intent, unreadable was not.
+   * assigned". 5.1 on a raised card, 5.5 on a panel, 5.8 on the page.
+   * Quiet is the intent, unreadable was not.
    */
-  --text-faint: #8b867c;
+  --text-faint: #8f897e;
+  /* Separators and marks too quiet to carry meaning on their own
+     (the "/" in a breadcrumb, a kbd hint inside a filled button). */
+  --text-ghost: #5b564c;
 
-  --brand: #ff8a3d;
   /*
-   * Ambient wash at the top of the page. The entrance screens used to
-   * be the only place it appeared; it now lives on the page itself, at
-   * a strength you notice without being able to point at a gradient.
+   * The brand is a signal, not a fill: the logo, the "needs you" count,
+   * focus rings, selected marks. The primary control is bone white.
    */
-  --glow: color-mix(in srgb, var(--brand) 9%, transparent);
+  --brand: #ff8a3d;
+  /* The ambient wash is gone. Kept as a token, transparent, so the few
+     gradients that still name it stay valid and draw nothing. */
+  --glow: transparent;
   /* Text sitting on a brand or failed fill. Dark ink here; the light
      theme flips it to white because its fills are deeper. */
-  --on-brand: #0e0d0b;
-  --on-danger: #0e0d0b;
+  --on-brand: #0b0a09;
+  --on-danger: #0b0a09;
+  /*
+   * The primary control: the text colour as fill, the page colour as
+   * label. Derived, so every theme gets its own inversion: bone on
+   * the warm black, ink on the light page, navy's text on navy.
+   */
+  --primary: var(--text);
+  --on-primary: var(--bg);
+  --primary-hover: color-mix(in srgb, var(--text) 86%, var(--bg));
 
-  --running: #4da3ff;
-  --succeeded: #3fbf7f;
-  --failed: #ff6b5e;
-  --gated: #f2c40d;
+  --running: #5aa9ff;
+  --succeeded: #58c795;
+  --failed: #ff7b6e;
+  --gated: #e9c046;
   --idle: #6d675c;
 
   --shadow-1: rgba(0, 0, 0, 0.25);
   --shadow-2: rgba(0, 0, 0, 0.45);
-  --backdrop: rgba(10, 9, 7, 0.66);
+  /* The 1px light along the top edge of a raised surface. */
+  --inner-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  /* The one deep soft shadow under a tray, a drawer, a menu, a dialog. */
+  --shadow-float: 0 24px 60px rgba(0, 0, 0, 0.45);
+  /* What dims the page behind a drawer or a dialog. */
+  --scrim: rgba(5, 4, 3, 0.62);
+  --backdrop: var(--scrim);
   /* Most provider marks are near black, which vanishes on a dark
      background, so they are lightened rather than recoloured. */
   --logo-filter: invert(1) grayscale(1) brightness(1.6);
@@ -77,9 +112,21 @@
   --sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --display: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
 
+  /* The UI voice is the sans at 13px, set slightly tight. Mono is for
+     numbers, costs, durations, ordinals, ids, paths, branches and
+     keyboard hints, never for chrome. */
+  --text-size: 13px;
+  --tracking: -0.005em;
+
+  /* Controls 7px (8px for a page's main action), cards 9px, panels
+     and trays 14px. --radius-lg stays for dialogs and older slabs. */
   --radius: 7px;
+  --radius-control: 8px;
+  --radius-card: 9px;
   --radius-lg: 12px;
+  --radius-panel: 14px;
   --lane-width: 300px;
+  --sidebar-width: 224px;
 }
 
 /*
@@ -92,21 +139,29 @@
   color-scheme: light;
 
   --bg: #f2f1ed;
-  --panel: #f9f8f5;
+  --panel: #f8f7f4;
   --panel-raised: #ffffff;
   --line: #e2dfd8;
-  --line-bright: #c9c4b9;
+  --line-edge: #dbd7ce;
+  --line-bright: #d3cec4;
+  --control-line: #bfb9ad;
+  --nav-current: #e7e5df;
   /* Same floor, measured against this theme's own surfaces:
      3.51 on the page, 3.73 on a card, 3.97 on a raised card. */
   --field-line: #877f6f;
   --text: #1d1a14;
+  --text-soft: #36322a;
   --text-dim: #575145;
   /* 5.87 on white, 5.52 on a card, 5.19 on the page. */
   --text-faint: #6b6455;
+  --text-ghost: #a59e90;
 
   --brand: #b34a00;
   --on-brand: #ffffff;
   --on-danger: #ffffff;
+  /* --primary and --on-primary follow from :root: ink on the page.
+     The hover lifts toward the page rather than darkening further. */
+  --primary-hover: color-mix(in srgb, var(--text) 84%, var(--bg));
 
   --running: #0f62d6;
   --succeeded: #0d7a4a;
@@ -116,11 +171,11 @@
 
   --shadow-1: rgba(29, 26, 20, 0.1);
   --shadow-2: rgba(29, 26, 20, 0.22);
-  --backdrop: rgba(29, 26, 20, 0.4);
+  --inner-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+  --shadow-float: 0 18px 48px rgba(29, 26, 20, 0.12);
+  --scrim: rgba(29, 26, 20, 0.32);
   --logo-filter: grayscale(1);
-  /* The same wash, quieter: a deep burnt orange at 9% on a pale ground
-     reads as a stain rather than as light. */
-  --glow: color-mix(in srgb, var(--brand) 5%, transparent);
+  --glow: transparent;
 }
 
 /*
@@ -135,21 +190,28 @@
   color-scheme: dark;
 
   --bg: #0a0e16;
-  --panel: #131a26;
-  --panel-raised: #182130;
-  --line: #232e40;
-  --line-bright: #33415a;
+  --panel: #0f1520;
+  --panel-raised: #151d2b;
+  --line: #1c2535;
+  --line-edge: #222d40;
+  --line-bright: #283548;
+  --control-line: #354560;
+  --nav-current: #141c2a;
   --field-line: #5c6c85;
   --text: #e4e9f2;
+  --text-soft: #c2ccdb;
   --text-dim: #8496b0;
   --text-faint: #7a8dab;
+  --text-ghost: #4b5a72;
 
   --on-brand: #0a0e16;
   --on-danger: #0a0e16;
 
   --idle: #5b6c85;
 
-  --backdrop: rgba(6, 9, 15, 0.66);
+  --inner-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  --shadow-float: 0 24px 60px rgba(0, 0, 0, 0.5);
+  --scrim: rgba(6, 9, 15, 0.66);
 }
 
 /*
@@ -205,28 +267,117 @@ body {
   background: var(--bg);
   color: var(--text);
   font-family: var(--sans);
-  font-size: 14px;
-  line-height: 1.5;
+  font-size: var(--text-size);
+  letter-spacing: var(--tracking);
+  line-height: 1.45;
   -webkit-font-smoothing: antialiased;
   -webkit-tap-highlight-color: transparent;
-  /* Own stacking, so the wash can sit behind the page without falling
-     through to the canvas and disappearing. */
   isolation: isolate;
 }
 
-/*
- * The brand wash, fixed to the viewport so a long settings page does
- * not scroll it away. Pointer-events none, and behind every descendant:
- * opaque lanes and cards keep their own fill, and anything transparent
- * (the topbar, page padding, the entrance screens) lets it show.
- */
-body::before {
+/* Instrument text: numbers, costs, durations, ids, paths, branches.
+   Tabular, so a count that ticks does not jitter its neighbours. */
+.mono {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+/* A keyboard hint: a key name in a hairline box. */
+.kbd {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 6px;
+  border: 1px solid var(--line-bright);
+  border-radius: 5px;
+  color: var(--text-faint);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0;
+  line-height: 17px;
+}
+
+/* A small count beside a label. Quiet by default; .count-signal is the
+   brand fill reserved for "this needs you". */
+.count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  padding: 0 6px;
+  border-radius: 9px;
+  color: var(--text-faint);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0;
+  line-height: 17px;
+  font-variant-numeric: tabular-nums;
+}
+
+.count-signal {
+  background: var(--brand);
+  color: var(--on-brand);
+}
+
+/* A status: a 6px dot and its word in the status colour. Set
+   data-tone to running, succeeded, failed, gated or idle. */
+.status-word {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11.5px;
+  color: var(--status-tone, var(--text-faint));
+}
+
+.status-word::before {
   content: "";
-  position: fixed;
-  inset: 0;
-  z-index: -1;
-  pointer-events: none;
-  background: radial-gradient(68rem 34rem at 50% -8%, var(--glow), transparent 68%);
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.status-word[data-tone="running"] { --status-tone: var(--running); }
+.status-word[data-tone="succeeded"] { --status-tone: var(--succeeded); }
+.status-word[data-tone="failed"] { --status-tone: var(--failed); }
+.status-word[data-tone="gated"] { --status-tone: var(--gated); }
+.status-word[data-tone="idle"] { --status-tone: var(--idle); }
+
+/* A running dot carries a soft halo of its own colour. */
+.status-word[data-tone="running"]::before {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--running) 16%, transparent);
+}
+
+/* A failure is a square, so it does not rest on colour alone. */
+.status-word[data-tone="failed"]::before {
+  border-radius: 1px;
+}
+
+/* A surface that sits on the page: hairline edge, 14px corners. */
+.surface-panel {
+  border: 1px solid var(--line-edge);
+  border-radius: var(--radius-panel);
+  background: var(--panel);
+}
+
+/* A surface that floats: a tray, a drawer, a popover. */
+.surface-float {
+  border: 1px solid var(--line-edge);
+  border-radius: var(--radius-panel);
+  background: var(--panel);
+  box-shadow: var(--inner-highlight), var(--shadow-float);
+}
+
+/* A card raised off a panel. */
+.surface-raised {
+  border: 1px solid var(--line-bright);
+  border-radius: var(--radius-card);
+  background: var(--panel-raised);
+  box-shadow: var(--inner-highlight);
 }
 
 button {
@@ -256,11 +407,13 @@ button {
   scrollbar-color: var(--line-bright) transparent;
 }
 
-/* Instrumentation voice: labels, counts, ids, statuses. */
+/* A section's name: small sans capitals, quiet. Counts and ids beside
+   it are .mono, not this. */
 .label {
-  font-family: var(--mono);
+  font-family: var(--sans);
   font-size: 11px;
-  letter-spacing: 0.08em;
+  font-weight: 500;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--text-faint);
 }
@@ -297,9 +450,9 @@ button {
   height: 100dvh;
 }
 
-/* Chrome on the page itself, hairline below: the board slab stays the
-   only panel on screen, so the three planes read page, lane, card
-   rather than starting one plane up. */
+/* The strip over a page that stands outside the workspace (Settings,
+   the changelog): the wordmark and a way back. Hairline below, on the
+   page itself. */
 .topbar {
   display: flex;
   align-items: center;
@@ -307,8 +460,6 @@ button {
   padding: 0 24px;
   height: 52px;
   border-bottom: 1px solid var(--line);
-  /* Transparent so the page wash reads at the top, the way it does on
-     the entrance screens this bar used to cover. */
   background: transparent;
   flex-shrink: 0;
 }
@@ -390,162 +541,315 @@ button {
 }
 
 /*
- * The board's tools, and the chrome that follows them. Replaced by the
- * hamburger below 720px; see the narrow-screen block.
- *
- * A real flex container rather than `display: contents`, which would
- * have laid the buttons out identically and been the tidier rule.
- * Browsers have shipped `display: contents` removing an element from
- * the accessibility tree, and this one is a landmark carrying a name.
- * The gap repeats the topbar's so the row is unchanged either way.
+ * The workspace shell: the sidebar down the left, and the page beside
+ * it. Only .app-main scrolls its contents; the sidebar scrolls its own
+ * middle when a short window cannot hold every entry.
  */
-.topbar-nav {
-  display: flex;
-  align-items: center;
-  gap: 4px;
+.app-shell {
+  flex-direction: row;
 }
 
-/* Project context comes first; its navigation and tools sit below it.
-   Both rows keep the same DOM and keyboard order on smaller screens. */
-.workspace-nav .brand {
-  margin-right: 12px;
-}
-
-/* Brand and the project picker travel together. Settings and Sign out
-   travel together too, so a narrow screen can place each cluster
-   without splitting one button onto a line of its own. */
-.workspace-identity,
-.workspace-actions {
-  display: flex;
-  align-items: center;
-  gap: 20px;
-}
-
-/* Shrink the project name before the row overflows. The brand stays
-   intact: only the picker, which already ellipsizes, gives up width. */
-.workspace-identity {
-  flex: 0 1 auto;
+.app-main {
+  flex: 1 1 auto;
   min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
-.workspace-actions {
+.sidebar {
   flex: none;
+  width: var(--sidebar-width);
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 18px 12px 14px;
+  padding-left: max(12px, env(safe-area-inset-left));
+  border-right: 1px solid var(--line);
+  background: var(--bg);
 }
 
-.workspace-toolbar .topbar-nav {
-  align-self: stretch;
+/* Empty in a browser. The Mac app gives it the traffic lights' height
+   (desktop.css), and the connection pill sits in it. */
+.sidebar-titlebar {
+  display: none;
 }
 
-.workspace-toolbar .topbar-nav .btn {
+.sidebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 24px;
+  padding: 0 8px;
+}
+
+.sidebar-brand .brand {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.sidebar-brand .brand-glyph {
+  width: 22px;
+  height: 22px;
+}
+
+.sidebar-commands {
+  margin-left: auto;
   display: inline-flex;
   align-items: center;
-  min-height: 36px;
-  padding: 0 14px;
-  border-radius: var(--radius);
-  position: relative;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: none;
 }
 
-.workspace-toolbar a[aria-current="page"]::after {
+@media (hover: hover) {
+  .sidebar-commands:hover .kbd {
+    border-color: var(--control-line);
+    color: var(--text-dim);
+  }
+}
+
+.sidebar-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  /* Room for a focus ring on the first and last entries. */
+  margin: -3px -4px;
+  padding: 3px 4px;
+}
+
+.sidebar-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sidebar-section {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sidebar-heading {
+  padding: 0 8px 6px;
+  color: var(--text-faint);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* One entry: a place, a panel, or an action at the foot. */
+.sidebar-item {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 32px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.sidebar-item-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (hover: hover) {
+  .sidebar-item:hover {
+    color: var(--text);
+  }
+}
+
+.sidebar-item[aria-current="page"] {
+  background: var(--nav-current);
+  box-shadow: inset 0 0 0 1px var(--line-edge);
+  color: var(--text);
+}
+
+.sidebar-item:focus-visible {
+  outline-offset: 0;
+}
+
+.sidebar-item .seg-lock {
+  color: var(--text-ghost);
+}
+
+/* The project, under its heading: the picker drawn as a sidebar row
+   rather than as a form control. */
+.sidebar-picker .picker-trigger {
+  width: 100%;
+  max-width: none;
+  min-height: 32px;
+  padding: 0 8px;
+  gap: 9px;
+  border-color: transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+}
+
+.sidebar-picker .picker-trigger::before {
   content: "";
-  position: absolute;
-  /*
-   * The tab is 36px so the row is an easy target, and the label sits
-   * in the middle of that. A line on the control's lower edge would
-   * land about a line below the word. This keeps the mark a few
-   * pixels under the label. The 14px inset matches the padding, so
-   * the bar is as wide as the word.
-   */
-  left: 14px;
-  right: 14px;
-  top: calc(50% + 1.1em);
-  height: 2px;
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
   background: var(--brand);
 }
 
-.workspace-toolbar {
+.sidebar-picker .picker-trigger:hover,
+.sidebar-picker .picker-trigger[data-state="open"] {
+  border-color: transparent;
+  background: var(--nav-current);
+}
+
+.sidebar-picker .picker-labels {
+  flex: 1 1 auto;
+}
+
+/* The heading already says "Project". */
+.sidebar-picker .picker-kicker {
+  display: none;
+}
+
+.sidebar-picker .picker-current {
+  font-weight: 500;
+}
+
+.sidebar-picker .skeleton-picker {
+  height: 32px;
+}
+
+.sidebar-skeleton {
+  gap: 14px;
+  padding: 8px;
+}
+
+.sidebar-foot {
+  flex: none;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.sidebar-foot .sidebar-item {
+  min-height: 30px;
+  color: var(--text-faint);
+}
+
+@media (hover: hover) {
+  .sidebar-foot .sidebar-item:hover {
+    color: var(--text);
+  }
+}
+
+/*
+ * The page header: where you are, then what this page acts with. On the
+ * page itself, hairline below.
+ */
+.page-header {
   display: flex;
   align-items: center;
   flex: none;
-  gap: 20px;
-  min-width: 0;
+  gap: 12px;
   min-height: 56px;
-  padding: 10px 28px;
+  padding: 10px 24px;
+  padding-right: max(24px, env(safe-area-inset-right));
+  border-bottom: 1px solid var(--line);
+}
+
+.page-header-lead {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+/* The wordmark and the picker belong to the sidebar above 720px. */
+.page-header-brand,
+.page-header-picker {
+  display: none;
+}
+
+.page-header-spacer {
+  flex: 1;
+}
+
+.page-crumb {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.page-crumb-project {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-faint);
+}
+
+.page-crumb-sep {
+  color: var(--text-ghost);
+}
+
+.page-crumb-title {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
 }
 
 .workspace-tools {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   min-width: 0;
 }
 
 .workspace-tools > .btn {
-  white-space: nowrap;
-  min-height: 36px;
-  padding-inline: 16px;
-}
-
-.workspace-project {
-  min-width: 0;
-  max-width: min(420px, 40vw);
-}
-
-/* Inset on both sides, so the hover fill does not sit flush against
-   "Project" or against the mark. The negative margin keeps the label
-   where it was when nothing is hovered. */
-.workspace-nav .picker-trigger {
-  background: transparent;
-  border-color: transparent;
-  padding: 2px 10px;
-  margin-left: -10px;
-  gap: 12px;
-  /* The margin shrinks the wrapper by as much, so the name would be cut
-     10px short of the room it has. */
-  max-width: calc(100% + 10px);
-}
-
-.workspace-nav .picker-trigger:hover {
-  background: var(--panel-raised);
-}
-
-.workspace-nav .picker-labels {
-  flex-direction: row;
+  display: inline-flex;
   align-items: center;
-  gap: 10px;
-}
-
-.workspace-nav .picker-kicker {
-  font-family: var(--sans);
-  font-size: 11px;
-  letter-spacing: 0;
-  text-transform: none;
-}
-
-.workspace-nav .picker-current {
-  font-family: var(--display);
-  font-size: 20px;
-  font-weight: 650;
-  letter-spacing: -0.04em;
-  line-height: 1.2;
+  white-space: nowrap;
+  min-height: 32px;
+  padding-inline: 13px;
+  border-radius: var(--radius-control);
 }
 
 .workspace-tools .search {
-  width: clamp(220px, 24vw, 320px);
-  min-height: 36px;
-  background: var(--panel);
-}
-
-.workspace-nav .skeleton-picker {
-  height: 36px;
+  width: clamp(200px, 22vw, 300px);
+  min-height: 32px;
 }
 
 .workspace-tools .skeleton-search,
 .workspace-tools .skeleton-btn {
-  height: 36px;
+  height: 32px;
 }
 
 .workspace-tools .skeleton-search {
-  width: clamp(220px, 24vw, 320px);
+  width: clamp(200px, 22vw, 300px);
 }
 
 /* Hidden from sight, kept for a screen reader. Position rather than
@@ -759,15 +1063,26 @@ select.input,
   max-height: 320px;
 }
 
+/*
+ * Buttons. Three weights, and the brand is none of them:
+ *
+ *   .btn               secondary: a hairline outline on whatever it sits on
+ *   .btn .btn-primary  the one main action: bone fill, page coloured label
+ *   .btn .btn-ghost    quiet: no outline until the pointer arrives
+ *
+ * .btn-danger is a fourth, kept for an action that discards work.
+ */
 .btn {
-  background: var(--panel-raised);
-  border: 1px solid var(--line-bright);
+  background: transparent;
+  border: 1px solid var(--control-line);
   border-radius: var(--radius);
   color: var(--text);
-  padding: 7px 12px;
+  padding: 6px 12px;
   font-family: var(--sans);
-  font-size: 12px;
-  transition: background 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+  font-size: 13px;
+  letter-spacing: var(--tracking);
+  line-height: 1.35;
+  transition: background 160ms ease, border-color 160ms ease, box-shadow 160ms ease, color 160ms ease;
   font-weight: 500;
   /* Seven controls in the console are anchors wearing this class,
      because they navigate rather than act: Team and the settings gear
@@ -778,13 +1093,13 @@ select.input,
 
 @media (hover: hover) {
   .btn:hover:not(:disabled) {
-    background: var(--line);
-    border-color: var(--text-faint);
+    background: var(--nav-current);
+    border-color: var(--text-ghost);
   }
 }
 
 .btn:active:not(:disabled) {
-  background: var(--line);
+  background: var(--nav-current);
   transform: translateY(1px);
 }
 
@@ -794,10 +1109,21 @@ select.input,
 }
 
 .btn-primary {
-  background: var(--brand);
-  border-color: var(--brand);
-  color: var(--on-brand);
-  font-weight: 600;
+  background: var(--primary);
+  border-color: var(--primary);
+  color: var(--on-primary);
+  font-weight: 500;
+}
+
+/* A shortcut inside the primary button: the page colour, faded. */
+.btn-primary .kbd,
+.btn-primary kbd {
+  border: 0;
+  padding: 0;
+  margin-left: 6px;
+  color: color-mix(in srgb, var(--on-primary) 55%, var(--primary));
+  font-family: var(--mono);
+  font-size: 11px;
 }
 
 /* Reserved for an action that discards work, so it reads as a state
@@ -816,13 +1142,13 @@ select.input,
  * repaints the fill with --line, a pale grey, while the label stays the
  * --on-brand white the fill was chosen for: white on a pale grey is 1.4:1,
  * so the primary action of every screen became the least readable
- * thing on it the moment the cursor arrived. Mixing toward --text keeps
- * the hue and moves it in the same direction on both themes.
+ * thing on it the moment the cursor arrived. The primary steps a little
+ * toward the page; danger mixes toward --text, keeping its hue.
  */
 @media (hover: hover) {
   .btn-primary:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--brand) 85%, var(--text));
-    border-color: color-mix(in srgb, var(--brand) 85%, var(--text));
+    background: var(--primary-hover);
+    border-color: var(--primary-hover);
   }
 
   .btn-danger:hover:not(:disabled) {
@@ -854,6 +1180,21 @@ select.input,
   background: transparent;
   border-color: transparent;
   color: var(--text-dim);
+}
+
+/* .btn-quiet is the same control under the name the design uses. */
+.btn-quiet {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-dim);
+}
+
+@media (hover: hover) {
+  .btn-quiet:hover:not(:disabled) {
+    background: var(--nav-current);
+    border-color: transparent;
+    color: var(--text);
+  }
 }
 
 /*
@@ -906,8 +1247,9 @@ select.input,
 
 @media (hover: hover) {
   .btn-ghost:hover:not(:disabled) {
-    background: var(--panel-raised);
-    border-color: var(--line);
+    background: var(--nav-current);
+    border-color: transparent;
+    color: var(--text);
   }
 }
 
@@ -919,7 +1261,7 @@ select.input,
   flex: 1;
   display: flex;
   gap: 0;
-  padding: 0 20px 20px;
+  padding: 16px 20px 20px;
   min-height: 0;
   overflow-x: auto;
   overflow-y: hidden;
@@ -1251,36 +1593,6 @@ select.input,
 .chip-empty {
   border-style: dashed;
   color: var(--text-faint);
-}
-
-/* Analytics is a destination: an icon link, labelled for screen readers and by its tooltip. */
-.spend-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: none;
-  width: 34px;
-  height: 34px;
-  border: 1px solid var(--line-bright);
-  border-radius: var(--radius);
-  background: var(--panel);
-  color: var(--text-dim);
-  text-decoration: none;
-  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
-}
-.spend-button:hover {
-  background: var(--panel-raised);
-  border-color: var(--text-faint);
-  color: var(--text);
-}
-.spend-button[aria-current="page"] {
-  border-color: var(--brand);
-  background: color-mix(in srgb, var(--brand) 6%, var(--panel));
-  color: var(--brand);
-}
-.spend-button:focus-visible {
-  outline: 2px solid var(--brand);
-  outline-offset: 3px;
 }
 
 /* Lining figures keep the amount steady as it counts. */
@@ -3722,37 +4034,14 @@ a.pr-row:hover .pr-external {
 }
 
 /*
- * Where the topbar's row stops fitting, which is not where the board's
- * layout changes.
- *
- * Measured rather than guessed: with the picker, the search field, the
- * three board tools, the gear and the primary action, the row runs out
- * of slack at about 940px and starts wrapping the primary button's
- * label onto a second line while squeezing the search field down to a
- * stub. 980px leaves a margin over that, and keeps the full row at the
- * 1024px a tablet in landscape reports.
- *
- * The board keeps its own breakpoint at 720px, further down: lane
- * widths and the drawer becoming a sheet are a different question from
- * whether eight controls fit on one line.
+ * Beside the sidebar the page header has less room than the window. The
+ * search field gives up width first, so the primary action keeps its
+ * whole label on one line.
  */
 @media (max-width: 980px) {
-  .topbar-nav {
-    display: none;
-  }
-
-  .topbar-nav-swarms {
-    display: flex;
-    flex: 1;
-    min-width: 0;
-  }
-
-  .topbar-nav-swarms > :not(.workspace-swarm-switcher) {
-    display: none;
-  }
-
-  .nav-menu-trigger {
-    display: inline-flex;
+  .workspace-tools .search,
+  .workspace-tools .skeleton-search {
+    width: clamp(150px, 20vw, 220px);
   }
 }
 
@@ -3773,103 +4062,74 @@ a.pr-row:hover .pr-external {
     padding-right: max(12px, env(safe-area-inset-right));
   }
 
-  .workspace-nav .brand {
-    margin-right: 0;
-  }
-
-  /* Two lines, in the same order as the wide row. Line one is the
-     project, so the name stays readable instead of collapsing to the
-     caret. Line two is the board switch, Spend, Settings, and Sign
-     out: Sign out stays with the gear, not on a line by itself. */
-  .workspace-nav {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    align-items: center;
-    column-gap: 8px;
-    row-gap: 8px;
-  }
-
-  .workspace-identity {
-    grid-column: 1 / -1;
-    grid-row: 1;
-    gap: 8px;
-    min-width: 0;
-  }
-
-  .workspace-actions {
-    grid-column: 3;
-    grid-row: 2;
-    justify-self: end;
-    gap: 4px;
-  }
-
-  .workspace-nav > .seg {
-    grid-column: 1;
-    grid-row: 2;
-    justify-self: start;
-    min-width: 0;
-    max-width: 100%;
-  }
-
-  .workspace-nav > .spend-button {
-    grid-column: 2;
-    grid-row: 2;
-    justify-self: end;
-    min-width: 0;
-    max-width: 100%;
-    overflow: hidden;
-  }
-
-  .workspace-nav > .topbar-spacer,
-  .workspace-toolbar > .topbar-spacer {
+  /* The sidebar is not drawn. The page header takes its wordmark, its
+     picker and, behind the hamburger, its entries. Line one is the
+     wordmark, the project and the menu; line two is the swarm switcher
+     or the search field and the primary action. */
+  .sidebar {
     display: none;
   }
 
-  .workspace-nav .picker-trigger {
-    gap: 8px;
-    min-width: 0;
-    max-width: 100%;
-  }
-
-  /* Coarse pointers enlarge every .btn. On this row that extra padding
-     is what pushed Sign out onto its own line. The hit target still
-     clears 44px: the pseudo-element grows, the drawn box does not. */
-  .topbar .settings-gear,
-  .topbar .icon-button {
-    padding: 6px 8px;
-  }
-
-  .workspace-nav .settings-gear::after,
-  .workspace-nav .icon-button::after {
-    inset: -9px -8px;
-  }
-
-  .workspace-toolbar {
-    padding: 10px 16px;
-    gap: 10px;
+  .page-header {
     flex-wrap: wrap;
+    row-gap: 10px;
+    column-gap: 8px;
+    min-height: 0;
+    padding: 10px 12px;
+    padding-left: max(12px, env(safe-area-inset-left));
+    padding-right: max(12px, env(safe-area-inset-right));
   }
 
-  .workspace-project {
+  .page-header-lead {
+    flex: 1 0 100%;
+    gap: 10px;
+  }
+
+  .page-header-brand {
+    display: inline-flex;
+    flex: none;
+  }
+
+  .page-crumb {
+    display: none;
+  }
+
+  .page-header-picker {
+    display: block;
     flex: 1 1 auto;
     min-width: 0;
-    max-width: none;
   }
 
-  .workspace-nav .picker-current {
-    font-size: 16px;
+  .page-header-picker .picker-trigger {
+    max-width: 100%;
+    border-color: transparent;
+    background: transparent;
   }
 
-  .workspace-nav .picker-kicker {
+  .page-header-picker .picker-kicker {
     display: none;
   }
 
-  .workspace-nav .skeleton-picker {
-    height: 26px;
+  .page-header-picker .skeleton-picker {
+    height: 28px;
+  }
+
+  .page-header .nav-menu-trigger {
+    display: inline-flex;
+    flex: none;
+    margin-left: auto;
+  }
+
+  .page-header-spacer {
+    display: none;
+  }
+
+  .page-header > .workspace-swarm-switcher {
+    flex: 1 1 100%;
   }
 
   .workspace-tools {
-    flex: 1;
+    flex: 1 1 100%;
     gap: 8px;
   }
 
@@ -3883,6 +4143,11 @@ a.pr-row:hover .pr-external {
   .workspace-tools .btn {
     flex: none;
     min-height: 40px;
+  }
+
+  /* A phone has no keyboard to press it with. */
+  .workspace-tools .btn-primary .kbd {
+    display: none;
   }
 
   .topbar .select {
@@ -4491,11 +4756,7 @@ a.pr-row:hover .pr-external {
   padding: 20px 28px 24px;
   box-sizing: border-box;
 }
-/* The row and the menu mark where you are; the label stays a link. */
-.topbar-nav a[aria-current="page"] {
-  color: var(--text);
-  font-weight: 600;
-}
+/* The menu marks where you are; the label stays a link. */
 .nav-menu a[aria-current="page"] .picker-item-name {
   font-weight: 650;
 }
@@ -7197,9 +7458,9 @@ button.lane-agent[data-saving] {
   max-width: 320px;
   padding: 5px;
   border: 1px solid var(--line-bright);
-  border-radius: var(--radius);
+  border-radius: var(--radius-card);
   background: var(--panel-raised);
-  box-shadow: 0 10px 30px var(--shadow-2);
+  box-shadow: var(--inner-highlight), var(--shadow-float);
   /* Portalled to the body. The card drawer is z-index 20, so without
      this a run list opened from inside it paints under the panel. */
   z-index: 30;
@@ -7232,7 +7493,7 @@ button.lane-agent[data-saving] {
 }
 .picker-item:hover,
 .picker-item[data-highlighted] {
-  background: var(--bg);
+  background: var(--nav-current);
 }
 .picker-item[aria-checked="true"] {
   font-weight: 600;
@@ -7532,6 +7793,13 @@ button.lane-agent[data-saving] {
   /* The dock catches nothing; each toast takes its own clicks, so the
      board underneath stays workable while one is showing. */
   pointer-events: none;
+}
+
+/* Beside the sidebar, not over its foot. */
+@media (min-width: 721px) {
+  body:has(.app-shell > .sidebar) .toasts-dock {
+    left: calc(var(--sidebar-width) + 16px);
+  }
 }
 
 .toasts-dock-above:empty { display: none; }
@@ -8748,8 +9016,8 @@ a.hours-person-name:hover {
   padding: 2px;
   gap: 2px;
   border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--bg);
+  border-radius: var(--radius-control);
+  background: transparent;
 }
 
 .seg-item {
@@ -8759,11 +9027,11 @@ a.hours-person-name:hover {
   gap: 5px;
   border: none;
   background: none;
-  border-radius: 4px;
+  border-radius: 6px;
   padding: 4px 10px;
-  color: var(--text-faint);
+  color: var(--text-dim);
   font-family: var(--sans);
-  font-size: 12px;
+  font-size: 12.5px;
   font-weight: 500;
   text-decoration: none;
   white-space: nowrap;
@@ -8778,7 +9046,8 @@ a.hours-person-name:hover {
 }
 
 .seg-item[data-on] {
-  background: var(--panel-raised);
+  background: var(--nav-current);
+  box-shadow: inset 0 0 0 1px var(--line-edge);
   color: var(--text);
 }
 
@@ -10287,7 +10556,7 @@ a.hours-person-name:hover {
 .lane:not([data-kind="stage"]) .lane-head { min-height: 110px; }
 .card-title { font-size: 14px; line-height: 1.5; }
 .board[data-focused] .lane:not([data-occupied]) { display: none; }
-.board-controls { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 2px 24px 14px; flex-shrink: 0; }
+.board-controls { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 20px 0; flex-shrink: 0; }
 .board-filters { display: flex; align-items: center; gap: 4px; }
 .board-filter {
   display: inline-flex; align-items: center; gap: 8px; padding: 7px 10px;

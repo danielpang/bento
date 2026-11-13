@@ -30,6 +30,7 @@ export { DeviceApproval } from "./DeviceApproval.js";
 export { DiffReview } from "./DiffReview.js";
 export { FeatureDrawer } from "./FeatureDrawer.js";
 export { SignOutButton, StopButton } from "./IconButtons.js";
+export { Sidebar, type SidebarPlace } from "./Sidebar.js";
 export { Markdown, MermaidDiagram } from "./Markdown.js";
 export { Modal } from "./Modal.js";
 export { McpAuthorize } from "./McpAuthorize.js";

@@ -16,7 +16,11 @@ import { useDesktopConnection } from "../desktop.js";
  * is what lets the mark be identical in the tab and in the app. It is
  * decorative here because the name is right beside it.
  */
-export function BrandLockup({ size = "sm" }: { size?: "sm" | "lg" }) {
+export function BrandLockup({ size = "sm", connection = true }: {
+  size?: "sm" | "lg";
+  /** The sidebar shows the connection in the window's title strip instead. */
+  connection?: boolean;
+}) {
   const mark = (
     <span className={size === "lg" ? "brand brand-lg" : "brand"}>
       <svg className="brand-glyph" viewBox="0 0 64 64" aria-hidden="true" focusable="false">
@@ -32,7 +36,7 @@ export function BrandLockup({ size = "sm" }: { size?: "sm" | "lg" }) {
   // The top bar's wordmark also says where this window's Bento runs,
   // which matters in the desktop app once local and server windows are
   // open side by side.
-  if (size === "lg") return mark;
+  if (size === "lg" || !connection) return mark;
   return (
     <>
       {mark}
@@ -41,7 +45,7 @@ export function BrandLockup({ size = "sm" }: { size?: "sm" | "lg" }) {
   );
 }
 
-function DesktopConnectionBadge() {
+export function DesktopConnectionBadge() {
   const connection = useDesktopConnection();
   if (!connection) return null;
   const local = connection.mode === "local";

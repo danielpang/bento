@@ -1,9 +1,117 @@
-/* The macOS traffic lights sit on the existing themed header. Only Electron's
-   isolated preload sets this attribute; browser layout stays the same. */
+/* The Mac app's window chrome. Only Electron's isolated preload sets
+   data-desktop="mac"; browser layout stays the same.
+
+   The traffic lights sit at x 18, y 20 (main.ts). Two shapes of page
+   make room for them:
+
+   - The workspace (.app-shell): the top of the sidebar is a strip as
+     tall as the lights, the window's drag handle, with the connection
+     pill to their right. The page header beside it drags from its
+     blank space.
+   - A page with a full width .topbar (Settings, the changelog): the bar
+     is indented past the lights and drags from its blank space.
+   - Anything else (a session, an artifact, the entrance screens) gets
+     the reserved .desktop-titlebar strip above it. */
 :root[data-desktop="mac"] {
   --desktop-controls-inset: 104px;
   --desktop-titlebar-height: 52px;
+  /* The sidebar's strip: the lights' height plus their top margin. */
+  --desktop-sidebar-strip: 34px;
+  /* Where the lights end, so the pill starts clear of them. */
+  --desktop-lights-width: 76px;
 }
+
+/* Where this window's Bento runs: this Mac or a server. Only the desktop
+   bridge answers, so browsers never show it. */
+.desktop-connection {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  max-width: 100%;
+  margin-left: 10px;
+  padding: 2px 9px 2px 7px;
+  border: 1px solid var(--line-bright);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--text-dim);
+  font-size: 11.5px;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+
+.desktop-connection > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.desktop-connection svg {
+  flex: none;
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* --- The workspace ------------------------------------------------ */
+
+:root[data-desktop="mac"] .sidebar {
+  padding-top: 0;
+}
+
+:root[data-desktop="mac"] .sidebar-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex: none;
+  min-width: 0;
+  height: var(--desktop-sidebar-strip);
+  /* The strip starts at the window's top edge: the sidebar's gap would
+     otherwise add to the lights' clearance. */
+  margin: 0 0 -4px;
+  padding: 8px 0 0 var(--desktop-lights-width);
+  -webkit-app-region: drag;
+  user-select: none;
+}
+
+:root[data-desktop="mac"] .sidebar-titlebar .desktop-connection {
+  margin-left: 0;
+}
+
+/* The sidebar's blank space drags too; every entry in it stays a
+   control. */
+:root[data-desktop="mac"] :is(.sidebar, .sidebar-brand, .page-header, .page-header-lead) {
+  -webkit-app-region: drag;
+}
+
+:root[data-desktop="mac"] :is(
+  .sidebar-scroll,
+  .sidebar-foot,
+  .sidebar-brand > *,
+  .page-header-lead > *,
+  .page-header > :not(.page-header-lead, .page-header-spacer)
+) {
+  -webkit-app-region: no-drag;
+}
+
+/* The breadcrumb is text, not a control, so it drags with the header. */
+:root[data-desktop="mac"] .page-header-lead > .page-crumb {
+  -webkit-app-region: drag;
+  user-select: none;
+}
+
+/* Below 720px the header leads the page and the lights sit on it. */
+@media (max-width: 720px) {
+  :root[data-desktop="mac"] .page-header {
+    padding-top: var(--desktop-sidebar-strip);
+  }
+}
+
+/* --- A page with a full width bar ---------------------------------- */
 
 :root[data-desktop="mac"] .topbar {
   padding-left: var(--desktop-controls-inset);
@@ -12,42 +120,17 @@
   user-select: none;
 }
 
-/* Where this window's Bento runs, beside the wordmark: this Mac or a
-   server. Only the desktop bridge answers, so browsers never show it. */
-.desktop-connection {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  margin-left: 10px;
-  padding: 3px 9px 3px 7px;
-  border: 1px solid var(--line-bright);
-  border-radius: 999px;
-  background: var(--panel);
-  color: var(--text-dim);
-  font-size: 12px;
-  line-height: 1.3;
-  white-space: nowrap;
-}
-
-.desktop-connection svg {
-  width: 14px;
-  height: 14px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 2;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-/* Blank header space drags the window. Menus, links, and form fields keep
-   normal pointer behavior, including the project picker's whole subtree. */
 :root[data-desktop="mac"] .topbar > :not(.topbar-spacer) {
   -webkit-app-region: no-drag;
 }
 
+/* --- Everything that floats stays clickable ------------------------- */
+
 :root[data-desktop="mac"] :is(.modal-backdrop, .drawer, [data-portal-layer]) {
   -webkit-app-region: no-drag;
 }
+
+/* --- Pages with no chrome of their own ----------------------------- */
 
 .desktop-titlebar {
   position: fixed;
@@ -59,21 +142,47 @@
   z-index: 1;
 }
 
-/* Standalone sessions, artifacts, and entrance screens have no full-width
-   header. Reserve a matching strip so native controls never cover content. */
-:root[data-desktop="mac"] body:not(:has(#root > .app > .topbar)) {
+/* Standalone sessions, artifacts, and entrance screens have no chrome
+   that makes room for the lights. Reserve a strip so they never cover
+   content. */
+:root[data-desktop="mac"] body:not(:has(#root > .app > :is(.topbar, .sidebar))) {
   padding-top: var(--desktop-titlebar-height);
 }
 
-:root[data-desktop="mac"] body:not(:has(#root > .app > .topbar)) #root > :is(.app, .session-page) {
+:root[data-desktop="mac"] body:not(:has(#root > .app > :is(.topbar, .sidebar))) #root > :is(.app, .session-page) {
   height: calc(100dvh - var(--desktop-titlebar-height));
 }
 
-:root[data-desktop="mac"] body:has(#root > .app > .topbar) > .desktop-titlebar {
+:root[data-desktop="mac"] body:has(#root > .app > :is(.topbar, .sidebar)) > .desktop-titlebar {
   display: none;
 }
+
+/* --- Full screen: no lights, so no room for them -------------------- */
 
 :root[data-desktop="mac"][data-desktop-fullscreen] {
   --desktop-controls-inset: 24px;
   --desktop-titlebar-height: 0px;
+  --desktop-lights-width: 8px;
+}
+
+/* The strip folds away; the pill, when there is one, keeps a line. */
+:root[data-desktop="mac"][data-desktop-fullscreen] .sidebar {
+  padding-top: 18px;
+}
+
+:root[data-desktop="mac"][data-desktop-fullscreen] .sidebar-titlebar {
+  height: auto;
+  margin: 0;
+  padding: 0 0 0 8px;
+  justify-content: flex-start;
+}
+
+:root[data-desktop="mac"][data-desktop-fullscreen] .sidebar-titlebar:empty {
+  display: none;
+}
+
+@media (max-width: 720px) {
+  :root[data-desktop="mac"][data-desktop-fullscreen] .page-header {
+    padding-top: 10px;
+  }
 }
