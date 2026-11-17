@@ -642,7 +642,8 @@ function ConnectionCatalog({
           </div>
           <div className="actions">
             <button
-              className={entry.added ? "btn btn-primary icon-button" : "btn btn-primary"}
+              // Outlined: a list of twenty Adds is not twenty primary actions.
+              className={entry.added ? "btn icon-button" : "btn"}
               disabled={busy || entry.added}
               // An icon alone names nothing, and this one replaces the
               // only label the button had.

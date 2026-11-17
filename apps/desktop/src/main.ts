@@ -48,7 +48,7 @@ let quitting = false;
 let quitPrepared = false;
 let shutdownTask: Promise<void> | undefined;
 let updates: DesktopUpdates | undefined;
-const backgrounds = { light: "#f2f1ed", dark: "#0e0d0b", navy: "#0a0e16" };
+const backgrounds = { light: "#f2f1ed", dark: "#0b0a09", navy: "#0a0e16" };
 let appearance: keyof typeof backgrounds = nativeTheme.shouldUseDarkColors ? "dark" : "light";
 
 function publish(next: DesktopStatus) {

@@ -1,5 +1,4 @@
 import * as Menu from "@radix-ui/react-dropdown-menu";
-import { DropdownMark } from "./DropdownMark.js";
 
 /**
  * One entry in the console's navigation.
@@ -16,20 +15,6 @@ export type NavAction =
   // would type-check and then silently do nothing.
   | { id: string; label: string; onSelect: () => void; href?: never; current?: never; external?: never }
   | { id: string; label: string; href: string; onSelect?: never; current?: boolean; external?: boolean };
-
-export function ConfigureMenu({ actions }: { actions: NavAction[] }) {
-  return <Menu.Root>
-    <Menu.Trigger className="btn btn-ghost configure-trigger">
-      Configure
-      <DropdownMark />
-    </Menu.Trigger>
-    <Menu.Portal>
-      <Menu.Content className="picker-menu" align="start" sideOffset={6} data-portal-layer="">
-        {actions.map((action) => <Menu.Item key={action.id} className="picker-item" onSelect={action.onSelect}>{action.label}</Menu.Item>)}
-      </Menu.Content>
-    </Menu.Portal>
-  </Menu.Root>;
-}
 
 /**
  * The navigation, collapsed.

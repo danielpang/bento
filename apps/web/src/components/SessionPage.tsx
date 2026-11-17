@@ -202,7 +202,10 @@ export function SessionPage({
     <div className={hasDiff ? "session-page session-page-review" : "session-page"}>
       <header className="session-head">
         <h1 title={feature.title}>{feature.title}</h1>
-        <span className="chip" data-status={feature.status}>
+        <span
+          className="status-word"
+          data-tone={feature.status === "done" ? "succeeded" : feature.status === "gated" ? "gated" : "idle"}
+        >
           {feature.status === "done" ? "completed" : feature.status === "gated" ? "pending approval" : feature.status}
         </span>
         {exit}

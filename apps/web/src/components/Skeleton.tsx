@@ -99,19 +99,19 @@ export function BoardSkeleton({
   return (
     <div className="board" aria-busy="true" aria-label="Loading board">
       <LoadingStatus label="Loading board" />
+      <div className="board-tray">
       {skeletonLanes(stages).map((lane, i) => (
         <section key={i} className="lane" data-kind="stage">
           <header className="lane-head">
             <div className="lane-title">
               <span className="lane-title-text">
-                <Skeleton className="lane-ord" height={28} width={28} />
+                <Skeleton className="lane-ord" height={11} width="1.1rem" />
                 <Skeleton height={12} width={lane.title} />
               </span>
               <Skeleton height={11} width="1.1rem" />
             </div>
-            <Skeleton height={10} width="5.2rem" />
+            <Skeleton height={10} width="9rem" />
           </header>
-          <div className="lane-policy"><Skeleton height={10} width="6rem" /></div>
           <div className="lane-cards">
             {lane.cards.length === 0 ? (
               <div className="lane-empty skeleton-slot" />
@@ -121,6 +121,7 @@ export function BoardSkeleton({
           </div>
         </section>
       ))}
+      </div>
     </div>
   );
 }
@@ -263,14 +264,12 @@ export function SessionsListSkeleton({
       <LoadingStatus label="Loading sessions" />
       {Array.from({ length: rows }, (_, i) => (
         <div key={i} className="session-card" aria-hidden="true">
-          <Skeleton className="skeleton-avatar" radius="7px" width={28} height={28} />
-          <span className="session-card-main">
-            <span className="session-card-top">
-              <Skeleton height={13} width={`${58 + ((i * 13) % 22)}%`} />
-              <Skeleton height={11} width="2.4rem" />
-            </span>
-            <Skeleton height={11} width={`${40 + ((i * 9) % 18)}%`} />
-          </span>
+          <Skeleton height={13} width={`${58 + ((i * 13) % 22)}%`} />
+          <Skeleton height={11} width={`${50 + ((i * 9) % 18)}%`} />
+          <Skeleton height={11} width="4rem" />
+          <Skeleton height={11} width="2.4rem" />
+          <Skeleton height={11} width="6rem" />
+          <Skeleton height={11} width="2.4rem" />
         </div>
       ))}
     </div>

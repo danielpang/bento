@@ -43,7 +43,15 @@ const AT_BOTTOM_SLACK = 120;
  * and the pane reads as an exchange between people.
  */
 export type ChatItem =
-  | { key: string; kind: "message"; role: "assistant" | "user" | "system"; text: string; speaker: string }
+  | {
+      key: string;
+      kind: "message";
+      role: "assistant" | "user" | "system";
+      text: string;
+      speaker: string;
+      /** A routine boot line ("Starting sandbox."), drawn between hairlines. */
+      step?: boolean;
+    }
   | { key: string; kind: "tools"; calls: ToolCall[] }
   | {
       key: string;
@@ -921,7 +929,7 @@ export function ChatRow({ item, showDetail }: { item: ChatItem; showDetail: bool
     }
     if (item.role === "system") {
       return (
-        <div className="chat-row chat-row-system">
+        <div className="chat-row chat-row-system" data-step={item.step || undefined}>
           <span className="chat-note">{item.text}</span>
         </div>
       );
@@ -1007,6 +1015,7 @@ export function toChatItems(
         role: poolThought ? "assistant" : event.role,
         text: event.text,
         speaker: poolThought ? `${agentName} thinking` : event.role === "assistant" ? agentName : event.role === "user" ? "you" : "bento",
+        ...(event.role === "system" && event.progress ? { step: true } : {}),
       });
       n += 1;
       continue;

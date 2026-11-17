@@ -101,7 +101,8 @@ export function AnalyticsPage({ client, projectId }: { client: BentoClient; proj
         <a className="analytics-back" href="/" aria-label="Back to board">
           <span aria-hidden="true">←</span> Back
         </a>
-        <h1 className="analytics-title">Analytics</h1>
+        {/* The page header already says Analytics; the heading stays for a reader. */}
+        <h1 className="analytics-title visually-hidden">Analytics</h1>
       </header>
       <WindowPicker choice={choice} onChange={setChoice} note={data ? describeWindow(data.window) : null} />
       {loadFailed && data === null ? (

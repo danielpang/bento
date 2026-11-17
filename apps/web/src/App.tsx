@@ -16,7 +16,6 @@ import { createRequestGate } from "./latest-request.js";
 import { buildWatch } from "./build-watch.js";
 import { Board, matchesQuery, neighbourCardId, type CardPulse } from "./components/Board.js";
 import { BoardSearch } from "./components/BoardSearch.js";
-import { BottomBar } from "./components/BottomBar.js";
 import { BrandLockup } from "./components/BrandLockup.js";
 import {
   BoardSkeleton,
@@ -31,13 +30,12 @@ import {
   SwarmPageSkeleton,
 } from "./components/Skeleton.js";
 import { useGitHubOutcome } from "./components/GitHubIdentity.js";
-import { SignOutButton } from "./components/IconButtons.js";
-import { GearMark } from "./components/GearMark.js";
 import { CHANGELOG_URL } from "./changelog.js";
 import { FlagsProvider, useBetaTesters, useSwarmFlag } from "./beta.js";
 import { SwarmSubscribe, SwarmUnavailable, SwarmWaitlist, type WaitlistState } from "./components/SwarmGatePage.js";
 import { signInCallbackURL, takeWaitlistIntent } from "./swarm/waitlist-intent.js";
-import { BoardModeToggle } from "./components/BoardModeToggle.js";
+import { Sidebar, type SidebarPlace } from "./components/Sidebar.js";
+import { readBoardFocus, workGroup, type BoardFocus } from "./board-focus.js";
 import { swarmGate, useSwarmPlan } from "./swarm/plan.js";
 import { isSwarmEvent } from "./swarm/events.js";
 import {
@@ -47,7 +45,7 @@ import {
   rememberBoardMode,
   type BoardMode,
 } from "./swarm/view-state.js";
-import { NavMenu, ConfigureMenu, type NavAction } from "./components/NavMenu.js";
+import { NavMenu, type NavAction } from "./components/NavMenu.js";
 import { CommandMenu } from "./components/CommandMenu.js";
 import { OutOfCompute } from "./components/OutOfCompute.js";
 import { LowDiskSpace } from "./components/LowDiskSpace.js";
@@ -118,63 +116,55 @@ function RouteFallback() {
   }
   if (path.startsWith("/session/")) return <SessionPageSkeleton />;
   if (path.startsWith("/artifact/")) return <PageSkeleton />;
-  if (path === "/sessions") {
-    return (
-      <div className="app" aria-busy="true">
-        <header className="topbar">
-          <BrandLockup />
-          <span className="topbar-spacer" />
-        </header>
-        <SessionsListSkeleton framed />
-      </div>
-    );
-  }
+  if (path === "/sessions") return <ShellSkeleton><SessionsListSkeleton framed /></ShellSkeleton>;
   if (path === "/artifacts" || path.startsWith("/artifacts/")) {
-    return (
-      <div className="app" aria-busy="true">
-        <header className="topbar">
-          <BrandLockup />
-          <span className="topbar-spacer" />
-        </header>
-        <ArtifactsGridSkeleton framed />
-      </div>
-    );
+    return <ShellSkeleton><ArtifactsGridSkeleton framed /></ShellSkeleton>;
   }
-  if (path === "/analytics" || path === "/spend") {
-    return (
-      <div className="app" aria-busy="true">
-        <header className="topbar">
-          <BrandLockup />
-          <span className="topbar-spacer" />
-        </header>
-        <AnalyticsPageSkeleton />
-      </div>
-    );
-  }
+  if (path === "/analytics" || path === "/spend") return <ShellSkeleton><AnalyticsPageSkeleton /></ShellSkeleton>;
   if (path === "/changelog") return <PageSkeleton />;
   return (
-    <div className="app" aria-busy="true">
-      <header className="topbar workspace-nav">
-        <div className="workspace-identity">
-          <BrandLockup />
-          <div className="workspace-project" aria-hidden="true"><Skeleton className="skeleton-picker" /></div>
-        </div>
-        <span className="topbar-spacer" />
-      </header>
-      <div className="workspace-toolbar" aria-hidden="true">
-        <div className="topbar-nav"><Skeleton width="18rem" height={20} /></div>
-        <Skeleton className="nav-menu-trigger" width={32} height={32} />
-        <span className="topbar-spacer" />
-        <div className="workspace-tools">
-          <Skeleton className="skeleton-search" />
-          <Skeleton className="skeleton-btn" />
-        </div>
-      </div>
+    <ShellSkeleton tools>
       <BoardSkeleton projectId={readProjectSelection(Boolean(desktop))} />
-    </div>
+    </ShellSkeleton>
   );
 }
 
+/**
+ * The workspace chrome while its code arrives: the sidebar's shape and
+ * the page header's, so the board slides in under chrome that is
+ * already where it will stay.
+ */
+function ShellSkeleton({ tools = false, children }: { tools?: boolean; children: React.ReactNode }) {
+  return (
+    <div className="app app-shell" aria-busy="true">
+      <aside className="sidebar" aria-hidden="true">
+        <div className="sidebar-titlebar" />
+        <div className="sidebar-brand"><BrandLockup connection={false} /></div>
+        <div className="sidebar-scroll sidebar-skeleton">
+          {["5.5rem", "4rem", "4.6rem", "5rem"].map((width) => <Skeleton key={width} height={12} width={width} />)}
+          <Skeleton className="skeleton-picker" />
+        </div>
+      </aside>
+      <div className="app-main">
+        <header className="page-header" aria-hidden="true">
+          <div className="page-header-lead">
+            <span className="page-header-brand"><BrandLockup /></span>
+            <div className="page-crumb"><Skeleton height={14} width="8rem" /></div>
+            <Skeleton className="nav-menu-trigger" width={32} height={32} />
+          </div>
+          <span className="page-header-spacer" />
+          {tools && (
+            <div className="workspace-tools">
+              <Skeleton className="skeleton-search" />
+              <Skeleton className="skeleton-btn" />
+            </div>
+          )}
+        </header>
+        {children}
+      </div>
+    </div>
+  );
+}
 
 const client = new BentoClient({
   baseUrl: window.location.origin,
@@ -604,6 +594,18 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
    * against.
    */
   const [query, setQuery] = useState("");
+  /**
+   * The card board's filter (All cards, Needs you, Running). Held here
+   * rather than in the board so the sidebar's "Needs you" can open it.
+   * Remembered per browser under the key the board has always used.
+   */
+  const [boardFocus, setBoardFocus] = useState<BoardFocus>(() => {
+    try { return readBoardFocus(localStorage.getItem("bento.board.focus")); } catch { return "all"; }
+  });
+  const chooseBoardFocus = useCallback((next: BoardFocus) => {
+    setBoardFocus(next);
+    try { localStorage.setItem("bento.board.focus", next); } catch { /* Storage is optional. */ }
+  }, []);
   useEffect(() => {
     if (!beta) return;
     const shortcut = (event: KeyboardEvent) => {
@@ -1266,53 +1268,6 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
     </Suspense>
   );
 
-  const spend = projectId ? (
-    <a
-      className="spend-button"
-      href="/analytics"
-      aria-label="Analytics"
-      title="Analytics"
-      aria-current={screen === "analytics" ? "page" : undefined}
-    >
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-        <path d="M2.5 13.5h11" />
-        <path d="M4.5 13.5V8.5" />
-        <path d="M8 13.5V3.5" />
-        <path d="M11.5 13.5V6.5" />
-      </svg>
-    </a>
-  ) : null;
-
-  /*
-   * Rendered on the board screen, where it switches the slab in place,
-   * and on Analytics, where it is the way back to either board: each
-   * segment is a link to the board, and neither reads as open. Sessions
-   * is the card board's own tab, so it leaves the toggle out.
-   */
-  const boardToggle =
-    screen === "analytics" ? (
-      <BoardModeToggle
-        mode={null}
-        locked={swarmAccess.plan === "excluded"}
-        hrefFor={(next) => boardHref("/", window.location.search, { mode: next })}
-      />
-    ) : screen === "board" ? (
-      <BoardModeToggle
-        mode={boardMode}
-        locked={swarmAccess.plan === "excluded"}
-        hrefFor={(next) => boardHref(window.location.pathname, window.location.search, { mode: next })}
-        onSelect={(next) => {
-          setBoardMode(next);
-          rememberBoardMode(swarmStorage, next);
-          window.history.replaceState(
-            null,
-            "",
-            boardHref(window.location.pathname, window.location.search, { mode: next }),
-          );
-        }}
-      />
-    ) : undefined;
-
   /** What the Swarms tab shows in place of the board, or null when it opens. */
   const swarmGatePage =
     swarmGateState === "loading" ? (
@@ -1333,74 +1288,144 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
   const boardPending = projects === null || (projectId !== null && loadedFor !== projectId);
 
   /*
-   * The board's tools, as one list.
-   *
-   * The topbar renders them as a row and the hamburger renders them as
-   * a menu, and this is why the two cannot disagree about what exists.
-   * The order is the row's order, which is the order they were in
-   * before the menu existed.
-   */
-  /*
    * The swarm board's tools are not the card board's.
    *
-   * Board, Sessions and Pipeline are all about cards: a swarm has no
-   * stage to configure, no session list of its own, and the board
-   * button would point at the board already open. So on the swarm
-   * board they are left out. A swarm's agents and how it is run are
-   * chosen in the New swarm dialog and changed in its own settings.
-   */
-  /*
-   * And only where the swarm board is the thing actually on screen.
+   * Pipeline is about cards: a swarm has no stage to configure. So on
+   * the swarm board it is left out of Configure. A swarm's agents and
+   * how it is run are chosen in the New swarm dialog and changed in its
+   * own settings.
    *
+   * And only where the swarm board is the thing actually on screen.
    * `swarming` is true from the moment the mode is remembered, but the
-   * swarm board renders under `swarming && projectId` and the two
-   * early returns below (no project list yet, no projects at all) draw
-   * a skeleton (the swarm page's while `swarming`, else the card
-   * board's) without the board toggle. Keyed on
-   * `swarming` alone, somebody whose remembered mode is swarms and
-   * whose project list fails to load got a topbar with no Board, no
-   * Sessions and no toggle: nothing but the URL bar to get out with.
+   * swarm board renders under `swarming && projectId` and the two early
+   * returns below (no project list yet, no projects at all) draw a
+   * skeleton instead.
    */
   const onSwarmBoard = swarming && projectId !== null && hasProjects && swarmGateState === "open";
-  const actions: NavAction[] = onSwarmBoard
-    ? [
-        { id: "agents", label: "Agents", onSelect: () => { setAgentsIntent(null); setPanel("agents"); } },
-        ...(hasProjects ? [{ id: "repos", label: "Repositories", onSelect: () => setPanel("repos") }] : []),
-      ]
-    : [
-        { id: "board", label: "Board", href: "/", current: screen === "board" },
-        { id: "artifacts", label: "Artifacts", href: "/artifacts", current: screen === "artifacts" },
-        { id: "sessions", label: "Sessions", href: "/sessions", current: screen === "sessions" },
-        { id: "agents", label: "Agents", onSelect: () => { setAgentsIntent(null); setPanel("agents"); } },
-        ...(hasProjects
-          ? [
-              { id: "pipeline", label: "Pipeline", onSelect: () => setPanel("pipeline") },
-              { id: "repos", label: "Repositories", onSelect: () => setPanel("repos") },
-            ]
-          : []),
-      ];
+  const onCardBoard = screen === "board" && !swarming;
 
+  /*
+   * Board and Swarms are two boards of one screen. On that screen a
+   * click switches the slab in place and writes the mode into the
+   * address; anywhere else it is a page load to the board it names.
+   */
+  const openBoard = (next: BoardMode, focus?: BoardFocus) => {
+    if (focus) chooseBoardFocus(focus);
+    rememberBoardMode(swarmStorage, next);
+    if (screen !== "board") {
+      window.location.href = boardHref("/", window.location.search, { mode: next });
+      return;
+    }
+    setBoardMode(next);
+    window.history.replaceState(null, "", boardHref(window.location.pathname, window.location.search, { mode: next }));
+  };
+  /*
+   * "Needs you" is the board's own filter, opened from the sidebar. It
+   * exists only where that filter does (beta), and counts the cards the
+   * board already holds, so it says nothing until they have arrived.
+   */
+  const needsYouCount =
+    beta && projectId !== null && loadedFor === projectId
+      ? features.filter((feature) => workGroup(feature, runStatus[feature.id]) === "needs-you").length
+      : undefined;
+  const needsYouOpen = beta && onCardBoard && boardFocus === "needs-you";
+  const places: SidebarPlace[] = [
+    ...(beta
+      ? [{
+          id: "needs-you",
+          label: "Needs you",
+          href: boardHref("/", window.location.search, { mode: "pipeline" }),
+          current: needsYouOpen,
+          ...(needsYouCount !== undefined ? { count: needsYouCount } : {}),
+          signal: true,
+          onSelect: () => openBoard("pipeline", "needs-you"),
+        }]
+      : []),
+    {
+      id: "board",
+      label: "Board",
+      href: boardHref("/", window.location.search, { mode: "pipeline" }),
+      current: onCardBoard && !needsYouOpen,
+      onSelect: () => openBoard("pipeline", beta ? "all" : undefined),
+    },
+    {
+      id: "swarms",
+      label: "Swarms",
+      href: boardHref("/", window.location.search, { mode: "swarms" }),
+      current: screen === "board" && swarming,
+      locked: swarmAccess.plan === "excluded",
+      onSelect: () => openBoard("swarms"),
+    },
+    { id: "artifacts", label: "Artifacts", href: "/artifacts", current: screen === "artifacts" },
+    { id: "sessions", label: "Sessions", href: "/sessions", current: screen === "sessions" },
+    ...(projectId ? [{ id: "analytics", label: "Analytics", href: "/analytics", current: screen === "analytics" }] : []),
+  ];
+
+  /* The panels that configure the project. */
+  const configure: NavAction[] = [
+    { id: "agents", label: "Agents", onSelect: () => { setAgentsIntent(null); setPanel("agents"); } },
+    ...(hasProjects && !onSwarmBoard ? [{ id: "pipeline", label: "Pipeline", onSelect: () => setPanel("pipeline") }] : []),
+    ...(hasProjects ? [{ id: "repos", label: "Repositories", onSelect: () => setPanel("repos") }] : []),
+  ];
+
+  /* Everything about Bento rather than about the board. */
+  const about: NavAction[] = [
+    { id: "contact", label: "Contact", onSelect: () => setContactOpen(true) },
+    { id: "changelog", label: "Changelog", href: CHANGELOG_URL, external: true },
+    { id: "settings", label: "Settings", href: "/settings" },
+    ...(showSignOut ? [{ id: "signout", label: "Sign out", onSelect: () => void signOut() }] : []),
+  ];
+
+  /*
+   * The hamburger's menu, below 720px where the sidebar is not drawn.
+   * One list built from the sidebar's own, so the two cannot disagree
+   * about what exists. The board entries keep their in-place handling.
+   */
+  const menuEntries: NavAction[] = [
+    ...places.map((place): NavAction =>
+      place.onSelect
+        ? { id: place.id, label: place.count ? `${place.label} (${place.count})` : place.label, onSelect: place.onSelect }
+        : { id: place.id, label: place.label, href: place.href, ...(place.current ? { current: true } : {}) },
+    ),
+    ...configure,
+    ...about,
+  ];
+
+  const pageTitle =
+    screen === "artifacts" ? "Artifacts"
+    : screen === "sessions" ? "Sessions"
+    : screen === "analytics" ? "Analytics"
+    : swarming ? "Swarms"
+    : needsYouOpen ? "Needs you"
+    : "Board";
+  const projectName = projects?.find((project) => project.id === projectId)?.name;
+
+  const chrome = {
+    places,
+    configure,
+    about,
+    menuEntries,
+    title: pageTitle,
+    ...(projectName ? { projectName } : {}),
+    ...(beta ? { onCommands: () => setCommandsOpen(true) } : {}),
+  };
+
+  /* The contact dialog, opened from the sidebar's foot or the menu. */
   const bottom = (
-    <>
-      <BottomBar onContact={() => setContactOpen(true)} />
-      <Suspense fallback={null}>
-        {contactOpen && <ContactDialog client={client} onClose={() => setContactOpen(false)} />}
-      </Suspense>
-    </>
+    <Suspense fallback={null}>
+      {contactOpen && <ContactDialog client={client} onClose={() => setContactOpen(false)} />}
+    </Suspense>
   );
 
   if (projects === null) {
     return (
-      <div className="app" aria-busy={!loadError || undefined}>
-        <TopBar
-          showSignOut={showSignOut}
-          actions={actions}
-          meta={spend}
-          onContact={() => setContactOpen(true)}
-          picker={<Skeleton className="skeleton-picker" />}
-          search={workScreen ? <Skeleton className="skeleton-search" /> : undefined}
-          primary={workScreen ? <Skeleton className="skeleton-btn" /> : undefined}
-        />
+      <Workspace
+        busy={!loadError}
+        chrome={chrome}
+        picker={<Skeleton className="skeleton-picker" />}
+        search={workScreen ? <Skeleton className="skeleton-search" /> : undefined}
+        primary={workScreen ? <Skeleton className="skeleton-btn" /> : undefined}
+      >
         {loadError && (
           <div className="setup-prompt" role="alert">
             <span>{loadError}</span>
@@ -1429,25 +1454,20 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
         {panels}
         {dialogs}
         {bottom}
-      </div>
+      </Workspace>
     );
   }
 
   if (projects.length === 0) {
     return (
-      <div className="app">
-        <TopBar
-          showSignOut={showSignOut}
-          actions={actions}
-          meta={spend}
-          onContact={() => setContactOpen(true)}
-          boardToggle={boardToggle}
-          primary={
-            <button className="btn btn-primary" onClick={() => setDialog("project")}>
-              New project
-            </button>
-          }
-        />
+      <Workspace
+        chrome={chrome}
+        primary={
+          <button className="btn btn-primary" onClick={() => setDialog("project")}>
+            New project
+          </button>
+        }
+      >
         {swarming && swarmGatePage ? (
           swarmGatePage
         ) : (
@@ -1465,18 +1485,14 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
         {panels}
         {dialogs}
         {bottom}
-      </div>
+      </Workspace>
     );
   }
 
   return (
-    <div className="app">
-      <TopBar
-        showSignOut={showSignOut}
-        actions={actions}
+    <Workspace
+        chrome={chrome}
         showSwarmSwitcher={onSwarmBoard}
-        meta={spend}
-        onContact={() => setContactOpen(true)}
         picker={
           <ProjectPicker
             projects={projects}
@@ -1486,7 +1502,6 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
             onOpenProject={desktop ? (id) => { window.open(`/?project=${encodeURIComponent(id)}`, "_blank", "noopener,noreferrer"); } : undefined}
           />
         }
-        boardToggle={boardToggle}
         search={
           workScreen && !swarming ? (
             <BoardSearch
@@ -1506,11 +1521,12 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
             ) : (
               <button className="btn btn-primary" title={beta ? "New card (n)" : undefined} onClick={() => setDialog("feature")}>
                 New card
+                {beta && <kbd className="kbd" aria-hidden="true">N</kbd>}
               </button>
             )
           ) : undefined
         }
-      />
+      >
 
       {/* Ahead of the setup prompt: a team with no compute left cannot
           act on any advice below it either. The banner links to
@@ -1607,6 +1623,8 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
         onNewCard={startNew}
         mascots={mascots}
         onDismissMascots={dismissMascots}
+        focus={boardFocus}
+        onFocusChange={chooseBoardFocus}
         onMove={(featureId, stageId) => {
           // Optimistic: the card lands in the lane it was dropped on,
           // and the refetch settles the truth. Waiting for the server
@@ -1729,121 +1747,88 @@ function BoardScreen({ showSignOut, mode }: { showSignOut: boolean; mode: "local
       {panels}
       {dialogs}
       {bottom}
-    </div>
+    </Workspace>
   );
 }
 
+type WorkspaceChrome = {
+  places: SidebarPlace[];
+  configure: NavAction[];
+  about: NavAction[];
+  menuEntries: NavAction[];
+  title: string;
+  projectName?: string;
+  onCommands?: () => void;
+};
+
 /**
- * The console's chrome.
+ * The console's chrome: the sidebar down the left, and a page header
+ * over whatever the screen draws.
  *
- * Above 720px every control is one row. Below it the row is two lines
- * on purpose, in the same order. The project picker takes the first
- * line, so its name stays readable. The board switch, Spend, the gear,
- * and Sign out share the second, so Sign out is not left on a line by
- * itself. Letting the wide row wrap instead squeezed the project name
- * down to its caret and dropped Sign out onto the line under it.
+ * The sidebar holds every place and panel. The header says where you
+ * are (the project, then the page) and holds what the page acts with:
+ * the swarm switcher, the search field and the one primary action.
  *
- * The board's other tools stay in the menu behind the hamburger. The
- * search field and the primary action stay out, on the toolbar.
+ * Below 720px the sidebar is not drawn. The header then carries the
+ * wordmark, the project picker and the hamburger, whose menu lists the
+ * sidebar's entries in the sidebar's order, and the search field and
+ * the primary action wrap onto a line of their own.
  */
-function TopBar({
-  actions = [],
-  primary,
+function Workspace({
+  chrome,
   picker,
-  boardToggle,
-  showSwarmSwitcher = false,
   search,
-  meta,
-  onContact,
-  showSignOut,
+  primary,
+  showSwarmSwitcher = false,
+  busy = false,
+  children,
 }: {
-  /** The board's tools. Rendered as a row, and as menu entries. */
-  actions?: NavAction[];
+  chrome: WorkspaceChrome;
+  picker?: React.ReactNode;
+  search?: React.ReactNode;
   /** The one button that stays out of the menu at every width. */
   primary?: React.ReactNode;
-  picker?: React.ReactNode;
-  /** Pipeline or Swarms. Beside the picker, never in the menu. */
-  boardToggle?: React.ReactNode;
-  /** The swarm board mounts its live switcher here, before Configure. */
+  /** The swarm board mounts its live switcher here. */
   showSwarmSwitcher?: boolean;
-  search?: React.ReactNode;
-  /** The spend chip. It stays out of the menu at every width. */
-  meta?: React.ReactNode;
-  onContact: () => void;
-  showSignOut: boolean;
+  busy?: boolean;
+  children: React.ReactNode;
 }) {
-  const beta = useBetaTesters();
-  /*
-   * What the row spells out in controls the menu has to spell out in
-   * words. The gear is a gear because the row has no space for a word
-   * and every console puts settings behind one; a menu is a list of
-   * labels, and an unlabelled gear in it would be the only entry you
-   * had to recognise rather than read.
-   *
-   * Contact and the changelog live in the bottom bar, and are repeated
-   * here: on a phone the bottom bar is a thumb's reach away, but the
-   * menu is where somebody goes looking for "everything else", and the
-   * cost of answering that twice is two lines.
-   */
-  const entries: NavAction[] = [
-    ...actions,
-    { id: "contact", label: "Contact", onSelect: onContact },
-    { id: "changelog", label: "Changelog", href: CHANGELOG_URL, external: true },
-    { id: "settings", label: "Settings", href: "/settings" },
-    ...(showSignOut ? [{ id: "signout", label: "Sign out", onSelect: () => void signOut() }] : []),
-  ];
-
   return (
-    <>
-    <header className="topbar workspace-nav">
-      <div className="workspace-identity">
-        <BrandLockup />
-        {picker && <div className="workspace-project">{picker}</div>}
+    <div className="app app-shell" aria-busy={busy || undefined}>
+      <Sidebar
+        places={chrome.places}
+        picker={picker}
+        configure={chrome.configure}
+        footer={chrome.about}
+        {...(chrome.onCommands ? { onCommands: chrome.onCommands } : {})}
+      />
+      <div className="app-main">
+        <header className="page-header">
+          <div className="page-header-lead">
+            <span className="page-header-brand"><BrandLockup /></span>
+            <div className="page-crumb">
+              {chrome.projectName && (
+                <>
+                  <span className="page-crumb-project">{chrome.projectName}</span>
+                  <span className="page-crumb-sep" aria-hidden="true">/</span>
+                </>
+              )}
+              <span className="page-crumb-title">{chrome.title}</span>
+            </div>
+            {picker && <div className="page-header-picker">{picker}</div>}
+            <NavMenu actions={chrome.menuEntries} />
+          </div>
+          {showSwarmSwitcher && <div id="swarm-switcher-slot" className="workspace-swarm-switcher" />}
+          <span className="page-header-spacer" />
+          {(search || primary) && (
+            <div className="workspace-tools">
+              {search}
+              {primary}
+            </div>
+          )}
+        </header>
+        {children}
       </div>
-      {/* Beside the picker it qualifies: which project, then which of
-          its boards. The row's own gap separates them. */}
-      {boardToggle}
-      <span className="topbar-spacer" />
-      {meta}
-      <div className="workspace-actions">
-        <a className="btn btn-ghost settings-gear" aria-label="Settings" title="Settings" href="/settings">
-          <GearMark />
-        </a>
-        {showSignOut && <SignOutButton onClick={() => signOut()} />}
-      </div>
-    </header>
-    <div className="workspace-toolbar">
-      <nav className={showSwarmSwitcher ? "topbar-nav topbar-nav-swarms" : "topbar-nav"} aria-label="Board">
-        {actions.filter((action) => !beta || action.href !== undefined).map((action) =>
-          action.href === undefined ? (
-            <button key={action.id} className="btn btn-ghost" onClick={action.onSelect}>
-              {action.label}
-            </button>
-          ) : (
-            <a
-              key={action.id}
-              className="btn btn-ghost"
-              href={action.href}
-              target={action.external ? "_blank" : undefined}
-              rel={action.external ? "noreferrer" : undefined}
-              aria-current={action.current ? "page" : undefined}
-            >
-              {action.label}
-            </a>
-          ),
-        )}
-        {showSwarmSwitcher && <div id="swarm-switcher-slot" className="workspace-swarm-switcher" />}
-        {beta && actions.some((action) => action.href === undefined) && <ConfigureMenu actions={actions.filter((action) => action.href === undefined)} />}
-      </nav>
-      <NavMenu actions={entries} />
-      <span className="topbar-spacer" />
-      {(search || primary) && (
-        <div className="workspace-tools">
-          {search}
-          {primary}
-        </div>
-      )}
     </div>
-    </>
   );
 }
