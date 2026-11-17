@@ -29,10 +29,9 @@ function zoomAt(view: Viewport, scale: number, x: number, y: number): Viewport {
 /**
  * The plan, drawn.
  *
- * Top down from the planner: the plan fans out into one column per
- * branch where it first branches, and each branch's work stacks down
- * its column, indented by depth. A card a person opens from folded
- * fans its children out sideways, centred under it. Every position, every edge path, and every
+ * Top down from the planner: every open card spreads its children side
+ * by side on the row below it, centred under it, joined by one bus
+ * line. Every position, every edge path, and every
  * number on every card comes from `layout.ts`: this file places what
  * that module worked out and adds no arithmetic of its own, which is
  * why the Outline can render the same figures and why the maths is
