@@ -529,35 +529,53 @@ export function buildSwarmModel(tasks: SwarmTask[], options: ModelOptions = {}):
    * opened it is asking for; everything nobody opened stays compact.
    */
   const fanned = new Set<string>();
-  const place = (node: SwarmNode, x: number, y: number): Extent => {
-    node.x = x;
+  /*
+   * Each subtree is laid out once, with its own card at x = 0, and
+   * reports how far it reaches either side of that card. A parent then
+   * knows where each child goes relative to itself (`offsetX`), and one
+   * pass from the column heads down turns those offsets into positions.
+   * Laying a fanned child out twice (once to measure, once to place)
+   * doubled the work at every opened level, so a tree opened sixteen
+   * deep was placed sixty thousand times over.
+   */
+  const offsetX = new Map<string, number>();
+  const measure = (node: SwarmNode, y: number): Extent => {
     node.y = y;
-    const extent = { left: x, right: x + NODE_WIDTH, bottom: y + NODE_HEIGHT };
+    const extent = { left: 0, right: NODE_WIDTH, bottom: y + NODE_HEIGHT };
     const kids = shown(node);
     if (kids.length === 0) return extent;
     if (opened.has(node.id)) {
       fanned.add(node.id);
       const row = y + NODE_HEIGHT + FAN_GAP;
-      // Measured at the origin first: a child's subtree can reach left
-      // of the child itself when something inside it is fanned too.
-      const sizes = kids.map((kid) => place(kid, 0, row));
+      // A child's subtree can reach left of the child itself when
+      // something inside it is fanned too, so each is set by its extent.
+      const sizes = kids.map((kid) => measure(kid, row));
       const starts: number[] = [];
       let run = 0;
       for (const size of sizes) {
         starts.push(run - size.left);
         run += size.right - size.left + COLUMN_GAP;
       }
-      const shift = x - (starts[0]! + starts[starts.length - 1]!) / 2;
-      kids.forEach((kid, index) => grow(extent, place(kid, starts[index]! + shift, row)));
+      const shift = -(starts[0]! + starts[starts.length - 1]!) / 2;
+      kids.forEach((kid, index) => {
+        const at = starts[index]! + shift;
+        offsetX.set(kid.id, at);
+        grow(extent, { left: sizes[index]!.left + at, right: sizes[index]!.right + at, bottom: sizes[index]!.bottom });
+      });
       return extent;
     }
     let below = extent.bottom + STACK_GAP;
     for (const kid of kids) {
-      const size = place(kid, x + INDENT, below);
-      grow(extent, size);
+      const size = measure(kid, below);
+      offsetX.set(kid.id, INDENT);
+      grow(extent, { left: size.left + INDENT, right: size.right + INDENT, bottom: size.bottom });
       below = size.bottom + STACK_GAP;
     }
     return extent;
+  };
+  const settle = (node: SwarmNode, x: number): void => {
+    node.x = x;
+    for (const kid of shown(node)) settle(kid, x + offsetX.get(kid.id)!);
   };
 
   const top = spine.length * ROW_PITCH;
@@ -566,10 +584,10 @@ export function buildSwarmModel(tasks: SwarmTask[], options: ModelOptions = {}):
   for (const head of heads) {
     // A fan can reach left of its column's head, so the column starts
     // where its leftmost card does.
-    const reach = place(head, 0, top).left;
-    const size = place(head, cursor - reach, top);
+    const size = measure(head, top);
+    settle(head, cursor - size.left);
     bottom = Math.max(bottom, size.bottom);
-    cursor = size.right + COLUMN_GAP;
+    cursor += size.right - size.left + COLUMN_GAP;
   }
   const spineX = heads.length > 0 ? (heads[0]!.x + heads[heads.length - 1]!.x) / 2 : 0;
   spine.forEach((node, row) => {

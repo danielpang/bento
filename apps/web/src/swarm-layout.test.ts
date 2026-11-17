@@ -505,6 +505,63 @@ test("a fan inside a fan keeps every card clear of its neighbours", () => {
   assert.equal(model.width, Math.max(...cards.map((card) => card.x + NODE_WIDTH)));
 });
 
+/** A chain of plans, each holding the next plan and one leaf beside it. */
+function deepChain(depth: number): SwarmTask[] {
+  const tasks = [node("p0", null, "plan", "working", { position: 0 })];
+  for (let level = 1; level <= depth; level += 1) {
+    tasks.push(node(`p${level}`, `p${level - 1}`, "plan", "working", { position: level * 2 }));
+    tasks.push(node(`l${level}`, `p${level - 1}`, "leaf", "working", { position: level * 2 + 1 }));
+  }
+  return tasks;
+}
+
+test("a tree opened forty levels deep lays out at once, every opened card over its children", () => {
+  // Each opened level once laid its children out twice, so forty levels
+  // would have taken about a trillion placements.
+  const tasks = deepChain(40);
+  const opened = tasks.filter((task) => task.nodeType === "plan").map((task) => task.id);
+  const started = Date.now();
+  const model = buildSwarmModel(tasks, { now: 0, expanded: opened, opened });
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 100, `layout took ${elapsed}ms`);
+
+  const at = (id: string) => model.byId.get(id)!;
+  for (let level = 0; level < 40; level += 1) {
+    const parent = at(`p${level}`);
+    const first = at(`p${level + 1}`);
+    const second = at(`l${level + 1}`);
+    assert.equal(parent.x, (first.x + second.x) / 2, `p${level} is centred over its children`);
+    // The single root sits on its own row above the columns; below it,
+    // every opened card's children are a fan's row down.
+    if (level > 0) assert.equal(first.y, parent.y + NODE_HEIGHT + FAN_GAP);
+  }
+  const cards = visibleNodes(model);
+  for (const one of cards) {
+    for (const other of cards) {
+      if (one === other) continue;
+      const apart = one.x + NODE_WIDTH <= other.x || other.x + NODE_WIDTH <= one.x ||
+        one.y + NODE_HEIGHT <= other.y || other.y + NODE_HEIGHT <= one.y;
+      assert.ok(apart, `${one.id} overlaps ${other.id}`);
+    }
+  }
+  assert.equal(Math.min(...cards.map((card) => card.x)), 0);
+  assert.equal(model.width, Math.max(...cards.map((card) => card.x + NODE_WIDTH)));
+});
+
+test("a search revealing a deep path keeps it stacked, a step in per level", () => {
+  const tasks = deepChain(40);
+  const plans = tasks.filter((task) => task.nodeType === "plan").map((task) => task.id);
+  // Revealed by a search: expanded, never opened.
+  const model = buildSwarmModel(tasks, { now: 0, expanded: plans });
+  const at = (id: string) => model.byId.get(id)!;
+  // The root's two children are the columns; under p1 every level steps in.
+  for (let level = 2; level <= 40; level += 1) {
+    assert.equal(at(`p${level}`).x, at(`p${level - 1}`).x + INDENT);
+    assert.equal(at(`l${level}`).x, at(`p${level - 1}`).x + INDENT);
+  }
+  assert.equal(model.width, INDENT * 39 + NODE_WIDTH + COLUMN_GAP + NODE_WIDTH);
+});
+
 test("the model cache tells opened apart from expanded", () => {
   const tasks = [
     node("root", null, "plan", "working", { position: 0 }),
