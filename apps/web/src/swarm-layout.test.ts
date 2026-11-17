@@ -3,14 +3,10 @@ import test from "node:test";
 import {
   COLUMN_GAP,
   COLUMN_PITCH,
-  INDENT,
   LONG_RUN_WARNING_MS,
   NODE_HEIGHT,
   NODE_WIDTH,
-  RAIL_ENTRY,
-  RAIL_OFFSET,
   ROW_PITCH,
-  STACK_GAP,
   buildSwarmModel,
   createModelCache,
   formatCompletion,
@@ -364,92 +360,135 @@ test("an edge leaves the parent's bottom centre and arrives at the child's top c
   assert.equal(edge.path, `M ${centre} ${NODE_HEIGHT} V ${ROW_PITCH}`);
 });
 
-test("a branch's work stacks down one column, a step to the right per level", () => {
+/** No two drawn cards share any of the same space. */
+function assertNoOverlap(model: ReturnType<typeof buildSwarmModel>): void {
+  const cards = visibleNodes(model);
+  for (const one of cards) {
+    for (const other of cards) {
+      if (one === other) continue;
+      const apart = one.x + NODE_WIDTH <= other.x || other.x + NODE_WIDTH <= one.x ||
+        one.y + NODE_HEIGHT <= other.y || other.y + NODE_HEIGHT <= one.y;
+      assert.ok(apart, `${one.id} overlaps ${other.id}`);
+    }
+  }
+}
+
+test("every open card spreads its children on the row below, centred over them", () => {
   const model = buildSwarmModel(
     [
       node("root", null, "plan", "working", { position: 0 }),
       node("pay", "root", "plan", "working", { position: 1 }),
       node("pay-1", "pay", "leaf", "working", { position: 2 }),
-      node("pay-1a", "pay-1", "leaf", "open", { position: 3 }),
-      node("pay-2", "pay", "leaf", "open", { position: 4 }),
+      node("pay-2", "pay", "leaf", "open", { position: 3 }),
+      node("pay-3", "pay", "leaf", "open", { position: 4 }),
       node("cart", "root", "plan", "working", { position: 5 }),
       node("cart-1", "cart", "leaf", "open", { position: 6 }),
       node("cart-2", "cart", "leaf", "open", { position: 7 }),
-      node("cart-3", "cart", "leaf", "open", { position: 8 }),
     ],
     { now: 0 },
   );
-  const at = (id: string) => [model.byId.get(id)!.x, model.byId.get(id)!.y];
-  const step = NODE_HEIGHT + STACK_GAP;
-  // Depth first down the first column, indented by depth under "pay".
-  assert.deepEqual(at("pay"), [0, ROW_PITCH]);
-  assert.deepEqual(at("pay-1"), [INDENT, ROW_PITCH + step]);
-  assert.deepEqual(at("pay-1a"), [INDENT * 2, ROW_PITCH + step * 2]);
-  assert.deepEqual(at("pay-2"), [INDENT, ROW_PITCH + step * 3]);
-  // The next column starts past the widest card in the first.
-  const second = INDENT * 2 + NODE_WIDTH + COLUMN_GAP;
-  assert.deepEqual(at("cart"), [second, ROW_PITCH]);
-  assert.deepEqual(at("cart-3"), [second + INDENT, ROW_PITCH + step * 3]);
-  // Two columns wide, however many leaves, rather than one per leaf.
-  assert.equal(model.width, second + INDENT + NODE_WIDTH);
-  assert.equal(model.height, ROW_PITCH + step * 3 + NODE_HEIGHT);
-  // The root sits over the middle of the two branch heads.
-  assert.deepEqual(at("root"), [second / 2, 0]);
+  const at = (id: string) => model.byId.get(id)!;
+  // One row per depth.
+  assert.equal(at("root").y, 0);
+  assert.deepEqual(["pay", "cart"].map((id) => at(id).y), [ROW_PITCH, ROW_PITCH]);
+  assert.deepEqual(["pay-1", "pay-2", "pay-3", "cart-1", "cart-2"].map((id) => at(id).y), Array(5).fill(ROW_PITCH * 2));
+  // Leaves a column apart, left to right in plan order.
+  assert.deepEqual(
+    ["pay-1", "pay-2", "pay-3", "cart-1", "cart-2"].map((id) => at(id).x),
+    [0, 1, 2, 3, 4].map((column) => column * COLUMN_PITCH),
+  );
+  // Each card over the middle of its first and last child.
+  assert.equal(at("pay").x, (at("pay-1").x + at("pay-3").x) / 2);
+  assert.equal(at("cart").x, (at("cart-1").x + at("cart-2").x) / 2);
+  assert.equal(at("root").x, (at("pay").x + at("cart").x) / 2);
+  assert.equal(model.width, 5 * COLUMN_PITCH - COLUMN_GAP);
+  assert.equal(model.height, ROW_PITCH * 2 + NODE_HEIGHT);
+  assertNoOverlap(model);
 });
 
-test("several roots are the columns themselves, with nothing above them", () => {
+test("several roots sit side by side on the top row", () => {
   const model = buildSwarmModel(
     [
       node("a", null, "plan", "working", { position: 0 }),
       node("a1", "a", "leaf", "open", { position: 1 }),
-      node("b", null, "leaf", "open", { position: 2 }),
-    ],
-    { now: 0 },
-  );
-  assert.deepEqual([model.byId.get("a")!.x, model.byId.get("a")!.y], [0, 0]);
-  assert.deepEqual([model.byId.get("a1")!.x, model.byId.get("a1")!.y], [INDENT, NODE_HEIGHT + STACK_GAP]);
-  assert.equal(model.byId.get("b")!.x, INDENT + NODE_WIDTH + COLUMN_GAP);
-  assert.equal(model.byId.get("b")!.y, 0);
-});
-
-test("inside a column each child's rail starts where the sibling above turned off", () => {
-  const model = buildSwarmModel(
-    [
-      node("a", null, "plan", "working", { position: 0 }),
-      node("a1", "a", "leaf", "done", { position: 1 }),
-      node("a2", "a", "leaf", "working", { position: 2 }),
-      node("b", null, "leaf", "open", { position: 3 }),
-    ],
-    { now: 0 },
-  );
-  const edge = (child: string) => model.edges.find((item) => item.childId === child)!;
-  const rail = RAIL_OFFSET;
-  const step = NODE_HEIGHT + STACK_GAP;
-  assert.equal(
-    edge("a1").path,
-    `M ${rail} ${NODE_HEIGHT} V ${step + RAIL_ENTRY - 6} Q ${rail} ${step + RAIL_ENTRY}, ${rail + 6} ${step + RAIL_ENTRY} H ${INDENT}`,
-  );
-  assert.ok(edge("a2").path.startsWith(`M ${rail} ${step + RAIL_ENTRY} V`));
-  // The first stretch also leads to the working leaf below it, so it is lit.
-  assert.equal(edge("a1").live, true);
-  assert.equal(edge("a2").live, true);
-});
-
-test("a stretch of rail is dark when nothing below it is happening", () => {
-  const model = buildSwarmModel(
-    [
-      node("a", null, "plan", "working", { position: 0 }),
-      node("a1", "a", "leaf", "working", { position: 1 }),
       node("a2", "a", "leaf", "open", { position: 2 }),
       node("b", null, "leaf", "open", { position: 3 }),
     ],
     { now: 0 },
   );
+  const at = (id: string) => model.byId.get(id)!;
+  assert.deepEqual([at("a").y, at("b").y], [0, 0]);
+  assert.equal(at("a").x, (at("a1").x + at("a2").x) / 2);
+  assert.equal(at("b").x, at("a2").x + COLUMN_PITCH);
+  assert.equal(Math.min(...visibleNodes(model).map((card) => card.x)), 0);
+  assertNoOverlap(model);
+});
+
+test("a wide subtree pushes its neighbours apart rather than under it", () => {
+  // b's children reach well past b on both sides; a and c make room.
+  const model = buildSwarmModel(
+    [
+      node("root", null, "plan", "working", { position: 0 }),
+      node("a", "root", "leaf", "open", { position: 1 }),
+      node("b", "root", "plan", "working", { position: 2 }),
+      ...[1, 2, 3, 4].map((n) => node(`b${n}`, "b", "plan", "working", { position: 2 + n })),
+      ...[1, 2, 3, 4].flatMap((n) => [1, 2].map((m) => node(`b${n}-${m}`, `b${n}`, "leaf", "open", { position: 10 + n * 2 + m }))),
+      node("c", "root", "leaf", "open", { position: 30 }),
+    ],
+    { now: 0 },
+  );
+  assertNoOverlap(model);
+  const at = (id: string) => model.byId.get(id)!;
+  assert.equal(at("b").x, (at("b1").x + at("b4").x) / 2);
+  assert.equal(at("b1").x, (at("b1-1").x + at("b1-2").x) / 2);
+  assert.equal(model.width, Math.max(...visibleNodes(model).map((card) => card.x + NODE_WIDTH)));
+});
+
+test("a line is lit when its child is on the frontier, and lit lines are drawn last", () => {
+  const model = buildSwarmModel(
+    [
+      node("root", null, "plan", "working", { position: 0 }),
+      node("done", "root", "leaf", "done", { position: 1 }),
+      node("live", "root", "leaf", "working", { position: 2 }),
+      node("waiting", "root", "leaf", "open", { position: 3 }),
+    ],
+    { now: 0, autoCollapseCompleted: false },
+  );
   const edge = (child: string) => model.edges.find((item) => item.childId === child)!;
-  assert.equal(edge("a1").live, true);
-  assert.equal(edge("a2").live, false);
-  // Lit lines are drawn last, so they sit on top where lines meet.
-  assert.equal(model.edges[model.edges.length - 1]!.live, true);
+  assert.equal(edge("done").live, false);
+  assert.equal(edge("live").live, true);
+  assert.equal(edge("waiting").live, false);
+  // Every child of one card shares the crossbar; the lit one sits on top.
+  assert.equal(model.edges[model.edges.length - 1]!.childId, "live");
+});
+
+/** A chain of plans, each holding the next plan and one leaf beside it. */
+function deepChain(depth: number): SwarmTask[] {
+  const tasks = [node("p0", null, "plan", "working", { position: 0 })];
+  for (let level = 1; level <= depth; level += 1) {
+    tasks.push(node(`p${level}`, `p${level - 1}`, "plan", "working", { position: level * 2 }));
+    tasks.push(node(`l${level}`, `p${level - 1}`, "leaf", "working", { position: level * 2 + 1 }));
+  }
+  return tasks;
+}
+
+test("a tree forty levels deep lays out at once, every card over its children", () => {
+  // Laying each child out twice, to measure and then to place, doubled
+  // the work at every level: forty levels would be about a trillion
+  // placements.
+  const started = Date.now();
+  const model = buildSwarmModel(deepChain(40), { now: 0 });
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 100, `layout took ${elapsed}ms`);
+  const at = (id: string) => model.byId.get(id)!;
+  for (let level = 0; level < 40; level += 1) {
+    const parent = at(`p${level}`);
+    assert.equal(parent.x, (at(`p${level + 1}`).x + at(`l${level + 1}`).x) / 2, `p${level} is centred over its children`);
+    assert.equal(at(`p${level + 1}`).y, parent.y + ROW_PITCH);
+  }
+  assertNoOverlap(model);
+  assert.equal(Math.min(...visibleNodes(model).map((card) => card.x)), 0);
+  assert.equal(model.width, Math.max(...visibleNodes(model).map((card) => card.x + NODE_WIDTH)));
 });
 
 test("an empty swarm is a model with nothing in it, not a crash", () => {

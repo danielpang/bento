@@ -27,19 +27,6 @@ export const COLUMN_PITCH = NODE_WIDTH + COLUMN_GAP;
 export const ROW_PITCH = NODE_HEIGHT + ROW_GAP;
 
 /**
- * Inside a branch's column, how far a child steps right of its parent.
- * Each level of the subtree is one more step, the way a file tree
- * indents, so depth reads from the left edge and siblings line up.
- */
-export const INDENT = 24;
-/** Between two cards stacked one above the other in a column. */
-export const STACK_GAP = 20;
-/** Where a parent's rail runs down, measured from its left edge. */
-export const RAIL_OFFSET = 12;
-/** Where a rail turns into a child, measured down from the child's top. */
-export const RAIL_ENTRY = 26;
-
-/**
  * How long a leaf may work before the console says so, in
  * milliseconds. The server raises `long_running` itself when it
  * notices; this is the same line drawn in the browser, so a leaf that
@@ -154,17 +141,11 @@ export interface SwarmEdge {
   childId: string;
   relation: "contains" | "depends_on";
   /**
-   * The drawn line. Into a column's head it runs from the parent's
-   * bottom centre, across, and down to the child's top centre. Inside
-   * a column it is one stretch of the parent's rail, from the sibling
-   * above (or the parent) down to this child, then right into it.
+   * The drawn line: down from the parent's bottom centre, across, and
+   * down into the child's top centre.
    */
   path: string;
-  /**
-   * Leads to work that is happening. A rail stretch is shared by every
-   * sibling below it, so it is lit when any of them is on the frontier,
-   * not only the child it ends at.
-   */
+  /** Leads to work that is happening: the child is on the frontier. */
   live: boolean;
 }
 
@@ -283,13 +264,10 @@ export function elapsedFor(task: Pick<SwarmTask, "startedAt" | "endedAt">, now: 
 /**
  * The whole model, from the task rows.
  *
- * Depth first through the tree. The plan fans out sideways only where
- * it first branches: each branch there is a column, and everything
- * under a branch stacks down its column, indented a step per level.
- * Fanning every level sideways put each leaf in a column of its own,
- * so a plan of five branches and fifteen leaves was fifteen cards
- * wide and a branch's work was spread across the screen. A collapsed
- * node is one card, because that is what it is drawn as.
+ * Depth first through the tree. Every open card spreads its children
+ * side by side on the row below it, centred over them, so depth reads
+ * top to bottom and siblings left to right. A collapsed node is one
+ * card, because that is what it is drawn as.
  */
 export function buildSwarmModel(tasks: SwarmTask[], options: ModelOptions = {}): SwarmModel {
   const now = options.now ?? 0;
@@ -489,47 +467,67 @@ export function buildSwarmModel(tasks: SwarmTask[], options: ModelOptions = {}):
   /*
    * Position.
    *
-   * The spine is the run of single nodes from the top before the plan
-   * first branches: one root, and its only child, and so on. Each sits
-   * on a row of its own, centred over what is below. Where it branches
-   * (or at the roots, when there are several) each branch becomes a
-   * column, side by side, and a column lists its subtree depth first,
-   * one card under the next, each a step further right than its parent.
+   * Every open card spreads its children side by side on the row below
+   * it, each child with its own subtree under it, and sits centred over
+   * the first and last of them. The roots sit side by side on the top
+   * row the same way. A folded card takes one card's room, because that
+   * is what it is drawn as.
+   *
+   * Each subtree is laid out once, with its own card at x = 0, and
+   * reports how far it reaches either side of that card. A parent then
+   * knows where each child goes relative to itself (`offsetX`), and one
+   * pass from the roots down turns those offsets into positions. Laying
+   * a child out twice (once to measure, once to place) doubles the work
+   * at every level, so a tree sixteen deep was placed sixty thousand
+   * times over.
    */
   const shown = (node: SwarmNode): SwarmNode[] =>
     node.collapsed
       ? []
       : node.childIds.map((id) => byId.get(id)).filter((n): n is SwarmNode => !!n && !n.hidden && seen.has(n.id));
-  const spine: SwarmNode[] = [];
-  let heads = nodes.filter((node) => node.depth === 0 && !node.hidden);
-  while (heads.length === 1) {
-    spine.push(heads[0]!);
-    heads = shown(heads[0]!);
-  }
-  const inSpine = new Set(spine.map((node) => node.id));
+  const offsetX = new Map<string, number>();
+  // Children packed left to right by how far each subtree reaches, and
+  // the run shifted so the parent sits over its first and last child.
+  const spread = (children: SwarmNode[], row: number): { at: number[]; sizes: Extent[] } => {
+    const sizes = children.map((child) => measure(child, row));
+    const starts: number[] = [];
+    let run = 0;
+    for (const size of sizes) {
+      starts.push(run - size.left);
+      run += size.right - size.left + COLUMN_GAP;
+    }
+    const shift = -(starts[0]! + starts[starts.length - 1]!) / 2;
+    return { at: starts.map((start) => start + shift), sizes };
+  };
+  const measure = (node: SwarmNode, y: number): Extent => {
+    node.y = y;
+    const extent = { left: 0, right: NODE_WIDTH, bottom: y + NODE_HEIGHT };
+    const kids = shown(node);
+    if (kids.length === 0) return extent;
+    const { at, sizes } = spread(kids, y + ROW_PITCH);
+    kids.forEach((kid, index) => {
+      offsetX.set(kid.id, at[index]!);
+      grow(extent, { left: sizes[index]!.left + at[index]!, right: sizes[index]!.right + at[index]!, bottom: sizes[index]!.bottom });
+    });
+    return extent;
+  };
+  const settle = (node: SwarmNode, x: number): void => {
+    node.x = x;
+    for (const kid of shown(node)) settle(kid, x + offsetX.get(kid.id)!);
+  };
 
-  const top = spine.length * ROW_PITCH;
-  let cursor = 0;
-  let bottom = spine.length > 0 ? top - ROW_GAP : 0;
-  for (const head of heads) {
-    let y = top;
-    let right = cursor + NODE_WIDTH;
-    const stack = (node: SwarmNode, level: number): void => {
-      node.x = cursor + level * INDENT;
-      node.y = y;
-      right = Math.max(right, node.x + NODE_WIDTH);
-      y += NODE_HEIGHT + STACK_GAP;
-      for (const kid of shown(node)) stack(kid, level + 1);
-    };
-    stack(head, 0);
-    bottom = Math.max(bottom, y - STACK_GAP);
-    cursor = right + COLUMN_GAP;
+  const tops = nodes.filter((node) => node.depth === 0 && !node.hidden);
+  let left = 0;
+  let right = 0;
+  let bottom = 0;
+  if (tops.length > 0) {
+    const { at, sizes } = spread(tops, 0);
+    left = Math.min(...sizes.map((size, index) => size.left + at[index]!));
+    right = Math.max(...sizes.map((size, index) => size.right + at[index]!));
+    bottom = Math.max(...sizes.map((size) => size.bottom));
+    // The leftmost card of the tree sits at x = 0.
+    tops.forEach((top, index) => settle(top, at[index]! - left));
   }
-  const spineX = heads.length > 0 ? (heads[0]!.x + heads[heads.length - 1]!.x) / 2 : 0;
-  spine.forEach((node, row) => {
-    node.x = spineX;
-    node.y = row * ROW_PITCH;
-  });
   // A hidden node keeps the folded ancestor's place, so nothing that
   // is measured while folded reports a position at the origin.
   for (const node of nodes) {
@@ -544,21 +542,16 @@ export function buildSwarmModel(tasks: SwarmTask[], options: ModelOptions = {}):
   const edges: SwarmEdge[] = [];
   for (const node of nodes) {
     if (node.hidden || node.collapsed) continue;
-    const kids = shown(node);
-    kids.forEach((child, index) => {
+    for (const child of shown(node)) {
       edges.push({
         id: `${node.id}:${child.id}`,
         parentId: node.id,
         childId: child.id,
         relation: child.parentRelation,
-        path: inSpine.has(node.id)
-          ? edgePath(node, child)
-          : railPath(node, child, index > 0 ? kids[index - 1]! : null),
-        live: inSpine.has(node.id)
-          ? child.frontierPath
-          : kids.slice(index).some((kid) => kid.frontierPath),
+        path: edgePath(node, child),
+        live: child.frontierPath,
       });
-    });
+    }
   }
   // Lit lines last, so where two lines share a stretch the one leading
   // to work in progress is the one on top.
@@ -590,10 +583,22 @@ export function buildSwarmModel(tasks: SwarmTask[], options: ModelOptions = {}):
       totalLeaves,
       cost: rootCost,
     },
-    width: heads.length > 0 ? cursor - COLUMN_GAP : spine.length > 0 ? NODE_WIDTH : 0,
+    width: right - left,
     height: bottom,
     orphanIds,
   };
+}
+
+interface Extent {
+  left: number;
+  right: number;
+  bottom: number;
+}
+
+function grow(extent: Extent, by: Extent): void {
+  extent.left = Math.min(extent.left, by.left);
+  extent.right = Math.max(extent.right, by.right);
+  extent.bottom = Math.max(extent.bottom, by.bottom);
 }
 
 function hideSubtree(node: SwarmNode, byId: Map<string, SwarmNode>): void {
@@ -638,32 +643,6 @@ export function busPath(x1: number, y1: number, x2: number, y2: number): string 
     `H ${round(x2 - s * r)}`,
     `Q ${round(x2)} ${round(mid)}, ${round(x2)} ${round(mid + r)}`,
     `V ${round(y2)}`,
-  ].join(" ");
-}
-
-/**
- * One stretch of a parent's rail inside a column.
- *
- * The rail runs down the parent's left side, under its card. Each
- * child's stretch starts where the sibling above it turned off (or at
- * the parent's bottom, for the first), so no two stretches overlap and
- * each can be dashed or lit on its own, then turns right into the
- * child's left edge.
- */
-export function railPath(
-  parent: Pick<SwarmNode, "x" | "y">,
-  child: Pick<SwarmNode, "x" | "y">,
-  above: Pick<SwarmNode, "y"> | null,
-): string {
-  const x = parent.x + RAIL_OFFSET;
-  const y1 = above ? above.y + RAIL_ENTRY : parent.y + NODE_HEIGHT;
-  const y2 = child.y + RAIL_ENTRY;
-  const r = Math.min(6, (child.x - x) / 2, (y2 - y1) / 2);
-  return [
-    `M ${round(x)} ${round(y1)}`,
-    `V ${round(y2 - r)}`,
-    `Q ${round(x)} ${round(y2)}, ${round(x + r)} ${round(y2)}`,
-    `H ${round(child.x)}`,
   ].join(" ");
 }
 
