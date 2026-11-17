@@ -1,0 +1,35 @@
+name: Mobile
+
+on:
+  pull_request:
+    paths:
+      - 'apps/mobile/**'
+      - 'packages/api-client/**'
+      - 'packages/core/**'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/mobile.yml'
+  workflow_dispatch:
+
+jobs:
+  expo:
+    runs-on: ubuntu-latest
+    env:
+      EXPO_NO_TELEMETRY: '1'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build:mobile
+      - run: pnpm --filter @bento/mobile typecheck
+      - run: pnpm --filter @bento/mobile test
+      - run: pnpm --filter @bento/mobile build:web
+      - run: pnpm --filter @bento/mobile exec playwright install --with-deps chromium
+      - run: pnpm --filter @bento/mobile test:e2e
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bento-ios-bundle
+          path: apps/mobile/dist
