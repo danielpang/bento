@@ -3,7 +3,7 @@ import { createRequire } from "node:module";
 import test from "node:test";
 import type pg from "pg";
 import { POOL_QUERY_TIMEOUT_MS, pgBossDatabase } from "./client.js";
-import { PG_BOSS_POLL_TIMEOUT_MS, isPgBossPoll, runPgBossPoll } from "./pg-boss-poll.js";
+import { PG_BOSS_POLL_TIMEOUT_MS, isConnectTimeout, isPgBossPoll, runPgBossPoll } from "./pg-boss-poll.js";
 
 const require = createRequire(import.meta.url);
 const plans = require("pg-boss/src/plans.js") as Record<string, (...args: unknown[]) => unknown>;
@@ -84,6 +84,52 @@ test("a second timeout, or any other error, goes to pg-boss", async () => {
   } as unknown as pg.Pool;
   await assert.rejects(runPgBossPoll(refused, "poll", []), /permission denied/);
   assert.equal(calls, 1, "only a timeout is retried");
+});
+
+test("the connect timeouts pg-pool and node-pg raise are recognized", () => {
+  assert.equal(isConnectTimeout(new Error("timeout exceeded when trying to connect")), true);
+  assert.equal(isConnectTimeout(new Error("Connection terminated due to connection timeout")), true);
+  assert.equal(isConnectTimeout(new Error("timeout expired")), true);
+  assert.equal(isConnectTimeout(new Error("timeout exceeded when trying to connect to something else")), false);
+  assert.equal(isConnectTimeout(readTimeout()), false);
+  assert.equal(isConnectTimeout("timeout exceeded when trying to connect"), false);
+});
+
+test("a connect timeout is retried once, and a second one is reported", async () => {
+  for (const message of [
+    "timeout exceeded when trying to connect",
+    "Connection terminated due to connection timeout",
+    "timeout expired",
+  ]) {
+    const calls: number[] = [];
+    const pool = {
+      query: async () => {
+        calls.push(1);
+        if (calls.length === 1) throw new Error(message);
+        return ok;
+      },
+    } as unknown as pg.Pool;
+    const result = await runPgBossPoll(pool, "poll", []);
+    assert.equal(result, ok, message);
+    assert.equal(calls.length, 2, message);
+
+    let failures = 0;
+    const stuck = {
+      query: async () => {
+        failures++;
+        throw new Error(message);
+      },
+    } as unknown as pg.Pool;
+    await assert.rejects(
+      runPgBossPoll(stuck, "poll", []),
+      (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.equal(err.message, message);
+        return true;
+      },
+    );
+    assert.equal(failures, 2, message);
+  }
 });
 
 test("the adapter sends polls through the retry and everything else straight", async () => {
