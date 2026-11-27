@@ -394,6 +394,9 @@ test("a run without credentials says so in the transcript", { timeout: 90_000 },
   const { runs } = await json<{ runs: { id: string }[] }>(await app.request(`/api/features/${feature.id}`));
   const transcript = await (await app.request(`/api/runs/${runs[0]!.id}/transcript`)).text();
   assert.match(transcript, /system> No ANTHROPIC_API_KEY/, "the reason is in the transcript, not a column nobody renders");
+
+  const built = await ctx.db.select().from(sandboxes).where(eq(sandboxes.featureId, feature.id));
+  assert.deepEqual(built, [], "a run that cannot start must not provision a sandbox first");
 });
 
 /**

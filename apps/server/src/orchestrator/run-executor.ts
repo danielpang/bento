@@ -411,6 +411,43 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
     return;
   }
 
+  // A shared login is a credential, whether it arrives as a mount or an
+  // env var. Only when none of the three exists does the run stop, and
+  // it stops here, before a machine is made for an agent that cannot start.
+  if (!customProvider && !personalAccount && missing.length > 0 && authMounts.length === 0 && Object.keys(authEnv).length === 0) {
+    // The pointer has to name a door that exists where the reader is.
+    // Multi mode stores keys under Agents, Model provider keys. Local
+    // mode stores them through bento setup, or shares this machine's
+    // agent logins. And when sharing is already on but this machine has
+    // no login for the tool, saying "turn on sharing" would point at a
+    // switch already flipped.
+    // An Ollama run shares no login, so the fixes worth naming are
+    // Ollama's own: the key, or a server of the organization's own.
+    const canShareLogin = !onOllama && Boolean(adapter.configPaths?.length);
+    const sharing = canShareLogin && ctx.env.BENTO_MODE !== "multi" && (await shouldShareAgentAuth(ctx));
+    const toolName = modelGuidanceFor(profile.cli)?.label ?? profile.cli;
+    await finishRun(
+      ctx,
+      runId,
+      {
+        ok: false,
+        error: missingRequiredEnvMessage({
+          missing,
+          toolName,
+          cli: profile.cli,
+          mode: ctx.env.BENTO_MODE === "multi" ? "multi" : "local",
+          onOllama,
+          sharing,
+          canShareLogin,
+        }),
+      },
+      null,
+    );
+    emitBoard("failed");
+    await subject.settle(ctx);
+    return;
+  }
+
   const disk = await ctx.diskSpace?.check().catch(() => null);
   if (disk?.warning) await saySystem(disk.warning);
 
@@ -759,42 +796,6 @@ export async function executeRun(ctx: AppContext, runId: string): Promise<void> 
   // own variables go first, so anything the organization saved under
   // the same name wins: pool's base URL defaults to Poolside Platform
   // here and to an enterprise endpoint when one is stored.
-  // A shared login is a credential, whether it arrives as a mount or an
-  // env var. Only when none of the three exists does the run stop here.
-  if (!customProvider && !personalAccount && missing.length > 0 && authMounts.length === 0 && Object.keys(authEnv).length === 0) {
-    // The pointer has to name a door that exists where the reader is.
-    // Multi mode stores keys under Agents, Model provider keys. Local
-    // mode stores them through bento setup, or shares this machine's
-    // agent logins. And when sharing is already on but this machine has
-    // no login for the tool, saying "turn on sharing" would point at a
-    // switch already flipped.
-    // An Ollama run shares no login, so the fixes worth naming are
-    // Ollama's own: the key, or a server of the organization's own.
-    const canShareLogin = !onOllama && Boolean(adapter.configPaths?.length);
-    const sharing = canShareLogin && ctx.env.BENTO_MODE !== "multi" && (await shouldShareAgentAuth(ctx));
-    const toolName = modelGuidanceFor(profile.cli)?.label ?? profile.cli;
-    await finishRun(
-      ctx,
-      runId,
-      {
-        ok: false,
-        error: missingRequiredEnvMessage({
-          missing,
-          toolName,
-          cli: profile.cli,
-          mode: ctx.env.BENTO_MODE === "multi" ? "multi" : "local",
-          onOllama,
-          sharing,
-          canShareLogin,
-        }),
-      },
-      null,
-    );
-    emitBoard("failed");
-    await subject.settle(ctx);
-    return;
-  }
-
   // Snapshot before the agent touches anything, so this run can be
   // undone wholesale. Drivers without snapshots (Docker) rely on git.
   if (driver.snapshot) {
