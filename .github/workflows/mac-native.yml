@@ -1,0 +1,149 @@
+name: Mac native app
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Bento release tag to build (for example v0.1.3)
+        required: true
+        type: string
+      ref:
+        description: Branch or commit to build instead of the tag's commit
+        required: false
+        type: string
+  workflow_call:
+    inputs:
+      tag:
+        description: The same release tag used to package the CLI
+        required: true
+        type: string
+      commit:
+        description: Exact tag commit already resolved by the release workflow
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  mac:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.commit || inputs.ref || format('refs/tags/{0}', inputs.tag) }}
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Validate the release tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: node scripts/release-version.mjs "$TAG"
+      - name: Require Apple signing and notarization credentials
+        env:
+          CSC_LINK: ${{ secrets.DESKTOP_CSC_LINK || secrets.MACOS_CERT_P12 }}
+          CSC_KEY_PASSWORD: ${{ secrets.DESKTOP_CSC_KEY_PASSWORD || secrets.MACOS_CERT_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID || secrets.MACOS_APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD || secrets.MACOS_NOTARY_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID || secrets.MACOS_TEAM_ID }}
+        run: |
+          for NAME in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!NAME}" ]; then
+              echo "::error::Missing $NAME. Mac releases require Developer ID signing and notarization. See apps/mac/scripts/README.md."
+              exit 1
+            fi
+          done
+      - name: Install the Rust toolchain
+        working-directory: apps/mac
+        run: rustup toolchain install "$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" --profile minimal
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/mac/target
+          key: mac-native-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('apps/mac/Cargo.lock', 'apps/mac/rust-toolchain.toml') }}
+      - run: pnpm install --frozen-lockfile
+      - name: Test
+        working-directory: apps/mac
+        run: cargo test
+      - name: Build the app
+        env:
+          BENTO_RELEASE_TAG: ${{ inputs.tag }}
+        run: apps/mac/scripts/package.sh --sidecar
+      # electron-builder reads the certificate from CSC_LINK itself; codesign needs it in a keychain.
+      - name: Import the signing certificate
+        env:
+          CSC_LINK: ${{ secrets.DESKTOP_CSC_LINK || secrets.MACOS_CERT_P12 }}
+          CSC_KEY_PASSWORD: ${{ secrets.DESKTOP_CSC_KEY_PASSWORD || secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          umask 077
+          CERT="$RUNNER_TEMP/cert.p12"
+          trap 'rm -f "$CERT"' EXIT
+          if ! printf '%s' "$CSC_LINK" | base64 --decode > "$CERT" 2>/dev/null || [ ! -s "$CERT" ]; then
+            echo '::error::The signing certificate secret must be a base64 encoded .p12 file.'
+            exit 1
+          fi
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 32)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security set-keychain-settings -lut 21600 build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security import "$CERT" -k build.keychain -P "$CSC_KEY_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain > /dev/null
+          # shellcheck disable=SC2046
+          security list-keychains -d user -s build.keychain $(security list-keychains -d user | tr -d '"')
+      - name: Sign, notarize, and package
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID || secrets.MACOS_APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD || secrets.MACOS_NOTARY_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID || secrets.MACOS_TEAM_ID }}
+        run: apps/mac/scripts/sign.sh
+      - name: Verify signing and version
+        env:
+          TAG: ${{ inputs.tag }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID || secrets.MACOS_TEAM_ID }}
+        run: |
+          VERSION="$(node scripts/release-version.mjs "$TAG")"
+          APP=apps/mac/target/bundle/Bento.app
+          ACTUAL="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
+          test "$ACTUAL" = "$VERSION"
+          # A leading '=' makes this an inline requirement instead of a file path.
+          codesign --verify --deep --strict -R '=anchor apple generic and certificate leaf[field.1.2.840.113635.100.6.1.13] exists' "$APP"
+          TEAM="$(codesign -dv "$APP" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+          test "$TEAM" = "$APPLE_TEAM_ID"
+          xcrun stapler validate "$APP"
+          spctl --assess --type execute --verbose=2 "$APP"
+          cd apps/mac/target/bundle
+          shasum -a 256 ./*.dmg ./*.zip > mac-native.sha256
+      # The window needs a display and a GPU, so this starts the bundle's signed Node and Postgres directly.
+      - name: Start the signed local server
+        timeout-minutes: 5
+        env:
+          BENTO_DATA_DIR: ${{ runner.temp }}/bento-data
+          BENTO_SIDECAR_PORT: 47911
+        run: |
+          SIDECAR=apps/mac/target/bundle/Bento.app/Contents/Resources/sidecar
+          # The server stops when its stdin closes.
+          sleep 280 | "$SIDECAR/bin/node" "$SIDECAR/bin/sidecar.mjs" &
+          for _ in $(seq 1 120); do
+            if curl -fsS "http://127.0.0.1:$BENTO_SIDECAR_PORT/api/health" > /dev/null 2>&1; then
+              echo 'The signed local server started.'
+              pkill -f "sleep 280" || true
+              wait || true
+              exit 0
+            fi
+            sleep 1
+          done
+          echo '::error::The signed local server did not start in two minutes.'
+          exit 1
+      - uses: actions/upload-artifact@v6
+        with:
+          name: mac-native
+          if-no-files-found: error
+          path: |
+            apps/mac/target/bundle/*.dmg
+            apps/mac/target/bundle/*.zip
+            apps/mac/target/bundle/mac-native.sha256
