@@ -1,7 +1,7 @@
 //! The inspector: the selected card, what can be done with it, and its conversation.
 
 use bento_client::RunStatus;
-use rune::{El, ScrollSpec, Tx, col, row};
+use rune::{El, ScrollSpec, Tx, col, row, spacer};
 use rune_kit::{Button, ButtonVariant, Kit, Markdown, TextArea};
 
 use crate::data::{self, Action};
@@ -21,7 +21,15 @@ pub fn inspector(s: &State, t: &Tokens, k: &Kit) -> El {
         .key("inspector-head")
         .w_full()
         .gap(10.0)
-        .child(row().gap(10.0).center_y().child(orb(material, flow, 18.0)).child(label(c.title.clone(), 14.0, 600.0, t.text).wrap().shrink()))
+        .child(
+            row()
+                .gap(10.0)
+                .center_y()
+                .child(orb(material, flow, 18.0))
+                .child(label(c.title.clone(), 14.0, 600.0, t.text).wrap().shrink())
+                .child(spacer())
+                .child(Button::new("Close").variant(ButtonVariant::Ghost).on_press(|s: &mut State| s.selected = None).build(k).key("drawer-close")),
+        )
         .child(row().gap(8.0).center_y().child(status(c.status, t)).child(label(lane, 11.5, 400.0, t.faint)));
     if !c.description.trim().is_empty() {
         head = head.child(label(c.description.clone(), 12.5, 400.0, t.dim).wrap().max_h(120.0).key("description"));

@@ -31,6 +31,10 @@ fn on_key(s: &mut State, ev: &KeyEvent, tx: &mut Tx) -> bool {
         s.inspector.toggle();
         return true;
     }
+    if ev.key == rune::Key::Escape && s.screen == state::Screen::Board && s.new_card.is_none() && s.selected.is_some() {
+        s.selected = None;
+        return true;
+    }
     pages::on_key(s, ev, tx)
 }
 
