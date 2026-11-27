@@ -506,6 +506,8 @@ pub enum AgentEvent {
         name: String,
         phase: ToolPhase,
         detail: Option<Value>,
+        /// The tool's native line, which carries its call id, input, output and failure.
+        raw: Option<Value>,
     },
     Result {
         ok: bool,
@@ -539,6 +541,8 @@ enum KnownAgentEvent {
         phase: ToolPhase,
         #[serde(default)]
         detail: Option<Value>,
+        #[serde(default)]
+        raw: Option<Value>,
     },
     Result {
         ok: bool,
@@ -564,7 +568,7 @@ impl AgentEvent {
         match KnownAgentEvent::deserialize(&value) {
             Ok(KnownAgentEvent::Init { session_id, model }) => AgentEvent::Init { session_id, model },
             Ok(KnownAgentEvent::Message { role, text }) => AgentEvent::Message { role, text },
-            Ok(KnownAgentEvent::Tool { name, phase, detail }) => AgentEvent::Tool { name, phase, detail },
+            Ok(KnownAgentEvent::Tool { name, phase, detail, raw }) => AgentEvent::Tool { name, phase, detail, raw },
             Ok(KnownAgentEvent::Result {
                 ok,
                 session_id,
@@ -849,7 +853,7 @@ mod tests {
         assert_eq!(block.first_seq, Some(1));
         assert!(matches!(&block.events[0], AgentEvent::Message { role: MessageRole::System, .. }));
         assert_eq!(block.events[1], AgentEvent::Init { session_id: Some("s-1".into()), model: Some("claude-sonnet-5".into()) });
-        assert!(matches!(&block.events[2], AgentEvent::Tool { name, phase: ToolPhase::Start, detail: Some(_) } if name == "Bash"));
+        assert!(matches!(&block.events[2], AgentEvent::Tool { name, phase: ToolPhase::Start, detail: Some(_), .. } if name == "Bash"));
         assert!(matches!(&block.events[3], AgentEvent::Result { ok: false, interrupted: true, num_turns: Some(2), .. }));
         assert!(matches!(&block.events[4], AgentEvent::Result { ok: true, interrupted: false, .. }));
         assert_eq!(c.pending[0].status, "queued");

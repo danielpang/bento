@@ -31,6 +31,8 @@ pub enum Msg {
     Swarms(swarms::Msg),
     Analytics(analytics::Msg),
     Settings(settings::Msg),
+    Card(crate::screens::card::Msg),
+    Review(crate::screens::drawer::Msg),
     /// The old server has stopped for a restart.
     Restarted(u64),
 }
@@ -62,6 +64,12 @@ impl From<analytics::Msg> for Msg {
 impl From<settings::Msg> for Msg {
     fn from(m: settings::Msg) -> Msg {
         Msg::Settings(m)
+    }
+}
+
+impl From<crate::screens::drawer::Msg> for Msg {
+    fn from(m: crate::screens::drawer::Msg) -> Msg {
+        Msg::Review(m)
     }
 }
 
@@ -180,7 +188,7 @@ pub fn err(e: bento_client::Error) -> String {
 pub fn data_dir() -> PathBuf {
     match std::env::var_os("BENTO_DATA_DIR").filter(|v| !v.is_empty()) {
         Some(d) => PathBuf::from(d),
-        None => PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".bento"),
+        None => crate::shell_env::home().unwrap_or_default().join(".bento"),
     }
 }
 
@@ -233,6 +241,15 @@ pub fn boot(s: &mut State) {
         Ok(sc) => s.conn.sidecar = Some(sc),
         Err(e) => s.phase = Phase::Failed(e),
     }
+}
+
+/// Stops a server that is still starting. Try again boots it afresh, once this one has stopped.
+pub fn cancel_boot(s: &mut State) {
+    s.conn.sidecar_gen += 1;
+    if let Some(old) = s.conn.sidecar.take() {
+        old.stop_in_background();
+    }
+    s.phase = Phase::Failed(sidecar::CANCELLED.into());
 }
 
 /// Stops the server off the UI thread, then boots it again with the options saved since. Every
@@ -321,6 +338,8 @@ pub fn select_card(s: &mut State, id: &str) {
         s.conn.run_stream = None;
     }
     load_detail(s);
+    crate::screens::card::select(s);
+    crate::screens::drawer::selected(s);
 }
 
 fn load_detail(s: &mut State) {
@@ -545,6 +564,7 @@ fn apply(s: &mut State, m: Msg) {
                     s.conn.run_stream = None;
                 }
             }
+            crate::screens::drawer::loaded(s, detail, &conversation);
         }
         Msg::RunStream { run, .. } if s.conn.streaming_run() != Some(&run) => {}
         Msg::RunStream { update, .. } => {
@@ -608,6 +628,8 @@ fn apply(s: &mut State, m: Msg) {
                 boot(s);
             }
         }
+        Msg::Card(m) => crate::screens::card::apply(s, m),
+        Msg::Review(m) => crate::screens::drawer::apply(s, m),
         m @ (Msg::Sessions(_) | Msg::Artifacts(_) | Msg::Swarms(_) | Msg::Analytics(_) | Msg::Settings(_)) => pages::apply(s, m),
     }
 }

@@ -22,6 +22,7 @@ fn card(id: &str, title: &str, note: &str, agent: &str, status: Status) -> Card 
         status,
         run_id: run_status.map(|_| format!("run-{id}")),
         run_status,
+        pr: None,
     }
 }
 
@@ -76,7 +77,7 @@ pub fn board(s: &mut State) {
     ];
     s.selected = Some("webhooks".into());
     let msg = |role, text: &str| AgentEvent::Message { role, text: text.into() };
-    let tool = |name: &str| AgentEvent::Tool { name: name.into(), phase: ToolPhase::Start, detail: None };
+    let tool = |name: &str| AgentEvent::Tool { name: name.into(), phase: ToolPhase::Start, detail: None, raw: None };
     s.transcript = Transcript {
         feature: "webhooks".into(),
         blocks: vec![Block {

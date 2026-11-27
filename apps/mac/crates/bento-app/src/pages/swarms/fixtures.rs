@@ -148,7 +148,7 @@ fn cursor_detail(status: &str, paused: Option<&str>) -> SwarmDetail {
 
 fn worker_output() -> Output {
     let msg = |role, text: &str| AgentEvent::Message { role, text: text.into() };
-    let tool = |name: &str| AgentEvent::Tool { name: name.into(), phase: ToolPhase::Start, detail: None };
+    let tool = |name: &str| AgentEvent::Tool { name: name.into(), phase: ToolPhase::Start, detail: None, raw: None };
     Output {
         run_id: "run-matrix".into(),
         entries: data::entries(&[
@@ -190,7 +190,7 @@ fn planner(s: &mut State) {
         run_id: "run-planner".into(),
         entries: data::entries(&[
             msg(MessageRole::User, "Page the run events route with a cursor so the console loads older events on scroll."),
-            AgentEvent::Tool { name: "Read".into(), phase: ToolPhase::Start, detail: None },
+            AgentEvent::Tool { name: "Read".into(), phase: ToolPhase::Start, detail: None, raw: None },
             msg(MessageRole::Assistant, "Five tasks: the cursor type, the query, the route, the console, and the tenant matrix. The first three in order; the last two after the route."),
         ]),
         ended: Some(RunStatus::Succeeded),

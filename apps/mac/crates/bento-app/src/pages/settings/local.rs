@@ -179,8 +179,7 @@ pub fn view(s: &State, t: &Tokens, k: &Kit, layer: &mut Vec<El>) -> El {
             s.settings.open_select = None;
             draft(s).docker = v == DOCKER_LABEL;
         })
-        .build(k, layer)
-        .key("local-sandbox");
+        .build(k, layer);
     let sandbox_note = if d.docker {
         note("Docker isolates each agent in a container.", t)
     } else {

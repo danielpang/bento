@@ -33,6 +33,10 @@ BENTO_DATA_DIR=/tmp/bento-dev node apps/mac/sidecar/dist/bin/sidecar.mjs
 
 It is named `bundle` rather than `build` so the repository wide `turbo run build` does not copy 70 MB of binaries on every build.
 
+## In the Mac app
+
+`apps/mac/scripts/package.sh` builds an unsigned `apps/mac/target/bundle/Bento.app` with this `dist/` at `Contents/Resources/sidecar` and a `node` binary beside the script (`sidecar/bin/node`). The app starts the sidecar with the PATH of the person's login shell plus the usual install folders (an app opened from Finder gets only `/usr/bin:/bin:/usr/sbin:/sbin`), and with `BENTO_SIDECAR_PORT` set to the port the server had last time (kept in `<data dir>/mac-app/port`), so the origin stays the same across launches. One app runs per data folder (`<data dir>/mac-app/instance.lock`): a second launch brings the first window forward and exits.
+
 ## Configuration
 
 Environment variables only. All are optional.

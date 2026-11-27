@@ -10,6 +10,7 @@ use crate::data;
 use crate::metal::{self, orb, ring};
 use crate::model::LaneKind;
 use crate::pages;
+use crate::screens::drawer::changes;
 use crate::screens::inspector::{block, user};
 use crate::screens::parts::key;
 use crate::state::{Screen, State};
@@ -264,6 +265,10 @@ fn session(s: &State, o: &Open, t: &Tokens, k: &Kit) -> El {
     };
     let mut pane = col().key("session").w_full().h_full().child(head).child(body);
     if o.detail.is_some() && !o.deleted && o.pane == Pane::Conversation {
+        let agent = o.latest_agent().map_or("The agent".to_owned(), |a| a.name.clone());
+        if let Some(q) = crate::screens::card::session_questions(&o.questions, &agent, t, k) {
+            pane = pane.child(col().key("session-questions").w_full().items_center().child(col().w_full().max_w(READING_W).px(24.0).pt(10.0).child(q)));
+        }
         pane = pane.child(composer_bar(o, t, k));
     }
     pane
@@ -343,12 +348,7 @@ fn composer_bar(o: &Open, t: &Tokens, k: &Kit) -> El {
     let mut buttons = row().w_full().gap(8.0).center_y().child(label(hint(o), 11.5, 400.0, t.faint).wrap().grow(1.0).shrink());
     if o.run_active() {
         let does = o.stop_does();
-        let help = match does {
-            StopDoes::End => "Stop the agent",
-            StopDoes::Interrupt => "Stop this turn. The agent waits for your next message.",
-            StopDoes::None if o.interrupt_sent.is_some() => "Stopping this turn.",
-            StopDoes::None => "The agent is waiting for your next message.",
-        };
+        let help = crate::screens::card::stop::stop_help(does, &o.turn);
         let stop = Button::new("Stop")
             .variant(ButtonVariant::Neutral)
             .disabled(o.busy || does == StopDoes::None)
@@ -498,43 +498,8 @@ pub fn inspector(s: &State, _cx: &mut Cx<State>, t: &Tokens, k: &Kit, _layer: &m
     let mut files = col().key("session-files").w_full().gap(2.0).child(label("FILES CHANGED", 11.0, 500.0, t.faint).pb(4.0));
     match &o.changes {
         None => files = files.child(note("Loading the changes.", t)),
-        Some(c) if c.repositories.iter().all(|r| r.files.is_empty()) => files = files.child(label("Nothing committed yet.", 12.5, 400.0, t.faint)),
-        Some(c) => {
-            let many = c.repositories.len() > 1;
-            for r in &c.repositories {
-                for file in &r.files {
-                    let path = file.path.clone();
-                    let shown = if many { format!("{}/{}", r.name, file.path) } else { file.path.clone() };
-                    let row_el = row()
-                        .key(format!("file-{shown}"))
-                        .w_full()
-                        .px(6.0)
-                        .py(4.0)
-                        .gap(8.0)
-                        .radius(6.0)
-                        .center_y()
-                        .role("button")
-                        .label(shown.clone())
-                        .focusable(true)
-                        .on_press_tx(move |s: &mut State, tx: &mut Tx| {
-                            let p = &mut s.sessions;
-                            if let Some(o) = p.open.as_mut().filter(|o| o.has_diff()) {
-                                o.pane = Pane::Changes;
-                                if let Some(i) = p.diff.file_index(&path) {
-                                    p.diff.scroll_to_file(i, tx);
-                                }
-                            }
-                        })
-                        .child(mono(shown, 11.5, t.dim).truncate().grow(1.0).shrink())
-                        .child(mono(format!("+{}", file.additions), 11.5, t.succeeded))
-                        .child(if file.deletions > 0 { mono(format!("-{}", file.deletions), 11.5, t.failed) } else { el() });
-                    files = files.child(row_el);
-                }
-                if r.truncated {
-                    files = files.child(label("The diff is too large to show in full.", 11.5, 400.0, t.faint).wrap());
-                }
-            }
-        }
+        Some(c) if changes::is_empty(c) => files = files.child(label("Nothing committed yet.", 12.5, 400.0, t.faint)),
+        Some(c) => files = files.child(changes::files(c, t, show_file)),
     }
     Some(
         col()
@@ -548,6 +513,16 @@ pub fn inspector(s: &State, _cx: &mut Cx<State>, t: &Tokens, k: &Kit, _layer: &m
             .child(files)
             .scroll(ScrollSpec { stick_bottom: false }),
     )
+}
+
+fn show_file(s: &mut State, path: &str, tx: &mut Tx) {
+    let p = &mut s.sessions;
+    if let Some(o) = p.open.as_mut().filter(|o| o.has_diff()) {
+        o.pane = Pane::Changes;
+        if let Some(i) = p.diff.file_index(path) {
+            p.diff.scroll_to_file(i, tx);
+        }
+    }
 }
 
 pub fn toolbar(s: &State, _cx: &mut Cx<State>, t: &Tokens, _k: &Kit) -> Option<El> {

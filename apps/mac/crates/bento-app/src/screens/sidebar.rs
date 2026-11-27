@@ -68,13 +68,14 @@ pub fn sidebar(s: &State, t: &Tokens, k: &Kit) -> El {
     }
     let cards = || s.lanes.iter().flat_map(|l| l.cards.iter().map(move |c| (l, c)));
     sb = sb.child(section("Running now", t));
-    for (lane, card) in cards().filter(|(_, c)| c.status == Status::Running) {
+    for (lane, card) in cards().filter(|(_, c)| c.status == Status::Running && !s.card.asks(c)) {
         let detail = if card.agent.is_empty() { lane.name.clone() } else { format!("{} · {}", lane.name, card.agent) };
         sb = sb.child(live(card, &detail, metal::CHROME, 1.0, s, t));
     }
     sb = sb.child(section("Needs you", t));
-    for (lane, card) in cards().filter(|(_, c)| c.status == Status::Gated) {
-        sb = sb.child(live(card, &lane.rule, metal::GOLD, 0.0, s, t));
+    for (lane, card) in cards().filter(|(_, c)| c.status == Status::Gated || s.card.asks(c)) {
+        let detail = if s.card.asks(card) { format!("{} is waiting for your answer.", if card.agent.is_empty() { "The agent" } else { &card.agent }) } else { lane.rule.clone() };
+        sb = sb.child(live(card, &detail, metal::GOLD, 0.0, s, t));
     }
     sb.footer(
         SidebarRow::new("Settings")

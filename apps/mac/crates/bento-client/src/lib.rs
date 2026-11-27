@@ -15,7 +15,7 @@ pub mod sse;
 mod stream;
 mod types;
 
-pub use api::{analytics::*, artifacts::*, sessions::*, settings::*, swarms::*};
+pub use api::{agents::*, analytics::*, artifacts::*, card::*, review::*, sessions::*, settings::*, swarms::*};
 pub use client::Client;
 pub use error::{Error, Result};
 pub use stream::{BoardUpdate, RunUpdate, StreamHandle};

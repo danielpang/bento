@@ -68,11 +68,11 @@ pub struct Flags {
 }
 
 impl Client {
-    fn call<T: DeserializeOwned>(&self, method: &str, path: &str, body: Option<String>) -> Result<T> {
+    pub(crate) fn call<T: DeserializeOwned>(&self, method: &str, path: &str, body: Option<String>) -> Result<T> {
         Self::decode(self.send(self.request(method, path), body)?)
     }
 
-    fn json(body: &impl Serialize) -> Result<String> {
+    pub(crate) fn json(body: &impl Serialize) -> Result<String> {
         serde_json::to_string(body).map_err(|e| Error::Decode { message: e.to_string(), body: String::new() })
     }
 

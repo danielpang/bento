@@ -2,9 +2,11 @@
 
 mod board;
 mod boot;
+pub(crate) mod card;
+pub(crate) mod drawer;
 mod empty;
 pub(crate) mod inspector;
-mod new_card;
+pub(crate) mod new_card;
 pub(crate) mod parts;
 mod sidebar;
 
@@ -22,7 +24,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let k = theme::kit(&t);
     let mut layer = Vec::new();
     let base = match &s.phase {
-        Phase::Booting(message) => boot::starting(message, &t),
+        Phase::Booting(message) => boot::starting(message, &t, &k),
         Phase::Failed(message) => boot::failed(message, &t, &k),
         Phase::Ready => shell(s, cx, &t, &k, &mut layer),
     };
@@ -61,6 +63,7 @@ fn shell(s: &State, cx: &mut Cx<State>, t: &Tokens, k: &Kit, layer: &mut Vec<El>
         _ => pages::inspector(s, cx, t, k, layer),
     };
     new_card::dialog(s, t, k, layer);
+    card::dialogs(s, t, k, layer);
     let mut split = SplitView::new(main).sidebar(&s.sidebar, |s: &mut State| &mut s.sidebar, sidebar::sidebar(s, t, k));
     if let Some(side) = side {
         split = split.inspector(&s.inspector, |s: &mut State| &mut s.inspector, side);

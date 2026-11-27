@@ -34,14 +34,14 @@ pub enum Load<T> {
 }
 
 impl<T> Load<T> {
-    fn ready(&self) -> Option<&T> {
+    pub(crate) fn ready(&self) -> Option<&T> {
         match self {
             Load::Ready(v) => Some(v),
             _ => None,
         }
     }
 
-    fn from(result: Result<T, bento_client::Error>) -> Load<T> {
+    pub(crate) fn from(result: Result<T, bento_client::Error>) -> Load<T> {
         match result {
             Ok(v) => Load::Ready(v),
             Err(e) => Load::Failed { missing: e.is_not_found(), message: data::err(e) },
@@ -139,15 +139,9 @@ pub fn apply(s: &mut State, m: Msg) {
             if s.artifacts.body.as_ref().is_none_or(|(b, _)| *b != id) {
                 return;
             }
-            let body = match result {
-                Ok(bytes) if image => match image_cache(s) {
-                    Some(cache) => Load::Ready(Body::Image(cache.load(bytes))),
-                    None => Load::Failed { message: String::new(), missing: false },
-                },
-                Ok(bytes) => Load::Ready(Body::Text(String::from_utf8_lossy(&bytes).into_owned())),
-                Err(e) => Load::from(Err(e)),
-            };
-            s.artifacts.body = Some((id, body));
+            let bus = s.conn.bus.clone();
+            let cache = s.artifacts.images.get_or_insert_with(|| ImageCache::new(Arc::new(move || bus.send(Msg::Decoded))));
+            s.artifacts.body = Some((id, decode(cache, image, result)));
         }
         Msg::Run { id, result } => {
             let info = result.map(|r| RunInfo { status: r.status, agent: s.artifacts.profiles.get(&r.agent_profile_id).cloned() });
@@ -177,12 +171,13 @@ pub fn apply(s: &mut State, m: Msg) {
     }
 }
 
-fn image_cache(s: &mut State) -> Option<&ImageCache> {
-    if s.artifacts.images.is_none() {
-        let bus = s.conn.bus.clone();
-        s.artifacts.images = Some(ImageCache::new(Arc::new(move || bus.send(Msg::Decoded))));
+/// An artifact's bytes as the reader shows them: pixels for an image, text for the rest.
+pub(crate) fn decode(cache: &ImageCache, image: bool, result: Result<Vec<u8>, bento_client::Error>) -> Load<Body> {
+    match result {
+        Ok(bytes) if image => Load::Ready(Body::Image(cache.load(bytes))),
+        Ok(bytes) => Load::Ready(Body::Text(String::from_utf8_lossy(&bytes).into_owned())),
+        Err(e) => Load::from(Err(e)),
     }
-    s.artifacts.images.as_ref()
 }
 
 /// Refetches the list and the loaded cards' files without clearing what is shown.
@@ -251,7 +246,7 @@ fn load_run(s: &mut State, run: &str) {
 
 /// What the reader fetches: text for the kinds it renders, bytes for a raster image, and
 /// nothing for HTML, SVG or any other file that could carry script.
-fn fetches(a: &RunArtifact) -> Option<bool> {
+pub(crate) fn fetches(a: &RunArtifact) -> Option<bool> {
     match a.kind.as_str() {
         "image" => Some(true),
         "markdown" | "mermaid" => Some(false),
@@ -295,7 +290,7 @@ fn selected_card(s: &State) -> Option<&ProjectArtifactCard> {
 
 // Formatting, after the console's artifacts-format.ts.
 
-fn base_name(path: &str) -> &str {
+pub(crate) fn base_name(path: &str) -> &str {
     path.rsplit('/').next().filter(|b| !b.is_empty()).unwrap_or(path)
 }
 
@@ -309,7 +304,7 @@ fn kind_label(kind: &str) -> &'static str {
     }
 }
 
-fn kind_ext(kind: &str, path: Option<&str>) -> String {
+pub(crate) fn kind_ext(kind: &str, path: Option<&str>) -> String {
     if let (true, Some(path)) = (kind == "file", path)
         && let Some((_, ext)) = path.rsplit_once('.')
         && !ext.is_empty()
@@ -364,7 +359,7 @@ fn updated_ago(iso: &str, now: i64) -> String {
     if hours < 48 { format!("Updated {hours}h ago") } else { format!("Updated {}d ago", hours / 24) }
 }
 
-fn created_label(iso: &str) -> String {
+pub(crate) fn created_label(iso: &str) -> String {
     const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
     let (Some(month), Some(day), Some(year), Some(time)) = (
         iso.get(5..7).and_then(|m| m.parse::<usize>().ok()).and_then(|m| MONTHS.get(m.wrapping_sub(1))),
@@ -385,7 +380,7 @@ fn size_label(bytes: u64) -> String {
     }
 }
 
-fn short_id(id: &str) -> &str {
+pub(crate) fn short_id(id: &str) -> &str {
     id.get(..8).unwrap_or(id)
 }
 
@@ -440,7 +435,7 @@ fn visible_files(s: &State) -> Vec<(String, String)> {
 
 // The view.
 
-fn note(text: impl Into<String>, t: &Tokens) -> El {
+pub(crate) fn note(text: impl Into<String>, t: &Tokens) -> El {
     label(text, 12.5, 400.0, t.faint).wrap()
 }
 
@@ -457,7 +452,7 @@ fn button(name: impl Into<String>, k: &Kit, f: impl Fn(&mut State, &mut Tx) + 's
     Button::new(name).variant(ButtonVariant::Neutral).on_press_tx(f).build(k)
 }
 
-fn ext_badge(text: String, t: &Tokens, w: f32) -> El {
+pub(crate) fn ext_badge(text: String, t: &Tokens, w: f32) -> El {
     row().w(w).h(20.0).radius(5.0).center().border(1.0, t.line).fill(t.raised).child(mono(text, 9.5, t.dim))
 }
 
@@ -652,7 +647,7 @@ fn file_row(s: &State, card: &ProjectArtifactCard, a: &RunArtifact, t: &Tokens) 
     r
 }
 
-fn open_in_browser(url: String) -> impl Fn(&mut State, &mut Tx) + 'static {
+pub(crate) fn open_in_browser(url: String) -> impl Fn(&mut State, &mut Tx) + 'static {
     move |s: &mut State, tx: &mut Tx| {
         if let Err(e) = tx.open_url(&url) {
             s.toast(e.to_string());
@@ -686,19 +681,31 @@ fn reader(s: &State, t: &Tokens, k: &Kit, stacked: bool) -> El {
             .child(label(name, 14.0, 600.0, t.text).truncate())
             .child(mono(a.path.clone(), 11.0, t.faint).truncate_middle()),
     );
-    // HTML gets the copper key in its own panel; everything else can open the console's page.
-    if let (Some(c), false) = (client, a.kind == "html") {
-        let url = if fetches(a).is_some() { c.artifact_console_url(&a.id) } else { c.artifact_content_url(&a.id) };
-        let name = if fetches(a).is_some() { "Open in browser" } else { "Download" };
-        head = head.child(button(name, k, open_in_browser(url)).key("artifact-open"));
+    if let Some(open) = open_button(a, client, k) {
+        head = head.child(open);
     }
-    frame.child(head).child(el().w_full().h(1.0).fill(t.line)).child(reader_body(s, a, t, k))
+    let body = s.artifacts.body.as_ref().filter(|(id, _)| *id == a.id).map(|(_, b)| b);
+    let made_by = match s.artifacts.runs.get(&a.run_id) {
+        Some(Load::Ready(RunInfo { agent: Some(agent), .. })) => format!("{agent}, run {}", short_id(&a.run_id)),
+        _ => format!("Run {}", short_id(&a.run_id)),
+    };
+    frame.child(head).child(el().w_full().h(1.0).fill(t.line)).child(preview(a, body, &made_by, client, t, k))
 }
 
-fn reader_body(s: &State, a: &RunArtifact, t: &Tokens, k: &Kit) -> El {
+/// HTML gets the copper key in its own panel; everything else can open the console's page, or
+/// download what has no preview.
+pub(crate) fn open_button(a: &RunArtifact, client: Option<&Client>, k: &Kit) -> Option<El> {
+    let c = client.filter(|_| a.kind != "html")?;
+    let url = if fetches(a).is_some() { c.artifact_console_url(&a.id) } else { c.artifact_content_url(&a.id) };
+    let name = if fetches(a).is_some() { "Open in browser" } else { "Download" };
+    Some(button(name, k, open_in_browser(url)).key("artifact-open"))
+}
+
+/// One artifact read in place. HTML, SVG and other files are never fetched or drawn here.
+pub(crate) fn preview(a: &RunArtifact, body: Option<&Load<Body>>, made_by: &str, client: Option<&Client>, t: &Tokens, k: &Kit) -> El {
     let scroll = |child: El| col().key("artifact-body").w_full().grow(1.0).shrink().min_h(0.0).scroll(ScrollSpec::default()).child(child);
     if a.kind == "html" {
-        return html_panel(s, a, t);
+        return html_panel(a, made_by, client, t);
     }
     if fetches(a).is_none() {
         return centered(
@@ -706,10 +713,7 @@ fn reader_body(s: &State, a: &RunArtifact, t: &Tokens, k: &Kit) -> El {
             vec![ext_badge(kind_ext(&a.kind, Some(&a.path)), t, 52.0), cnote("This file has no preview. Download it to look at it.", t).max_w(320.0)],
         );
     }
-    let body = match &s.artifacts.body {
-        Some((id, body)) if *id == a.id => body,
-        _ => return centered("artifact-loading", vec![note("Loading artifacts.", t)]),
-    };
+    let Some(body) = body else { return centered("artifact-loading", vec![note("Loading artifacts.", t)]) };
     match body {
         Load::Loading => centered("artifact-loading", vec![note("Loading artifacts.", t)]),
         Load::Failed { message, .. } => centered(
@@ -751,12 +755,8 @@ fn reader_body(s: &State, a: &RunArtifact, t: &Tokens, k: &Kit) -> El {
 }
 
 /// HTML is never fetched or drawn here: the console renders it in a sandboxed frame.
-fn html_panel(s: &State, a: &RunArtifact, t: &Tokens) -> El {
-    let url = s.conn.client.as_ref().map(|c| c.artifact_console_url(&a.id));
-    let made_by = match s.artifacts.runs.get(&a.run_id) {
-        Some(Load::Ready(RunInfo { agent: Some(agent), .. })) => format!("{agent}, run {}", short_id(&a.run_id)),
-        _ => format!("Run {}", short_id(&a.run_id)),
-    };
+fn html_panel(a: &RunArtifact, made_by: &str, client: Option<&Client>, t: &Tokens) -> El {
+    let url = client.map(|c| c.artifact_console_url(&a.id));
     let facts = col()
         .gap(4.0)
         .items_center()

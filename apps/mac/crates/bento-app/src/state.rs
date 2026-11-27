@@ -103,6 +103,8 @@ pub struct State {
     pub swarms: swarms::PageState,
     pub analytics: analytics::PageState,
     pub settings: settings::PageState,
+    pub card: crate::screens::card::CardState,
+    pub review: crate::screens::drawer::Review,
 }
 
 impl State {
@@ -110,7 +112,7 @@ impl State {
         State {
             screen: Screen::Board,
             sidebar: PaneState::new(232.0).range(180.0, 360.0),
-            inspector: PaneState::new(400.0).range(320.0, 560.0),
+            inspector: PaneState::new(400.0).range(320.0, 760.0),
             phase: Phase::Booting("Starting Bento.".into()),
             projects: Vec::new(),
             project: None,
@@ -131,6 +133,8 @@ impl State {
             swarms: Default::default(),
             analytics: Default::default(),
             settings: Default::default(),
+            card: Default::default(),
+            review: Default::default(),
         }
     }
 

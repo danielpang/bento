@@ -67,7 +67,7 @@ fn sessions() -> Vec<ProjectSession> {
 
 fn open(s: &mut State, status: &str, live: bool) {
     let msg = |role, text: &str| AgentEvent::Message { role, text: text.into() };
-    let tool = |name: &str| AgentEvent::Tool { name: name.into(), phase: ToolPhase::Start, detail: None };
+    let tool = |name: &str| AgentEvent::Tool { name: name.into(), phase: ToolPhase::Start, detail: None, raw: None };
     let mut detail: FeatureDetail = serde_json::from_value(json!({
         "id": "webhooks", "projectId": "bento", "title": "Retry failed webhook deliveries", "status": "active",
         "currentStageId": "implementation", "branchName": "bento/retry-failed-webhook-deliveries-1f2a",

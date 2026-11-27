@@ -3,12 +3,16 @@
 
 use std::collections::{HashMap, HashSet};
 
-use bento_client::{AgentProfile, SavedSecret};
+use bento_client::{AgentProfile, AgentTool, CatalogProvider, SavedSecret};
 use rune::{El, TextEdit, Tx, col, el, row, spacer};
 use rune_kit::{Button, ButtonVariant, IconButton, IconButtonVariant, Kit, TextInput};
 
+use super::agent_form::{self, Form};
+use super::connections::{self, Connections};
 use super::{Confirm, Load, Msg, Pending, heading, note, panel, state_line, title_row};
 use crate::data;
+use crate::metal;
+use crate::screens::parts::key;
 use crate::state::State;
 use crate::theme::{Tokens, label, mono};
 
@@ -80,14 +84,23 @@ pub struct Agents {
     /// Drafts per credential name, so switching providers loses nothing.
     pub inputs: HashMap<&'static str, TextEdit>,
     pub revealed: HashSet<&'static str>,
+    /// Which tools the server's sandbox has; only read to warn about a missing one.
+    pub tools: Load<Vec<AgentTool>>,
+    pub catalog: Load<Vec<CatalogProvider>>,
+    pub form: Option<Form>,
+    pub connections: Connections,
 }
 
 pub fn enter(s: &mut State) {
     let a = &mut s.settings.agents;
     a.secrets = Load::Loading;
     a.profiles = Load::Loading;
+    a.form = None;
     load_secrets(s);
     s.conn.spawn(|c| Msg::Profiles(c.profiles().map_err(data::err)));
+    s.conn.spawn(|c| Msg::Catalog(c.model_catalog().map_err(data::err)));
+    s.conn.spawn(|c| Msg::Tools(c.agent_tools().map_err(data::err)));
+    connections::enter(s);
 }
 
 pub fn load_secrets(s: &mut State) {
@@ -98,11 +111,11 @@ pub fn reload_profiles(s: &mut State) {
     s.conn.spawn(|c| Msg::Profiles(c.profiles().map_err(data::err)));
 }
 
-fn input<'a>(s: &'a mut State, name: &'static str) -> &'a mut TextEdit {
+pub(super) fn input<'a>(s: &'a mut State, name: &'static str) -> &'a mut TextEdit {
     s.settings.agents.inputs.entry(name).or_insert_with(|| TextEdit::new(""))
 }
 
-fn save(s: &mut State, name: &'static str) {
+pub(super) fn save(s: &mut State, name: &'static str) {
     let value = input(s, name).text.trim().to_owned();
     if value.is_empty() || s.settings.busy {
         return;
@@ -126,17 +139,19 @@ pub fn saved(s: &mut State, name: &'static str, result: Result<(), String>) {
 }
 
 /// A personal key first, as the console reads it in local mode.
-fn saved_secret<'a>(secrets: &'a [SavedSecret], name: &str) -> Option<&'a SavedSecret> {
+pub(super) fn saved_secret<'a>(secrets: &'a [SavedSecret], name: &str) -> Option<&'a SavedSecret> {
     let named = || secrets.iter().filter(|x| x.name == name);
     named().find(|x| x.scope.as_deref() == Some("user")).or_else(|| named().next())
 }
 
-pub fn view(s: &State, t: &Tokens, k: &Kit) -> El {
+pub fn view(s: &State, t: &Tokens, k: &Kit, layer: &mut Vec<El>) -> El {
+    agent_form::dialog(s, t, k, layer);
     col()
         .w_full()
         .gap(14.0)
         .child(heading("Agents", "Pair a harness with a model, then assign that agent to a board stage or swarm role.", t))
         .child(roster(s, t, k))
+        .child(connections::view(s, t, k))
         .child(keys(s, t, k))
 }
 
@@ -146,7 +161,10 @@ fn roster(s: &State, t: &Tokens, k: &Kit) -> El {
         Load::Ready(p) => format!("{} configured", p.len()),
         _ => String::new(),
     };
-    let mut p = panel("agents-roster", t).child(title_row("Your agents", Some(mono(count, 11.0, t.faint)), t));
+    let busy = s.settings.busy;
+    let add = |s: &mut State, _: &mut Tx| agent_form::open_new(s);
+    let trailing = row().gap(10.0).center_y().child(mono(count, 11.0, t.faint)).child(key("New agent", metal::KEY, t, (!busy).then_some(add)).key("agent-new"));
+    let mut p = panel("agents-roster", t).child(title_row("Your agents", Some(trailing), t));
     match &a.profiles {
         Load::Loading => p = p.child(state_line("Loading the agents.", t)),
         Load::Failed(e) => p = p.child(label(e.clone(), 12.5, 450.0, t.failed).wrap().selectable(true)),
@@ -154,6 +172,8 @@ fn roster(s: &State, t: &Tokens, k: &Kit) -> El {
         Load::Ready(list) => {
             for profile in list {
                 let (id, name) = (profile.id.clone(), profile.name.clone());
+                let edited = profile.clone();
+                let edit = move |s: &mut State, _: &mut Tx| agent_form::open_edit(s, &edited);
                 let remove = move |s: &mut State, _: &mut Tx| {
                     s.settings.confirm = Some(Confirm {
                         title: format!("Remove {name}?"),
@@ -179,9 +199,17 @@ fn roster(s: &State, t: &Tokens, k: &Kit) -> El {
                                 .child(mono(format!("{} · {}", profile.cli, profile.model), 11.5, t.faint).truncate()),
                         )
                         .child(
+                            Button::new("Edit")
+                                .variant(ButtonVariant::Ghost)
+                                .disabled(busy)
+                                .on_press_tx(edit)
+                                .build(k)
+                                .key(format!("agent-edit-{}", profile.id)),
+                        )
+                        .child(
                             Button::new("Remove")
                                 .variant(ButtonVariant::Ghost)
-                                .disabled(s.settings.busy)
+                                .disabled(busy)
                                 .on_press_tx(remove)
                                 .build(k)
                                 .key(format!("agent-remove-{}", profile.id)),

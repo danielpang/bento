@@ -5,7 +5,14 @@
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
+
+use crate::shell_env;
+
+/// What the boot screen says after the person cancelled a start, as the Electron launcher does.
+pub const CANCELLED: &str = "Connection cancelled.";
+const PORT_VAR: &str = "BENTO_SIDECAR_PORT";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
@@ -65,13 +72,30 @@ pub struct Sidecar {
 
 impl Sidecar {
     /// Starts it and reads its stdout on a thread, handing each event to `on_event`.
-    /// `env` is set over the inherited environment.
+    /// `env` is set over the inherited environment, with the login shell's PATH and the port
+    /// the server had last time. Waits first for an earlier server that is still stopping, since
+    /// two on one data folder fight over its Postgres.
     pub fn start(launch: &Launch, env: &[(String, String)], mut on_event: impl FnMut(Event) + Send + 'static) -> Result<Sidecar, String> {
+        wait_for_stops(Duration::from_secs(25));
         let mut cmd = Command::new(&launch.node);
         cmd.arg(&launch.script).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
+        cmd.env("PATH", with_node_dir(shell_env::path(), &launch.node));
+        if std::env::var_os("HOME").is_none()
+            && let Some(home) = shell_env::home()
+        {
+            cmd.env("HOME", home);
+        }
         cmd.envs(env.iter().map(|(k, v)| (k, v)));
         if let Ok(dir) = std::env::var("BENTO_DATA_DIR") {
             cmd.env("BENTO_DATA_DIR", dir);
+        }
+        // A stable port keeps the pages the app opened (GitHub, MCP and OAuth callbacks) working
+        // across launches. The sidecar falls back to a free port when this one is taken.
+        let port_file = crate::data::data_dir().join("mac-app").join("port");
+        let chosen = env.iter().any(|(k, _)| k == PORT_VAR) || std::env::var_os(PORT_VAR).is_some_and(|v| !v.is_empty());
+        let remember = (!chosen).then(|| port_file.clone());
+        if !chosen && let Some(port) = std::fs::read_to_string(&port_file).ok().and_then(|t| saved_port(&t)) {
+            cmd.env(PORT_VAR, port.to_string());
         }
         let mut child = cmd
             .spawn()
@@ -84,6 +108,11 @@ impl Sidecar {
                 for line in BufReader::new(stdout).lines() {
                     let Ok(line) = line else { break };
                     if let Some(event) = parse_line(&line) {
+                        if let (Event::Ready(url), Some(file)) = (&event, &remember)
+                            && let Some(port) = port_of(url)
+                        {
+                            let _ = std::fs::write(file, port.to_string());
+                        }
                         on_event(event);
                     }
                 }
@@ -109,11 +138,21 @@ impl Sidecar {
         false
     }
 
+    /// Stops it on a thread. The next `start` waits for it.
+    pub fn stop_in_background(mut self) {
+        let stopping = Stopping::begin();
+        std::thread::spawn(move || {
+            self.stop();
+            drop(stopping);
+        });
+    }
+
     /// Closes stdin (the sidecar's clean stop), then SIGTERM, then SIGKILL, each with a bound.
     pub fn stop(&mut self) {
         if matches!(self.child.try_wait(), Ok(Some(_))) {
             return;
         }
+        let _stopping = Stopping::begin();
         drop(self.stdin.take());
         if self.wait_for(Duration::from_secs(8)) {
             return;
@@ -126,6 +165,47 @@ impl Sidecar {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+static STOPPING: (Mutex<usize>, Condvar) = (Mutex::new(0), Condvar::new());
+
+/// Counts a stop in progress for as long as it lives.
+struct Stopping;
+
+impl Stopping {
+    fn begin() -> Stopping {
+        *STOPPING.0.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        Stopping
+    }
+}
+
+impl Drop for Stopping {
+    fn drop(&mut self) {
+        *STOPPING.0.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+        STOPPING.1.notify_all();
+    }
+}
+
+fn wait_for_stops(limit: Duration) {
+    let count = STOPPING.0.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = STOPPING.1.wait_timeout_while(count, limit, |n| *n > 0);
+}
+
+/// The bundled node's folder goes last, so scripts that run `node` (npm installed agent CLIs)
+/// still find one on a Mac without it.
+fn with_node_dir(path: &str, node: &Path) -> String {
+    match node.parent().filter(|d| node.is_absolute() && !path.split(':').any(|p| Path::new(p) == *d)) {
+        Some(dir) => format!("{path}:{}", dir.display()),
+        None => path.to_owned(),
+    }
+}
+
+fn saved_port(text: &str) -> Option<u16> {
+    text.trim().parse().ok().filter(|p| *p >= 1024)
+}
+
+fn port_of(url: &str) -> Option<u16> {
+    url.rsplit(':').next()?.trim_end_matches('/').parse().ok()
 }
 
 impl Drop for Sidecar {
@@ -150,6 +230,19 @@ mod tests {
         assert_eq!(parse_line(r#"{"event":"stopping","reason":"SIGTERM"}"#), None);
         assert_eq!(parse_line("not json"), None);
         assert_eq!(parse_line(r#"{"event":"ready"}"#), None);
+    }
+
+    #[test]
+    fn ports_and_path() {
+        assert_eq!(port_of("http://127.0.0.1:64500"), Some(64500));
+        assert_eq!(port_of("http://127.0.0.1:64500/"), Some(64500));
+        assert_eq!(saved_port("51234\n"), Some(51234));
+        assert_eq!(saved_port("80"), None);
+        assert_eq!(saved_port(""), None);
+        let node = Path::new("/A/Bento.app/Contents/Resources/sidecar/bin/node");
+        assert_eq!(with_node_dir("/usr/bin", node), "/usr/bin:/A/Bento.app/Contents/Resources/sidecar/bin");
+        assert_eq!(with_node_dir("/usr/bin", Path::new("node")), "/usr/bin");
+        assert_eq!(with_node_dir("/opt/n/bin:/usr/bin", Path::new("/opt/n/bin/node")), "/opt/n/bin:/usr/bin");
     }
 
     #[test]

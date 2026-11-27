@@ -4,6 +4,8 @@ use std::collections::HashMap;
 
 use bento_client::{AdvanceRule, AgentEvent, AgentProfile, Board, CardRun, Feature, FeatureStatus, MessageRole, RunStatus, ToolPhase};
 
+pub use crate::screens::drawer::tools::{self, ToolCall};
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Status {
     Idle,
@@ -44,6 +46,8 @@ pub struct Card {
     pub status: Status,
     pub run_id: Option<String>,
     pub run_status: Option<RunStatus>,
+    /// The pull request's number, and its link when known.
+    pub pr: Option<(u64, Option<String>)>,
 }
 
 #[derive(Clone, Debug)]
@@ -110,6 +114,7 @@ pub fn lanes(board: &Board, profiles: &[AgentProfile]) -> Vec<Lane> {
             status,
             run_id: run.and_then(|r| r.run_id.clone()),
             run_status: run.map(|r| r.status),
+            pr: f.pr_number.map(|n| (n, f.pr_url.clone())),
         }
     };
     fn sorted<'a>(it: impl Iterator<Item = &'a Feature>) -> Vec<&'a Feature> {
@@ -155,8 +160,8 @@ pub enum Entry {
     User(String),
     Agent(String),
     System(String),
-    /// Consecutive tool calls, by name, in order.
-    Tools(Vec<String>),
+    /// Consecutive tool calls, in order.
+    Tools(Vec<ToolCall>),
     Failed(String),
 }
 
@@ -168,10 +173,23 @@ pub fn push_event(entries: &mut Vec<Entry>, event: &AgentEvent) {
             MessageRole::Assistant => Entry::Agent(text.clone()),
             _ => Entry::System(text.clone()),
         }),
-        AgentEvent::Tool { name, phase: ToolPhase::Start, .. } => match entries.last_mut() {
-            Some(Entry::Tools(names)) => names.push(name.clone()),
-            _ => entries.push(Entry::Tools(vec![name.clone()])),
-        },
+        AgentEvent::Tool { name, phase, detail, raw } => {
+            let call = tools::activity(name, *phase == ToolPhase::End, detail.as_ref(), raw.as_ref());
+            // An end, or a start repeated by a resumed stream, lands on the call it names.
+            let earlier = call.id.as_ref().and_then(|id| {
+                entries.iter_mut().rev().find_map(|e| match e {
+                    Entry::Tools(calls) => calls.iter_mut().find(|c| c.id.as_ref() == Some(id)),
+                    _ => None,
+                })
+            });
+            if let Some(known) = earlier {
+                tools::merge(known, call);
+            } else if let Some(Entry::Tools(calls)) = entries.last_mut() {
+                calls.push(call);
+            } else {
+                entries.push(Entry::Tools(vec![call]));
+            }
+        }
         AgentEvent::Result { ok: false, error: Some(e), interrupted: false, .. } if !e.trim().is_empty() => {
             entries.push(Entry::Failed(e.clone()))
         }
@@ -180,9 +198,9 @@ pub fn push_event(entries: &mut Vec<Entry>, event: &AgentEvent) {
 }
 
 /// "Bash, Read ×3, Edit": names in first-use order with repeat counts.
-pub fn tools_line(names: &[String]) -> String {
+pub fn tools_line(calls: &[ToolCall]) -> String {
     let mut seen: Vec<(&str, usize)> = Vec::new();
-    for n in names {
+    for n in calls.iter().map(|c| c.name.as_str()) {
         match seen.iter_mut().find(|(s, _)| *s == n) {
             Some((_, c)) => *c += 1,
             None => seen.push((n, 1)),
@@ -255,7 +273,8 @@ mod tests {
     #[test]
     fn events_fold_tool_runs_and_keep_failures() {
         let mut entries = Vec::new();
-        let tool = |n: &str, phase| AgentEvent::Tool { name: n.into(), phase, detail: None };
+        let named = ToolCall::named;
+        let tool = |n: &str, phase| AgentEvent::Tool { name: n.into(), phase, detail: None, raw: None };
         for e in [
             AgentEvent::Message { role: MessageRole::User, text: "do it".into() },
             AgentEvent::Init { session_id: None, model: None },
@@ -275,12 +294,12 @@ mod tests {
             entries,
             [
                 Entry::User("do it".into()),
-                Entry::Tools(vec!["Bash".into(), "Read".into(), "Read".into()]),
+                Entry::Tools(vec![named("Bash"), ToolCall { done: true, ..named("Bash") }, named("Read"), named("Read")]),
                 Entry::Agent("Done.".into()),
-                Entry::Tools(vec!["Edit".into()]),
+                Entry::Tools(vec![named("Edit")]),
                 Entry::Failed("boom".into()),
             ]
         );
-        assert_eq!(tools_line(&["Bash".into(), "Read".into(), "Read".into(), "Bash".into()]), "Bash ×2, Read ×2");
+        assert_eq!(tools_line(&["Bash", "Read", "Read", "Bash"].map(named)), "Bash ×2, Read ×2");
     }
 }

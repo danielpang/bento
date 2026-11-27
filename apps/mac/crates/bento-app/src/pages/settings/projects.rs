@@ -465,8 +465,7 @@ fn stage_dialog(s: &State, d: &StageDraft, t: &Tokens, k: &Kit, layer: &mut Vec<
                 d.agent = id.clone();
             }
         })
-        .build(k, layer)
-        .key("stage-agent");
+        .build(k, layer);
     let agent = Field::new().label("Agent").control(agent).build(k);
     let gate = |g: GateType| move |s: &mut State| {
         if let Some(d) = s.settings.projects.stage.as_mut() {

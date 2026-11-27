@@ -54,7 +54,9 @@ fn card(c: &Card, s: &State, t: &Tokens) -> El {
         .focusable(true)
         .on_press(move |s: &mut State| if s.selected.as_deref() == Some(&id) { s.selected = None } else { data::select_card(s, &id) });
     // Metal says the card is alive (chrome, flowing) or waiting on a person (gold, still).
+    let asks = s.card.asks(c);
     match c.status {
+        _ if asks => card = card.child(ring(metal::GOLD, 2.0, 0.0, 10.0)),
         Status::Running => card = card.child(ring(metal::CHROME, 2.0, 1.0, 10.0)),
         Status::Gated => card = card.child(ring(metal::GOLD, 2.0, 0.0, 10.0)),
         _ => {}
@@ -68,10 +70,30 @@ fn card(c: &Card, s: &State, t: &Tokens) -> El {
     if !c.agent.is_empty() {
         foot = foot.child(label(c.agent.clone(), 11.5, 400.0, t.faint).truncate().shrink());
     }
-    if c.status == Status::Gated {
+    if let Some((number, url)) = &c.pr {
+        foot = foot.child(spacer()).child(pr_chip(*number, url.clone(), t));
+    }
+    if c.status == Status::Gated || asks {
         let id = c.id.clone();
-        let review = key("Review", metal::KEY_GOLD, t, Some(move |s: &mut State, _: &mut rune::Tx| data::select_card(s, &id)));
-        foot = foot.child(spacer()).child(review.key("review"));
+        let name = if asks { "Answer" } else { "Review" };
+        let review = key(name, metal::KEY_GOLD, t, Some(move |s: &mut State, _: &mut rune::Tx| data::select_card(s, &id)));
+        if c.pr.is_none() {
+            foot = foot.child(spacer());
+        }
+        foot = foot.child(review.key("review"));
     }
     card.child(foot)
+}
+
+/// The card's pull request: a link when its address is known.
+fn pr_chip(number: u64, url: Option<String>, t: &Tokens) -> El {
+    let chip = label(format!("PR #{number}"), 11.0, 500.0, t.dim).px(7.0).py(2.0).radius(9.0).border(1.0, t.line).key("pr-chip");
+    match url {
+        Some(url) => chip.role("link").label(format!("PR #{number}")).focusable(true).on_press_tx(move |s: &mut State, tx: &mut rune::Tx| {
+            if let Err(e) = tx.open_url(&url) {
+                s.toast(e.to_string());
+            }
+        }),
+        None => chip,
+    }
 }

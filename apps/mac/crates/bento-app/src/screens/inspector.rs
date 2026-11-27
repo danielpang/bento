@@ -1,13 +1,15 @@
-//! The inspector: the selected card, what can be done with it, and its conversation.
+//! The inspector: the selected card, what can be done with it, and its review tabs.
 
 use bento_client::RunStatus;
-use rune::{El, ScrollSpec, Tx, col, row, spacer};
+use rune::{El, Tx, col, row, spacer};
 use rune_kit::{Button, ButtonVariant, Kit, Markdown, TextArea};
 
-use crate::data::{self, Action};
-use crate::metal::{self, orb};
-use crate::model::{Card, Entry, LaneKind, Status, tools_line};
-use crate::screens::parts::{key, metal_of, status};
+use crate::data;
+use crate::metal::orb;
+use crate::model::{Entry, Status, tools_line};
+use crate::screens::card;
+use crate::screens::drawer::{self, Tab};
+use crate::screens::parts::{metal_of, status};
 use crate::state::{Block, State};
 use crate::theme::{Tokens, label, mono};
 
@@ -37,66 +39,34 @@ pub fn inspector(s: &State, t: &Tokens, k: &Kit) -> El {
     if !c.note.is_empty() && c.status != Status::Running {
         head = head.child(label(c.note.clone(), 12.5, 400.0, t.dim).wrap());
     }
-    head = head.child(actions(s, c, t, k));
-    col()
+    head = head.child(card::actions(s, c, t, k));
+    let conversation = s.review.of(&c.id).is_none_or(|r| r.tab == Tab::Conversation);
+    let mut pane = col()
         .key("inspector")
         .w_full()
         .h_full()
         .padding(16.0)
         .gap(14.0)
         .child(head)
-        .child(transcript(s, t, k))
-        .child(composer(s, k))
-}
-
-fn button(name: impl Into<String>, k: &Kit, busy: bool, f: impl Fn(&mut State, &mut Tx) + 'static) -> El {
-    Button::new(name).variant(ButtonVariant::Neutral).disabled(busy).on_press_tx(f).build(k)
-}
-
-fn action(id: &str, a: Action) -> impl Fn(&mut State, &mut Tx) + 'static {
-    let id = id.to_owned();
-    move |s: &mut State, _: &mut Tx| data::act(s, &id, a.clone())
-}
-
-fn actions(s: &State, c: &Card, t: &Tokens, k: &Kit) -> El {
-    let busy = s.busy;
-    let mut bar = row().key("actions").w_full().gap(8.0).flex_wrap().center_y();
-    let Some(index) = s.lanes.iter().position(|l| l.cards.iter().any(|x| x.id == c.id)) else { return bar };
-    let lane = &s.lanes[index];
-    match &lane.kind {
-        LaneKind::Backlog => bar = bar.child(button("Start pipeline", k, busy, action(&c.id, Action::Advance)).key("advance")),
-        LaneKind::Completed => bar = bar.child(button("Reopen", k, busy, action(&c.id, Action::Back)).key("reopen")),
-        LaneKind::Stage(_) => {
-            if c.status == Status::Gated {
-                let approve = (!busy).then(|| action(&c.id, Action::Approve));
-                bar = bar
-                    .child(key("Approve and advance", metal::KEY_GOLD, t, approve).key("approve"))
-                    .child(button("Reject", k, busy, action(&c.id, Action::Reject)).key("reject"));
-            } else if let Some(next) = s.lanes.get(index + 1).filter(|l| matches!(l.kind, LaneKind::Stage(_))) {
-                bar = bar.child(button(format!("Move to {}", next.name), k, busy, action(&c.id, Action::Advance)).key("advance"));
-            }
-            bar = bar.child(button("Send back a stage", k, busy, action(&c.id, Action::Back)).key("back"));
-        }
+        .child(card::panels(s, t, k))
+        .child(drawer::tabs(s, &c.id, t))
+        .child(drawer::body(s, &c.id, t, k));
+    if conversation {
+        pane = pane.child(composer(s, k));
     }
-    let active = c.run_status.is_some_and(RunStatus::is_active);
-    if let (true, Some(run)) = (active, c.run_id.clone()) {
-        bar = bar.child(button("Stop the agent", k, busy, action(&c.id, Action::Stop { run })).key("stop"));
-    } else if let (false, LaneKind::Stage(_), Some(profile)) = (active, &lane.kind, lane.agent_profile_id.clone()) {
-        bar = bar.child(button(format!("Run {}", lane.agent), k, busy, action(&c.id, Action::Run { profile })).key("run"));
-    }
-    bar
+    pane
 }
 
-fn entry(e: &Entry, n: usize, t: &Tokens, k: &Kit) -> El {
+pub(crate) fn entry(e: &Entry, n: &str, t: &Tokens, k: &Kit) -> El {
     match e {
         Entry::User(text) => user(text, &format!("user-{n}"), t, k),
         Entry::Agent(text) => Markdown::new(text.clone()).build(k).key(format!("agent-{n}")).w_full(),
         Entry::System(text) => label(text.clone(), 11.5, 400.0, t.faint).wrap().key(format!("system-{n}")),
-        Entry::Tools(names) => row()
+        Entry::Tools(calls) => row()
             .key(format!("tools-{n}"))
             .gap(6.0)
             .child(el_dot(t))
-            .child(mono(tools_line(names), 11.5, t.faint).wrap().shrink()),
+            .child(mono(tools_line(calls), 11.5, t.faint).wrap().shrink()),
         Entry::Failed(text) => label(text.clone(), 12.0, 450.0, t.failed).wrap().selectable(true).key(format!("failed-{n}")),
     }
 }
@@ -109,7 +79,8 @@ pub(crate) fn user(text: &str, key: &str, t: &Tokens, k: &Kit) -> El {
     col().key(key).w_full().padding(10.0).radius(8.0).fill(t.raised).child(Markdown::new(text.to_owned()).build(k).w_full())
 }
 
-pub(crate) fn block(b: &Block, i: usize, t: &Tokens, k: &Kit) -> El {
+/// Who ran a block and how it ended.
+pub(crate) fn block_head(b: &Block, t: &Tokens) -> El {
     let word = match b.status {
         RunStatus::Queued | RunStatus::Starting | RunStatus::Running => "running",
         RunStatus::Succeeded => "succeeded",
@@ -117,37 +88,15 @@ pub(crate) fn block(b: &Block, i: usize, t: &Tokens, k: &Kit) -> El {
         RunStatus::Cancelled => "cancelled",
         RunStatus::Unknown => "",
     };
-    let mut c = col()
-        .key(format!("block-{i}"))
-        .w_full()
-        .gap(10.0)
-        .child(row().gap(8.0).child(label(b.agent.clone(), 11.5, 600.0, t.dim)).child(label(word, 11.5, 400.0, t.faint)));
-    for (n, e) in b.entries.iter().enumerate() {
-        c = c.child(entry(e, n, t, k));
-    }
-    c
+    row().gap(8.0).child(label(b.agent.clone(), 11.5, 600.0, t.dim)).child(label(word, 11.5, 400.0, t.faint))
 }
 
-fn transcript(s: &State, t: &Tokens, k: &Kit) -> El {
-    let tr = &s.transcript;
-    let mut c = col().key("transcript").w_full().gap(16.0).pr(4.0);
-    for (i, b) in tr.blocks.iter().enumerate() {
-        c = c.child(block(b, i, t, k));
+pub(crate) fn block(b: &Block, i: usize, t: &Tokens, k: &Kit) -> El {
+    let mut c = col().key(format!("block-{i}")).w_full().gap(10.0).child(block_head(b, t));
+    for (n, e) in b.entries.iter().enumerate() {
+        c = c.child(entry(e, &n.to_string(), t, k));
     }
-    if let Some(live) = &tr.live {
-        let mut b = block(live, tr.blocks.len(), t, k).key("block-live");
-        if !tr.draft.is_empty() {
-            b = b.child(Markdown::new(tr.draft.clone()).streaming(true).build(k).key("draft").w_full().opacity(0.75));
-        }
-        c = c.child(b);
-    }
-    for (n, text) in tr.pending.iter().chain(&tr.sent).enumerate() {
-        c = c.child(user(text, &format!("pending-{n}"), t, k).opacity(0.7));
-    }
-    if tr.loading && tr.blocks.is_empty() {
-        c = c.child(label("Loading the conversation.", 12.0, 400.0, t.faint));
-    }
-    col().key("transcript-scroll").w_full().grow(1.0).shrink().min_h(0.0).scroll(ScrollSpec { stick_bottom: true }).child(c)
+    c
 }
 
 fn composer(s: &State, k: &Kit) -> El {

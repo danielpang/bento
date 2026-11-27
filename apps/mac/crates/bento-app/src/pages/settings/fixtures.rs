@@ -3,6 +3,8 @@
 use rune::TextEdit;
 use serde_json::json;
 
+use super::agent_form;
+use super::connections::Login;
 use super::local::Options;
 use super::projects::{Remove, StageDraft};
 use super::{Load, Section, Theme};
@@ -22,8 +24,23 @@ fn base(s: &mut State, section: Section) {
     p.agents.profiles = Load::Ready(from!(json!([
         {"id": "pm", "name": "Product Manager", "cli": "claude-code", "model": "claude-opus-4-1"},
         {"id": "se", "name": "Software Engineer", "cli": "codex", "model": "gpt-5-codex"},
-        {"id": "judge", "name": "Reviewer", "cli": "pi", "model": "anthropic/claude-sonnet-4-5"},
+        {"id": "judge", "name": "Reviewer", "cli": "pi", "model": "anthropic/claude-sonnet-4-5", "skill": "Review the diff against the card. Your write-up must list what blocks a merge, then what can wait."},
     ])));
+    p.agents.catalog = Load::Ready(from!(json!([
+        {"id": "anthropic", "name": "Anthropic", "models": [
+            {"id": "claude-sonnet-5", "name": "Claude Sonnet 5"}, {"id": "claude-opus-5", "name": "Claude Opus 5"}, {"id": "claude-sonnet-4-5", "name": "Claude Sonnet 4.5"}]},
+        {"id": "openai", "name": "OpenAI", "models": [{"id": "gpt-5-codex", "name": "GPT-5 Codex"}, {"id": "gpt-5.4", "name": "GPT-5.4"}]},
+        {"id": "google", "name": "Google", "models": [{"id": "gemini-3.1-pro", "name": "Gemini 3.1 Pro"}]},
+        {"id": "openrouter", "name": "OpenRouter", "models": [{"id": "z-ai/glm-4.6", "name": "GLM 4.6"}]},
+        {"id": "ollama", "name": "Ollama", "models": [{"id": "glm-5.1", "name": "GLM 5.1"}]},
+    ])));
+    p.agents.tools = Load::Ready(from!(json!([
+        {"cli": "claude-code", "label": "Claude Code", "installed": true},
+        {"cli": "codex", "label": "Codex CLI", "installed": true},
+        {"cli": "cursor", "label": "Cursor CLI", "installed": false, "installUrl": "https://cursor.com/cli", "installCommand": "curl -fsS https://cursor.com/install | bash"},
+    ])));
+    p.agents.connections.accounts = Load::Ready(Vec::new());
+    p.agents.connections.machine = Some(from!(json!({"mode": "local", "shareAgentAuth": false, "pinnedByEnv": false, "canShareMachineLogin": true, "claude": {"loggedIn": false}})));
     // The hint is the server's mask of a fake value.
     p.agents.secrets = Load::Ready(from!(json!([{"id": "k1", "name": "ANTHROPIC_API_KEY", "hint": "••••••••0000", "scope": "user"}])));
     p.projects.list = Load::Ready(from!(json!([
@@ -37,6 +54,54 @@ fn base(s: &mut State, section: Section) {
 
 pub fn agents(s: &mut State) {
     base(s, Section::Agents);
+}
+
+pub fn agent_new(s: &mut State) {
+    agents(s);
+    agent_form::open_new(s);
+}
+
+fn edit(s: &mut State, id: &str) {
+    agents(s);
+    let Load::Ready(list) = &s.settings.agents.profiles else { return };
+    let p = list.iter().find(|p| p.id == id).cloned().expect("fixture agent");
+    agent_form::open_edit(s, &p);
+}
+
+pub fn agent_edit(s: &mut State) {
+    edit(s, "judge");
+}
+
+/// A model the catalog does not list, on a tool the sandbox lacks.
+pub fn agent_typed(s: &mut State) {
+    agents(s);
+    let p = from!(json!({"id": "cu", "name": "Cursor agent", "cli": "cursor", "model": "composer-3-preview"}));
+    agent_form::open_edit(s, &p);
+}
+
+pub fn agent_refused(s: &mut State) {
+    agent_new(s);
+    let f = s.settings.agents.form.as_mut().expect("open");
+    f.name = TextEdit::new("Implementer");
+    f.error = Some("This tool cannot run Anthropic models. It reaches OpenAI, OpenRouter, Vercel AI Gateway.".into());
+}
+
+pub fn claude_login(s: &mut State) {
+    agents(s);
+    let c = &mut s.settings.agents.connections;
+    c.accounts = Load::Ready(from!(json!([{"id": "a1", "provider": "openai-codex", "reconnectRequired": false}])));
+    c.login = Some(Login::new("anthropic", from!(json!({"id": "l1", "url": "https://claude.ai/oauth/authorize", "userCode": null, "interval": 0}))));
+    c.machine = Some(from!(json!({"mode": "local", "shareAgentAuth": true, "pinnedByEnv": false, "canShareMachineLogin": true,
+        "claude": {"loggedIn": true, "subscriptionType": "max", "email": "me@example.com"}})));
+    if let Load::Ready(list) = &mut s.settings.agents.secrets {
+        list.push(from!(json!({"id": "k2", "name": "CLAUDE_CODE_OAUTH_TOKEN", "hint": "••••••••0000", "scope": "user"})));
+    }
+}
+
+pub fn chatgpt_login(s: &mut State) {
+    agents(s);
+    let c = &mut s.settings.agents.connections;
+    c.login = Some(Login::new("openai-codex", from!(json!({"id": "l2", "url": "https://auth.openai.com/codex/device", "userCode": "ABCD-1234", "interval": 5}))));
 }
 
 pub fn projects(s: &mut State) {

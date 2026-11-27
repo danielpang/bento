@@ -8,13 +8,16 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 
 use bento_client::{
     AgentEvent, AgentProfile, Conversation, FeatureChanges, FeatureDetail, FeatureStatus, InterruptResult, MessageResult, MessageRole, NewSession,
-    ProjectSession, RunStatus, RunUpdate, StartedSession, TurnState,
+    ProjectSession, RunStatus, RunUpdate, StartedSession,
 };
 use rune::{Key, KeyEvent, TextEdit, Tx};
-use rune_kit::diff::{self, DiffState};
+use rune_kit::diff::DiffState;
 
 use crate::data::{self, err};
+use crate::screens::card::Questions;
+use crate::screens::card::stop::{RunFacts, Turn, stop_does};
 use crate::model;
+use crate::screens::drawer;
 use crate::state::{Block, Screen, State, Transcript};
 
 pub use scenes::SCENES;
@@ -34,10 +37,6 @@ pub const HARNESSES: &[(&str, &str, &str)] = &[
     ("fx", "fx", "moonshotai/kimi-k3"),
 ];
 
-/// Tools whose live session can stop a turn and keep the run open.
-const INTERRUPTIBLE: &[&str] = &["claude-code", "codex", "opencode", "pi"];
-/// How long Stop rests after an interrupt whose turn end never arrived.
-const INTERRUPT_SETTLE: f64 = 15.0;
 
 pub enum List {
     Loading,
@@ -51,13 +50,7 @@ pub enum Pane {
     Changes,
 }
 
-/// What Stop does, as the console decides it (`stop-action.ts`).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum StopDoes {
-    Interrupt,
-    End,
-    None,
-}
+pub use crate::screens::card::stop::StopDoes;
 
 /// One conversation, open beside the list.
 pub struct Open {
@@ -69,12 +62,8 @@ pub struct Open {
     pub transcript: Transcript,
     /// The run whose stream this page holds.
     pub streaming: Option<String>,
-    /// Whether the agent is in a turn, as the server holding the run last said.
-    pub turn: Option<TurnState>,
-    /// The same, read off the transcript until the server says.
-    pub turn_from_events: bool,
-    /// An interrupt was sent and its turn has not ended; the clock time it was sent.
-    pub interrupt_sent: Option<f64>,
+    pub turn: Turn,
+    pub questions: Questions,
     pub tokens: u64,
     pub live_tokens: u64,
     pub composer: TextEdit,
@@ -95,9 +84,8 @@ impl Open {
             deleted: false,
             transcript: Transcript { feature: feature.to_owned(), loading: true, ..Transcript::default() },
             streaming: None,
-            turn: None,
-            turn_from_events: true,
-            interrupt_sent: None,
+            turn: Turn::default(),
+            questions: Questions::default(),
             tokens: 0,
             live_tokens: 0,
             composer: TextEdit::new(""),
@@ -141,24 +129,17 @@ impl Open {
     }
 
     pub fn stop_does(&self) -> StopDoes {
-        if self.interrupt_sent.is_some() {
-            return StopDoes::None;
-        }
-        let Some(run) = self.latest_run().filter(|r| r.status.is_active()) else { return StopDoes::None };
-        let stage = run.role.as_deref().is_none_or(|r| r == "stage");
-        let tool = self.latest_agent().is_some_and(|a| INTERRUPTIBLE.contains(&a.cli.as_str()));
-        if !(run.live_session == Some(true) && stage && tool) {
-            return StopDoes::End;
-        }
-        let working = match self.turn {
-            Some(t) => t == TurnState::Working,
-            None => self.turn_from_events,
-        };
-        if working { StopDoes::Interrupt } else { StopDoes::None }
+        let run = self.latest_run().map(|r| RunFacts {
+            active: r.status.is_active(),
+            live_session: r.live_session,
+            role: r.role.as_deref(),
+            cli: self.latest_agent().map(|a| a.cli.as_str()),
+        });
+        stop_does(run, &self.turn)
     }
 
     pub fn has_diff(&self) -> bool {
-        self.changes.as_ref().is_some_and(|c| c.repositories.iter().any(|r| !r.diff.trim().is_empty()))
+        self.changes.as_ref().is_some_and(drawer::changes::has_diff)
     }
 }
 
@@ -189,7 +170,7 @@ impl Compose {
     }
 }
 
-fn starting_model(cli: &str, recent: Option<(&str, &str)>) -> String {
+pub(crate) fn starting_model(cli: &str, recent: Option<(&str, &str)>) -> String {
     match recent {
         Some((c, model)) if c == cli => model.to_owned(),
         _ => HARNESSES.iter().find(|h| h.0 == cli).map_or("", |h| h.2).to_owned(),
@@ -378,7 +359,7 @@ pub fn stop(s: &mut State, now: f64) {
     o.busy = true;
     o.problem = None;
     if does == StopDoes::Interrupt {
-        o.interrupt_sent = Some(now);
+        o.turn.interrupt_sent = Some(now);
     }
     let feature = o.feature.clone();
     s.conn.spawn(move |c| {
@@ -398,8 +379,7 @@ fn follow(s: &mut State, run: &str, agent: String) {
     let Some(client) = s.conn.client.clone() else { return };
     o.transcript.live = Some(Block { agent, status: RunStatus::Running, entries: Vec::new() });
     o.transcript.draft.clear();
-    o.turn = None;
-    o.turn_from_events = true;
+    o.turn = Turn::default();
     o.live_tokens = 0;
     o.streaming = Some(run.to_owned());
     let (bus, id) = (s.conn.bus.clone(), run.to_owned());
@@ -472,6 +452,9 @@ pub fn apply(s: &mut State, m: Msg) {
             o.profiles = profiles;
             let newest = detail.runs.first().filter(|r| r.status.is_active()).map(|r| (r.id.clone(), r.agent_profile_id.clone()));
             o.detail = Some(detail);
+            let (feature, asking) = (o.feature.clone(), newest.as_ref().map(|(run, _)| run.clone()));
+            crate::screens::card::follow_session(s, &feature, asking.as_deref());
+            let Some(o) = s.sessions.open.as_mut() else { return };
             match newest {
                 Some((run, profile)) => {
                     let agent = o.agent(&profile).map(|a| a.name.clone()).unwrap_or_default();
@@ -480,7 +463,7 @@ pub fn apply(s: &mut State, m: Msg) {
                 None => {
                     o.transcript.live = None;
                     o.streaming = None;
-                    o.interrupt_sent = None;
+                    o.turn.interrupt_sent = None;
                     s.conn.release(Screen::Sessions, Some("run"));
                 }
             }
@@ -491,12 +474,7 @@ pub fn apply(s: &mut State, m: Msg) {
             let Some(o) = p.open.as_mut() else { return };
             match result {
                 Ok(changes) => {
-                    let files = changes.repositories.iter().flat_map(|r| diff::parse(&r.diff)).collect::<Vec<_>>();
-                    if p.diff.files().is_empty() {
-                        p.diff = DiffState::new(files);
-                    } else {
-                        p.diff.set_files(files);
-                    }
+                    drawer::changes::show(&mut p.diff, &changes);
                     o.changes = Some(changes);
                     if !o.has_diff() {
                         o.pane = Pane::Conversation;
@@ -511,19 +489,15 @@ pub fn apply(s: &mut State, m: Msg) {
             let Some(o) = s.sessions.open.as_mut() else { return };
             match update {
                 RunUpdate::Event { event, .. } => {
-                    match &event {
-                        AgentEvent::Message { role: MessageRole::Assistant, .. } => o.transcript.draft.clear(),
-                        AgentEvent::Message { role: MessageRole::User, .. } => o.turn_from_events = true,
-                        AgentEvent::Result { .. } => {
-                            o.turn_from_events = false;
-                            o.interrupt_sent = None;
-                        }
-                        _ => {}
+                    if matches!(&event, AgentEvent::Message { role: MessageRole::Assistant, .. }) {
+                        o.transcript.draft.clear();
                     }
+                    o.turn.on_event(&event);
                     o.live_tokens += tokens_of(&event);
                     if let Some(live) = o.transcript.live.as_mut() {
                         model::push_event(&mut live.entries, &event);
                     }
+                    crate::screens::card::session_event(s, &event);
                 }
                 RunUpdate::Delta(d) if d.channel == "text" => {
                     let draft = &mut o.transcript.draft;
@@ -533,12 +507,7 @@ pub fn apply(s: &mut State, m: Msg) {
                         draft.push_str(&d.text);
                     }
                 }
-                RunUpdate::Turn(turn) => {
-                    o.turn = Some(turn);
-                    if turn == TurnState::Waiting {
-                        o.interrupt_sent = None;
-                    }
-                }
+                RunUpdate::Turn(turn) => o.turn.on_turn(turn),
                 RunUpdate::Done { .. } => {
                     o.streaming = None;
                     let feature = o.feature.clone();
@@ -578,14 +547,14 @@ pub fn apply(s: &mut State, m: Msg) {
             let Some(o) = s.sessions.open.as_mut() else { return };
             o.busy = false;
             match result {
-                Ok(Some(r)) if !r.interrupted => o.interrupt_sent = None,
+                Ok(Some(r)) if !r.interrupted => o.turn.interrupt_sent = None,
                 Ok(Some(_)) => {}
                 Ok(None) => {
                     load_detail(s, &feature);
                     refresh_list(s);
                 }
                 Err(e) => {
-                    o.interrupt_sent = None;
+                    o.turn.interrupt_sent = None;
                     o.problem = Some(e);
                 }
             }
@@ -622,14 +591,11 @@ pub fn poll(s: &mut State, t: f64, tx: &mut Tx) -> bool {
         return false;
     }
     let mut changed = false;
-    if let Some(o) = s.sessions.open.as_mut()
-        && let Some(sent) = o.interrupt_sent
-    {
-        if t - sent >= INTERRUPT_SETTLE {
-            o.interrupt_sent = None;
-            changed = true;
-        } else {
-            tx.wake_after(std::time::Duration::from_secs_f64(INTERRUPT_SETTLE - (t - sent)));
+    if let Some(o) = s.sessions.open.as_mut() {
+        let (settled, next) = o.turn.settle(t);
+        changed |= settled;
+        if let Some(next) = next {
+            tx.wake_after(std::time::Duration::from_secs_f64(next));
         }
     }
     let seen = board_signature(s);
@@ -758,6 +724,7 @@ pub fn token_count(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bento_client::TurnState;
     use serde_json::json;
 
     fn run(status: &str, live: Option<bool>, role: Option<&str>) -> bento_client::AgentRun {
@@ -777,11 +744,11 @@ mod tests {
     fn stop_interrupts_a_working_live_agent_rests_while_it_waits_and_ends_the_rest() {
         let mut o = open("claude-code", run("running", Some(true), Some("stage")));
         assert_eq!(o.stop_does(), StopDoes::Interrupt);
-        o.turn_from_events = false;
+        o.turn.from_events = false;
         assert_eq!(o.stop_does(), StopDoes::None);
-        o.turn = Some(TurnState::Working);
+        o.turn.on_turn(TurnState::Working);
         assert_eq!(o.stop_does(), StopDoes::Interrupt);
-        o.interrupt_sent = Some(1.0);
+        o.turn.interrupt_sent = Some(1.0);
         assert_eq!(o.stop_does(), StopDoes::None);
         assert_eq!(open("fake", run("running", Some(true), None)).stop_does(), StopDoes::End);
         assert_eq!(open("claude-code", run("running", Some(false), None)).stop_does(), StopDoes::End);

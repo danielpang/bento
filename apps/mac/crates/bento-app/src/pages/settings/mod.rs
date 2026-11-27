@@ -2,12 +2,14 @@
 //! the chosen section at reading width on the right. Sections that live only in the console
 //! open it in the browser.
 
+mod agent_form;
 mod agents;
+mod connections;
 mod fixtures;
 mod local;
 mod projects;
 
-use bento_client::{AgentProfile, Feature, Health, Pipeline, Project, SavedSecret};
+use bento_client::{AccountLogin, AgentAccount, AgentProfile, AgentTool, CatalogProvider, Feature, Health, MachineSettings, Pipeline, Project, SavedSecret};
 use rune::{Cx, El, KeyEvent, ScrollSpec, Tx, col, el, row, spacer};
 use rune_kit::{Button, ButtonVariant, Dialog, Kit};
 
@@ -80,6 +82,7 @@ pub enum Reload {
     Secrets,
     Profiles,
     Pipeline,
+    Machine,
 }
 
 #[derive(Default)]
@@ -111,6 +114,14 @@ pub enum Msg {
     ProjectRemoved(Result<String, String>),
     StageSaved(Result<(), String>),
     Active(Result<usize, String>),
+    Tools(Result<Vec<AgentTool>, String>),
+    Catalog(Result<Vec<CatalogProvider>, String>),
+    ProfileSaved(Result<(), String>),
+    Machine(Option<MachineSettings>),
+    Accounts(Result<Vec<AgentAccount>, String>),
+    AccountActed(Result<(), String>),
+    LoginStarted { provider: &'static str, result: Result<AccountLogin, String> },
+    LoginEnded { id: String, result: Result<bool, String> },
 }
 
 pub fn apply(s: &mut State, m: Msg) {
@@ -147,6 +158,7 @@ pub fn apply(s: &mut State, m: Msg) {
                     projects::load_pipeline(s);
                     data::refetch_board(s);
                 }
+                Reload::Machine => connections::load_machine(s),
             }
         }
         Msg::Renamed(result) => {
@@ -183,6 +195,14 @@ pub fn apply(s: &mut State, m: Msg) {
             }
         }
         Msg::Active(result) => local::checked(s, result),
+        Msg::Tools(r) => s.settings.agents.tools = r.into(),
+        Msg::Catalog(r) => s.settings.agents.catalog = r.into(),
+        Msg::ProfileSaved(result) => agent_form::saved(s, result),
+        Msg::Machine(m) => s.settings.agents.connections.machine = m,
+        Msg::Accounts(r) => s.settings.agents.connections.accounts = r.into(),
+        Msg::AccountActed(result) => connections::acted(s, result),
+        Msg::LoginStarted { provider, result } => connections::started(s, provider, result),
+        Msg::LoginEnded { id, result } => connections::ended(s, id, result),
     }
 }
 
@@ -301,7 +321,7 @@ pub fn line(t: &Tokens) -> El {
 
 pub fn view(s: &State, _cx: &mut Cx<State>, t: &Tokens, k: &Kit, layer: &mut Vec<El>) -> El {
     let body = match s.settings.section {
-        Section::Agents => agents::view(s, t, k),
+        Section::Agents => agents::view(s, t, k, layer),
         Section::Projects => projects::view(s, t, k, layer),
         Section::Local => local::view(s, t, k, layer),
         Section::Appearance => appearance(s, t),
@@ -459,6 +479,12 @@ fn preview(theme: Theme) -> El {
 
 pub const SCENES: &[Scene] = &[
     ("settings", fixtures::agents),
+    ("settings/agent-new", fixtures::agent_new),
+    ("settings/agent-edit", fixtures::agent_edit),
+    ("settings/agent-typed", fixtures::agent_typed),
+    ("settings/agent-refused", fixtures::agent_refused),
+    ("settings/claude-login", fixtures::claude_login),
+    ("settings/chatgpt-login", fixtures::chatgpt_login),
     ("settings/projects", fixtures::projects),
     ("settings/project", fixtures::project),
     ("settings/stage", fixtures::stage),
