@@ -35,7 +35,7 @@ It is named `bundle` rather than `build` so the repository wide `turbo run build
 
 ## In the Mac app
 
-`apps/mac/scripts/package.sh` builds an unsigned `apps/mac/target/bundle/Bento.app` with this `dist/` at `Contents/Resources/sidecar` and a `node` binary beside the script (`sidecar/bin/node`). The app starts the sidecar with the PATH of the person's login shell plus the usual install folders (an app opened from Finder gets only `/usr/bin:/bin:/usr/sbin:/sbin`), and with `BENTO_SIDECAR_PORT` set to the port the server had last time (kept in `<data dir>/mac-app/port`), so the origin stays the same across launches. One app runs per data folder (`<data dir>/mac-app/instance.lock`): a second launch brings the first window forward and exits.
+`apps/mac/scripts/package.sh` builds an unsigned `apps/mac/target/bundle/Bento.app` with this `dist/` at `Contents/Resources/sidecar` and a `node` binary beside the script (`sidecar/bin/node`). `apps/mac/scripts/sign.sh` signs and notarizes it; see `apps/mac/scripts/README.md`. The app starts the sidecar with the PATH of the person's login shell plus the usual install folders (an app opened from Finder gets only `/usr/bin:/bin:/usr/sbin:/sbin`), and with `BENTO_SIDECAR_PORT` set to the port the server had last time (kept in `<data dir>/mac-app/port`), so the origin stays the same across launches. One app runs per data folder (`<data dir>/mac-app/instance.lock`): a second launch brings the first window forward and exits.
 
 ## Configuration
 

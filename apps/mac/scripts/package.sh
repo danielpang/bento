@@ -6,7 +6,8 @@
 #   scripts/package.sh --sidecar    rebuilds sidecar/dist first
 #
 # BENTO_NODE_BINARY picks the node to bundle (default: the `node` on PATH, which must be 22 or
-# later and an official build that links only system libraries).
+# later and an official build that links only system libraries). BENTO_RELEASE_TAG (v1.2.3) sets
+# the version, as it does for the Electron app. Sign it with scripts/sign.sh.
 set -eu
 
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -30,7 +31,10 @@ if otool -L "$node_bin" | tail -n +2 | grep -v -e '^\s*/usr/lib/' -e '^\s*/Syste
 fi
 
 cargo build --release -p bento-app --manifest-path "$here/Cargo.toml"
-version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$here/Cargo.toml" | head -n 1)
+# The same version the Electron app's package.mjs uses: BENTO_RELEASE_TAG, else the checkout's tag.
+tag=${BENTO_RELEASE_TAG:-$(git -C "$repo" describe --tags --match 'v[0-9]*.[0-9]*.[0-9]*' --dirty 2>/dev/null || true)}
+[ -n "$tag" ] || tag="v$("$node_bin" -p "require('$repo/apps/desktop/package.json').version")-dev"
+version=$("$node_bin" "$repo/scripts/release-version.mjs" "$tag")
 
 rm -rf "$out"
 mkdir -p "$out/Contents/MacOS" "$out/Contents/Resources"
