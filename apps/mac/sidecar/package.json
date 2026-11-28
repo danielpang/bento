@@ -1,0 +1,25 @@
+{
+  "name": "@bento/mac-sidecar",
+  "version": "0.0.1",
+  "private": true,
+  "license": "Elastic-2.0",
+  "description": "The local Bento server process the native Mac app supervises",
+  "type": "module",
+  "scripts": {
+    "bundle": "node scripts/bundle.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsx src/main.ts",
+    "start": "node dist/bin/sidecar.mjs",
+    "test": "node --test --import tsx src/*.test.ts"
+  },
+  "dependencies": {
+    "@bento/sandbox": "workspace:*",
+    "@bento/server": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "esbuild": "0.28.2",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3"
+  }
+}

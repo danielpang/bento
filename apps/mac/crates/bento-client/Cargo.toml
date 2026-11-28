@@ -1,0 +1,19 @@
+[package]
+name = "bento-client"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# HTTPS for the REST calls, for a hosted server. Local mode is plain http.
+tls = ["ureq/tls"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2.12", default-features = false }
+
+[dev-dependencies]
+serde_json = "1"
+ureq = { version = "2.12", default-features = false }

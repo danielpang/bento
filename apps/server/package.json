@@ -56,5 +56,11 @@
       "types": "./dist/lib.d.ts",
       "default": "./dist/lib.js"
     }
+  },
+  "optionalDependencies": {
+    "@embedded-postgres/darwin-arm64": "17.12.0-beta.19",
+    "@embedded-postgres/darwin-x64": "17.12.0-beta.19",
+    "@embedded-postgres/linux-arm64": "17.12.0-beta.19",
+    "@embedded-postgres/linux-x64": "17.12.0-beta.19"
   }
 }

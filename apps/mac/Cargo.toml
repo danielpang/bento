@@ -1,0 +1,28 @@
+[workspace]
+resolver = "3"
+members = ["crates/bento-app", "crates/bento-client"]
+
+[workspace.package]
+edition = "2024"
+version = "0.0.1"
+publish = false
+
+# Rune is pre-release: one rev for Rune, rune-kit, rune-fx and every patch below.
+[workspace.dependencies]
+rune = { git = "https://github.com/anomalyco/rune", rev = "7a7ed14e93" }
+rune-kit = { git = "https://github.com/anomalyco/rune", rev = "7a7ed14e93", features = ["markdown"] }
+rune-fx = { git = "https://github.com/anomalyco/rune", rev = "7a7ed14e93" }
+wgpu = { version = "~30.0.1", default-features = false, features = ["std", "parking_lot", "wgsl", "metal"] }
+
+[patch.crates-io]
+winit = { git = "https://github.com/anomalyco/rune", rev = "7a7ed14e93" }
+sctk-adwaita = { git = "https://github.com/anomalyco/rune", rev = "7a7ed14e93" }
+parley_engine = { git = "https://github.com/anomalyco/rune", rev = "7a7ed14e93" }
+wgpu-hal = { git = "https://github.com/anomalyco/rune", rev = "7a7ed14e93" }
+naga = { git = "https://github.com/anomalyco/rune", rev = "7a7ed14e93" }
+accesskit_windows = { git = "https://github.com/anomalyco/rune", rev = "7a7ed14e93" }
+accesskit_macos = { git = "https://github.com/anomalyco/rune", rev = "7a7ed14e93" }
+accesskit_atspi_common = { git = "https://github.com/anomalyco/rune", rev = "7a7ed14e93" }
+
+[profile.dev.package."*"]
+opt-level = 2
